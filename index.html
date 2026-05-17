@@ -3661,9 +3661,7 @@ function makeSeedAutomations(){
      config:{message:'🎉 Deal closed! {address} — {revenue}'}},
     {id:'auto-2',stage:'Under Contract',type:'calendar',active:true,
      config:{title:'DD Deadline — {address}',details:'Purchase price: {price}',dateField:'dd'}},
-    {id:'auto-3',stage:'Closing',type:'email',active:true,
-     config:{to:'{advisor_email}',cc:'',subject:'Closing reminder: {address}',
-             body:'Hi {advisor_name},\n\nDon\'t forget — {address} closes on {close_date}.\n\nRevenue: {revenue}\n\nGood luck!'}},
+    {id:'auto-3',stage:'Closing',type:'commission_invoice',active:true,config:{}},
     {id:'auto-4',stage:'Closed Won',type:'note',active:true,
      config:{note:'Deal closed successfully. Final revenue: {revenue}.'}},
   ];
@@ -3678,6 +3676,7 @@ let allProfiles  = {};
 let allAutomations = [];
 let allOfficeManagers = []; // [{email, office, name?}] — loaded from DB / localStorage
 let allTasks = [];         // [{id, title, description, assignedTo, assignedToName, dueDate, status, dealId, dealAddress, createdBy, createdAt}]
+let allDocuments = [];     // [{id, name, type, office, fileDataUrl, fileName, mimeType, uploadedAt, uploadedBy}]
 let pendingActions = [];
 let activeChart  = null;
 let currentView  = 'board';
@@ -4503,6 +4502,12 @@ const FB = {
         createdTasks=snap.docs.map(d=>({...d.data(),id:d.id})); mergeTasks();
       }));
     }
+    if(isAdmin){
+      _fbUnsubs.push(onSnapshot(collection(_fbDb,'documents'), snap=>{
+        allDocuments = snap.docs.map(d=>({...d.data(),id:d.id}));
+        onUpdate('documents');
+      }));
+    }
   },
   async createTask(data){
     const {collection, addDoc} = _fbFns;
@@ -4547,6 +4552,15 @@ const FB = {
   async deleteAutomation(id){
     const {doc,deleteDoc}=_fbFns;
     await deleteDoc(doc(_fbDb,'automations',id));
+  },
+  async saveDocument(data){
+    const {collection, doc, setDoc, addDoc} = _fbFns;
+    if(data.id){ const id=data.id; const d={...data}; delete d.id; await setDoc(doc(_fbDb,'documents',id), d, {merge:true}); return id; }
+    const ref = await addDoc(collection(_fbDb,'documents'), data); return ref.id;
+  },
+  async deleteDocument(id){
+    const {doc,deleteDoc}=_fbFns;
+    await deleteDoc(doc(_fbDb,'documents',id));
   },
   // Generic helper: write to any eos document (admin-only write in Firestore rules)
   async saveEOS(docId, data){
@@ -5052,6 +5066,92 @@ function fireAutomations(deal, oldStage){
           .catch(e=>console.error('[assign_task]',e));
         break;
       }
+
+      case 'commission_invoice':{
+        const today=new Date().toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'});
+        const ciPrice=deal.purchasePrice||deal.contractPrice||0;
+        const ciPct=deal.elcCommissionPct||deal.commissionPct||0;
+        const ciAmt=Math.round(ciPrice*ciPct/100);
+        const ciProject=deal.projectName||deal.propertyAddress||'';
+        const ciSeller=deal.ownershipEntity||'[Seller Entity]';
+        const ciContact=deal.contactPerson||'[Contact Name]';
+        const ciSellerEmail=deal.contactEmail||'';
+        const ciBuyer=deal.buyer||deal.loiBuyer||'[Buyer]';
+        const ciClose=deal.closeDate?fmtDate(deal.closeDate):'[Closing Date]';
+        const ciEscrow=deal.escrowAgent||'';
+        const ciEscrowEmail=deal.escrowAgentEmail||'';
+        const dealOffice=allProfiles[deal.advisorUid]?.office||'';
+        const getDocByType=t=>allDocuments.find(d=>d.type===t&&d.office===dealOffice)||allDocuments.find(d=>d.type===t);
+        const w9Doc=getDocByType('W-9');
+        const wireDoc=getDocByType('Wire Instructions');
+        const w9Display=w9Doc?'(Download from Admin → Documents tab)':'https://ryansampson1.github.io/advisor-dashboard/W-9-ELC.pdf';
+        const invoiceHtml=`<!DOCTYPE html><html><head><title>Commission Invoice</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=EB+Garamond:wght@400;600&display=swap');
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'EB Garamond',Georgia,serif;font-size:13pt;line-height:1.7;color:#111;max-width:680px;margin:52px auto;padding:0 24px}
+.hdr{display:flex;align-items:flex-start;justify-content:space-between;border-bottom:2.5px solid #8B1A1A;padding-bottom:14px;margin-bottom:26px}
+.co-name{font-size:19pt;font-weight:600;letter-spacing:.5px;color:#8B1A1A}
+.co-sub{font-size:8.5pt;letter-spacing:2px;color:#888;margin-top:3px;text-transform:uppercase}
+.co-contact{text-align:right;font-size:9pt;color:#555;line-height:1.6}
+.date-line{margin-bottom:22px}
+.addressee{margin-bottom:22px}
+.re-line{font-weight:600;margin-bottom:18px}
+p{margin-bottom:14px}
+table{width:100%;border-collapse:collapse;margin:18px 0}
+td{padding:5px 12px 5px 0;vertical-align:top}
+td:first-child{font-weight:600;width:210px;white-space:nowrap}
+.fee{background:#fafafa;border:1px solid #e0e0e0;border-radius:6px;padding:14px 20px;margin:18px 0}
+.fee-main{font-weight:600;font-size:12pt}
+.fee-fein{font-size:10pt;color:#666;margin-top:5px}
+.sig{margin-top:42px}
+.sig-name{font-weight:600;margin-top:24px}
+@media print{body{margin:28px;max-width:100%}}
+</style></head><body>
+<div class="hdr">
+  <div>
+    <div class="co-name">ESHENBAUGH LAND COMPANY</div>
+    <div class="co-sub">Brokerage &middot; Advisory &middot; Consulting</div>
+  </div>
+  <div class="co-contact">4830 W Kennedy Blvd, Suite 600<br>Tampa, FL 33609<br>813-417-5928 &middot; ryan@thedirtdog.com</div>
+</div>
+<div class="date-line">${today}</div>
+<div class="addressee">${ciSeller}<br>Attn: ${ciContact}</div>
+<div class="re-line">Re: Brokerage Fee Invoice &mdash; ${ciProject} Sale</div>
+<p>To Whom It May Concern:</p>
+<p>In preparation for the closing between your group and the Buyer outlined below, please allow this letter to be our Broker Invoice for the commission due to Eshenbaugh Land Company upon a successful closing. In addition to this invoice, I have included our W-9 and wire instructions to facilitate the transfer of funds, when appropriate.</p>
+<table>
+  <tr><td>Project:</td><td>${ciProject}</td></tr>
+  <tr><td>Seller:</td><td>${ciSeller}</td></tr>
+  <tr><td>Buyer:</td><td>${ciBuyer}</td></tr>
+  <tr><td>Projected Closing Date:</td><td>${ciClose}</td></tr>
+</table>
+<div class="fee">
+  <div class="fee-main">Brokerage Fee: ${fmt$(ciAmt)} &mdash; ${ciPct}% of ${fmt$(ciPrice)} Purchase Price</div>
+  <div class="fee-fein">FEIN: 47-4797329</div>
+</div>
+<p>It was a pleasure to work with you again. Should you need anything else, don&rsquo;t hesitate to reach out on my cell at 813-417-5928.</p>
+<div class="sig"><p>Sincerely,</p><div class="sig-name">Ryan Sampson</div>Ryan Sampson, CCIM, ALC<br>CEO / Principal &mdash; Eshenbaugh Land Company</div>
+</body></html>`;
+        const iWin=window.open('','_blank','width=820,height=1060');
+        if(iWin){iWin.document.write(invoiceHtml);iWin.document.close();iWin.focus();setTimeout(()=>iWin.print(),800);}
+        const toList=[ciEscrowEmail,ciSellerEmail].filter(Boolean).join(',');
+        const gmailSubject=`Re: Brokerage Fee Invoice — ${ciProject} Sale`;
+        const wireNote=wireDoc?'Wire Instructions: See attached PDF':'Wire Instructions: [Attach ELC wire instructions PDF]';
+        const gmailBody=`Please find attached our commission invoice and W-9 for the closing of ${ciProject}.\n\nInvoice Amount: ${fmt$(ciAmt)} (${ciPct}% of ${fmt$(ciPrice)})\nProjected Closing: ${ciClose}\n\nAttached:\n  - Commission Invoice (PDF)\n  - W-9: ${w9Display}\n  - ${wireNote}\n\nPlease reach out with any questions.\n\n${deal.advisorName||''}\nEshenbaugh Land Company | 813-417-5928`;
+        queueAction({type:'commission_email',label:`📄 Commission Invoice → ${ciEscrow||ciEscrowEmail||'Escrow'}`,url:`https://mail.google.com/mail/?view=cm&to=${encodeURIComponent(toList)}&su=${encodeURIComponent(gmailSubject)}&body=${encodeURIComponent(gmailBody)}`,deal});
+        const ciDue=new Date(); ciDue.setDate(ciDue.getDate()+1);
+        Store.createTask({
+          title:`Send commission invoice to escrow — ${deal.propertyAddress||ciProject}`,
+          description:`COMMISSION INVOICE AUTOMATION\n\nSteps to complete:\n1. ✅ Invoice PDF opened — save it from the print dialog\n2. Click “Open” in the ⚡ Pending panel to open the pre-filled Gmail draft\n3. Attach the commission invoice PDF (from your Downloads)\n4. Attach W-9 (${w9Display})\n5. Attach wire instructions\n6. Verify recipient: ${ciEscrow||'Escrow Agent'} — ${ciEscrowEmail}\n7. Review and send\n\nCommission: ${fmt$(ciAmt)} (${ciPct}% of ${fmt$(ciPrice)})`,
+          assignedTo:deal.advisorUid, assignedToName:deal.advisorName||deal.advisorEmail,
+          dealId:deal.id, dealAddress:deal.propertyAddress,
+          dueDate:ciDue.toISOString().slice(0,10), status:'pending',
+          createdBy:currentUser?.uid||'system', createdByName:'Automation', createdAt:Date.now(),
+        }).then(()=>showToast('📄 Commission invoice generated — check ⚡ Pending panel','success',5000))
+          .catch(e=>console.error('[commission_invoice]',e));
+        break;
+      }
       case 'gdrive':{
         // Queue a Google Drive upload action — requires user to authorize via OAuth in their browser
         const fileName = interpolate(cfg.fileName||`{address} — {stage} ({close_date}).pdf`, deal);
@@ -5175,6 +5275,7 @@ function renderShell(){
     {id:'leaderboard',   label:'🏆 Leaderboard',    admin:true, manager:true},
     {id:'manageStages',  label:'🗂 Stages',         admin:true},
     {id:'officeManagers',label:'🏢 Offices',        admin:true},
+    {id:'documents',     label:'📂 Documents',     admin:true},
     {id:'eos',           label:'🧭 EOS',            always:true},
     {id:'comps',         label:'🗺 Comps',          advisor:true},
     {id:'drive',         label:'📁 Drive',          always:true},
@@ -5263,7 +5364,7 @@ function renderCurrentView(){
   const map={board:viewBoard,tasks:viewTasks,calendar:viewCalendar,dashboard:viewDashboard,projection:viewProjection,
     commissions:viewMyCommissions,
     splits:viewSplits,automations:viewAutomations,users:viewUsers,leaderboard:viewLeaderboard,
-    manageStages:viewManageStages,officeManagers:viewOfficeManagers,
+    manageStages:viewManageStages,officeManagers:viewOfficeManagers,documents:viewDocuments,
     eos:()=>viewEOS('rocks'),comps:viewComps,drive:viewDrive,hr:viewHR};
   (map[currentView]||viewBoard)();
 }
@@ -7426,6 +7527,114 @@ window.deleteAdvisor = async (uid, name, email) => {
   }
 };
 
+
+/* =======================================================
+   VIEW: DOCUMENTS (super admin)
+   ======================================================= */
+const DOC_TYPES=['W-9','Wire Instructions','Commission Invoice Template','Letterhead','Other'];
+function viewDocuments(){
+  if(activeChart){activeChart.destroy();activeChart=null;}
+  const offices=[...new Set(Object.values(allProfiles).map(p=>p.office).filter(Boolean))];
+  const grouped={};
+  allDocuments.forEach(d=>{ const k=d.office||'(All Offices)'; if(!grouped[k])grouped[k]=[]; grouped[k].push(d); });
+  setContent(`
+    <div class="flex items-center justify-between mb-5">
+      <div>
+        <h2 class="text-xl font-bold text-gray-800">&#128194; Automation Documents</h2>
+        <p class="text-sm text-gray-500 mt-0.5">Store W-9s, wire instructions, and other files used by stage automations. Upload per-office for multi-office setups.</p>
+      </div>
+    </div>
+    <div class="bg-white rounded-2xl border p-5 mb-5">
+      <div class="text-sm font-bold text-gray-700 mb-3">Upload New Document</div>
+      <div class="grid grid-cols-2 gap-3 mb-3">
+        <div>
+          <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Document Type</label>
+          <select id="doc-type" class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-red-300">
+            ${DOC_TYPES.map(t=>`<option value="${t}">${t}</option>`).join('')}
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Office (blank = all offices)</label>
+          <select id="doc-office" class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-red-300">
+            <option value="">(All Offices)</option>
+            ${offices.map(o=>`<option value="${o}">${o}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div id="doc-drop-zone" ondragover="event.preventDefault()" ondrop="handleDocDrop(event)"
+        class="border-2 border-dashed border-gray-200 rounded-xl p-6 text-center cursor-pointer hover:border-red-300 transition-colors"
+        onclick="document.getElementById('doc-file-input').click()">
+        <div class="text-3xl mb-1">&#128206;</div>
+        <div class="text-sm text-gray-500">Click or drag &amp; drop a file (PDF, DOCX, PNG &mdash; max 900 KB)</div>
+        <div id="doc-file-name" class="text-xs text-green-600 mt-1 font-medium"></div>
+      </div>
+      <input type="file" id="doc-file-input" class="hidden" accept=".pdf,.docx,.doc,.png,.jpg" onchange="handleDocFileSelect(event)">
+      <button onclick="uploadDocument()" class="mt-3 brand-btn px-5 py-2 rounded-lg text-sm font-semibold">Upload Document</button>
+    </div>
+    <div class="space-y-4">
+      ${Object.keys(grouped).length===0
+        ?'<div class="bg-white rounded-2xl border p-8 text-center text-gray-400 text-sm">No documents uploaded yet. Upload your W-9 and wire instructions to enable commission invoice automations.</div>'
+        :Object.entries(grouped).map(([office,docs])=>`
+          <div>
+            <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">${office}</div>
+            <div class="space-y-2">
+              ${docs.map(d=>`
+                <div class="bg-white rounded-xl border p-4 flex items-center gap-4">
+                  <div class="text-2xl">${docTypeIcon(d.type)}</div>
+                  <div class="flex-1 min-w-0">
+                    <div class="text-sm font-semibold text-gray-800">${d.name||d.fileName||'Untitled'}</div>
+                    <div class="text-xs text-gray-400 mt-0.5">${d.type} &nbsp;&middot;&nbsp; ${d.office||'All Offices'} &nbsp;&middot;&nbsp; ${d.fileName||''} &nbsp;&middot;&nbsp; Uploaded ${d.uploadedAt?new Date(d.uploadedAt).toLocaleDateString():'—'} by ${d.uploadedByName||'Admin'}</div>
+                  </div>
+                  <div class="flex gap-2 shrink-0">
+                    ${d.fileDataUrl?`<a href="data:${d.mimeType||'application/octet-stream'};base64,${d.fileDataUrl}" download="${d.fileName||d.name||'document'}" class="text-xs bg-blue-50 text-blue-600 hover:bg-blue-100 px-3 py-1 rounded-lg font-medium">&#11015; Download</a>`:''}
+                    <button onclick="deleteDocument('${d.id}')" class="text-xs text-red-400 hover:text-red-600 px-2 py-1 rounded hover:bg-red-50">Delete</button>
+                  </div>
+                </div>`).join('')}
+            </div>
+          </div>`).join('')}
+    </div>
+  `);
+}
+function docTypeIcon(t){
+  return {'W-9':'&#128203;','Wire Instructions':'&#127974;','Commission Invoice Template':'&#128196;','Letterhead':'&#128394;'}[t]||'&#128193;';
+}
+let _docFileData=null;
+function handleDocFileSelect(e){const f=e.target.files[0];if(f)readDocFile(f);}
+window.handleDocDrop=function(e){e.preventDefault();const f=e.dataTransfer.files[0];if(f)readDocFile(f);};
+function readDocFile(file){
+  if(file.size>950000){showToast('File too large — max 900 KB','error');return;}
+  const r=new FileReader();
+  r.onload=ev=>{
+    const du=ev.target.result;
+    _docFileData={dataUrl:du,base64:du.split(',')[1],name:file.name,mimeType:file.type,size:file.size};
+    const lbl=document.getElementById('doc-file-name');
+    if(lbl)lbl.textContent=`✅ ${file.name} (${Math.round(file.size/1024)} KB)`;
+  };
+  r.readAsDataURL(file);
+}
+window.uploadDocument=async function(){
+  if(!_docFileData){showToast('Please select a file first','error');return;}
+  const type=document.getElementById('doc-type')?.value||'Other';
+  const office=document.getElementById('doc-office')?.value||'';
+  const name=type+(office?` — ${office}`:'');
+  showToast('Uploading…','info',2000);
+  try{
+    await Store.saveDocument({name,type,office,fileName:_docFileData.name,mimeType:_docFileData.mimeType,
+      fileDataUrl:_docFileData.base64,uploadedAt:Date.now(),
+      uploadedBy:currentUser?.uid||'',uploadedByName:currentUser?.name||''});
+    _docFileData=null;
+    showToast(`✅ ${name} uploaded successfully`,'success');
+    viewDocuments();
+  }catch(e){console.error('[uploadDocument]',e);showToast('Upload failed: '+e.message,'error');}
+};
+window.deleteDocument=async function(id){
+  if(!confirm('Delete this document? Automations will fall back to defaults.'))return;
+  await Store.deleteDocument(id);
+  allDocuments=allDocuments.filter(d=>d.id!==id);
+  showToast('Document deleted','info');
+  viewDocuments();
+};
+
 /* =======================================================
    VIEW: AUTOMATIONS (admin)
    ======================================================= */
@@ -7468,6 +7677,7 @@ function autoSummary(rule){
     case 'calendar': return `Event: ${cfg.title||'?'}`;
     case 'docusign': return `URL: ${cfg.url||'?'}`;
     case 'webhook':  return `POST → ${cfg.url||'?'}`;
+    case 'commission_invoice': return '📄 Auto-generate commission invoice PDF + Gmail draft + advisor task';
     default: return JSON.stringify(cfg);
   }
 }
