@@ -8270,12 +8270,14 @@ function eosSave(key,val){
 function viewEOS(sub='rocks'){
   if(activeChart){ activeChart.destroy(); activeChart=null; }
   const uid=currentUser.uid, isAdmin=currentUser.isAdmin;
+  const effectiveAdminGlobal = isAdmin && !adminViewAsAdvisor && !staffViewMode;
   const tabs=[
     {id:'rocks',     label:'🪨 Rocks'},
     {id:'vto',       label:'🗺 VTO'},
     {id:'chart',     label:'📋 Accountability'},
     {id:'issues',    label:'🚨 Issues & Headlines'},
     {id:'scorecard', label:'📊 Scorecard'},
+    ...(effectiveAdminGlobal ? [{id:'l10', label:'📋 L-10 Agenda'}] : []),
   ];
   const nav=tabs.map(t=>`
     <button onclick="viewEOS('${t.id}')" class="px-3 py-2 text-sm font-medium rounded-lg transition whitespace-nowrap
@@ -8397,7 +8399,8 @@ function viewEOS(sub='rocks'){
 
   else if(sub==='issues'){
     const issues=eosGet('issues',[]);
-    const myIssues=isAdmin?issues:issues.filter(iss=>iss.advisorUid===uid);
+    const effectiveAdmin=isAdmin&&!adminViewAsAdvisor&&!staffViewMode;
+    const myIssues=effectiveAdmin?issues:issues.filter(iss=>iss.advisorUid===uid);
     body=`
       <div class="max-w-2xl">
         <!-- Add issue/headline -->
@@ -8590,6 +8593,198 @@ function viewEOS(sub='rocks'){
       </div>`;
   }
 
+  // ── L-10 AGENDA ────────────────────────────────────────────────────────
+  else if(sub==='l10'){
+    const l10Sub = (typeof window._l10Sub!=='undefined') ? window._l10Sub : 'advisor';
+
+    // Prior-week window (same as scorecard)
+    const now2 = new Date();
+    const dow2 = now2.getDay();
+    const dtm2 = dow2===0?6:dow2-1;
+    const thisMon2 = new Date(now2); thisMon2.setDate(now2.getDate()-dtm2); thisMon2.setHours(0,0,0,0);
+    const pwS2 = new Date(thisMon2); pwS2.setDate(thisMon2.getDate()-7);
+    const pwE2 = new Date(thisMon2); pwE2.setMilliseconds(-1);
+    const pwSts=pwS2.getTime(), pwEts=pwE2.getTime();
+    const fmtD2 = d=>d.toLocaleDateString('en-US',{month:'short',day:'numeric'});
+    const weekLabel2 = fmtD2(pwS2)+' – '+pwE2.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+
+    const allIssues = eosGet('issues',[]);
+
+    // Determine whose issues to show per sub-tab
+    const filterIssues = (roleFilter) => {
+      if(roleFilter==='admin') return allIssues;
+      return allIssues.filter(i => {
+        if(roleFilter==='staff') return i.role==='staff' || (!i.role && false);
+        if(roleFilter==='advisor') return i.role==='advisor' || !i.role; // legacy = advisor
+        return true;
+      });
+    };
+
+    // New deals from prior week for advisor headlines
+    const headlineStages = /^(listing|proposal to do|under contract|contract terminated|closing|closed won)$/i;
+    const newDealHeadlines = allDeals
+      .filter(d => {
+        const ts = d.stageEnteredAt || d.createdAt || 0;
+        return ts >= pwSts && ts <= pwEts && headlineStages.test(d.stage||'');
+      })
+      .sort((a,b)=>(b.stageEnteredAt||b.createdAt||0)-(a.stageEnteredAt||a.createdAt||0));
+
+    const stageIcon = s => {
+      if(/listing/i.test(s))           return '🏠';
+      if(/proposal/i.test(s))          return '📄';
+      if(/under.?contract/i.test(s))   return '📝';
+      if(/terminat/i.test(s))          return '❌';
+      if(/closing|closed.?won/i.test(s)) return '🏆';
+      return '📌';
+    };
+
+    // L-10 section builder
+    const section = (icon, title, mins, content, accentColor='#1a1a1a') => `
+      <div class="bg-white rounded-2xl border overflow-hidden mb-4">
+        <div class="px-5 py-3 border-b flex items-center justify-between" style="background:#f8f8f8">
+          <div class="flex items-center gap-2">
+            <span class="text-lg">${icon}</span>
+            <span class="font-bold text-gray-800 text-sm">${title}</span>
+          </div>
+          <span class="text-xs font-semibold px-2.5 py-1 rounded-full text-white" style="background:${accentColor}">${mins} min</span>
+        </div>
+        <div class="px-5 py-4">${content}</div>
+      </div>`;
+
+    const emptyMsg = '<p class="text-sm text-gray-400 italic">Nothing to report this week.</p>';
+
+    const issueList = (items) => items.length===0 ? emptyMsg : items.map(iss=>`
+      <div class="flex items-start gap-3 py-2 border-b border-gray-50 last:border-0">
+        <span class="text-base mt-0.5">${iss.type==='headline'?'📣':'🚨'}</span>
+        <div class="flex-1 min-w-0">
+          <div class="flex flex-wrap items-center gap-2 mb-0.5">
+            <span class="text-xs font-bold uppercase ${iss.type==='headline'?'text-blue-600':'text-red-600'}">${iss.type}</span>
+            <span class="text-xs text-gray-400">${iss.advisorName||''} · ${new Date(iss.createdAt).toLocaleDateString()}</span>
+          </div>
+          <div class="text-sm text-gray-800">${iss.text}</div>
+        </div>
+        <button onclick="resolveIssue('${iss.id}')" class="text-green-600 hover:text-green-700 text-xs font-semibold shrink-0 mt-0.5" title="Resolve">✓</button>
+      </div>`).join('');
+
+    // Build content for each sub-tab
+    const buildL10 = (roleFilter) => {
+      const tabIssues   = filterIssues(roleFilter);
+      const headlines   = tabIssues.filter(i=>i.type==='headline');
+      const issues      = tabIssues.filter(i=>i.type==='issue');
+      const isAdvTab    = roleFilter==='advisor';
+      const isAdminTab  = roleFilter==='admin';
+
+      // Headlines section: issues/headlines + (for advisor tab) deal pipeline activity
+      let headlineContent = '';
+      if(isAdvTab && newDealHeadlines.length>0){
+        headlineContent += `<div class="mb-3">
+          <p class="text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">📊 Pipeline Activity — Prior Week</p>
+          ${newDealHeadlines.map(d=>`
+            <div class="flex items-center gap-2 py-1.5 border-b border-gray-50 last:border-0">
+              <span>${stageIcon(d.stage)}</span>
+              <span class="text-sm font-semibold text-gray-800">${d.projectName||d.propertyAddress||'Unnamed'}</span>
+              <span class="text-xs text-gray-400">→ ${d.stage}</span>
+              <span class="text-xs text-gray-400 ml-auto">${d.advisorName||''}</span>
+            </div>`).join('')}
+        </div>`;
+      }
+      if(headlines.length>0){
+        headlineContent += `<div class="${isAdvTab&&newDealHeadlines.length>0?'mt-3':''}">
+          ${isAdvTab&&newDealHeadlines.length>0?'<p class="text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">💬 Submitted Headlines</p>':''}
+          ${issueList(headlines)}
+        </div>`;
+      }
+      if(!headlineContent) headlineContent = emptyMsg;
+
+      const allTab = isAdminTab ? filterIssues('advisor').concat(filterIssues('staff')) : [];
+      const allHeadlines = isAdminTab ? allTab.filter(i=>i.type==='headline') : headlines;
+      const allIss       = isAdminTab ? allTab.filter(i=>i.type==='issue')    : issues;
+
+      let adminHeadlineContent = isAdminTab ? issueList(allHeadlines) : headlineContent;
+      let adminIssueContent    = isAdminTab ? issueList(allIss) : issueList(issues);
+      let adminDealContent     = isAdminTab ? (newDealHeadlines.length>0 ? `<div class="mb-3"><p class="text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">📊 Pipeline Activity — Prior Week</p>${newDealHeadlines.map(d=>`<div class="flex items-center gap-2 py-1.5 border-b border-gray-50 last:border-0"><span>${stageIcon(d.stage)}</span><span class="text-sm font-semibold text-gray-800">${d.projectName||d.propertyAddress||'Unnamed'}</span><span class="text-xs text-gray-400">→ ${d.stage}</span><span class="text-xs text-gray-400 ml-auto">${d.advisorName||''}</span></div>`).join('')}</div>` : '') : '';
+
+      const finalHeadlineContent = isAdminTab
+        ? (adminDealContent + (allHeadlines.length>0 ? `<div class="${adminDealContent?'mt-3':''}"><p class="text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">💬 Submitted Headlines</p>${issueList(allHeadlines)}</div>` : (adminDealContent?'':emptyMsg)))
+        : headlineContent;
+
+      return `
+        ${section('👋','Segue — Good News','5',`
+          <p class="text-sm text-gray-500 mb-3">Each person shares one piece of personal or professional good news.</p>
+          <div class="grid grid-cols-2 gap-2">
+            ${getDistinctAdvisors().slice(0,8).map(a=>`
+              <div class="flex items-center gap-2 p-2 bg-gray-50 rounded-lg">
+                <div class="w-6 h-6 rounded-full bg-gray-200 flex items-center justify-center text-xs font-bold text-gray-600">${(a.name||'?')[0].toUpperCase()}</div>
+                <span class="text-xs text-gray-700 truncate">${a.name||a.email}</span>
+              </div>`).join('')}
+          </div>
+        `,'#374151')}
+
+        ${section('📊','Scorecard Review','5',`
+          <p class="text-sm text-gray-500 mb-3">Review key weekly metrics. <button onclick="viewEOS('scorecard')" class="text-blue-600 hover:underline text-sm font-medium">Open full scorecard →</button></p>
+          <div class="flex flex-wrap gap-2 text-xs text-gray-400">
+            <span class="px-2.5 py-1 bg-gray-100 rounded-full">Prior week: ${weekLabel2}</span>
+            <span class="px-2.5 py-1 bg-gray-100 rounded-full">${newDealHeadlines.length} pipeline moves</span>
+          </div>
+        `,'#0891b2')}
+
+        ${section('🪨','Rock Review','5',`
+          <p class="text-sm text-gray-500 mb-2">Each rock owner reports <strong>on track</strong> or <strong>off track</strong>. <button onclick="viewEOS('rocks')" class="text-blue-600 hover:underline text-sm font-medium">Open Rocks →</button></p>
+          <div class="flex gap-3 text-xs">
+            <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-full inline-block" style="background:#059669"></span> On Track</span>
+            <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-full inline-block" style="background:#DA291C"></span> Off Track</span>
+          </div>
+        `,'#059669')}
+
+        ${section('📣','Customer / Employee Headlines','5', finalHeadlineContent, '#7c3aed')}
+
+        ${section('✅','To-Do List Review','5',`
+          <p class="text-sm text-gray-500 mb-2">Review 7-day to-dos — done or not done (no discussion).</p>
+          <p class="text-sm text-gray-400 italic">Open the Tasks tab for this week's items.</p>
+        `,'#D97706')}
+
+        ${section('🔥','IDS — Issues List','60', adminIssueContent.trim()||issueList(issues), '#DA291C')}
+
+        ${section('🏁','Conclude — Wrap Up','5',`
+          <div class="space-y-3 text-sm text-gray-700">
+            <div><strong class="text-gray-800">1. To-Do Recap</strong> — Review any new 7-day to-dos created during IDS.</div>
+            <div><strong class="text-gray-800">2. Cascading Messages</strong> — What needs to be shared with the team?</div>
+            <div><strong class="text-gray-800">3. Rate the Meeting</strong></div>
+            <div class="flex gap-2 flex-wrap mt-1">
+              ${[1,2,3,4,5,6,7,8,9,10].map(n=>`<button onclick="this.style.background=this.style.background?'':'var(--brand-red)';this.style.color=this.style.color?'':'white'" class="w-8 h-8 rounded-full border border-gray-200 text-xs font-bold hover:border-red-400 transition">${n}</button>`).join('')}
+            </div>
+          </div>
+        `,'#374151')}
+      `;
+    };
+
+    const subTabs = [
+      {id:'advisor', label:'👔 Advisor L-10'},
+      {id:'staff',   label:'🏢 Staff L-10'},
+      {id:'admin',   label:'⚙️ Admin L-10'},
+    ];
+    const subNav = subTabs.map(t=>`
+      <button onclick="window._l10Sub='${t.id}';viewEOS('l10')"
+        class="px-4 py-2 text-sm font-semibold rounded-lg transition whitespace-nowrap ${l10Sub===t.id?'text-white':'text-gray-600 hover:bg-white/60'}"
+        style="${l10Sub===t.id?'background:var(--brand-red)':''}">
+        ${t.label}
+      </button>`).join('');
+
+    const printDate = new Date().toLocaleDateString('en-US',{weekday:'long',year:'numeric',month:'long',day:'numeric'});
+
+    body = `
+      <div class="flex items-center justify-between mb-4 flex-wrap gap-3">
+        <div>
+          <h3 class="font-bold text-gray-800 text-base">📋 L-10 Meeting Agenda</h3>
+          <p class="text-xs text-gray-400 mt-0.5">${printDate} · 90 minutes · EOS Format</p>
+        </div>
+        <div class="flex gap-2 bg-gray-100 p-1 rounded-xl">${subNav}</div>
+      </div>
+      <div class="max-w-2xl">
+        ${buildL10(l10Sub)}
+      </div>`;
+  }
+
   setContent(`
     <div class="flex items-center justify-between mb-5">
       <h2 class="text-xl font-bold text-gray-800">EOS Operating System</h2>
@@ -8650,7 +8845,8 @@ window.submitIssue = () => {
   if(!text){ showToast('Enter a description','error'); return; }
   const type=document.querySelector('input[name="iss-type"]:checked')?.value||'issue';
   const list=eosGet('issues',[]);
-  list.unshift({id:'iss-'+Date.now(),advisorUid:currentUser.uid,advisorName:currentUser.name,type,text,createdAt:Date.now()});
+  const issRole = currentUser.isStaff ? 'staff' : currentUser.isAdmin ? 'admin' : 'advisor';
+  list.unshift({id:'iss-'+Date.now(),advisorUid:currentUser.uid,advisorName:currentUser.name,role:issRole,type,text,createdAt:Date.now()});
   eosSave('issues',list); showToast('Submitted!','success'); viewEOS('issues');
 };
 window.resolveIssue = id => {
