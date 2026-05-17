@@ -9158,7 +9158,117 @@ function viewEOS(sub='rocks'){
 
     const col = lbl => `<th class="px-4 py-3 text-center text-xs font-bold text-gray-500 uppercase tracking-wide whitespace-nowrap">${lbl}</th>`;
 
-    body = `
+    // ── Staff Scorecard builder ────────────────────────────────────────
+    const staffScorecard = (standalone=true) => {
+      // Prior-week window (same as above)
+      const staffUsers = Object.entries(allProfiles)
+        .filter(([sUid,p])=>(p.roles||[]).includes('staff'))
+        .map(([sUid,p])=>({uid:sUid, name:p.name||p.email||sUid}))
+        .sort((a,b)=>a.name.localeCompare(b.name));
+
+      if(staffUsers.length===0) return standalone
+        ? '<div class="bg-white rounded-2xl border p-8 text-center text-gray-400 text-sm">No staff members found. Make sure staff users have the Staff role assigned.</div>'
+        : '<p class="text-sm text-gray-400 italic">No staff members found.</p>';
+
+      const allRocks = eosGet('myRocks',{});
+
+      const staffRow = (sUid, sName) => {
+        const sTasks    = allTasks.filter(t=>t.assignedTo===sUid);
+        const openTasks = sTasks.filter(t=>t.status==='pending').length;
+        const doneTasks = sTasks.filter(t=>t.status==='complete'&&(t.updatedAt||0)>=pwStart&&(t.updatedAt||0)<=pwEnd).length;
+
+        // Rocks
+        const rocks     = allRocks[sUid]||[];
+        const onTrack   = rocks.filter(r=>r.status==='complete'||r.status==='inprocess').length;
+        const totalR    = rocks.length;
+        const rockPct   = totalR>0 ? Math.round(onTrack/totalR*100) : 100;
+        const rockColor = rockPct>=80?'#059669':rockPct>=50?'#D97706':'#DA291C';
+
+        // Grade: 50% rocks, 50% tasks completed (≥3 = full)
+        const taskScore = Math.min(Math.round(doneTasks/Math.max(3,doneTasks+openTasks)*100),100);
+        const weekScore = Math.round(rockPct*0.5 + taskScore*0.5);
+        const grade = weekGrade(weekScore);
+
+        return `<tr class="border-b border-gray-100 hover:bg-gray-50 transition-colors">
+          <td class="px-5 py-4"><span class="text-sm font-semibold text-gray-800">${sName}</span></td>
+          <td class="px-4 py-4 text-center">
+            <div style="display:inline-flex;flex-direction:column;align-items:center;gap:3px">
+              <div style="width:48px;height:48px;border-radius:50%;background:${grade.bg};border:2px solid ${grade.color};display:flex;flex-direction:column;align-items:center;justify-content:center;line-height:1">
+                <span style="font-size:1.2rem;font-weight:800;color:${grade.color}">${grade.letter}</span>
+              </div>
+              <span style="font-size:.7rem;color:${grade.color};font-weight:700">${weekScore}%</span>
+            </div>
+          </td>
+          <td class="px-4 py-4 text-center"><span class="text-sm font-bold text-gray-700">${openTasks}</span></td>
+          <td class="px-4 py-4 text-center"><span class="text-sm font-bold" style="color:${doneTasks>0?'#059669':'#DA291C'}">${doneTasks}</span></td>
+          <td class="px-4 py-4 text-center">
+            <div class="inline-flex flex-col items-center gap-1">
+              <span class="text-sm font-bold" style="color:${rockColor}">${rockPct}%</span>
+              ${totalR>0?`<span class="text-xs text-gray-400">${onTrack}/${totalR} on track</span>`:'<span class="text-xs text-gray-400">No rocks</span>'}
+            </div>
+          </td>
+        </tr>`;
+      };
+
+      const tableHtml = `
+        <div class="bg-white rounded-2xl border overflow-hidden ${standalone?'':'mt-4'}">
+          <div class="px-6 py-4 border-b flex items-center justify-between flex-wrap gap-2" style="${standalone?'':'background:#f8f8f8'}">
+            <div>
+              <h3 class="font-bold text-gray-800 text-base">🏢 Staff Weekly Scorecard</h3>
+              <p class="text-xs text-gray-400 mt-0.5">Prior week: ${weekLabel}</p>
+            </div>
+            <span class="text-xs text-gray-400">Auto-refreshes each Sunday</span>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full">
+              <thead>
+                <tr class="bg-gray-50 border-b border-gray-200">
+                  <th class="px-5 py-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide">Staff Member</th>
+                  <th class="px-4 py-3 text-center text-xs font-bold text-gray-500 uppercase tracking-wide whitespace-nowrap">Week Grade</th>
+                  ${col('Open Tasks')}
+                  ${col('Tasks Done ✓')}
+                  ${col('Rocks On Track')}
+                </tr>
+                <tr class="bg-gray-50/60 border-b border-gray-100">
+                  <th class="px-5 pb-2 text-left text-xs text-gray-400 font-normal">—</th>
+                  <th class="px-4 pb-2 text-center text-xs text-gray-400 font-normal">A≥90 B≥80 C≥70 D≥60</th>
+                  <th class="px-4 pb-2 text-center text-xs text-gray-400 font-normal">current</th>
+                  <th class="px-4 pb-2 text-center text-xs text-gray-400 font-normal">prior week</th>
+                  <th class="px-4 pb-2 text-center text-xs text-gray-400 font-normal">% on track</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${staffUsers.map(s=>staffRow(s.uid,s.name)).join('')}
+              </tbody>
+            </table>
+          </div>
+          <div class="px-6 py-3 border-t bg-gray-50 flex flex-wrap gap-5 text-xs text-gray-400">
+            <span>Grade = 50% Rock status + 50% Tasks completed</span>
+            <span><span style="color:#059669;font-weight:700">●</span> Green = on track</span>
+            <span><span style="color:#DA291C;font-weight:700">●</span> Red = needs attention</span>
+          </div>
+        </div>`;
+      return tableHtml;
+    };
+
+    // Scorecard sub-tab toggle (admin sees both options)
+    const scView = (typeof window._scorecardView!=='undefined') ? window._scorecardView : (isStaffView()?'staff':'advisor');
+    const showBoth = effectiveAdmin;
+
+    const scToggle = showBoth ? `
+      <div class="flex gap-2 bg-gray-100 p-1 rounded-xl mb-5">
+        <button onclick="window._scorecardView='advisor';viewEOS('scorecard')"
+          class="px-4 py-2 text-sm font-semibold rounded-lg transition whitespace-nowrap ${scView==='advisor'?'text-white':'text-gray-600 hover:bg-gray-200'}"
+          style="${scView==='advisor'?'background:var(--brand-black)':''}">👔 Advisor</button>
+        <button onclick="window._scorecardView='staff';viewEOS('scorecard')"
+          class="px-4 py-2 text-sm font-semibold rounded-lg transition whitespace-nowrap ${scView==='staff'?'text-white':'text-gray-600 hover:bg-gray-200'}"
+          style="${scView==='staff'?'background:var(--brand-black)':''}">🏢 Staff</button>
+        <button onclick="window._scorecardView='both';viewEOS('scorecard')"
+          class="px-4 py-2 text-sm font-semibold rounded-lg transition whitespace-nowrap ${scView==='both'?'text-white':'text-gray-600 hover:bg-gray-200'}"
+          style="${scView==='both'?'background:var(--brand-black)':''}">⚙️ Both</button>
+      </div>` : '';
+
+    const advisorScHtml = `
       <div class="bg-white rounded-2xl border overflow-hidden">
         <div class="px-6 py-4 border-b flex items-center justify-between flex-wrap gap-2">
           <div>
@@ -9207,6 +9317,13 @@ function viewEOS(sub='rocks'){
           <span><span style="color:#DA291C;font-weight:700">●</span> Red = below target</span>
         </div>
       </div>`;
+
+    const showAdv   = !effectiveAdmin || scView==='advisor' || scView==='both';
+    const showStaff = (effectiveAdmin && (scView==='staff'||scView==='both')) || isStaffView();
+
+    body = scToggle
+      + (showAdv   ? advisorScHtml       : '')
+      + (showStaff ? staffScorecard(true) : '');
   }
 
   // ── L-10 AGENDA ────────────────────────────────────────────────────────
@@ -9365,12 +9482,14 @@ function viewEOS(sub='rocks'){
         `,'#374151')}
 
         ${section('📊','Scorecard Review','5',`
-          <p class="text-sm text-gray-500 mb-3">Review key weekly metrics.
-            <button onclick="viewEOS('scorecard')" class="text-blue-600 hover:underline text-sm font-medium">Open full scorecard →</button>
-          </p>
+          <p class="text-sm text-gray-500 mb-3">Review key weekly metrics.</p>
+          <div class="flex flex-wrap gap-2 mb-3">
+            ${roleFilter==='advisor'||roleFilter==='admin' ? `<button onclick="window._scorecardView='advisor';viewEOS('scorecard')" class="text-xs font-semibold px-3 py-1.5 rounded-lg text-white transition" style="background:#1a1a1a">👔 Open Advisor Scorecard →</button>` : ''}
+            ${roleFilter==='staff'||roleFilter==='admin' ? `<button onclick="window._scorecardView='staff';viewEOS('scorecard')" class="text-xs font-semibold px-3 py-1.5 rounded-lg text-white transition" style="background:#374151">🏢 Open Staff Scorecard →</button>` : ''}
+          </div>
           <div class="flex flex-wrap gap-2 text-xs text-gray-400">
             <span class="px-2.5 py-1 bg-gray-100 rounded-full">Prior week: ${weekLabel2}</span>
-            <span class="px-2.5 py-1 bg-gray-100 rounded-full">${newDealHeadlines.length} pipeline moves</span>
+            ${roleFilter!=='staff'?`<span class="px-2.5 py-1 bg-gray-100 rounded-full">${newDealHeadlines.length} pipeline moves</span>`:''}
           </div>
         `,'#0891b2')}
 
