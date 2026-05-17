@@ -1979,6 +1979,11 @@ function buildYearlyOutlook(deals){
 function qBounds(year,q){ const sm=(q-1)*3; return {start:new Date(year,sm,1), end:new Date(year,sm+3,0,23,59,59)}; }
 function currentQ(){ const n=new Date(),q=Math.floor(n.getMonth()/3)+1; return {year:n.getFullYear(),q}; }
 function priorQ(){ const {year,q}=currentQ(); return q===1?{year:year-1,q:4}:{year,q:q-1}; }
+function nQ(n){ // n quarters back from current
+  let {year,q}=currentQ();
+  for(let i=0;i<n;i++){ q--; if(q<1){q=4;year--;} }
+  return {year,q};
+}
 function qLabel(year,q){ return `Q${q} ${year}`; }
 function inQ(tsMs, year, q){
   if(!tsMs) return false;
@@ -5288,9 +5293,9 @@ function viewBoard(){
     const listDeals = myDeals.filter(d=> /^listing$/i.test((d.stage||'').trim()));
     const listVol   = listDeals.reduce((s,d)=>s+(d.listedPrice||d.purchasePrice||0), 0);
 
-    // 3. Q2 Goal — deals put under contract this quarter (DD/Rezone/Permitting/Closing/Won)
-    // Effective date = contractEnteredAt (first UC entry) ?? createdAt (deal creation date)
-    const Q_GOAL = 10000000;
+    // 3. Q Goal — deals put under contract this quarter (DD/Rezone/Permitting/Closing/Won)
+    // Goal is per-advisor, set in Splits page; default $10M
+    const Q_GOAL = (allProfiles[uid]?.quarterlyUCGoal) || 10000000;
     const now = new Date();
     const qStart = new Date(now.getFullYear(), Math.floor(now.getMonth()/3)*3, 1);
     const qEnd   = new Date(now.getFullYear(), Math.floor(now.getMonth()/3)*3+3, 0, 23, 59, 59);
@@ -7718,7 +7723,58 @@ function viewLeaderboard(){
 
   setContent(`
     <h2 class="text-xl font-bold text-gray-800 mb-2">Advisor Leaderboard</h2>
-    <p class="text-xs text-gray-400 mb-5">UC Goal = quarterly Under Contract volume target. 🔴 = below goal · 🟢 = at or above goal</p>
+    <p class="text-xs text-gray-400 mb-5">UC Goal = quarterly Under Contract volume target per advisor (set in Splits). 🔴 = below · 🟢 = at or above goal</p>
+
+    <!-- ── Trailing 4 Quarters: Goal % Achieved ── -->
+    <div class="bg-white rounded-2xl border overflow-hidden mb-6">
+      <div class="px-5 py-3.5 border-b bg-gray-50 flex items-center gap-3">
+        <span class="font-bold text-gray-800 text-sm">📈 Trailing 4 Quarters — Goal % Achieved</span>
+        <span class="text-xs text-gray-400">UC volume entered vs quarterly goal</span>
+      </div>
+      <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="border-b bg-gray-50/60 text-xs text-gray-500 uppercase tracking-wide">
+            <th class="px-5 py-2.5 text-left">Advisor</th>
+            ${[3,2,1,0].map(n=>{
+              const {year,q}=nQ(n); return `<th class="px-4 py-2.5 text-center">${qLabel(year,q)}</th>`;
+            }).join('')}
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+          ${rows.map(r=>{
+            const trailingCells=[3,2,1,0].map(n=>{
+              const {year,q}=nQ(n);
+              const ucDeals=countStageEntries(allDeals.filter(d=>d.advisorUid===r.adv.uid),'contractEnteredAt',year,q);
+              const vol=ucDeals.reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||0),0);
+              const pct=r.goal>0?Math.min(Math.round(vol/r.goal*100),999):0;
+              const hit=pct>=100;
+              const barW=Math.min(pct,100);
+              const color=hit?'#059669':pct>=60?'#D97706':'#DA291C';
+              return `<td class="px-4 py-3 text-center">
+                <div class="flex flex-col items-center gap-1">
+                  <span class="text-sm font-bold" style="color:${color}">${pct}%</span>
+                  <div style="width:56px;height:4px;background:#e5e7eb;border-radius:9999px;overflow:hidden">
+                    <div style="width:${barW}%;height:100%;background:${color};border-radius:9999px"></div>
+                  </div>
+                  <span class="text-xs text-gray-400">${fmt$(vol)}</span>
+                </div>
+              </td>`;
+            }).join('');
+            return `<tr class="hover:bg-gray-50 transition-colors">
+              <td class="px-5 py-3">
+                <div class="font-semibold text-gray-800 text-sm">${r.adv.name}</div>
+                <div class="text-xs text-gray-400">Goal: ${fmt$(r.goal)}/Q</div>
+              </td>
+              ${trailingCells}
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+      </div>
+    </div>
+
+    <!-- ── Main Leaderboard Table ── -->
     <div class="overflow-x-auto">
     <table class="w-full bg-white rounded-2xl border text-sm overflow-hidden">
       <thead>
@@ -8389,9 +8445,8 @@ function viewEOS(sub='rocks'){
     const qNum  = Math.floor(now.getMonth()/3)+1;
     const qStart = new Date(now.getFullYear(),(qNum-1)*3,1).getTime();
     const qEnd   = new Date(now.getFullYear(),qNum*3,0,23,59,59).getTime();
-    const Q_GOAL = 10000000;
-
     const advRow = (advUid, advName) => {
+      const Q_GOAL = (allProfiles[advUid]?.quarterlyUCGoal) || 10000000;
       const advDeals = allDeals.filter(d => d.advisorUid===advUid || (d.coAdvisors||[]).some(ca=>ca.uid===advUid));
       const advTasks = allTasks.filter(t => t.assignedTo===advUid);
 
