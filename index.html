@@ -4992,6 +4992,80 @@ function interpolate(tpl, deal){
   return (tpl||'').replace(/\{([\w]+)\}/g,(_,k)=> base[k] ?? `{${k}}`);
 }
 
+
+/* Render stage fields for newStage + inject any unfilled fields from skipped stages */
+function renderStageFieldsWithSkipped(newStage, oldStage, data){
+  const dealKey = data.id||'new';
+  const container = document.getElementById('stage-fields');
+  if(!container) return;
+  // First render the destination stage fields normally
+  renderStageFields(newStage, data, dealKey);
+  // Then inject any skipped-stage fields that are empty
+  const ALL_STAGES=['Prospect','Listing','Under Contract','Due Diligence','Rezoning/Permitting','Closing','Closed Won'];
+  const oldIdx=ALL_STAGES.indexOf(oldStage);
+  const newIdx=ALL_STAGES.indexOf(newStage);
+  if(oldIdx<0||newIdx<=oldIdx+1) return; // no skipped stages
+  const skippedStageForms = [];
+  for(let i=oldIdx+1;i<newIdx;i++){
+    const st=ALL_STAGES[i];
+    if(!st) continue;
+    // Only inject if there are empty required fields for this skipped stage
+    const REQUIRED={
+      'Listing':            ['listedPrice','elcCommissionPct','sign'],
+      'Under Contract':     ['contractPrice','buyer','escrowAgent','escrowAgentEmail'],
+      'Due Diligence':      ['psaEffectiveDate','ddExpirationDate'],
+      'Rezoning/Permitting':['rezoneExpiration'],
+    };
+    const req=REQUIRED[st]||[];
+    const hasEmpty=req.some(k=>!data[k]);
+    if(hasEmpty) skippedStageForms.push(st);
+  }
+  if(!skippedStageForms.length) return;
+  // Append a "Missing from skipped stages" section
+  const extra=document.createElement('div');
+  extra.className='border-t pt-4 mt-3';
+  extra.innerHTML=`
+    <div class="flex items-center gap-2 mb-3">
+      <span class="text-xs font-bold text-amber-600 uppercase tracking-widest">⚠️ Missing from skipped stages</span>
+    </div>
+    <p class="text-xs text-gray-400 mb-3">This deal skipped the stages below. Fill in any needed fields now.</p>
+    ${skippedStageForms.map(st=>`
+      <div class="bg-amber-50 border border-amber-200 rounded-xl p-3 mb-2">
+        <div class="text-xs font-bold text-amber-700 uppercase tracking-widest mb-2">${st}</div>
+        ${getSkippedStageHtml(st, data)}
+      </div>`).join('')}`;
+  container.appendChild(extra);
+}
+
+function getSkippedStageHtml(stage, data){
+  const inp=(id,lbl,type,ph,val)=>`<div class="mb-2"><label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">${lbl}</label><input id="${id}" type="${type}" placeholder="${ph}" value="${val||''}" class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-amber-300"/></div>`;
+  const sel=(id,lbl,opts,val)=>`<div class="mb-2"><label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">${lbl}</label><select id="${id}" class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-amber-300">${opts.map(o=>`<option value="${o.v}" ${val===o.v?'selected':''}>${o.l}</option>`).join('')}</select></div>`;
+  switch(stage){
+    case 'Listing': return `
+      <div class="grid grid-cols-2 gap-2">
+        ${inp('sf-listed-price','Listed Price ($)','number','1500000',data.listedPrice)}
+        <div><label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Commission %</label><div class="flex items-center border rounded-lg overflow-hidden"><input id="sf-elc-commission" type="number" min="0" max="100" step="0.25" placeholder="3.0" value="${data.elcCommissionPct||''}" class="flex-1 px-3 py-2 text-sm outline-none"/><span class="px-2 bg-gray-50 text-gray-500 text-sm border-l">%</span></div></div>
+      </div>
+      ${sel('sf-sign','Sign',[{v:'yes',l:'Yes'},{v:'no',l:'No'},{v:'custom',l:'Custom'}],data.sign||'yes')}`;
+    case 'Under Contract': return `
+      <div class="grid grid-cols-2 gap-2">
+        ${inp('sf-contract-price','Contract Price ($)','number','1450000',data.contractPrice)}
+        ${inp('sf-buyer','Buyer','text','Jane Doe LLC',data.buyer)}
+      </div>
+      <div class="grid grid-cols-2 gap-2">
+        ${inp('sf-escrow-agent','Escrow Agent','text','First Title Co.',data.escrowAgent)}
+        ${inp('sf-escrow-email','Escrow Email','email','escrow@title.com',data.escrowAgentEmail)}
+      </div>`;
+    case 'Due Diligence': return `
+      <div class="grid grid-cols-2 gap-2">
+        ${inp('sf-psa-effective-date','PSA Effective Date','date','',data.psaEffectiveDate)}
+        ${inp('sf-dd-date','DD Expiration Date','date','',data.ddExpirationDate||data.dueDiligenceDate)}
+      </div>`;
+    case 'Rezoning/Permitting': return inp('sf-rezone-expiration','Rezoning Expiration Date','date','',data.rezoneExpiration);
+    default: return '';
+  }
+}
+
 /* =======================================================
    AUTOMATION ENGINE
    ======================================================= */
@@ -5938,51 +6012,86 @@ window.handleDrop = (ev,newStage) => {
   const deal=allDeals.find(d=>d.id===id);
   if(!deal) return;
   if(!currentUser.isAdmin&&deal.advisorUid!==currentUser.uid){ showToast('You can only move your own deals','warning'); return; }
-  if(deal.stage===newStage) return;
-  // Listing requires signed listing agreement upload
-  if(newStage==='Listing'){
-    openDealModal(id);
-    document.getElementById('f-stage').value='Listing';
-    document.getElementById('f-prob').value=STAGE_PROB['Listing'];
-    renderStageFields('Listing', deal);
-    showToast('Upload the signed listing agreement to complete this move','info',6000);
-    return;
-  }
-  // Under Contract requires contract details + upload
-  if(newStage==='Under Contract'){
-    openDealModal(id);
-    document.getElementById('f-stage').value='Under Contract';
-    document.getElementById('f-prob').value=STAGE_PROB['Under Contract'];
-    renderStageFields('Under Contract', deal);
-    showToast('Fill in the contract details to complete this move','info',6000);
-    return;
-  }
-  // Due Diligence / Closing / Closed Won require purchase price & closing details
-  if(['Due Diligence','Closing','Closed Won'].includes(newStage)){
-    openDealModal(id);
-    document.getElementById('f-stage').value=newStage;
-    document.getElementById('f-prob').value=STAGE_PROB[newStage]??deal.probability;
-    renderStageFields(newStage, deal);
-    document.getElementById('stage-fields').classList.remove('hidden');
-    showToast(`Fill in the required details to move to ${newStage}`,'info',6000);
-    return;
-  }
-  // For all other stages: check if a custom gate is configured
-  if(openGateModal(id, newStage)) return;
+
+  // Allow re-drop to same stage to retrigger automations (e.g. went back then returned)
   const oldStage=deal.stage;
+  const stageChanged = oldStage !== newStage;
+
+  // Check custom gate for the destination stage
+  if(stageChanged && openGateModal(id, newStage)) return;
+
   const upd={
-    stage:newStage, probability:STAGE_PROB[newStage],
-    stageEnteredAt:Date.now(), updatedAt:Date.now(),
-    // Track first-entry timestamps for KPI counting — never overwrite once set
-    ...(!deal.listingEnteredAt    && newStage==='Listing'          ? {listingEnteredAt:Date.now()}    : {}),
-    ...(!deal.contractEnteredAt   && newStage==='Under Contract'   ? {contractEnteredAt:Date.now()}   : {}),
+    stage:newStage, probability:STAGE_PROB[newStage]??deal.probability,
+    updatedAt:Date.now(),
+    // Only set stageEnteredAt on a real stage change
+    ...(stageChanged ? {stageEnteredAt:Date.now()} : {}),
+    ...(!deal.listingEnteredAt  && newStage==='Listing'         ? {listingEnteredAt:Date.now()}   : {}),
+    ...(!deal.contractEnteredAt && newStage==='Under Contract'  ? {contractEnteredAt:Date.now()}  : {}),
   };
+
   Store.updateDeal(id,upd).then(()=>{
     Object.assign(deal,upd);
-    fireAutomations(deal,oldStage);
+    // Always fire automations on every drop (including same-stage re-drop)
+    fireAutomations(deal, stageChanged ? oldStage : null);
     viewBoard();
-    showToast(`Moved to ${newStage}`,'success');
-  });
+
+    // Check for missing fields across skipped stages and prompt user
+    const missing = getMissingStageFields(deal, newStage, stageChanged ? oldStage : null);
+    if(missing.length){
+      showToast(`Moved to ${newStage} ✓`,'success',2500);
+      setTimeout(()=>{
+        const labels = missing.slice(0,4).map(m=>m.label).join(', ')+(missing.length>4?` +${missing.length-4} more`:'');
+        showToast(
+          `⚠️ Missing fields for ${newStage}: ${labels} — <u style="cursor:pointer" onclick="openDealModalForMissing('${id}','${newStage}','${oldStage}')">Complete now</u>`,
+          'warning', 10000
+        );
+      }, 800);
+    } else {
+      showToast(`Moved to ${newStage}`,'success');
+    }
+  }).catch(e=>{ console.error('[handleDrop]',e); showToast('Move failed — '+e.message,'error'); });
+};
+
+/* Returns array of {key, label, stage} for fields missing in newStage + skipped stages */
+function getMissingStageFields(deal, newStage, oldStage){
+  const ALL_STAGES=['Prospect','Listing','Under Contract','Due Diligence','Rezoning/Permitting','Closing','Closed Won','Closed Lost','Contract Terminated'];
+  const REQUIRED={
+    'Listing':            [{key:'listedPrice',label:'Listed Price'},{key:'elcCommissionPct',label:'Commission %'},{key:'sign',label:'Sign'}],
+    'Under Contract':     [{key:'contractPrice',label:'Contract Price'},{key:'buyer',label:'Buyer'},{key:'escrowAgent',label:'Escrow Agent'},{key:'escrowAgentEmail',label:'Escrow Email'}],
+    'Due Diligence':      [{key:'psaEffectiveDate',label:'PSA Effective Date'},{key:'ddExpirationDate',label:'DD Expiration Date'}],
+    'Rezoning/Permitting':[{key:'rezoneExpiration',label:'Rezoning Expiration'}],
+    'Closing':            [{key:'purchasePrice',label:'Purchase Price'},{key:'elcCommissionPct',label:'Commission %'},{key:'closeDate',label:'Closing Date'},{key:'escrowAgent',label:'Escrow Agent'},{key:'escrowAgentEmail',label:'Escrow Email'}],
+    'Closed Won':         [{key:'purchasePrice',label:'Purchase Price'},{key:'buyer',label:'Buyer'},{key:'elcCommissionPct',label:'Commission %'}],
+  };
+  // Determine which stages to check: newStage + any skipped stages between old and new
+  const oldIdx = ALL_STAGES.indexOf(oldStage);
+  const newIdx = ALL_STAGES.indexOf(newStage);
+  const stagesToCheck = [newStage];
+  if(oldIdx>=0 && newIdx>oldIdx+1){
+    for(let i=oldIdx+1;i<newIdx;i++){
+      if(ALL_STAGES[i] && REQUIRED[ALL_STAGES[i]]) stagesToCheck.push(ALL_STAGES[i]);
+    }
+  }
+  const missing=[]; const seen=new Set();
+  for(const st of stagesToCheck){
+    for(const {key,label} of (REQUIRED[st]||[])){
+      if(!seen.has(key) && !deal[key]){ missing.push({key,label,stage:st}); seen.add(key); }
+    }
+  }
+  return missing;
+}
+
+/* Open deal modal showing all missing fields for the new stage + skipped stages */
+window.openDealModalForMissing = function(id, newStage, oldStage){
+  openDealModal(id);
+  const deal = allDeals.find(d=>d.id===id);
+  if(!deal) return;
+  // Set stage selector to newStage
+  const stageEl = document.getElementById('f-stage');
+  if(stageEl) stageEl.value = newStage;
+  // Render fields for newStage + any skipped stages with missing data
+  renderStageFieldsWithSkipped(newStage, oldStage, deal);
+  document.getElementById('stage-fields')?.classList.remove('hidden');
 };
 
 /* =======================================================
@@ -9410,6 +9519,7 @@ window.handleDealSubmit = async ev => {
     await Store.updateDeal(id,data);
     Object.assign(existing,data);
     if(oldStage!==stage) fireAutomations(existing,oldStage);
+    else if(stage==='Closing') fireAutomations(existing,null); // re-fire Closing automation on form save too
     showToast('Deal updated','success');
   } else {
     data.createdAt=Date.now();
