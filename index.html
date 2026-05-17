@@ -1523,6 +1523,17 @@ const FB = {
     _fbUnsubs.push(onSnapshot(collection(_fbDb,'automations'), snap=>{
       allAutomations=snap.docs.map(d=>({...d.data(),id:d.id}));
       onUpdate('automations');
+      // Migrate auto-3 if it still has old 'email' type
+      const a3=snap.docs.find(d=>d.id==='auto-3');
+      if(a3 && a3.data().type!=='commission_invoice'){
+        setDoc(fbDoc(_fbDb,'automations','auto-3'),{stage:'Closing',type:'commission_invoice',active:true,config:{}})
+          .catch(e=>console.warn('[migrate-auto-3]',e));
+      }
+    }));
+    // Documents real-time sync (W-9, wire instructions, etc.)
+    _fbUnsubs.push(onSnapshot(collection(_fbDb,'documents'), snap=>{
+      allDocuments = snap.docs.map(d=>({...d.data(),id:d.id}));
+      onUpdate('documents');
     }));
     // EOS real-time sync (also handles app settings: stages, officeManagers, pendingProfiles)
     _fbUnsubs.push(onSnapshot(collection(_fbDb,'eos'), snap=>{
@@ -2124,6 +2135,10 @@ function fireAutomations(deal, oldStage){
           .catch(e=>console.error('[assign_task]',e));
         break;
       }
+      case 'commission_invoice':{
+        window.generateCommissionInvoice(deal);
+        break;
+      }
       case 'gdrive':{
         // Queue a Google Drive upload action — requires user to authorize via OAuth in their browser
         const fileName = interpolate(cfg.fileName||`{address} — {stage} ({close_date}).pdf`, deal);
@@ -2184,7 +2199,7 @@ function renderPendingPanel(){
         <div class="text-sm text-gray-800 truncate">${a.label}</div>
       </div>
       <div class="flex gap-1.5 shrink-0">
-        <button onclick="execAction('${a.id}')" class="text-xs bg-blue-50 text-blue-700 hover:bg-blue-100 px-2 py-1 rounded font-medium">${a.type==='webhook'?'Send':'Open'}</button>
+        <button onclick="execAction('${a.id}')" class="text-xs bg-blue-50 text-blue-700 hover:bg-blue-100 px-2 py-1 rounded font-medium">${a.type==='webhook'?'Send':a.type==='commission_invoice'?'Print PDF':'Open'}</button>
         <button onclick="dismissAction('${a.id}')" class="text-xs text-gray-400 hover:text-red-500 px-1">✕</button>
       </div>
     </div>`).join('');
@@ -2197,6 +2212,24 @@ window.execAction = id => {
     fetch(a.url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(a.payload)})
       .then(()=>showToast('Webhook sent!','success'))
       .catch(()=>showToast('Webhook failed — check URL','error'));
+  } else if(a.type==='commission_invoice'){
+    // Auto-download W-9 and wire instructions if available
+    const dlBlob=(dataUrl,fileName)=>{
+      const link=document.createElement('a');
+      link.href=dataUrl; link.download=fileName;
+      document.body.appendChild(link); link.click(); document.body.removeChild(link);
+    };
+    const fetchAndDl=(url,fileName)=>{
+      fetch(url).then(r=>r.blob()).then(blob=>{
+        const br=new FileReader(); br.onload=()=>dlBlob(br.result,fileName); br.readAsDataURL(blob);
+      }).catch(()=>console.warn('Could not auto-download',fileName));
+    };
+    if(a.w9Doc?.url)   fetchAndDl(a.w9Doc.url,   'W-9-ELC.pdf');
+    if(a.wireDoc?.url) fetchAndDl(a.wireDoc.url,  'Wire-Instructions-ELC.pdf');
+    const win=window.open('','_blank');
+    if(win){ win.document.write(a.invoiceHtml); win.document.close(); setTimeout(()=>win.print(),800); }
+    dismissAction(id);
+    return;
   } else if(a.url) window.open(a.url,'_blank');
   dismissAction(id);
 };
@@ -3661,7 +3694,7 @@ function makeSeedAutomations(){
      config:{message:'🎉 Deal closed! {address} — {revenue}'}},
     {id:'auto-2',stage:'Under Contract',type:'calendar',active:true,
      config:{title:'DD Deadline — {address}',details:'Purchase price: {price}',dateField:'dd'}},
-    {id:'auto-3',stage:'Closing',type:'email',active:true,
+    {id:'auto-3',stage:'Closing',type:'commission_invoice',active:true,config:{}}
      config:{to:'{advisor_email}',cc:'',subject:'Closing reminder: {address}',
              body:'Hi {advisor_name},\n\nDon\'t forget — {address} closes on {close_date}.\n\nRevenue: {revenue}\n\nGood luck!'}},
     {id:'auto-4',stage:'Closed Won',type:'note',active:true,
@@ -3679,6 +3712,7 @@ let allProfiles  = {};
 let allAutomations = [];
 let allOfficeManagers = []; // [{email, office, name?}] — loaded from DB / localStorage
 let allTasks = [];         // [{id, title, description, assignedTo, assignedToName, dueDate, status, dealId, dealAddress, createdBy, createdAt}]
+let allDocuments = [];     // [{id, type, office, url, name, uploadedAt}]
 let pendingActions = [];
 let activeChart  = null;
 let currentView  = 'board';
@@ -4033,6 +4067,7 @@ function renderStageFields(stage, data={}){
   // ── CLOSING ──────────────────────────────────────────────────────
   if(stage==='Closing'){
     const clPrice = data.purchasePrice||data.contractPrice||data.loiPrice||'';
+    window._closingDeal = data;
     container.innerHTML=`
       <div class="border-t pt-4 mt-1">
         <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">Closing Details</div>
@@ -4059,6 +4094,11 @@ function renderStageFields(stage, data={}){
             ${inp('sf-escrow-agent','Escrow Agent','text','First Title Co.',data.escrowAgent)}
             ${inp('sf-escrow-email','Escrow Email','email','escrow@title.com',data.escrowAgentEmail)}
           </div>
+          <button type="button"
+            onclick="(()=>{ const _d=window._closingDeal||{}; const d={..._d, purchasePrice:parseFloat(document.getElementById('sf-purchase-price')?.value)||_d.purchasePrice||0, elcCommissionPct:parseFloat(document.getElementById('sf-elc-commission')?.value)||_d.elcCommissionPct||0, closeDate:document.getElementById('sf-close-date')?.value||_d.closeDate||'', escrowAgent:document.getElementById('sf-escrow-agent')?.value||_d.escrowAgent||'', escrowAgentEmail:document.getElementById('sf-escrow-email')?.value||_d.escrowAgentEmail||'', buyer:document.getElementById('sf-buyer')?.value||_d.buyer||'', projectName:document.getElementById('sf-project-name')?.value||_d.projectName||''}; window.generateCommissionInvoice(d); })()"
+            class="w-full flex items-center justify-center gap-2 bg-red-700 hover:bg-red-800 text-white font-semibold rounded-xl px-4 py-3 text-sm transition-colors mt-2">
+            &#128196; Generate Commission Invoice &amp; Draft Email
+          </button>
         </div>
       </div>`;
     appendInlineGateFields(container, stage, data, dealKey);
@@ -4982,6 +5022,92 @@ function interpolate(tpl, deal){
   };
   return (tpl||'').replace(/\{([\w]+)\}/g,(_,k)=> base[k] ?? `{${k}}`);
 }
+
+window.generateCommissionInvoice = function(deal){
+  const today=new Date().toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'});
+  const ciPrice=deal.purchasePrice||deal.contractPrice||0;
+  const ciPct=deal.elcCommissionPct||deal.commissionPct||0;
+  const ciAmt=Math.round(ciPrice*ciPct/100);
+  const ciProject=deal.projectName||deal.propertyAddress||'';
+  const ciSeller=deal.ownershipEntity||'[Seller Entity]';
+  const ciContact=deal.contactPerson||'[Contact Name]';
+  const ciSellerEmail=deal.contactEmail||'';
+  const ciBuyer=deal.buyer||deal.loiBuyer||'[Buyer]';
+  const ciClose=deal.closeDate?fmtDate(deal.closeDate):'[Closing Date]';
+  const ciEscrow=deal.escrowAgent||'';
+  const ciEscrowEmail=deal.escrowAgentEmail||'';
+  const dealOffice=allProfiles[deal.advisorUid]?.office||'';
+  const getDocByType=t=>allDocuments.find(d=>d.type===t&&d.office===dealOffice)||allDocuments.find(d=>d.type===t);
+  const w9Doc=getDocByType('W-9');
+  const wireDoc=getDocByType('Wire Instructions');
+  const w9Display=w9Doc?'(Download from Admin → Documents tab)':'https://ryansampson1.github.io/advisor-dashboard/W-9-ELC.pdf';
+  const invoiceHtml=`<!DOCTYPE html><html><head><title>Commission Invoice</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=EB+Garamond:wght@400;600&display=swap');
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{font-family:'EB Garamond',Georgia,serif;font-size:13pt;line-height:1.7;color:#111;
+  display:flex;flex-direction:column;min-height:100vh}
+.letterhead-header{width:100%;display:block;margin-bottom:0}
+.body-content{flex:1;padding:28px 52px 20px 44px;max-width:820px;width:100%}
+.date-line{margin-bottom:22px}
+.addressee{margin-bottom:22px}
+.re-line{font-weight:600;margin-bottom:18px}
+p{margin-bottom:14px}
+table{width:100%;border-collapse:collapse;margin:18px 0}
+td{padding:5px 12px 5px 0;vertical-align:top}
+td:first-child{font-weight:600;width:210px;white-space:nowrap}
+.fee{background:#fafafa;border:1px solid #e0e0e0;border-radius:6px;padding:14px 20px;margin:18px 0}
+.fee-main{font-weight:600;font-size:12pt}
+.fee-fein{font-size:10pt;color:#666;margin-top:5px}
+.sig{margin-top:42px}
+.sig-name{font-weight:600;margin-top:24px}
+.letterhead-footer{width:100%;display:block;margin-top:auto}
+@media print{
+  .body-content{padding:20px 48px 16px 40px}
+  .letterhead-footer{position:fixed;bottom:0;left:0;width:100%}
+}
+</style></head><body>
+<img src="https://ryansampson1.github.io/advisor-dashboard/elc-letterhead-header.jpeg" class="letterhead-header" alt="Eshenbaugh Land Company">
+<div class="body-content">
+<div class="date-line">${today}</div>
+<div class="addressee">${ciSeller}<br>Attn: ${ciContact}</div>
+<div class="re-line">Re: Brokerage Fee Invoice &mdash; ${ciProject} Sale</div>
+<p>To Whom It May Concern:</p>
+<p>In preparation for the closing between your group and the Buyer outlined below, please allow this letter to be our Broker Invoice for the commission due to Eshenbaugh Land Company upon a successful closing. In addition to this invoice, I have included our W-9 and wire instructions to facilitate the transfer of funds, when appropriate.</p>
+<table>
+  <tr><td>Project:</td><td>${ciProject}</td></tr>
+  <tr><td>Seller:</td><td>${ciSeller}</td></tr>
+  <tr><td>Buyer:</td><td>${ciBuyer}</td></tr>
+  <tr><td>Projected Closing Date:</td><td>${ciClose}</td></tr>
+</table>
+<div class="fee">
+  <div class="fee-main">Brokerage Fee: ${fmt$(ciAmt)} &mdash; ${ciPct}% of ${fmt$(ciPrice)} Purchase Price</div>
+  <div class="fee-fein">FEIN: 47-4797329</div>
+</div>
+<p>It was a pleasure to work with you again. Should you need anything else, don&rsquo;t hesitate to reach out on my cell at 813-417-5928.</p>
+<div class="sig"><p>Sincerely,</p><div class="sig-name">${deal.advisorName||'Ryan Sampson'}</div>${deal.advisorName||'Ryan Sampson'}, CCIM, ALC<br>CEO / Principal &mdash; Eshenbaugh Land Company</div>
+</div>
+<img src="https://ryansampson1.github.io/advisor-dashboard/elc-letterhead-footer.jpeg" class="letterhead-footer" alt="">
+</body></html>`;
+  queueAction({type:'commission_invoice',label:`📄 Commission Invoice — ${ciProject}`,invoiceHtml,deal,w9Doc,wireDoc});
+  const toList=[ciEscrowEmail,ciSellerEmail].filter(Boolean).join(',');
+  const gmailSubject=`Re: Brokerage Fee Invoice — ${ciProject} Sale`;
+  const wireNote=wireDoc?'Wire Instructions (auto-downloaded — attach from your Downloads folder)':'Wire Instructions: [Attach ELC wire instructions PDF from your files]';
+  const gmailBody=`Please find attached our commission invoice, W-9, and wire instructions for the closing of ${ciProject}.\n\nInvoice Amount: ${fmt$(ciAmt)} (${ciPct}% of ${fmt$(ciPrice)})\nProjected Closing: ${ciClose}\n\nFiles to attach (downloaded to your computer):\n  1. Commission Invoice PDF\n  2. ${w9Doc?'W-9 — Eshenbaugh Land Company':'W-9: '+w9Display}\n  3. ${wireNote}\n\nPlease reach out with any questions.\n\n${deal.advisorName||\'\'}\nEshenbaugh Land Company | 813-417-5928`;
+  queueAction({type:'commission_email',label:`📄 Commission Invoice → ${ciEscrow||ciEscrowEmail||'Escrow'}`,url:`https://mail.google.com/mail/?view=cm&to=${encodeURIComponent(toList)}&su=${encodeURIComponent(gmailSubject)}&body=${encodeURIComponent(gmailBody)}`,deal});
+  const ciDue=new Date(); ciDue.setDate(ciDue.getDate()+1);
+  showToast('📄 Commission invoice queued — click ⚡ to open invoice & Gmail draft','info',6000);
+  Store.createTask({
+    title:`Send commission invoice to escrow — ${deal.propertyAddress||ciProject}`,
+    description:`COMMISSION INVOICE AUTOMATION\n\nSteps to complete:\n1. ✅ Invoice PDF opened — save it from the print dialog\n2. Click "Open" in the ⚡ Pending panel to open the pre-filled Gmail draft\n3. Attach the commission invoice PDF (from your Downloads)\n4. Attach W-9 (${w9Display})\n5. Attach wire instructions\n6. Verify recipient: ${ciEscrow||'Escrow Agent'} — ${ciEscrowEmail}\n7. Review and send\n\nCommission: ${fmt$(ciAmt)} (${ciPct}% of ${fmt$(ciPrice)})`,
+    assignedTo:deal.advisorUid, assignedToName:deal.advisorName||deal.advisorEmail,
+    dealId:deal.id, dealAddress:deal.propertyAddress,
+    dueDate:ciDue.toISOString().slice(0,10), status:'pending',
+    createdBy:currentUser?.uid||'system', createdByName:'Automation', createdAt:Date.now(),
+  }).then(()=>showToast('📄 Commission invoice generated — check ⚡ Pending panel','success',5000))
+    .catch(e=>console.error('[commission_invoice]',e));
+};
 
 /* =======================================================
    AUTOMATION ENGINE
@@ -7500,6 +7626,7 @@ function autoSummary(rule){
     case 'calendar': return `Event: ${cfg.title||'?'}`;
     case 'docusign': return `URL: ${cfg.url||'?'}`;
     case 'webhook':  return `POST → ${cfg.url||'?'}`;
+    case 'commission_invoice': return '📄 Auto-generate commission invoice PDF + Gmail draft + advisor task';
     default: return JSON.stringify(cfg);
   }
 }
