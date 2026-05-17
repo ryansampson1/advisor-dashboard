@@ -7935,7 +7935,12 @@ function viewLeaderboard(){
   const cq=currentQ(), pq=priorQ();
 
   const rows=advisors.map(adv=>{
-    const ad=allDeals.filter(d=>d.advisorUid===adv.uid);
+    // Include deals where advisor is primary OR co-advisor
+    const ad=allDeals.filter(d=>
+      d.advisorUid===adv.uid ||
+      (d.coAdvisors||[]).some(ca=>ca.uid===adv.uid) ||
+      (d.coAdvisorUids||[]).includes(adv.uid)
+    );
     const s=summarize(ad);
     const profile=getProfile(adv.uid);
     const goal=profile.quarterlyUCGoal||10000000;
@@ -7944,9 +7949,12 @@ function viewLeaderboard(){
     const pqListings=countStageEntries(ad,'listingEnteredAt',pq.year,pq.q);
     const cqUC=countStageEntries(ad,'contractEnteredAt',cq.year,cq.q);
     const pqUC=countStageEntries(ad,'contractEnteredAt',pq.year,pq.q);
-    const cqUCVal=cqUC.reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||0),0);
+    // Active UC pipeline: all deals in contract/DD/closing stages (not just Q2 entries)
+    const ucActive=ad.filter(d=> !isLostStage(d.stage||'') && !isWonStage(d.stage||'')
+      && /under.?contract|due.?diligence|rezoning|permitting|closing|in.?contract/i.test(d.stage||''));
+    const cqUCVal=ucActive.reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||0),0);
 
-    return {adv,s,profile,goal,cqListings,pqListings,cqUC,pqUC,cqUCVal};
+    return {adv,s,profile,goal,cqListings,pqListings,cqUC,pqUC,cqUCVal,ad};
   }).sort((a,b)=>b.s.projected-a.s.projected);
   const maxProj=Math.max(...rows.map(r=>r.s.projected),1);
 
@@ -7974,7 +7982,7 @@ function viewLeaderboard(){
           ${rows.map(r=>{
             const trailingCells=[3,2,1,0].map(n=>{
               const {year,q}=nQ(n);
-              const ucDeals=countStageEntries(allDeals.filter(d=>d.advisorUid===r.adv.uid),'contractEnteredAt',year,q);
+              const ucDeals=countStageEntries(r.ad,'contractEnteredAt',year,q);
               const vol=ucDeals.reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||0),0);
               const pct=r.goal>0?Math.min(Math.round(vol/r.goal*100),999):0;
               const hit=pct>=100;
@@ -8014,7 +8022,7 @@ function viewLeaderboard(){
           <th class="px-4 py-3 text-right">Closed Won</th>
           <th class="px-4 py-3 text-center">New Listings<br><span class="normal-case font-normal">${qLabel(cq.year,cq.q)} / ${qLabel(pq.year,pq.q)}</span></th>
           <th class="px-4 py-3 text-center">New UC<br><span class="normal-case font-normal">${qLabel(cq.year,cq.q)} / ${qLabel(pq.year,pq.q)}</span></th>
-          <th class="px-4 py-3 text-center">UC Vol ${qLabel(cq.year,cq.q)}<br><span class="normal-case font-normal">vs Goal</span></th>
+          <th class="px-4 py-3 text-center">Active UC Vol<br><span class="normal-case font-normal">vs Goal</span></th>
         </tr>
       </thead>
       <tbody class="divide-y divide-gray-100">
