@@ -5374,11 +5374,11 @@ td:first-child{font-weight:600;width:210px;white-space:nowrap}
 </div>
 <img src="https://ryansampson1.github.io/advisor-dashboard/elc-letterhead-footer.jpeg" class="letterhead-footer" alt="">
 </body></html>`;
-  queueAction({type:'commission_invoice',label:`📄 Commission Invoice — ${ciProject}`,invoiceHtml,deal});
+  queueAction({type:'commission_invoice',label:`📄 Commission Invoice — ${ciProject}`,invoiceHtml,deal,w9Doc,wireDoc});
   const toList=[ciEscrowEmail,ciSellerEmail].filter(Boolean).join(',');
   const gmailSubject=`Re: Brokerage Fee Invoice — ${ciProject} Sale`;
-  const wireNote=wireDoc?'Wire Instructions: See attached PDF':'Wire Instructions: [Attach ELC wire instructions PDF]';
-  const gmailBody=`Please find attached our commission invoice and W-9 for the closing of ${ciProject}.\n\nInvoice Amount: ${fmt$(ciAmt)} (${ciPct}% of ${fmt$(ciPrice)})\nProjected Closing: ${ciClose}\n\nAttached:\n  - Commission Invoice (PDF)\n  - W-9: ${w9Display}\n  - ${wireNote}\n\nPlease reach out with any questions.\n\n${deal.advisorName||''}\nEshenbaugh Land Company | 813-417-5928`;
+  const wireNote=wireDoc?'Wire Instructions (auto-downloaded — attach from your Downloads folder)':'Wire Instructions: [Attach ELC wire instructions PDF from your files]';
+  const gmailBody=`Please find attached our commission invoice, W-9, and wire instructions for the closing of ${ciProject}.\n\nInvoice Amount: ${fmt$(ciAmt)} (${ciPct}% of ${fmt$(ciPrice)})\nProjected Closing: ${ciClose}\n\nFiles to attach (downloaded to your computer):\n  1. Commission Invoice PDF\n  2. ${w9Doc?'W-9 — Eshenbaugh Land Company':'W-9: '+w9Display}\n  3. ${wireNote}\n\nPlease reach out with any questions.\n\n${deal.advisorName||''}\nEshenbaugh Land Company | 813-417-5928`;
   queueAction({type:'commission_email',label:`📄 Commission Invoice → ${ciEscrow||ciEscrowEmail||'Escrow'}`,url:`https://mail.google.com/mail/?view=cm&to=${encodeURIComponent(toList)}&su=${encodeURIComponent(gmailSubject)}&body=${encodeURIComponent(gmailBody)}`,deal});
   const ciDue=new Date(); ciDue.setDate(ciDue.getDate()+1);
   showToast('📄 Commission invoice queued — click ⚡ to open invoice & Gmail draft','info',6000);
@@ -5582,6 +5582,14 @@ window.execAction = id => {
       .then(()=>showToast('Webhook sent!','success'))
       .catch(()=>showToast('Webhook failed — check URL','error'));
   } else if(a.type==='commission_invoice'){
+    // Auto-download W-9 and wire instructions if available
+    const dlBlob=(dataUrl,fileName)=>{
+      const link=document.createElement('a');
+      link.href=dataUrl; link.download=fileName;
+      document.body.appendChild(link); link.click(); document.body.removeChild(link);
+    };
+    if(a.w9Doc?.fileDataUrl) dlBlob(a.w9Doc.fileDataUrl, a.w9Doc.fileName||'ELC-W9.pdf');
+    if(a.wireDoc?.fileDataUrl) dlBlob(a.wireDoc.fileDataUrl, a.wireDoc.fileName||'ELC-Wire-Instructions.pdf');
     // Open invoice in new window and trigger print dialog
     const iWin=window.open('','_blank','width=820,height=1060');
     if(iWin){ iWin.document.write(a.invoiceHtml); iWin.document.close(); iWin.focus(); setTimeout(()=>iWin.print(),800); }
