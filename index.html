@@ -4669,7 +4669,22 @@ function computeAdvisorKPIs(advisorUid){
   const qEnd      = new Date(thisYear, qNum*3, 0, 23,59,59).getTime();
   const Q_GOAL    = (allProfiles[advisorUid]?.quarterlyUCGoal) || 10000000;
 
-  const advDeals  = allDeals.filter(d=>d.advisorUid===advisorUid);
+  // Include deals where this advisor is primary OR listed as co-advisor
+  const advDeals  = allDeals.filter(d=>
+    d.advisorUid===advisorUid ||
+    (d.coAdvisors||[]).some(ca=>ca.uid===advisorUid) ||
+    (d.coAdvisorUids||[]).includes(advisorUid)
+  );
+
+  // Revenue share for this advisor on a deal (respects co-advisor splits)
+  const advRevShare = d => {
+    if(d.advisorUid===advisorUid) return getEffectiveRevenue(d); // primary: full gross
+    const ca=(d.coAdvisors||[]).find(c=>c.uid===advisorUid);
+    if(ca && (ca.split||0)>0) return getEffectiveRevenue(d)*(ca.split/100);
+    // legacy single co-advisor field
+    if((d.coAdvisorSplit||0)>0) return getEffectiveRevenue(d)*(d.coAdvisorSplit/100);
+    return getEffectiveRevenue(d)*0.5; // fallback: assume 50/50
+  };
 
   // Under-contract stages (DD, Rezoning, Permitting, Closing, Under Contract)
   const isUCStage = s => !isLostStage(s||'') && !isWonStage(s||'')
@@ -4685,7 +4700,7 @@ function computeAdvisorKPIs(advisorUid){
 
   // 1. Under-contract commission $ (CY + NY, actual commission not volume)
   const ucDeals     = advDeals.filter(d=>isUCStage(d.stage) && inCYNY(d));
-  const ucComm      = ucDeals.reduce((s,d)=>s+getEffectiveRevenue(d), 0);
+  const ucComm      = ucDeals.reduce((s,d)=>s+advRevShare(d), 0);
 
   // 2. Active LOI count
   const activeLOI   = advDeals.filter(d=>d.stage==='LOI').length;
@@ -4718,7 +4733,7 @@ function computeAdvisorKPIs(advisorUid){
 
   // 6. Closed Won this year + next year
   const closedCYNY = advDeals.filter(d=>isWonStage(d.stage) && inCYNY(d));
-  const closedComm = closedCYNY.reduce((s,d)=>s+getEffectiveRevenue(d), 0);
+  const closedComm = closedCYNY.reduce((s,d)=>s+advRevShare(d), 0);
 
   // 7. Projected revenue = UC commissions (CY+NY) — what will close
   const projectedRevenue = ucComm;
@@ -4886,27 +4901,32 @@ function buildMonthlyProjection(deals){
   const months=[];
   for(let i=0;i<12;i++){
     const d=new Date(now.getFullYear(),now.getMonth()+i,1);
-    months.push({label:d.toLocaleString('en-US',{month:'short',year:'2-digit'}),yr:d.getFullYear(),mo:d.getMonth(),rev:0});
+    months.push({label:d.toLocaleString('en-US',{month:'short',year:'2-digit'}),yr:d.getFullYear(),mo:d.getMonth(),rev:0,deals:[]});
   }
   for(const deal of deals){
     if(isLostStage(deal.stage)||!deal.closeDate) continue;
     const cd=new Date(deal.closeDate+'T00:00:00');
     const m=months.find(m=>m.yr===cd.getFullYear()&&m.mo===cd.getMonth());
-    if(m) m.rev+=dealProjected(deal);
+    if(m){ m.rev+=dealProjected(deal); m.deals.push(deal.propertyAddress||'Unnamed'); }
   }
   return months;
 }
 
 function buildYearlyOutlook(deals){
   const now=new Date();
-  const years=[0,1,2].map(i=>({label:`${now.getFullYear()+i}`,yr:now.getFullYear()+i,rev:0,cum:0}));
+  const years=[0,1,2].map(i=>({label:`${now.getFullYear()+i}`,yr:now.getFullYear()+i,remaining:0,closed:0,projected:0}));
   for(const deal of deals){
     if(isLostStage(deal.stage)||!deal.closeDate) continue;
     const yr=new Date(deal.closeDate+'T00:00:00').getFullYear();
     const y=years.find(y=>y.yr===yr);
-    if(y) y.rev+=dealProjected(deal);
+    if(!y) continue;
+    if(isWonStage(deal.stage)){
+      y.closed+=getEffectiveRevenue(deal);
+    } else {
+      y.remaining+=dealProjected(deal);
+    }
   }
-  let cum=0; years.forEach(y=>{cum+=y.rev;y.cum=cum;});
+  years.forEach(y=>{ y.projected=y.closed+y.remaining; });
   return years;
 }
 
@@ -6141,11 +6161,11 @@ function viewProjection(){
     <h2 class="text-xl font-bold text-gray-800 mb-6">Revenue Forecast</h2>
     <!-- 3-year cards -->
     <div class="grid grid-cols-3 gap-4 mb-8">
-      ${years.map(y=>`
+      ${years.map((y,i)=>`
         <div class="bg-white rounded-2xl border p-5">
-          <div class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">${y.label}</div>
-          <div class="text-2xl font-bold text-blue-700">${fmt$(y.rev)}</div>
-          <div class="text-xs text-gray-400 mt-1">Cumulative: ${fmt$(y.cum)}</div>
+          <div class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">${y.label} Projected Revenue</div>
+          <div class="text-2xl font-bold text-blue-700">${fmt$(i===0?y.remaining:y.projected)}</div>
+          ${i===0?`<div class="text-xs text-gray-400 mt-1">Cumulative (closed + pipeline): ${fmt$(y.projected)}</div>`:''}
         </div>`).join('')}
     </div>
     <!-- Monthly chart -->
@@ -6232,7 +6252,13 @@ function viewProjection(){
         responsive:true,
         plugins:{
           legend:{display:false},
-          tooltip:{callbacks:{label:ctx=>fmt$(ctx.raw)}}
+          tooltip:{callbacks:{
+            label: ctx => fmt$(ctx.raw),
+            afterBody: items => {
+              const dl = months[items[0]?.dataIndex]?.deals||[];
+              return dl.length ? ['','Deals:'].concat(dl.map(n=>'  '+n)) : [];
+            }
+          }}
         },
         scales:{y:{ticks:{callback:v=>'$'+(v/1000).toFixed(0)+'k'}}}
       }
