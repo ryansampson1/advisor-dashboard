@@ -5066,6 +5066,124 @@ function getSkippedStageHtml(stage, data){
   }
 }
 
+window.generateClosedWonAutomations = function(deal){
+  const cwProject   = deal.projectName||deal.propertyAddress||'[Project]';
+  const cwAddress   = deal.propertyAddress||'[Address]';
+  const cwContact   = deal.contactPerson||'[Contact]';
+  const cwEmail     = deal.contactEmail||'';
+  const cwBuyer     = deal.buyer||deal.loiBuyer||'[Buyer]';
+  const cwPrice     = deal.purchasePrice||deal.contractPrice||0;
+  const cwClose     = deal.closeDate ? fmtDate(deal.closeDate) : '[Closing Date]';
+  const cwAcres     = deal.acreage||deal.acres||'';
+  const cwUse       = deal.buyerUse||'[Intended Use]';
+  const cwSeller    = deal.ownershipEntity||'[Seller]';
+  const cwComm      = deal.elcCommissionPct ? Math.round(cwPrice*deal.elcCommissionPct/100) : 0;
+  const cwCommPct   = deal.elcCommissionPct||0;
+  const cwSign      = (deal.sign||'').toLowerCase();
+  const cwPR        = (deal.pressRelease||'').toLowerCase();
+  const cwAdvisor   = deal.advisorName||deal.advisorEmail||'';
+  const cwCounty    = deal.county||'';
+
+  // 1. Gift task to Krissy
+  const giftDue=new Date(); giftDue.setDate(giftDue.getDate()+2);
+  Store.createTask({
+    title:`Client gift — ${cwProject}`,
+    description:`CLOSED WON — CLIENT GIFT\n\nProject: ${cwProject}\nAddress: ${cwAddress}\nContact: ${cwContact}${cwEmail?'\nEmail: '+cwEmail:''}\nClose Date: ${cwClose}\nAdvisor: ${cwAdvisor}\n\nPlease arrange an appropriate closing gift for the client.`,
+    assignedTo:'krissy', assignedToName:'Krissy',
+    dealId:deal.id, dealAddress:cwAddress,
+    dueDate:giftDue.toISOString().slice(0,10), status:'pending',
+    createdBy:currentUser?.uid||'system', createdByName:'Automation', createdAt:Date.now(),
+  }).catch(e=>console.error('[cw-gift-task]',e));
+
+  // 2. Closing statement email → Krissy + Accounting
+  const csSubject=`Closing Statement — ${cwProject}`;
+  const csBody=`Hi Krissy,\n\nPlease find the closing statement for the following transaction:\n\nProject: ${cwProject}\nAddress: ${cwAddress}\nSeller: ${cwSeller}\nBuyer: ${cwBuyer}\nClose Date: ${cwClose}\nPurchase Price: ${fmt$(cwPrice)}\nELC Commission: ${fmt$(cwComm)} (${cwCommPct}%)\nCommission Delivery: Wire Transfer\n\nPlease coordinate with accounting on commission receipt.\n\nThank you,\n${cwAdvisor}\nEshenbaugh Land Company`;
+  queueAction({
+    type:'commission_email',
+    label:`📋 Closing Statement → Krissy + Accounting`,
+    url:`https://mail.google.com/mail/?view=cm&to=${encodeURIComponent('krissy@thedirtdog.com,accounting@thedirtdog.com')}&su=${encodeURIComponent(csSubject)}&body=${encodeURIComponent(csBody)}`,
+    deal,
+  });
+
+  // 3. Remove sign email (only if sign = yes)
+  if(cwSign==='yes'){
+    const signSubject=`Remove sign — ${cwAddress}`;
+    const signBody=`Hi,\n\nPlease arrange to remove the ELC sign at the following property:\n\nAddress: ${cwAddress}${cwCounty?'\nCounty: '+cwCounty:''}\nProject: ${cwProject}\nClose Date: ${cwClose}\n\nThank you!`;
+    queueAction({
+      type:'commission_email',
+      label:`🪧 Remove sign → Marketing`,
+      url:`https://mail.google.com/mail/?view=cm&to=${encodeURIComponent('marketing@thedirtdog.com')}&su=${encodeURIComponent(signSubject)}&body=${encodeURIComponent(signBody)}`,
+      deal,
+    });
+  }
+
+  // 4. Press release (only if pressRelease = yes)
+  if(cwPR==='yes'){
+    const prHtml=`<!DOCTYPE html><html><head><title>Press Release — ${cwProject}</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=EB+Garamond:wght@400;600&display=swap');
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'EB Garamond',Georgia,serif;font-size:13pt;line-height:1.8;color:#111;max-width:680px;margin:52px auto;padding:0 24px}
+.hdr{border-bottom:2.5px solid #8B1A1A;padding-bottom:14px;margin-bottom:24px}
+.co-name{font-size:19pt;font-weight:600;color:#8B1A1A;letter-spacing:.5px}
+.co-sub{font-size:8.5pt;letter-spacing:2px;color:#888;text-transform:uppercase;margin-top:3px}
+.pr-label{font-size:8.5pt;letter-spacing:2px;color:#888;text-transform:uppercase;margin:18px 0 6px}
+h1{font-size:15pt;font-weight:600;margin-bottom:8px;line-height:1.4}
+p{margin-bottom:14px}
+.contact{margin-top:32px;font-size:10pt;color:#555;border-top:1px solid #e0e0e0;padding-top:12px}
+@media print{body{margin:28px;max-width:100%}}
+</style></head><body>
+<div class="hdr">
+  <div class="co-name">ESHENBAUGH LAND COMPANY</div>
+  <div class="co-sub">Brokerage &middot; Advisory &middot; Consulting</div>
+</div>
+<div class="pr-label">For Immediate Release</div>
+<h1>Eshenbaugh Land Company Brokers the Sale of ${cwProject}</h1>
+<p><strong>Tampa, FL</strong> — Eshenbaugh Land Company (ELC) is pleased to announce the successful closing of <strong>${cwProject}</strong>${cwAddress&&cwAddress!==cwProject?', located at '+cwAddress:''}${cwCounty?' in '+cwCounty+' County':''}, for a purchase price of <strong>${fmt$(cwPrice)}</strong>.</p>
+<p>${cwBuyer&&cwBuyer!=='[Buyer]'?'The buyer, <strong>'+cwBuyer+'</strong>, intends to use the property for <strong>'+(cwUse||'future development')+'</strong>.':'The property will be used for <strong>'+(cwUse||'future development')+'</strong>.'}</p>
+${cwAcres?'<p>The site encompasses approximately <strong>'+cwAcres+' acres</strong>.</p>':''}
+<p>"We are proud to have facilitated this transaction and look forward to seeing the project come to fruition," said ${cwAdvisor||'the ELC team'}. "This closing reflects the continued strength of the land market and the trust our clients place in Eshenbaugh Land Company."</p>
+<p>Eshenbaugh Land Company specializes in the brokerage, advisory, and consulting of land transactions throughout Florida and the Southeast. For more information, visit <a href="https://www.thedirtdog.com">www.thedirtdog.com</a> or call 813-417-5928.</p>
+<div class="contact"><strong>Media Contact:</strong><br>Eshenbaugh Land Company<br>4830 W Kennedy Blvd, Suite 600 | Tampa, FL 33609<br>813-417-5928 | ryan@thedirtdog.com</div>
+</body></html>`;
+    queueAction({type:'commission_invoice',label:`📰 Press Release — ${cwProject}`,invoiceHtml:prHtml,deal});
+    const prDue=new Date(); prDue.setDate(prDue.getDate()+1);
+    Store.createTask({
+      title:`Review & send press release — ${cwProject}`,
+      description:`PRESS RELEASE AUTOMATION\n\n1. Click "Print PDF" in the ⚡ Pending panel to open the press release\n2. Review and edit as needed\n3. Save as PDF and distribute / post on social media\n\nProject: ${cwProject}\nClose Date: ${cwClose}\nPrice: ${fmt$(cwPrice)}`,
+      assignedTo:deal.advisorUid, assignedToName:cwAdvisor,
+      dealId:deal.id, dealAddress:cwAddress,
+      dueDate:prDue.toISOString().slice(0,10), status:'pending',
+      createdBy:currentUser?.uid||'system', createdByName:'Automation', createdAt:Date.now(),
+    }).catch(e=>console.error('[cw-pr-task]',e));
+  }
+
+  // 5. Client thank-you + survey
+  if(cwEmail){
+    const tySubject=`Thank you — ${cwProject}`;
+    const tyBody=`Dear ${cwContact},\n\nThank you so much for the opportunity to represent you in the sale of ${cwProject}. It was a true pleasure working with you throughout this process, and we are thrilled to have achieved a successful closing.\n\nAs we wrap up, we would love to hear about your experience working with Eshenbaugh Land Company. Your feedback helps us continue to improve and serve our clients better.\n\nPlease take a moment to complete our brief survey:\nhttps://www.surveymonkey.com/r/VLPJSVD\n\nWe look forward to working with you again in the future. Please don't hesitate to reach out anytime.\n\nWith gratitude,\n${cwAdvisor||'Ryan Sampson'}\nEshenbaugh Land Company\n813-417-5928 | ryan@thedirtdog.com`;
+    queueAction({
+      type:'commission_email',
+      label:`💌 Client Thank-You → ${cwContact||cwEmail}`,
+      url:`https://mail.google.com/mail/?view=cm&to=${encodeURIComponent(cwEmail)}&su=${encodeURIComponent(tySubject)}&body=${encodeURIComponent(tyBody)}`,
+      deal,
+    });
+  }
+
+  // 6. Task to Krissy: Esh Report + Land listing
+  const krissyDue=new Date(); krissyDue.setDate(krissyDue.getDate()+3);
+  Store.createTask({
+    title:`Esh Report + Land listing — ${cwProject}`,
+    description:`CLOSED WON — POST-CLOSING TASKS\n\nProject: ${cwProject}\nAddress: ${cwAddress}${cwCounty?'\nCounty: '+cwCounty:''}\nSeller: ${cwSeller}\nBuyer: ${cwBuyer}\nClose Date: ${cwClose}\nPurchase Price: ${fmt$(cwPrice)}${cwAcres?'\nAcreage: '+cwAcres:''}\nProposed / Buyer Use: ${cwUse}\nAdvisor: ${cwAdvisor}\n\nAction items:\n1. Add deal summary to Esh Report\n2. Update Land listing report (mark SOLD)\n3. Remove from active listings on websites\n4. Update internal deal database`,
+    assignedTo:'krissy', assignedToName:'Krissy',
+    dealId:deal.id, dealAddress:cwAddress,
+    dueDate:krissyDue.toISOString().slice(0,10), status:'pending',
+    createdBy:currentUser?.uid||'system', createdByName:'Automation', createdAt:Date.now(),
+  }).catch(e=>console.error('[cw-krissy-task]',e));
+
+  showToast('🎉 Closed Won automations fired — check ⚡ Pending panel + Tasks','success',6000);
+};
+
 window.generateCommissionInvoice = function(deal){
   const today=new Date().toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'});
   const ciPrice=deal.purchasePrice||deal.contractPrice||0;
@@ -5249,6 +5367,10 @@ function fireAutomations(deal, oldStage){
 
       case 'commission_invoice':{
         window.generateCommissionInvoice(deal);
+        break;
+      }
+      case 'closed_won':{
+        window.generateClosedWonAutomations(deal);
         break;
       }
       case 'gdrive':{
@@ -7817,6 +7939,7 @@ function autoSummary(rule){
     case 'docusign': return `URL: ${cfg.url||'?'}`;
     case 'webhook':  return `POST → ${cfg.url||'?'}`;
     case 'commission_invoice': return '📄 Auto-generate commission invoice PDF + Gmail draft + advisor task';
+    case 'closed_won': return '🎉 Closed Won suite: gift task, closing statement email, sign removal, press release, client thank-you + survey';
     default: return JSON.stringify(cfg);
   }
 }
