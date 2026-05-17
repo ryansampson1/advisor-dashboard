@@ -10706,10 +10706,21 @@ window.handleAutomationDocDrop = (evt, folder) => {
 window.handleAutomationDocUpload = async (files, folder) => {
   if(!files||!files.length) return;
 
-  // Storage is loaded lazily — wait up to 6s for it to be ready
+  // Ensure Storage is ready — lazy init or on-demand fallback
   if(!_fbStorage){
     let waited = 0;
-    while(!_fbStorage && waited < 6000){ await new Promise(r=>setTimeout(r,300)); waited+=300; }
+    while(!_fbStorage && waited < 4000){ await new Promise(r=>setTimeout(r,200)); waited+=200; }
+  }
+  if(!_fbStorage){
+    // On-demand init fallback
+    try {
+      const [appMod, stMod] = await Promise.all([
+        import('https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js'),
+        import('https://www.gstatic.com/firebasejs/10.7.1/firebase-storage.js')
+      ]);
+      _fbStorage = stMod.getStorage(appMod.getApp());
+      _fbFns = {..._fbFns, ...stMod};
+    } catch(e){ console.error('[Storage] on-demand init failed:', e); }
   }
   if(!_fbStorage){
     showToast('Firebase Storage is unavailable. Check your connection and try again.','error');
