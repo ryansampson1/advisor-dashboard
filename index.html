@@ -4447,10 +4447,19 @@ const FB = {
     _fbUnsubs.push(onSnapshot(collection(_fbDb,'automations'), snap=>{
       allAutomations=snap.docs.map(d=>({...d.data(),id:d.id}));
       // Auto-seed default rules on first run if collection is empty
-      if(snap.empty && isAdmin){
-        const seeds=makeSeedAutomations();
-        const {doc,setDoc}=_fbFns;
-        seeds.forEach(s=>{ const {id,...rest}=s; setDoc(doc(_fbDb,'automations',id),rest).catch(e=>console.warn('[seed-auto]',e)); });
+      const {doc:fbDoc,setDoc}=_fbFns;
+      if(isAdmin){
+        if(snap.empty){
+          // First run: seed all defaults into Firestore
+          makeSeedAutomations().forEach(s=>{ const {id,...rest}=s; setDoc(fbDoc(_fbDb,'automations',id),rest).catch(e=>console.warn('[seed-auto]',e)); });
+        } else {
+          // Migrate auto-3 if it still has old 'email' type (upgrade path)
+          const a3=snap.docs.find(d=>d.id==='auto-3');
+          if(a3 && a3.data().type!=='commission_invoice'){
+            setDoc(fbDoc(_fbDb,'automations','auto-3'),{stage:'Closing',type:'commission_invoice',active:true,config:{}})
+              .catch(e=>console.warn('[migrate-auto-3]',e));
+          }
+        }
       }
       onUpdate('automations');
     }));
