@@ -4446,6 +4446,12 @@ const FB = {
     }));
     _fbUnsubs.push(onSnapshot(collection(_fbDb,'automations'), snap=>{
       allAutomations=snap.docs.map(d=>({...d.data(),id:d.id}));
+      // Auto-seed default rules on first run if collection is empty
+      if(snap.empty && isAdmin){
+        const seeds=makeSeedAutomations();
+        const {doc,setDoc}=_fbFns;
+        seeds.forEach(s=>{ const {id,...rest}=s; setDoc(doc(_fbDb,'automations',id),rest).catch(e=>console.warn('[seed-auto]',e)); });
+      }
       onUpdate('automations');
     }));
     // EOS real-time sync (also handles app settings: stages, officeManagers, pendingProfiles)
@@ -5133,14 +5139,16 @@ td:first-child{font-weight:600;width:210px;white-space:nowrap}
 <p>It was a pleasure to work with you again. Should you need anything else, don&rsquo;t hesitate to reach out on my cell at 813-417-5928.</p>
 <div class="sig"><p>Sincerely,</p><div class="sig-name">Ryan Sampson</div>Ryan Sampson, CCIM, ALC<br>CEO / Principal &mdash; Eshenbaugh Land Company</div>
 </body></html>`;
-        const iWin=window.open('','_blank','width=820,height=1060');
-        if(iWin){iWin.document.write(invoiceHtml);iWin.document.close();iWin.focus();setTimeout(()=>iWin.print(),800);}
+        // Queue invoice as pending action (opened on user click to avoid popup blocker)
+        queueAction({type:'commission_invoice',label:`📄 Commission Invoice — ${ciProject}`,
+          invoiceHtml, deal});
         const toList=[ciEscrowEmail,ciSellerEmail].filter(Boolean).join(',');
         const gmailSubject=`Re: Brokerage Fee Invoice — ${ciProject} Sale`;
         const wireNote=wireDoc?'Wire Instructions: See attached PDF':'Wire Instructions: [Attach ELC wire instructions PDF]';
         const gmailBody=`Please find attached our commission invoice and W-9 for the closing of ${ciProject}.\n\nInvoice Amount: ${fmt$(ciAmt)} (${ciPct}% of ${fmt$(ciPrice)})\nProjected Closing: ${ciClose}\n\nAttached:\n  - Commission Invoice (PDF)\n  - W-9: ${w9Display}\n  - ${wireNote}\n\nPlease reach out with any questions.\n\n${deal.advisorName||''}\nEshenbaugh Land Company | 813-417-5928`;
         queueAction({type:'commission_email',label:`📄 Commission Invoice → ${ciEscrow||ciEscrowEmail||'Escrow'}`,url:`https://mail.google.com/mail/?view=cm&to=${encodeURIComponent(toList)}&su=${encodeURIComponent(gmailSubject)}&body=${encodeURIComponent(gmailBody)}`,deal});
         const ciDue=new Date(); ciDue.setDate(ciDue.getDate()+1);
+        showToast('📄 Commission invoice queued — click ⚡ to open invoice & Gmail draft','info',6000);
         Store.createTask({
           title:`Send commission invoice to escrow — ${deal.propertyAddress||ciProject}`,
           description:`COMMISSION INVOICE AUTOMATION\n\nSteps to complete:\n1. ✅ Invoice PDF opened — save it from the print dialog\n2. Click “Open” in the ⚡ Pending panel to open the pre-filled Gmail draft\n3. Attach the commission invoice PDF (from your Downloads)\n4. Attach W-9 (${w9Display})\n5. Attach wire instructions\n6. Verify recipient: ${ciEscrow||'Escrow Agent'} — ${ciEscrowEmail}\n7. Review and send\n\nCommission: ${fmt$(ciAmt)} (${ciPct}% of ${fmt$(ciPrice)})`,
@@ -5212,7 +5220,7 @@ function renderPendingPanel(){
         <div class="text-sm text-gray-800 truncate">${a.label}</div>
       </div>
       <div class="flex gap-1.5 shrink-0">
-        <button onclick="execAction('${a.id}')" class="text-xs bg-blue-50 text-blue-700 hover:bg-blue-100 px-2 py-1 rounded font-medium">${a.type==='webhook'?'Send':'Open'}</button>
+        <button onclick="execAction('${a.id}')" class="text-xs bg-blue-50 text-blue-700 hover:bg-blue-100 px-2 py-1 rounded font-medium">${a.type==='webhook'?'Send':a.type==='commission_invoice'?'Print PDF':'Open'}</button>
         <button onclick="dismissAction('${a.id}')" class="text-xs text-gray-400 hover:text-red-500 px-1">✕</button>
       </div>
     </div>`).join('');
@@ -5225,6 +5233,11 @@ window.execAction = id => {
     fetch(a.url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(a.payload)})
       .then(()=>showToast('Webhook sent!','success'))
       .catch(()=>showToast('Webhook failed — check URL','error'));
+  } else if(a.type==='commission_invoice'){
+    // Open invoice in new window and trigger print dialog
+    const iWin=window.open('','_blank','width=820,height=1060');
+    if(iWin){ iWin.document.write(a.invoiceHtml); iWin.document.close(); iWin.focus(); setTimeout(()=>iWin.print(),800); }
+    else { showToast('Pop-up blocked — allow pop-ups for this site and try again','error',5000); return; }
   } else if(a.url) window.open(a.url,'_blank');
   dismissAction(id);
 };
