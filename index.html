@@ -1163,7 +1163,13 @@ function renderStageFields(stage, data={}){
         </div>` : '';
     };
 
-    const fileChip = (name) => name ? `<span class="inline-flex items-center gap-1 text-xs bg-blue-50 text-blue-600 border border-blue-100 rounded-full px-2 py-0.5 mr-1 mb-1">📎 ${name}</span>` : '';
+    const fileChip = (name, url) => {
+      if (!name) return '';
+      const cls = 'inline-flex items-center gap-1 text-xs bg-blue-50 text-blue-600 border border-blue-100 rounded-full px-2 py-0.5 mr-1 mb-1';
+      return url
+        ? `<a href="${url}" target="_blank" rel="noopener" class="${cls} hover:bg-blue-100 cursor-pointer">📎 ${name} <span class="opacity-60">↗</span></a>`
+        : `<span class="${cls}">📎 ${name}</span>`;
+    };
 
     container.innerHTML=`
       <div class="border-t pt-4 mt-1">
@@ -1233,7 +1239,7 @@ function renderStageFields(stage, data={}){
         <div class="border rounded-xl p-3 bg-gray-50 mb-3">
           <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">Documents</div>
           <div class="flex flex-wrap gap-1 mb-2">
-            ${fileChip(lfName)}${fileChip(cfName)}${fileChip(loiName)}${fileChip(psaName)}${fileChip(csName)}
+            ${fileChip(lfName, listingFiles[dealKey]?.dataUrl||data.listingAgreementUrl||null)}${fileChip(cfName, contractFiles[dealKey]?.dataUrl||data.contractUrl||null)}${fileChip(loiName, stageFiles[`${dealKey}__loi`]?.dataUrl||data.loiUrl||null)}${fileChip(psaName, stageFiles[`${dealKey}__psa`]?.dataUrl||data.psaUrl||null)}${fileChip(csName, stageFiles[`${dealKey}__closing-statement`]?.dataUrl||data.closingStatementUrl||null)}
           </div>
           ${fileZone('cs-upload-zone','sf-cs-file','cs-upload-label',
             "handleStageFileSelect(event,'closing-statement')",
@@ -4128,7 +4134,13 @@ function renderStageFields(stage, data={}){
         </div>` : '';
     };
 
-    const fileChip = (name) => name ? `<span class="inline-flex items-center gap-1 text-xs bg-blue-50 text-blue-600 border border-blue-100 rounded-full px-2 py-0.5 mr-1 mb-1">📎 ${name}</span>` : '';
+    const fileChip = (name, url) => {
+      if (!name) return '';
+      const cls = 'inline-flex items-center gap-1 text-xs bg-blue-50 text-blue-600 border border-blue-100 rounded-full px-2 py-0.5 mr-1 mb-1';
+      return url
+        ? `<a href="${url}" target="_blank" rel="noopener" class="${cls} hover:bg-blue-100 cursor-pointer">📎 ${name} <span class="opacity-60">↗</span></a>`
+        : `<span class="${cls}">📎 ${name}</span>`;
+    };
 
     container.innerHTML=`
       <div class="border-t pt-4 mt-1">
@@ -4198,7 +4210,7 @@ function renderStageFields(stage, data={}){
         <div class="border rounded-xl p-3 bg-gray-50 mb-3">
           <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">Documents</div>
           <div class="flex flex-wrap gap-1 mb-2">
-            ${fileChip(lfName)}${fileChip(cfName)}${fileChip(loiName)}${fileChip(psaName)}${fileChip(csName)}
+            ${fileChip(lfName, listingFiles[dealKey]?.dataUrl||data.listingAgreementUrl||null)}${fileChip(cfName, contractFiles[dealKey]?.dataUrl||data.contractUrl||null)}${fileChip(loiName, stageFiles[`${dealKey}__loi`]?.dataUrl||data.loiUrl||null)}${fileChip(psaName, stageFiles[`${dealKey}__psa`]?.dataUrl||data.psaUrl||null)}${fileChip(csName, stageFiles[`${dealKey}__closing-statement`]?.dataUrl||data.closingStatementUrl||null)}
           </div>
           ${fileZone('cs-upload-zone','sf-cs-file','cs-upload-label',
             "handleStageFileSelect(event,'closing-statement')",
@@ -9798,6 +9810,27 @@ window.handleDealSubmit = async ev => {
   }
   const lfData = listingFiles[fileKey];
   const cfData = contractFiles[fileKey];
+  // Upload new files to Firebase Storage and get persistent download URLs
+  const _uploadDealFile = async (fileObj, dealId, type) => {
+    if (!fileObj?.dataUrl || !_fbStorage) return null;
+    try {
+      const {ref: fbRef, uploadBytes, getDownloadURL} = _fbFns;
+      const safeName = (fileObj.name||'file').replace(/[^a-zA-Z0-9._-]/g,'_');
+      const storePath = `dealDocs/${dealId}/${type}_${Date.now()}_${safeName}`;
+      const resp = await fetch(fileObj.dataUrl);
+      const blob = await resp.blob();
+      const snap = await uploadBytes(fbRef(_fbStorage, storePath), blob);
+      return await getDownloadURL(snap.ref);
+    } catch(e) { console.warn('[uploadDealFile]', e); return null; }
+  };
+  const _uploadId = id || ('new_'+Date.now());
+  const [lfUrl, cfUrl, loiUploadUrl, psaUploadUrl, csUploadUrl] = await Promise.all([
+    _uploadDealFile(lfData, _uploadId, 'listing'),
+    _uploadDealFile(cfData, _uploadId, 'contract'),
+    _uploadDealFile(stageFiles[`${fileKey}__loi`],               _uploadId, 'loi'),
+    _uploadDealFile(stageFiles[`${fileKey}__psa`],               _uploadId, 'psa'),
+    _uploadDealFile(stageFiles[`${fileKey}__closing-statement`], _uploadId, 'closing'),
+  ]);
   // Use hidden fields first; fall back to stage-specific fields so price/commission
   // entered in stage sections (e.g. Sold gate, Due Diligence inline) always produce revenue
   const purchasePrice = parseFloat(document.getElementById('f-price').value)||sf.purchasePrice||sf.contractPrice||sf.listedPrice||sf.proposedPrice||sf.loiPrice||0;
@@ -9834,8 +9867,8 @@ window.handleDealSubmit = async ev => {
     updatedAt:Date.now(),
     ...sf,
     dueDiligenceDate: sf.ddExpirationDate||sf.closeDate||null,
-    ...(lfData?{listingAgreementFileName:lfData.name, listingAgreementFileSize:lfData.size}:{}),
-    ...(cfData?{contractFileName:cfData.name, contractFileSize:cfData.size}:{}),
+    ...(lfData?{listingAgreementFileName:lfData.name, listingAgreementFileSize:lfData.size, ...(lfUrl?{listingAgreementUrl:lfUrl}:{})}:{}),
+    ...(cfData?{contractFileName:cfData.name, contractFileSize:cfData.size, ...(cfUrl?{contractUrl:cfUrl}:{})}:{}),
     // Stage-specific file uploads
     ...(()=>{
       const key=fileKey;
@@ -9843,9 +9876,9 @@ window.handleDealSubmit = async ev => {
       const loi=stageFiles[`${key}__loi`];
       const psa=stageFiles[`${key}__psa`];
       const cs =stageFiles[`${key}__closing-statement`];
-      if(loi) r.loiFileName=loi.name;
-      if(psa) r.psaFileName=psa.name;
-      if(cs)  r.closingStatementFileName=cs.name;
+      if(loi){ r.loiFileName=loi.name; if(loiUploadUrl) r.loiUrl=loiUploadUrl; }
+      if(psa){ r.psaFileName=psa.name; if(psaUploadUrl) r.psaUrl=psaUploadUrl; }
+      if(cs) { r.closingStatementFileName=cs.name; if(csUploadUrl) r.closingStatementUrl=csUploadUrl; }
       return r;
     })(),
     ...(inlineGateData?{gateData:{[stage]:inlineGateData}}:{}),
