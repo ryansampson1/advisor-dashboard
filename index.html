@@ -10705,45 +10705,70 @@ window.handleAutomationDocDrop = (evt, folder) => {
 
 window.handleAutomationDocUpload = async (files, folder) => {
   if(!files||!files.length) return;
-  if(!_fbStorage){ showToast('Storage not initialized — please refresh','error'); return; }
+
+  // Storage is loaded lazily — wait up to 6s for it to be ready
+  if(!_fbStorage){
+    let waited = 0;
+    while(!_fbStorage && waited < 6000){ await new Promise(r=>setTimeout(r,300)); waited+=300; }
+  }
+  if(!_fbStorage){
+    showToast('Firebase Storage is unavailable. Check your connection and try again.','error');
+    return;
+  }
+
   const {ref, uploadBytesResumable, getDownloadURL} = _fbFns;
   const {collection, addDoc} = _fbFns;
   const label    = document.getElementById('adoc-upload-label');
   const progress = document.getElementById('adoc-upload-progress');
   const bar      = document.getElementById('adoc-progress-bar');
   const progText = document.getElementById('adoc-progress-text');
+  const resetUI  = () => { if(label) label.classList.remove('hidden'); if(progress) progress.classList.add('hidden'); if(bar) bar.style.width='0%'; };
+
   if(label)    label.classList.add('hidden');
   if(progress) progress.classList.remove('hidden');
   let completed = 0;
   const total = files.length;
   for(const file of Array.from(files)){
     const storagePath = `automationDocs/${folder}/${Date.now()}_${file.name.replace(/[^a-zA-Z0-9._-]/g,'_')}`;
-    const task = uploadBytesResumable(ref(_fbStorage, storagePath), file);
-    await new Promise((resolve, reject) => {
-      task.on('state_changed',
-        snap => {
-          const pct = Math.round(snap.bytesTransferred/snap.totalBytes*100);
-          if(bar)      bar.style.width = pct+'%';
-          if(progText) progText.textContent = `Uploading ${file.name} — ${pct}%`;
-        },
-        err => { showToast(`Upload failed: ${err.message}`,'error'); reject(err); },
-        async () => {
-          const url = await getDownloadURL(task.snapshot.ref);
-          await addDoc(collection(_fbDb,'automationDocs'),{
-            name: file.name, size: file.size, type: file.type,
-            folder, storagePath, url,
-            uploadedAt: Date.now(),
-            uploadedBy: currentUser.uid,
-            uploadedByName: currentUser.name||currentUser.email,
-          });
-          completed++;
-          if(progText) progText.textContent = `✅ ${file.name} uploaded`;
-          resolve();
-        }
-      );
-    }).catch(()=>{});
+    let uploadOk = false;
+    try {
+      const task = uploadBytesResumable(ref(_fbStorage, storagePath), file);
+      await new Promise((resolve, reject) => {
+        task.on('state_changed',
+          snap => {
+            const pct = Math.round(snap.bytesTransferred/snap.totalBytes*100);
+            if(bar)      bar.style.width = pct+'%';
+            if(progText) progText.textContent = `Uploading ${file.name} — ${pct}%`;
+          },
+          err => reject(err),
+          async () => {
+            try {
+              const url = await getDownloadURL(task.snapshot.ref);
+              await addDoc(collection(_fbDb,'automationDocs'),{
+                name: file.name, size: file.size, type: file.type,
+                folder, storagePath, url,
+                uploadedAt: Date.now(),
+                uploadedBy: currentUser.uid,
+                uploadedByName: currentUser.name||currentUser.email,
+              });
+              completed++;
+              uploadOk = true;
+              if(progText) progText.textContent = `✅ ${file.name} uploaded`;
+              resolve();
+            } catch(e){ reject(e); }
+          }
+        );
+      });
+    } catch(err){
+      const msg = err?.code==='storage/unauthorized' ? 'Permission denied — check Firebase Storage rules.'
+                : err?.code==='storage/canceled'     ? 'Upload cancelled.'
+                : err?.message || String(err);
+      showToast(`Upload failed: ${msg}`, 'error');
+      console.error('[automationDocUpload]', err);
+    }
   }
-  showToast(`${completed} of ${total} file${total!==1?'s':''} uploaded`,'success');
+  resetUI();
+  if(completed>0) showToast(`${completed} of ${total} file${total!==1?'s':''} uploaded ✓`,'success');
   viewDocuments(folder);
 };
 
