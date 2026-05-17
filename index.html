@@ -8207,6 +8207,7 @@ function viewEOS(sub='rocks'){
     {id:'vto',       label:'🗺 VTO'},
     {id:'chart',     label:'📋 Accountability'},
     {id:'issues',    label:'🚨 Issues & Headlines'},
+    {id:'scorecard', label:'📊 Scorecard'},
   ];
   const nav=tabs.map(t=>`
     <button onclick="viewEOS('${t.id}')" class="px-4 py-2 text-sm font-medium rounded-lg transition
@@ -8364,6 +8365,134 @@ function viewEOS(sub='rocks'){
                 </div>
                 <button onclick="resolveIssue('${iss.id}')" class="text-green-600 hover:text-green-700 text-xs font-semibold shrink-0">✓ Resolve</button>
               </div>`).join('')}
+        </div>
+      </div>`;
+  }
+
+  // ── ADVISOR SCORECARD ────────────────────────────────────────────────────
+  else if(sub==='scorecard'){
+    const now = new Date();
+    // Prior-week window: Mon 00:00 → Sun 23:59:59 of the week before this one
+    const dow = now.getDay(); // 0=Sun
+    const daysToMonday = dow === 0 ? 6 : dow - 1;
+    const thisMonday = new Date(now);
+    thisMonday.setDate(now.getDate() - daysToMonday);
+    thisMonday.setHours(0,0,0,0);
+    const pwStart = new Date(thisMonday); pwStart.setDate(thisMonday.getDate()-7);
+    const pwEnd   = new Date(thisMonday); pwEnd.setMilliseconds(-1);
+    const pwS = pwStart.getTime(), pwE = pwEnd.getTime();
+
+    const fmt = d => d.toLocaleDateString('en-US',{month:'short',day:'numeric'});
+    const weekLabel = fmt(pwStart)+' – '+pwEnd.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+
+    // Q setup (same logic as advisor KPI bar)
+    const qNum  = Math.floor(now.getMonth()/3)+1;
+    const qStart = new Date(now.getFullYear(),(qNum-1)*3,1).getTime();
+    const qEnd   = new Date(now.getFullYear(),qNum*3,0,23,59,59).getTime();
+    const Q_GOAL = 10000000;
+
+    const advRow = (advUid, advName) => {
+      const advDeals = allDeals.filter(d => d.advisorUid===advUid || (d.coAdvisors||[]).some(ca=>ca.uid===advUid));
+      const advTasks = allTasks.filter(t => t.assignedTo===advUid);
+
+      // Q Goal %
+      const qDeals = advDeals.filter(d => {
+        if(isLostStage(d.stage||'')) return false;
+        if(!isContractActiveStage(d.stage) && !isWonStage(d.stage||'')) return false;
+        const ts = d.contractEnteredAt || d.createdAt || 0;
+        return ts >= qStart && ts <= qEnd;
+      });
+      const qVol  = qDeals.reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||0),0);
+      const qPct  = Math.min(Math.round(qVol/Q_GOAL*100),100);
+      const qColor= qPct>=100?'#059669':qPct>=60?'#D97706':'#DA291C';
+
+      // Tasks
+      const openTasks      = advTasks.filter(t=>t.status==='pending').length;
+      const completedTasks = advTasks.filter(t=>t.status==='complete' && (t.updatedAt||0)>=pwS && (t.updatedAt||0)<=pwE).length;
+
+      // Weekly deal activity (entered prior week)
+      const inPW = d => { const ts=(d.stageEnteredAt||d.createdAt||0); return ts>=pwS&&ts<=pwE; };
+      const prospects  = advDeals.filter(d=>d.stage==='Prospect' && (d.createdAt||0)>=pwS && (d.createdAt||0)<=pwE).length;
+      const newLOIs    = advDeals.filter(d=>d.stage==='LOI' && inPW(d)).length;
+      const newProps   = advDeals.filter(d=>d.stage==='Proposal To Do' && inPW(d)).length;
+
+      const cell = (val, target) => {
+        const color = target!=null ? (val>=target?'#059669':'#DA291C') : 'var(--text-1)';
+        return `<td class="px-4 py-3.5 text-center"><span class="text-sm font-bold" style="color:${color}">${val}</span></td>`;
+      };
+
+      return `<tr class="border-b border-gray-100 hover:bg-gray-50 transition-colors">
+        <td class="px-5 py-3.5">
+          <span class="text-sm font-semibold text-gray-800">${advName}</span>
+        </td>
+        <td class="px-4 py-3.5 text-center">
+          <div class="inline-flex flex-col items-center gap-1">
+            <span class="text-sm font-bold" style="color:${qColor}">${qPct}%</span>
+            <div style="width:72px;height:5px;background:#e5e7eb;border-radius:9999px;overflow:hidden">
+              <div style="width:${qPct}%;height:100%;background:${qColor};border-radius:9999px"></div>
+            </div>
+            <span class="text-xs text-gray-400">${fmt$(qVol)} of ${fmt$(Q_GOAL)}</span>
+          </div>
+        </td>
+        ${cell(openTasks)}
+        ${cell(completedTasks)}
+        ${cell(prospects,1)}
+        ${cell(newLOIs,1)}
+        ${cell(newProps,1)}
+      </tr>`;
+    };
+
+    const advisors = isAdmin
+      ? getDistinctAdvisors()
+      : [{uid, name: currentUser.name||currentUser.email}];
+
+    const col = lbl => `<th class="px-4 py-3 text-center text-xs font-bold text-gray-500 uppercase tracking-wide whitespace-nowrap">${lbl}</th>`;
+
+    body = `
+      <div class="bg-white rounded-2xl border overflow-hidden">
+        <div class="px-6 py-4 border-b flex items-center justify-between flex-wrap gap-2">
+          <div>
+            <h3 class="font-bold text-gray-800 text-base">📊 Advisor Weekly Scorecard</h3>
+            <p class="text-xs text-gray-400 mt-0.5">Prior week: ${weekLabel}</p>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="text-xs font-semibold px-2.5 py-1 rounded-full" style="background:#fef2f2;color:var(--brand-red)">Q${qNum} ${now.getFullYear()}</span>
+            <span class="text-xs text-gray-400">Refreshes every Sunday night</span>
+          </div>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full">
+            <thead>
+              <tr class="bg-gray-50 border-b border-gray-200">
+                <th class="px-5 py-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide">Advisor</th>
+                ${col('Q'+qNum+' Goal')}
+                ${col('Open Tasks')}
+                ${col('Tasks Done ✓')}
+                ${col('Prospects')}
+                ${col('New LOIs')}
+                ${col('Proposals')}
+              </tr>
+              <tr class="bg-gray-50/60 border-b border-gray-100">
+                <th class="px-5 pb-2.5 text-left text-xs text-gray-400 font-normal">—</th>
+                <th class="px-4 pb-2.5 text-center text-xs text-gray-400 font-normal">Target: 100%</th>
+                <th class="px-4 pb-2.5 text-center text-xs text-gray-400 font-normal">current</th>
+                <th class="px-4 pb-2.5 text-center text-xs text-gray-400 font-normal">prior week</th>
+                <th class="px-4 pb-2.5 text-center text-xs text-gray-400 font-normal">prior week · target ≥1</th>
+                <th class="px-4 pb-2.5 text-center text-xs text-gray-400 font-normal">prior week · target ≥1</th>
+                <th class="px-4 pb-2.5 text-center text-xs text-gray-400 font-normal">prior week · target ≥1</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${advisors.length===0
+                ? '<tr><td colspan="7" class="px-5 py-8 text-center text-gray-400 text-sm">No advisors found.</td></tr>'
+                : advisors.map(a=>advRow(a.uid,a.name)).join('')}
+            </tbody>
+          </table>
+        </div>
+        <div class="px-6 py-3 border-t bg-gray-50 flex flex-wrap gap-5 text-xs text-gray-400">
+          <span><span style="color:#059669;font-weight:700">●</span> Green = target met</span>
+          <span><span style="color:#DA291C;font-weight:700">●</span> Red = below target</span>
+          <span>Weekly columns count deals/tasks active or completed Mon–Sun of the prior week</span>
         </div>
       </div>`;
   }
