@@ -8681,6 +8681,7 @@ function viewEOS(sub='rocks'){
 
     // Grade helpers
     const weekGrade = score => {
+      if(score>=100) return {letter:'A+',color:'#7c3aed',bg:'#f5f3ff'};
       if(score>=90) return {letter:'A',color:'#059669',bg:'#f0fdf4'};
       if(score>=80) return {letter:'B',color:'#0891b2',bg:'#f0f9ff'};
       if(score>=70) return {letter:'C',color:'#D97706',bg:'#fffbeb'};
@@ -8711,13 +8712,33 @@ function viewEOS(sub='rocks'){
       const openTasks      = advTasks.filter(t=>t.status==='pending').length;
       const completedTasks = advTasks.filter(t=>t.status==='complete' && (t.updatedAt||0)>=pwS && (t.updatedAt||0)<=pwE).length;
 
-      // Weekly deal activity (auto-computed)
+      // Weekly deal activity — point-weighted, split between co-advisors by deal percentage
       const inPW = d => { const ts=(d.stageEnteredAt||d.createdAt||0); return ts>=pwS&&ts<=pwE; };
-      const prospects    = advDeals.filter(d=>d.stage==='Prospect'     && (d.createdAt||0)>=pwS && (d.createdAt||0)<=pwE).length;
-      const newLOIs      = advDeals.filter(d=>d.stage==='LOI'          && inPW(d)).length;
-      const newProps     = advDeals.filter(d=>d.stage==='Proposal To Do'&& inPW(d)).length;
-      const newListings  = advDeals.filter(d=>d.stage==='Listing'       && inPW(d)).length;
-      const newContracts = advDeals.filter(d=>/under.?contract/i.test(d.stage||'') && inPW(d)).length;
+      // Returns the fraction of base points this advisor earns on a deal
+      const splitPts = (d, base) => {
+        if(d.advisorUid === advUid) {
+          const coTotal = (d.coAdvisors||[]).reduce((s,ca)=>s+(ca.splitPct||0),0);
+          return base * Math.max(0, 100 - coTotal) / 100;
+        }
+        const ca = (d.coAdvisors||[]).find(c=>c.uid===advUid);
+        return ca ? base * (ca.splitPct||0) / 100 : 0;
+      };
+      const prospectDeals  = advDeals.filter(d=>d.stage==='Prospect'          && (d.createdAt||0)>=pwS && (d.createdAt||0)<=pwE);
+      const loiDeals       = advDeals.filter(d=>d.stage==='LOI'               && inPW(d));
+      const propDeals      = advDeals.filter(d=>d.stage==='Proposal To Do'    && inPW(d));
+      const listingDeals   = advDeals.filter(d=>d.stage==='Listing'           && inPW(d));
+      const contractDeals  = advDeals.filter(d=>/under.?contract/i.test(d.stage||'') && inPW(d));
+      const prospectPts    = prospectDeals.reduce((s,d)=>s+splitPts(d,1),0);
+      const loiPts         = loiDeals.reduce((s,d)=>s+splitPts(d,5),0);
+      const propPts        = propDeals.reduce((s,d)=>s+splitPts(d,5),0);
+      const listingPts     = listingDeals.reduce((s,d)=>s+splitPts(d,10),0);
+      const contractPts    = contractDeals.reduce((s,d)=>s+splitPts(d,10),0);
+      // Counts still used for display
+      const prospects   = prospectDeals.length;
+      const newLOIs     = loiDeals.length;
+      const newProps    = propDeals.length;
+      const newListings = listingDeals.length;
+      const newContracts= contractDeals.length;
 
       // Self-reported inputs (saved to advisorProfiles)
       const weekInputs     = allProfiles[advUid]?.weeklyInputs?.[weekKey] || {};
@@ -8732,15 +8753,15 @@ function viewEOS(sub='rocks'){
         qPct >= 10 ? 10 : 0,                          // 1. Q Goal on pace
         Math.max(0, 10 - openTasks * 2),               // 2. Open Tasks (10 − 2 per open task)
         openTasks === 0 ? 10 : Math.round(completedTasks / (completedTasks + openTasks) * 10), // 3. Tasks Completed (% done, or 10 if nothing open)
-        prospects >= 1 ? 10 : 0,                       // 4. Prospects Added
-        newLOIs >= 1 ? 10 : 0,                         // 5. New LOIs
-        newProps >= 1 ? 10 : 0,                        // 6. New Proposals
-        newListings >= 1 ? 10 : 0,                     // 7. New Listings
-        newContracts >= 1 ? 10 : 0,                    // 8. New Contracts
+        prospectPts,                                   // 4. Prospects (1pt each, split)
+        loiPts,                                        // 5. LOIs (5pts each, split)
+        propPts,                                       // 6. Proposals (5pts each, split)
+        listingPts,                                    // 7. Listings (10pts each, split)
+        contractPts,                                   // 8. Contracts (10pts each, split)
         networkEvent === 'yes' ? 10 : 0,               // 9. Network Event
         driveProps === 'yes' ? 10 : 0,                 // 10. Drive Properties
       ];
-      const weekScore = pts.reduce((a,b)=>a+b,0);
+      const weekScore = Math.round(pts.reduce((a,b)=>a+b,0));
       const grade = weekGrade(weekScore);
 
       const cell = (val, target) => {
@@ -8844,9 +8865,9 @@ function viewEOS(sub='rocks'){
         <td class="px-3 py-4 text-center">
           <div style="display:inline-flex;flex-direction:column;align-items:center;gap:3px">
             <div style="width:48px;height:48px;border-radius:50%;background:${grade.bg};border:2px solid ${grade.color};display:flex;flex-direction:column;align-items:center;justify-content:center;line-height:1">
-              <span style="font-size:1.2rem;font-weight:800;color:${grade.color}">${grade.letter}</span>
+              <span style="font-size:${grade.letter.length>1?'1rem':'1.2rem'};font-weight:800;color:${grade.color}">${grade.letter}</span>
             </div>
-            <span style="font-size:.7rem;color:${grade.color};font-weight:700">${weekScore}/100</span>
+            <span style="font-size:.7rem;color:${grade.color};font-weight:700">${weekScore} pts</span>
           </div>
         </td>
         <td class="px-3 py-4 text-center">
@@ -8860,11 +8881,11 @@ function viewEOS(sub='rocks'){
         </td>
         ${cell(openTasks, null)}
         ${cell(completedTasks, 1)}
-        ${cell(prospects, 1)}
-        ${cell(newLOIs, 1)}
-        ${cell(newProps, 1)}
-        ${cell(newListings, 1)}
-        ${cell(newContracts, 1)}
+        ${cell(prospects + (prospectPts!==prospects?' ('+Math.round(prospectPts*10)/10+'pts)':''), prospectPts>0?1:null)}
+        ${cell(newLOIs + (loiPts!==newLOIs*5?' ('+Math.round(loiPts*10)/10+'pts)':''), loiPts>0?1:null)}
+        ${cell(newProps + (propPts!==newProps*5?' ('+Math.round(propPts*10)/10+'pts)':''), propPts>0?1:null)}
+        ${cell(newListings + (listingPts!==newListings*10?' ('+Math.round(listingPts*10)/10+'pts)':''), listingPts>0?1:null)}
+        ${cell(newContracts + (contractPts!==newContracts*10?' ('+Math.round(contractPts*10)/10+'pts)':''), contractPts>0?1:null)}
         ${netEventCell}
         ${driveCell}
       </tr>`;
@@ -8996,7 +9017,7 @@ function viewEOS(sub='rocks'){
           </div>
           <div class="flex items-center gap-2">
             <span class="text-xs font-semibold px-2.5 py-1 rounded-full" style="background:#fef2f2;color:var(--brand-red)">Q${qNum} ${now.getFullYear()}</span>
-            <span class="text-xs text-gray-400">10 items · 10 pts each · 100 total</span>
+            <span class="text-xs text-gray-400">A+ ≥ 100 · scores split on co-advisor deals</span>
           </div>
         </div>
         <div class="overflow-x-auto">
@@ -9018,15 +9039,15 @@ function viewEOS(sub='rocks'){
               </tr>
               <tr class="bg-gray-50/60 border-b border-gray-100">
                 <th class="px-4 pb-2 text-left text-xs text-gray-400 font-normal sticky left-0 bg-gray-50/60 z-10 border-r border-gray-100">—</th>
-                <th class="px-3 pb-2 text-center text-xs text-gray-400 font-normal">A≥90 B≥80 C≥70 D≥60</th>
+                <th class="px-3 pb-2 text-center text-xs text-gray-400 font-normal">A+≥100 A≥90 B≥80 C≥70</th>
                 <th class="px-3 pb-2 text-center text-xs text-gray-400 font-normal">≥10% = 10pts</th>
                 <th class="px-3 pb-2 text-center text-xs text-gray-400 font-normal">10 − 2 per task</th>
                 <th class="px-3 pb-2 text-center text-xs text-gray-400 font-normal">% done · 10 if none open</th>
-                <th class="px-3 pb-2 text-center text-xs text-gray-400 font-normal">≥1 = 10pts</th>
-                <th class="px-3 pb-2 text-center text-xs text-gray-400 font-normal">≥1 = 10pts</th>
-                <th class="px-3 pb-2 text-center text-xs text-gray-400 font-normal">≥1 = 10pts</th>
-                <th class="px-3 pb-2 text-center text-xs text-gray-400 font-normal">≥1 = 10pts</th>
-                <th class="px-3 pb-2 text-center text-xs text-gray-400 font-normal">≥1 = 10pts</th>
+                <th class="px-3 pb-2 text-center text-xs text-gray-400 font-normal">1pt each</th>
+                <th class="px-3 pb-2 text-center text-xs text-gray-400 font-normal">5pts each</th>
+                <th class="px-3 pb-2 text-center text-xs text-gray-400 font-normal">5pts each</th>
+                <th class="px-3 pb-2 text-center text-xs text-gray-400 font-normal">10pts each</th>
+                <th class="px-3 pb-2 text-center text-xs text-gray-400 font-normal">10pts each</th>
                 <th class="px-3 pb-2 text-center text-xs text-gray-400 font-normal">yes = 10pts</th>
                 <th class="px-3 pb-2 text-center text-xs text-gray-400 font-normal">yes = 10pts</th>
               </tr>
@@ -9039,7 +9060,7 @@ function viewEOS(sub='rocks'){
           </table>
         </div>
         <div class="px-6 py-3 border-t bg-gray-50 flex flex-wrap gap-5 text-xs text-gray-400">
-          <span>Each of 10 items = 10 pts · Total out of 100</span>
+          <span>Contracts &amp; Listings = 10pts · LOIs &amp; Proposals = 5pts · Prospects = 1pt · split on co-advisor deals · A+ ≥ 100</span>
           <span><span style="color:#059669;font-weight:700">●</span> Green = target met</span>
           <span><span style="color:#DA291C;font-weight:700">●</span> Red = below target</span>
           <span>Network Event &amp; Property Visit: advisors self-report weekly · Locks Sunday 9pm</span>
