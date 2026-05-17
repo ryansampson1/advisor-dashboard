@@ -5203,6 +5203,7 @@ function renderShell(){
     {id:'eos',           label:'🧭 EOS',            always:true},
     {id:'comps',         label:'🗺 Comps',          advisor:true},
     {id:'drive',         label:'📁 Drive',          always:true},
+    {id:'documents',     label:'📄 Documents',      admin:true},
     {id:'hr',            label:'👥 HR',             always:true},
   ].filter(n=>{
     if(sv) return n.always; // staff view: only always tabs
@@ -5289,7 +5290,7 @@ function renderCurrentView(){
     commissions:viewMyCommissions,
     splits:viewSplits,automations:viewAutomations,users:viewUsers,leaderboard:viewLeaderboard,
     manageStages:viewManageStages,officeManagers:viewOfficeManagers,
-    eos:()=>viewEOS('rocks'),comps:viewComps,drive:viewDrive,hr:viewHR};
+    eos:()=>viewEOS('rocks'),comps:viewComps,drive:viewDrive,documents:viewDocuments,hr:viewHR};
   (map[currentView]||viewBoard)();
 }
 
@@ -10239,34 +10240,76 @@ function viewDrive(activeDrive){
     defaultDrive = officeKey;
   }
   const current = activeDrive && drives.includes(activeDrive) ? activeDrive : defaultDrive;
+  const driveLink = k => DRIVE_FOLDERS[k]?.url || '#';
 
-  const icons  = {ops:'🏢', tampa:'🌴', orlando:'🏙'};
-  const colors = {ops:'#e8291c', tampa:'#0ea5e9', orlando:'#8b5cf6'};
-  const labels = {ops:'ELC Owners & Ops', tampa:'Eshenbaugh — Tampa', orlando:'Eshenbaugh — Orlando'};
+  const folderCard = k => {
+    const f = DRIVE_FOLDERS[k];
+    const icons  = {ops:'🏢', tampa:'🌴', orlando:'🏙'};
+    const colors = {ops:'#e8291c', tampa:'#0ea5e9', orlando:'#8b5cf6'};
+    const c = colors[k] || '#6b7280';
+    return `
+      <a href="${driveLink(k)}" target="_blank"
+        class="flex flex-col items-center justify-center gap-3 bg-white rounded-2xl border-2 p-8 shadow-sm hover:shadow-md transition cursor-pointer text-center group"
+        style="border-color:${c}20">
+        <div class="w-16 h-16 rounded-2xl flex items-center justify-center text-3xl shadow-sm" style="background:${c}15">
+          ${icons[k] || '📁'}
+        </div>
+        <div>
+          <div class="font-bold text-gray-800 text-base group-hover:text-blue-600 transition">${f.label}</div>
+          <div class="text-xs text-gray-400 mt-0.5">Shared Drive · Opens in Google Drive</div>
+        </div>
+        <div class="text-xs font-medium px-3 py-1.5 rounded-full text-white transition" style="background:${c}">
+          Open Folder ↗
+        </div>
+      </a>`;
+  };
 
-  // Load documents for current folder from Firestore, then render
+  setContent(`
+    <div class="mb-6">
+      <h2 class="text-xl font-bold text-gray-800">📁 Google Drive</h2>
+      <p class="text-sm text-gray-500 mt-0.5">Click a folder to open it in Google Drive using your ${currentUser.email} account</p>
+    </div>
+    <div class="grid gap-5" style="grid-template-columns:repeat(auto-fill,minmax(260px,1fr))">
+      ${drives.map(folderCard).join('')}
+    </div>
+  `);
+}
+window.viewDrive = viewDrive;
+
+/* =======================================================
+   VIEW: DOCUMENTS (Admin / Super Admin only)
+   Automation documents — uploaded to Firebase Storage,
+   accessible via URL for automation workflows.
+   ======================================================= */
+function viewDocuments(activeFolder){
+  if(activeChart){ activeChart.destroy(); activeChart=null; }
+  const folders  = ['ops','marketing','templates','other'];
+  const fLabels  = {ops:'Operations', marketing:'Marketing', templates:'Templates', other:'Other'};
+  const fIcons   = {ops:'🏢', marketing:'📣', templates:'📋', other:'📎'};
+  const fColors  = {ops:'#e8291c', marketing:'#0ea5e9', templates:'#10b981', other:'#8b5cf6'};
+  const current  = (activeFolder && folders.includes(activeFolder)) ? activeFolder : 'ops';
+  const c        = fColors[current];
+
+  const extIcon = name => {
+    const ext = (name||'').split('.').pop().toLowerCase();
+    if(ext==='pdf')                            return '📄';
+    if(['doc','docx'].includes(ext))           return '📝';
+    if(['xls','xlsx','csv'].includes(ext))     return '📊';
+    if(['ppt','pptx'].includes(ext))           return '📑';
+    if(['jpg','jpeg','png','gif','webp'].includes(ext)) return '🖼';
+    if(['zip','rar','7z'].includes(ext))       return '🗜';
+    return '📎';
+  };
+  const fmtSize = b => b>1048576?`${(b/1048576).toFixed(1)} MB`:b>1024?`${(b/1024).toFixed(0)} KB`:`${b} B`;
+  const fmtDt   = ts => new Date(ts).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+
   const render = (docs=[]) => {
-    const c = colors[current] || '#374151';
     const folderDocs = docs.filter(d=>d.folder===current).sort((a,b)=>b.uploadedAt-a.uploadedAt);
 
-    const tabNav = drives.map(k=>`
-      <button onclick="viewDrive('${k}')"
+    const tabNav = folders.map(k=>`
+      <button onclick="viewDocuments('${k}')"
         class="px-4 py-2 text-sm font-semibold rounded-lg transition whitespace-nowrap ${current===k?'text-white':'text-gray-600 hover:bg-gray-100'}"
-        style="${current===k?`background:${colors[k]||'var(--brand-black)'}`:''}">${icons[k]} ${labels[k]}</button>`).join('');
-
-    const extIcon = name => {
-      const ext = (name||'').split('.').pop().toLowerCase();
-      if(['pdf'].includes(ext)) return '📄';
-      if(['doc','docx'].includes(ext)) return '📝';
-      if(['xls','xlsx','csv'].includes(ext)) return '📊';
-      if(['ppt','pptx'].includes(ext)) return '📑';
-      if(['jpg','jpeg','png','gif','webp'].includes(ext)) return '🖼';
-      if(['zip','rar','7z'].includes(ext)) return '🗜';
-      return '📎';
-    };
-
-    const fmtSize = b => b>1048576?`${(b/1048576).toFixed(1)} MB`:b>1024?`${(b/1024).toFixed(0)} KB`:`${b} B`;
-    const fmtDate = ts => new Date(ts).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+        style="${current===k?`background:${fColors[k]}`:''}">${fIcons[k]} ${fLabels[k]}</button>`).join('');
 
     const docRow = d => `
       <tr class="border-b border-gray-100 hover:bg-gray-50 transition-colors group">
@@ -10275,18 +10318,21 @@ function viewDrive(activeDrive){
             <span class="text-xl">${extIcon(d.name)}</span>
             <div class="min-w-0">
               <div class="text-sm font-semibold text-gray-800 truncate max-w-xs">${d.name}</div>
-              <div class="text-xs text-gray-400">${d.uploadedByName||'Unknown'} · ${fmtDate(d.uploadedAt)}</div>
+              <div class="text-xs text-gray-400">${d.uploadedByName||'Unknown'} · ${fmtDt(d.uploadedAt)}</div>
             </div>
           </div>
         </td>
         <td class="px-4 py-3 text-center text-xs text-gray-400">${fmtSize(d.size||0)}</td>
+        <td class="px-4 py-3">
+          <code class="text-xs bg-gray-100 px-2 py-1 rounded text-gray-600 select-all break-all">${d.url}</code>
+        </td>
         <td class="px-4 py-3 text-right">
           <div class="flex items-center justify-end gap-2">
             <a href="${d.url}" target="_blank"
               class="text-xs font-semibold px-3 py-1.5 rounded-lg text-white transition"
-              style="background:${c}">⬇ Download</a>
-            ${isAdminFull?`<button onclick="deleteDoc('${d.id}','${d.storagePath}')"
-              class="opacity-0 group-hover:opacity-100 text-xs text-gray-300 hover:text-red-500 transition font-semibold">✕</button>`:''}
+              style="background:${c}">⬇ View</a>
+            <button onclick="deleteAutomationDoc('${d.id}','${d.storagePath}')"
+              class="opacity-0 group-hover:opacity-100 text-xs text-gray-300 hover:text-red-500 transition font-semibold">✕</button>
           </div>
         </td>
       </tr>`;
@@ -10294,53 +10340,50 @@ function viewDrive(activeDrive){
     setContent(`
       <div class="flex flex-wrap items-center justify-between gap-4 mb-6">
         <div>
-          <h2 class="text-xl font-bold text-gray-800">📁 Documents</h2>
-          <p class="text-sm text-gray-500 mt-0.5">Upload and access shared documents</p>
+          <h2 class="text-xl font-bold text-gray-800">📄 Documents</h2>
+          <p class="text-sm text-gray-500 mt-0.5">Upload documents for automation workflows to reference by URL</p>
         </div>
-        <a href="${DRIVE_FOLDERS[current]?.url||'#'}" target="_blank"
-          class="text-xs font-semibold px-3 py-2 rounded-lg border text-gray-600 hover:bg-gray-50 transition">
-          Open in Google Drive ↗
-        </a>
       </div>
 
       <!-- Folder tabs -->
-      ${drives.length>1?`<div class="flex gap-2 bg-gray-100 p-1 rounded-xl mb-6 w-fit">${tabNav}</div>`:''}
+      <div class="flex gap-2 bg-gray-100 p-1 rounded-xl mb-6 w-fit">${tabNav}</div>
 
       <!-- Upload zone -->
-      <div id="doc-upload-zone"
+      <div id="adoc-upload-zone"
         class="border-2 border-dashed rounded-2xl p-8 mb-6 text-center transition cursor-pointer"
         style="border-color:${c}40;background:${c}08"
-        onclick="document.getElementById('doc-file-input').click()"
+        onclick="document.getElementById('adoc-file-input').click()"
         ondragover="event.preventDefault();this.style.borderColor='${c}';this.style.background='${c}15'"
         ondragleave="this.style.borderColor='${c}40';this.style.background='${c}08'"
-        ondrop="event.preventDefault();this.style.borderColor='${c}40';this.style.background='${c}08';handleDocDrop(event,'${current}')">
-        <input id="doc-file-input" type="file" multiple class="hidden"
-          onchange="handleDocUpload(this.files,'${current}')"/>
-        <div id="doc-upload-label">
+        ondrop="event.preventDefault();this.style.borderColor='${c}40';this.style.background='${c}08';handleAutomationDocDrop(event,'${current}')">
+        <input id="adoc-file-input" type="file" multiple class="hidden"
+          onchange="handleAutomationDocUpload(this.files,'${current}')"/>
+        <div id="adoc-upload-label">
           <div class="text-3xl mb-2">☁️</div>
           <p class="text-sm font-semibold text-gray-700">Drop files here or click to upload</p>
-          <p class="text-xs text-gray-400 mt-1">Any file type · Multiple files supported</p>
+          <p class="text-xs text-gray-400 mt-1">Any file type · URL is generated for each file</p>
         </div>
-        <div id="doc-upload-progress" class="hidden mt-3">
+        <div id="adoc-upload-progress" class="hidden mt-3">
           <div class="w-full bg-gray-200 rounded-full h-2 max-w-xs mx-auto">
-            <div id="doc-progress-bar" class="h-2 rounded-full transition-all" style="width:0%;background:${c}"></div>
+            <div id="adoc-progress-bar" class="h-2 rounded-full transition-all" style="width:0%;background:${c}"></div>
           </div>
-          <p id="doc-progress-text" class="text-xs text-gray-500 mt-1.5">Uploading…</p>
+          <p id="adoc-progress-text" class="text-xs text-gray-500 mt-1.5">Uploading…</p>
         </div>
       </div>
 
       <!-- Document list -->
       <div class="bg-white rounded-2xl border overflow-hidden">
         <div class="px-5 py-3 border-b flex items-center justify-between" style="background:#f8f8f8">
-          <span class="font-bold text-gray-700 text-sm">${icons[current]} ${labels[current]}</span>
+          <span class="font-bold text-gray-700 text-sm">${fIcons[current]} ${fLabels[current]}</span>
           <span class="text-xs text-gray-400">${folderDocs.length} document${folderDocs.length!==1?'s':''}</span>
         </div>
         ${folderDocs.length===0
-          ? '<div class="px-5 py-10 text-center text-gray-400 text-sm">No documents yet. Upload one above.</div>'
+          ? '<div class="px-5 py-10 text-center text-gray-400 text-sm">No documents yet — upload one above.</div>'
           : `<div class="overflow-x-auto"><table class="w-full">
                <thead><tr class="border-b border-gray-100 bg-gray-50/60">
                  <th class="px-4 py-2 text-left text-xs font-bold text-gray-500 uppercase tracking-wide">File</th>
                  <th class="px-4 py-2 text-center text-xs font-bold text-gray-500 uppercase tracking-wide">Size</th>
+                 <th class="px-4 py-2 text-left text-xs font-bold text-gray-500 uppercase tracking-wide">URL (for automations)</th>
                  <th class="px-4 py-2 text-right text-xs font-bold text-gray-500 uppercase tracking-wide">Actions</th>
                </tr></thead>
                <tbody>${folderDocs.map(docRow).join('')}</tbody>
@@ -10349,64 +10392,53 @@ function viewDrive(activeDrive){
     `);
   };
 
-  // Render immediately with empty list, then populate from Firestore
   render([]);
   if(_fbDb && _fbFns){
     const {collection, getDocs} = _fbFns;
-    getDocs(collection(_fbDb,'documents'))
+    getDocs(collection(_fbDb,'automationDocs'))
       .then(snap => {
         const docs = snap.docs.map(d=>({...d.data(),id:d.id}));
         if(docs.length) render(docs);
       })
-      .catch(e => console.warn('Could not load documents:', e));
+      .catch(e => console.warn('Could not load automation docs:', e));
   }
 }
 
-window.handleDocDrop = (evt, folder) => {
-  handleDocUpload(evt.dataTransfer.files, folder);
+window.handleAutomationDocDrop = (evt, folder) => {
+  handleAutomationDocUpload(evt.dataTransfer.files, folder);
 };
 
-window.handleDocUpload = async (files, folder) => {
+window.handleAutomationDocUpload = async (files, folder) => {
   if(!files||!files.length) return;
   if(!_fbStorage){ showToast('Storage not initialized — please refresh','error'); return; }
-
   const {ref, uploadBytesResumable, getDownloadURL} = _fbFns;
-  const {collection, addDoc}                        = _fbFns;
-
-  const label    = document.getElementById('doc-upload-label');
-  const progress = document.getElementById('doc-upload-progress');
-  const bar      = document.getElementById('doc-progress-bar');
-  const progText = document.getElementById('doc-progress-text');
-  if(label) label.classList.add('hidden');
+  const {collection, addDoc} = _fbFns;
+  const label    = document.getElementById('adoc-upload-label');
+  const progress = document.getElementById('adoc-upload-progress');
+  const bar      = document.getElementById('adoc-progress-bar');
+  const progText = document.getElementById('adoc-progress-text');
+  if(label)    label.classList.add('hidden');
   if(progress) progress.classList.remove('hidden');
-
   let completed = 0;
   const total = files.length;
-
   for(const file of Array.from(files)){
-    const storagePath = `documents/${folder}/${Date.now()}_${file.name.replace(/[^a-zA-Z0-9._-]/g,'_')}`;
-    const storageRef  = ref(_fbStorage, storagePath);
-    const task        = uploadBytesResumable(storageRef, file);
-
+    const storagePath = `automationDocs/${folder}/${Date.now()}_${file.name.replace(/[^a-zA-Z0-9._-]/g,'_')}`;
+    const task = uploadBytesResumable(ref(_fbStorage, storagePath), file);
     await new Promise((resolve, reject) => {
       task.on('state_changed',
         snap => {
-          const pct = Math.round(snap.bytesTransferred / snap.totalBytes * 100);
+          const pct = Math.round(snap.bytesTransferred/snap.totalBytes*100);
           if(bar)      bar.style.width = pct+'%';
           if(progText) progText.textContent = `Uploading ${file.name} — ${pct}%`;
         },
         err => { showToast(`Upload failed: ${err.message}`,'error'); reject(err); },
         async () => {
           const url = await getDownloadURL(task.snapshot.ref);
-          await addDoc(collection(_fbDb,'documents'),{
-            name:         file.name,
-            size:         file.size,
-            type:         file.type,
-            folder,
-            storagePath,
-            url,
-            uploadedAt:   Date.now(),
-            uploadedBy:   currentUser.uid,
+          await addDoc(collection(_fbDb,'automationDocs'),{
+            name: file.name, size: file.size, type: file.type,
+            folder, storagePath, url,
+            uploadedAt: Date.now(),
+            uploadedBy: currentUser.uid,
             uploadedByName: currentUser.name||currentUser.email,
           });
           completed++;
@@ -10416,26 +10448,25 @@ window.handleDocUpload = async (files, folder) => {
       );
     }).catch(()=>{});
   }
-
   showToast(`${completed} of ${total} file${total!==1?'s':''} uploaded`,'success');
-  viewDrive(folder);
+  viewDocuments(folder);
 };
 
-window.deleteDoc = async (docId, storagePath) => {
+window.deleteAutomationDoc = async (docId, storagePath) => {
   if(!confirm('Delete this document? This cannot be undone.')) return;
   const {doc, deleteDoc: fsDelete} = _fbFns;
-  const {ref, deleteObject}         = _fbFns;
+  const {ref, deleteObject} = _fbFns;
   try {
-    await fsDelete(doc(_fbDb,'documents',docId));
+    await fsDelete(doc(_fbDb,'automationDocs',docId));
     if(storagePath && _fbStorage){
       await deleteObject(ref(_fbStorage, storagePath)).catch(()=>{});
     }
     showToast('Document deleted','success');
-    viewDrive(window._currentDriveFolder||'ops');
+    viewDocuments();
   } catch(e){ showToast('Delete failed: '+e.message,'error'); }
 };
 
-window.viewDrive = viewDrive;
+window.viewDocuments = viewDocuments;
 
 // Expose EOS sub-navigation globally (called from inline onclick inside setContent)
 window.viewEOS = viewEOS;
