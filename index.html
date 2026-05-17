@@ -4491,6 +4491,17 @@ const FB = {
     _fbUnsubs.push(onSnapshot(collection(_fbDb,'automations'), snap=>{
       allAutomations=snap.docs.map(d=>({...d.data(),id:d.id}));
       onUpdate('automations');
+      // Migrate auto-3 if it still has old 'email' type
+      const a3=snap.docs.find(d=>d.id==='auto-3');
+      if(a3 && a3.data().type!=='commission_invoice'){
+        setDoc(fbDoc(_fbDb,'automations','auto-3'),{stage:'Closing',type:'commission_invoice',active:true,config:{}})
+          .catch(e=>console.warn('[migrate-auto-3]',e));
+      }
+    }));
+    // Documents real-time sync (W-9, wire instructions, etc.)
+    _fbUnsubs.push(onSnapshot(collection(_fbDb,'documents'), snap=>{
+      allDocuments = snap.docs.map(d=>({...d.data(),id:d.id}));
+      onUpdate('documents');
     }));
     // EOS real-time sync (also handles app settings: stages, officeManagers, pendingProfiles)
     _fbUnsubs.push(onSnapshot(collection(_fbDb,'eos'), snap=>{
@@ -5205,6 +5216,10 @@ function fireAutomations(deal, oldStage){
           .catch(e=>console.error('[assign_task]',e));
         break;
       }
+      case 'commission_invoice':{
+        window.generateCommissionInvoice(deal);
+        break;
+      }
       case 'gdrive':{
         // Queue a Google Drive upload action — requires user to authorize via OAuth in their browser
         const fileName = interpolate(cfg.fileName||`{address} — {stage} ({close_date}).pdf`, deal);
@@ -5265,7 +5280,7 @@ function renderPendingPanel(){
         <div class="text-sm text-gray-800 truncate">${a.label}</div>
       </div>
       <div class="flex gap-1.5 shrink-0">
-        <button onclick="execAction('${a.id}')" class="text-xs bg-blue-50 text-blue-700 hover:bg-blue-100 px-2 py-1 rounded font-medium">${a.type==='webhook'?'Send':'Open'}</button>
+        <button onclick="execAction('${a.id}')" class="text-xs bg-blue-50 text-blue-700 hover:bg-blue-100 px-2 py-1 rounded font-medium">${a.type==='webhook'?'Send':a.type==='commission_invoice'?'Print PDF':'Open'}</button>
         <button onclick="dismissAction('${a.id}')" class="text-xs text-gray-400 hover:text-red-500 px-1">✕</button>
       </div>
     </div>`).join('');
@@ -5278,6 +5293,15 @@ window.execAction = id => {
     fetch(a.url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(a.payload)})
       .then(()=>showToast('Webhook sent!','success'))
       .catch(()=>showToast('Webhook failed — check URL','error'));
+  } else if(a.type==='commission_invoice'){
+    const dlBlob=(dataUrl,fileName)=>{const link=document.createElement('a');link.href=dataUrl;link.download=fileName;document.body.appendChild(link);link.click();document.body.removeChild(link);};
+    const fetchAndDl=(url,fileName)=>{fetch(url).then(r=>r.blob()).then(blob=>{const br=new FileReader();br.onload=()=>dlBlob(br.result,fileName);br.readAsDataURL(blob);}).catch(()=>console.warn('Could not auto-download',fileName));};
+    if(a.w9Doc?.url)   fetchAndDl(a.w9Doc.url,   'W-9-ELC.pdf');
+    if(a.wireDoc?.url) fetchAndDl(a.wireDoc.url,  'Wire-Instructions-ELC.pdf');
+    const win=window.open('','_blank');
+    if(win){ win.document.write(a.invoiceHtml); win.document.close(); setTimeout(()=>win.print(),800); }
+    dismissAction(id);
+    return;
   } else if(a.url) window.open(a.url,'_blank');
   dismissAction(id);
 };
