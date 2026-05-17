@@ -8614,8 +8614,10 @@ function viewEOS(sub='rocks'){
     const filterIssues = (roleFilter) => {
       if(roleFilter==='admin') return allIssues;
       return allIssues.filter(i => {
-        if(roleFilter==='staff') return i.role==='staff' || (!i.role && false);
-        if(roleFilter==='advisor') return i.role==='advisor' || !i.role; // legacy = advisor
+        // legacy items with no role → treat as advisor
+        const r = i.role || 'advisor';
+        if(roleFilter==='staff')   return r==='staff';
+        if(roleFilter==='advisor') return r==='advisor' || r==='admin'; // admin items show in advisor L-10 too
         return true;
       });
     };
@@ -8696,17 +8698,20 @@ function viewEOS(sub='rocks'){
       }
       if(!headlineContent) headlineContent = emptyMsg;
 
-      const allTab = isAdminTab ? filterIssues('advisor').concat(filterIssues('staff')) : [];
-      const allHeadlines = isAdminTab ? allTab.filter(i=>i.type==='headline') : headlines;
-      const allIss       = isAdminTab ? allTab.filter(i=>i.type==='issue')    : issues;
+      // tabIssues already = allIssues for admin tab, filtered for advisor/staff tabs
+      const allIss       = tabIssues.filter(i=>i.type==='issue');
+      const allHeadlines = tabIssues.filter(i=>i.type==='headline');
 
-      let adminHeadlineContent = isAdminTab ? issueList(allHeadlines) : headlineContent;
-      let adminIssueContent    = isAdminTab ? issueList(allIss) : issueList(issues);
+      let adminHeadlineContent = headlineContent; // handled below via allHeadlines
+      let adminIssueContent    = issueList(allIss);
       let adminDealContent     = isAdminTab ? (newDealHeadlines.length>0 ? `<div class="mb-3"><p class="text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">📊 Pipeline Activity — Prior Week</p>${newDealHeadlines.map(d=>`<div class="flex items-center gap-2 py-1.5 border-b border-gray-50 last:border-0"><span>${stageIcon(d.stage)}</span><span class="text-sm font-semibold text-gray-800">${d.projectName||d.propertyAddress||'Unnamed'}</span><span class="text-xs text-gray-400">→ ${d.stage}</span><span class="text-xs text-gray-400 ml-auto">${d.advisorName||''}</span></div>`).join('')}</div>` : '') : '';
 
-      const finalHeadlineContent = isAdminTab
-        ? (adminDealContent + (allHeadlines.length>0 ? `<div class="${adminDealContent?'mt-3':''}"><p class="text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">💬 Submitted Headlines</p>${issueList(allHeadlines)}</div>` : (adminDealContent?'':emptyMsg)))
-        : headlineContent;
+      const submittedHeadlines = allHeadlines.length>0
+        ? `<div class="${(isAdvTab||isAdminTab)&&newDealHeadlines.length>0?'mt-3':''}"><p class="text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">💬 Submitted Headlines</p>${issueList(allHeadlines)}</div>`
+        : '';
+      const finalHeadlineContent = (isAdvTab||isAdminTab)
+        ? (adminDealContent + submittedHeadlines || emptyMsg)
+        : (submittedHeadlines || emptyMsg);
 
       return `
         ${section('👋','Segue — Good News','5',`
