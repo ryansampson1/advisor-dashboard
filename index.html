@@ -3661,7 +3661,9 @@ function makeSeedAutomations(){
      config:{message:'🎉 Deal closed! {address} — {revenue}'}},
     {id:'auto-2',stage:'Under Contract',type:'calendar',active:true,
      config:{title:'DD Deadline — {address}',details:'Purchase price: {price}',dateField:'dd'}},
-    {id:'auto-3',stage:'Closing',type:'commission_invoice',active:true,config:{}},
+    {id:'auto-3',stage:'Closing',type:'email',active:true,
+     config:{to:'{advisor_email}',cc:'',subject:'Closing reminder: {address}',
+             body:'Hi {advisor_name},\n\nDon\'t forget — {address} closes on {close_date}.\n\nRevenue: {revenue}\n\nGood luck!'}},
     {id:'auto-4',stage:'Closed Won',type:'note',active:true,
      config:{note:'Deal closed successfully. Final revenue: {revenue}.'}},
   ];
@@ -3676,7 +3678,6 @@ let allProfiles  = {};
 let allAutomations = [];
 let allOfficeManagers = []; // [{email, office, name?}] — loaded from DB / localStorage
 let allTasks = [];         // [{id, title, description, assignedTo, assignedToName, dueDate, status, dealId, dealAddress, createdBy, createdAt}]
-let allDocuments = [];     // [{id, name, type, office, fileDataUrl, fileName, mimeType, uploadedAt, uploadedBy}]
 let pendingActions = [];
 let activeChart  = null;
 let currentView  = 'board';
@@ -4057,11 +4058,6 @@ function renderStageFields(stage, data={}){
             ${inp('sf-escrow-agent','Escrow Agent','text','First Title Co.',data.escrowAgent)}
             ${inp('sf-escrow-email','Escrow Email','email','escrow@title.com',data.escrowAgentEmail)}
           </div>
-          <button type="button"
-            onclick="(()=>{ const d={...data, purchasePrice:parseFloat(document.getElementById('sf-purchase-price')?.value)||data.purchasePrice||0, elcCommissionPct:parseFloat(document.getElementById('sf-elc-commission')?.value)||data.elcCommissionPct||0, closeDate:document.getElementById('sf-close-date')?.value||data.closeDate||'', escrowAgent:document.getElementById('sf-escrow-agent')?.value||data.escrowAgent||'', escrowAgentEmail:document.getElementById('sf-escrow-email')?.value||data.escrowAgentEmail||'', buyer:document.getElementById('sf-buyer')?.value||data.buyer||'', projectName:document.getElementById('sf-project-name')?.value||data.projectName||''}; generateCommissionInvoice(d); })()"
-            class="w-full flex items-center justify-center gap-2 bg-red-700 hover:bg-red-800 text-white font-semibold rounded-xl px-4 py-3 text-sm transition-colors mt-2">
-            &#128196; Generate Commission Invoice &amp; Draft Email
-          </button>
         </div>
       </div>`;
     appendInlineGateFields(container, stage, data, dealKey);
@@ -4451,21 +4447,6 @@ const FB = {
     }));
     _fbUnsubs.push(onSnapshot(collection(_fbDb,'automations'), snap=>{
       allAutomations=snap.docs.map(d=>({...d.data(),id:d.id}));
-      // Auto-seed default rules on first run if collection is empty
-      const {doc:fbDoc,setDoc}=_fbFns;
-      if(isAdmin){
-        if(snap.empty){
-          // First run: seed all defaults into Firestore
-          makeSeedAutomations().forEach(s=>{ const {id,...rest}=s; setDoc(fbDoc(_fbDb,'automations',id),rest).catch(e=>console.warn('[seed-auto]',e)); });
-        } else {
-          // Migrate auto-3 if it still has old 'email' type (upgrade path)
-          const a3=snap.docs.find(d=>d.id==='auto-3');
-          if(a3 && a3.data().type!=='commission_invoice'){
-            setDoc(fbDoc(_fbDb,'automations','auto-3'),{stage:'Closing',type:'commission_invoice',active:true,config:{}})
-              .catch(e=>console.warn('[migrate-auto-3]',e));
-          }
-        }
-      }
       onUpdate('automations');
     }));
     // EOS real-time sync (also handles app settings: stages, officeManagers, pendingProfiles)
@@ -4522,12 +4503,6 @@ const FB = {
         createdTasks=snap.docs.map(d=>({...d.data(),id:d.id})); mergeTasks();
       }));
     }
-    if(isAdmin){
-      _fbUnsubs.push(onSnapshot(collection(_fbDb,'documents'), snap=>{
-        allDocuments = snap.docs.map(d=>({...d.data(),id:d.id}));
-        onUpdate('documents');
-      }));
-    }
   },
   async createTask(data){
     const {collection, addDoc} = _fbFns;
@@ -4572,15 +4547,6 @@ const FB = {
   async deleteAutomation(id){
     const {doc,deleteDoc}=_fbFns;
     await deleteDoc(doc(_fbDb,'automations',id));
-  },
-  async saveDocument(data){
-    const {collection, doc, setDoc, addDoc} = _fbFns;
-    if(data.id){ const id=data.id; const d={...data}; delete d.id; await setDoc(doc(_fbDb,'documents',id), d, {merge:true}); return id; }
-    const ref = await addDoc(collection(_fbDb,'documents'), data); return ref.id;
-  },
-  async deleteDocument(id){
-    const {doc,deleteDoc}=_fbFns;
-    await deleteDoc(doc(_fbDb,'documents',id));
   },
   // Generic helper: write to any eos document (admin-only write in Firestore rules)
   async saveEOS(docId, data){
@@ -4992,284 +4958,6 @@ function interpolate(tpl, deal){
   return (tpl||'').replace(/\{([\w]+)\}/g,(_,k)=> base[k] ?? `{${k}}`);
 }
 
-
-/* Render stage fields for newStage + inject any unfilled fields from skipped stages */
-function renderStageFieldsWithSkipped(newStage, oldStage, data){
-  const dealKey = data.id||'new';
-  const container = document.getElementById('stage-fields');
-  if(!container) return;
-  // First render the destination stage fields normally
-  renderStageFields(newStage, data, dealKey);
-  // Then inject any skipped-stage fields that are empty
-  const ALL_STAGES=['Prospect','Listing','Under Contract','Due Diligence','Rezoning/Permitting','Closing','Closed Won'];
-  const oldIdx=ALL_STAGES.indexOf(oldStage);
-  const newIdx=ALL_STAGES.indexOf(newStage);
-  if(oldIdx<0||newIdx<=oldIdx+1) return; // no skipped stages
-  const skippedStageForms = [];
-  for(let i=oldIdx+1;i<newIdx;i++){
-    const st=ALL_STAGES[i];
-    if(!st) continue;
-    // Only inject if there are empty required fields for this skipped stage
-    const REQUIRED={
-      'Listing':            ['listedPrice','elcCommissionPct','sign'],
-      'Under Contract':     ['contractPrice','buyer','escrowAgent','escrowAgentEmail'],
-      'Due Diligence':      ['psaEffectiveDate','ddExpirationDate'],
-      'Rezoning/Permitting':['rezoneExpiration'],
-    };
-    const req=REQUIRED[st]||[];
-    const hasEmpty=req.some(k=>!data[k]);
-    if(hasEmpty) skippedStageForms.push(st);
-  }
-  if(!skippedStageForms.length) return;
-  // Append a "Missing from skipped stages" section
-  const extra=document.createElement('div');
-  extra.className='border-t pt-4 mt-3';
-  extra.innerHTML=`
-    <div class="flex items-center gap-2 mb-3">
-      <span class="text-xs font-bold text-amber-600 uppercase tracking-widest">⚠️ Missing from skipped stages</span>
-    </div>
-    <p class="text-xs text-gray-400 mb-3">This deal skipped the stages below. Fill in any needed fields now.</p>
-    ${skippedStageForms.map(st=>`
-      <div class="bg-amber-50 border border-amber-200 rounded-xl p-3 mb-2">
-        <div class="text-xs font-bold text-amber-700 uppercase tracking-widest mb-2">${st}</div>
-        ${getSkippedStageHtml(st, data)}
-      </div>`).join('')}`;
-  container.appendChild(extra);
-}
-
-function getSkippedStageHtml(stage, data){
-  const inp=(id,lbl,type,ph,val)=>`<div class="mb-2"><label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">${lbl}</label><input id="${id}" type="${type}" placeholder="${ph}" value="${val||''}" class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-amber-300"/></div>`;
-  const sel=(id,lbl,opts,val)=>`<div class="mb-2"><label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">${lbl}</label><select id="${id}" class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-amber-300">${opts.map(o=>`<option value="${o.v}" ${val===o.v?'selected':''}>${o.l}</option>`).join('')}</select></div>`;
-  switch(stage){
-    case 'Listing': return `
-      <div class="grid grid-cols-2 gap-2">
-        ${inp('sf-listed-price','Listed Price ($)','number','1500000',data.listedPrice)}
-        <div><label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Commission %</label><div class="flex items-center border rounded-lg overflow-hidden"><input id="sf-elc-commission" type="number" min="0" max="100" step="0.25" placeholder="3.0" value="${data.elcCommissionPct||''}" class="flex-1 px-3 py-2 text-sm outline-none"/><span class="px-2 bg-gray-50 text-gray-500 text-sm border-l">%</span></div></div>
-      </div>
-      ${sel('sf-sign','Sign',[{v:'yes',l:'Yes'},{v:'no',l:'No'},{v:'custom',l:'Custom'}],data.sign||'yes')}`;
-    case 'Under Contract': return `
-      <div class="grid grid-cols-2 gap-2">
-        ${inp('sf-contract-price','Contract Price ($)','number','1450000',data.contractPrice)}
-        ${inp('sf-buyer','Buyer','text','Jane Doe LLC',data.buyer)}
-      </div>
-      <div class="grid grid-cols-2 gap-2">
-        ${inp('sf-escrow-agent','Escrow Agent','text','First Title Co.',data.escrowAgent)}
-        ${inp('sf-escrow-email','Escrow Email','email','escrow@title.com',data.escrowAgentEmail)}
-      </div>`;
-    case 'Due Diligence': return `
-      <div class="grid grid-cols-2 gap-2">
-        ${inp('sf-psa-effective-date','PSA Effective Date','date','',data.psaEffectiveDate)}
-        ${inp('sf-dd-date','DD Expiration Date','date','',data.ddExpirationDate||data.dueDiligenceDate)}
-      </div>`;
-    case 'Rezoning/Permitting': return inp('sf-rezone-expiration','Rezoning Expiration Date','date','',data.rezoneExpiration);
-    default: return '';
-  }
-}
-
-window.generateClosedWonAutomations = function(deal){
-  const cwProject   = deal.projectName||deal.propertyAddress||'[Project]';
-  const cwAddress   = deal.propertyAddress||'[Address]';
-  const cwContact   = deal.contactPerson||'[Contact]';
-  const cwEmail     = deal.contactEmail||'';
-  const cwBuyer     = deal.buyer||deal.loiBuyer||'[Buyer]';
-  const cwPrice     = deal.purchasePrice||deal.contractPrice||0;
-  const cwClose     = deal.closeDate ? fmtDate(deal.closeDate) : '[Closing Date]';
-  const cwAcres     = deal.acreage||deal.acres||'';
-  const cwUse       = deal.buyerUse||'[Intended Use]';
-  const cwSeller    = deal.ownershipEntity||'[Seller]';
-  const cwComm      = deal.elcCommissionPct ? Math.round(cwPrice*deal.elcCommissionPct/100) : 0;
-  const cwCommPct   = deal.elcCommissionPct||0;
-  const cwSign      = (deal.sign||'').toLowerCase();
-  const cwPR        = (deal.pressRelease||'').toLowerCase();
-  const cwAdvisor   = deal.advisorName||deal.advisorEmail||'';
-  const cwCounty    = deal.county||'';
-
-  // 1. Gift task to Krissy
-  const giftDue=new Date(); giftDue.setDate(giftDue.getDate()+2);
-  Store.createTask({
-    title:`Client gift — ${cwProject}`,
-    description:`CLOSED WON — CLIENT GIFT\n\nProject: ${cwProject}\nAddress: ${cwAddress}\nContact: ${cwContact}${cwEmail?'\nEmail: '+cwEmail:''}\nClose Date: ${cwClose}\nAdvisor: ${cwAdvisor}\n\nPlease arrange an appropriate closing gift for the client.`,
-    assignedTo:'krissy', assignedToName:'Krissy',
-    dealId:deal.id, dealAddress:cwAddress,
-    dueDate:giftDue.toISOString().slice(0,10), status:'pending',
-    createdBy:currentUser?.uid||'system', createdByName:'Automation', createdAt:Date.now(),
-  }).catch(e=>console.error('[cw-gift-task]',e));
-
-  // 2. Closing statement email → Krissy + Accounting
-  const csSubject=`Closing Statement — ${cwProject}`;
-  const csBody=`Hi Krissy,\n\nPlease find the closing statement for the following transaction:\n\nProject: ${cwProject}\nAddress: ${cwAddress}\nSeller: ${cwSeller}\nBuyer: ${cwBuyer}\nClose Date: ${cwClose}\nPurchase Price: ${fmt$(cwPrice)}\nELC Commission: ${fmt$(cwComm)} (${cwCommPct}%)\nCommission Delivery: Wire Transfer\n\nPlease coordinate with accounting on commission receipt.\n\nThank you,\n${cwAdvisor}\nEshenbaugh Land Company`;
-  queueAction({
-    type:'commission_email',
-    label:`📋 Closing Statement → Krissy + Accounting`,
-    url:`https://mail.google.com/mail/?view=cm&to=${encodeURIComponent('krissy@thedirtdog.com,accounting@thedirtdog.com')}&su=${encodeURIComponent(csSubject)}&body=${encodeURIComponent(csBody)}`,
-    deal,
-  });
-
-  // 3. Remove sign email (only if sign = yes)
-  if(cwSign==='yes'){
-    const signSubject=`Remove sign — ${cwAddress}`;
-    const signBody=`Hi,\n\nPlease arrange to remove the ELC sign at the following property:\n\nAddress: ${cwAddress}${cwCounty?'\nCounty: '+cwCounty:''}\nProject: ${cwProject}\nClose Date: ${cwClose}\n\nThank you!`;
-    queueAction({
-      type:'commission_email',
-      label:`🪧 Remove sign → Marketing`,
-      url:`https://mail.google.com/mail/?view=cm&to=${encodeURIComponent('marketing@thedirtdog.com')}&su=${encodeURIComponent(signSubject)}&body=${encodeURIComponent(signBody)}`,
-      deal,
-    });
-  }
-
-  // 4. Press release (only if pressRelease = yes)
-  if(cwPR==='yes'){
-    const prHtml=`<!DOCTYPE html><html><head><title>Press Release — ${cwProject}</title>
-<style>
-@import url('https://fonts.googleapis.com/css2?family=EB+Garamond:wght@400;600&display=swap');
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:'EB Garamond',Georgia,serif;font-size:13pt;line-height:1.8;color:#111;max-width:680px;margin:52px auto;padding:0 24px}
-.hdr{border-bottom:2.5px solid #8B1A1A;padding-bottom:14px;margin-bottom:24px}
-.co-name{font-size:19pt;font-weight:600;color:#8B1A1A;letter-spacing:.5px}
-.co-sub{font-size:8.5pt;letter-spacing:2px;color:#888;text-transform:uppercase;margin-top:3px}
-.pr-label{font-size:8.5pt;letter-spacing:2px;color:#888;text-transform:uppercase;margin:18px 0 6px}
-h1{font-size:15pt;font-weight:600;margin-bottom:8px;line-height:1.4}
-p{margin-bottom:14px}
-.contact{margin-top:32px;font-size:10pt;color:#555;border-top:1px solid #e0e0e0;padding-top:12px}
-@media print{body{margin:28px;max-width:100%}}
-</style></head><body>
-<div class="hdr">
-  <div class="co-name">ESHENBAUGH LAND COMPANY</div>
-  <div class="co-sub">Brokerage &middot; Advisory &middot; Consulting</div>
-</div>
-<div class="pr-label">For Immediate Release</div>
-<h1>Eshenbaugh Land Company Brokers the Sale of ${cwProject}</h1>
-<p><strong>Tampa, FL</strong> — Eshenbaugh Land Company (ELC) is pleased to announce the successful closing of <strong>${cwProject}</strong>${cwAddress&&cwAddress!==cwProject?', located at '+cwAddress:''}${cwCounty?' in '+cwCounty+' County':''}, for a purchase price of <strong>${fmt$(cwPrice)}</strong>.</p>
-<p>${cwBuyer&&cwBuyer!=='[Buyer]'?'The buyer, <strong>'+cwBuyer+'</strong>, intends to use the property for <strong>'+(cwUse||'future development')+'</strong>.':'The property will be used for <strong>'+(cwUse||'future development')+'</strong>.'}</p>
-${cwAcres?'<p>The site encompasses approximately <strong>'+cwAcres+' acres</strong>.</p>':''}
-<p>"We are proud to have facilitated this transaction and look forward to seeing the project come to fruition," said ${cwAdvisor||'the ELC team'}. "This closing reflects the continued strength of the land market and the trust our clients place in Eshenbaugh Land Company."</p>
-<p>Eshenbaugh Land Company specializes in the brokerage, advisory, and consulting of land transactions throughout Florida and the Southeast. For more information, visit <a href="https://www.thedirtdog.com">www.thedirtdog.com</a> or call 813-417-5928.</p>
-<div class="contact"><strong>Media Contact:</strong><br>Eshenbaugh Land Company<br>4830 W Kennedy Blvd, Suite 600 | Tampa, FL 33609<br>813-417-5928 | ryan@thedirtdog.com</div>
-</body></html>`;
-    queueAction({type:'commission_invoice',label:`📰 Press Release — ${cwProject}`,invoiceHtml:prHtml,deal});
-    const prDue=new Date(); prDue.setDate(prDue.getDate()+1);
-    Store.createTask({
-      title:`Review & send press release — ${cwProject}`,
-      description:`PRESS RELEASE AUTOMATION\n\n1. Click "Print PDF" in the ⚡ Pending panel to open the press release\n2. Review and edit as needed\n3. Save as PDF and distribute / post on social media\n\nProject: ${cwProject}\nClose Date: ${cwClose}\nPrice: ${fmt$(cwPrice)}`,
-      assignedTo:deal.advisorUid, assignedToName:cwAdvisor,
-      dealId:deal.id, dealAddress:cwAddress,
-      dueDate:prDue.toISOString().slice(0,10), status:'pending',
-      createdBy:currentUser?.uid||'system', createdByName:'Automation', createdAt:Date.now(),
-    }).catch(e=>console.error('[cw-pr-task]',e));
-  }
-
-  // 5. Client thank-you + survey
-  if(cwEmail){
-    const tySubject=`Thank you — ${cwProject}`;
-    const tyBody=`Dear ${cwContact},\n\nThank you so much for the opportunity to represent you in the sale of ${cwProject}. It was a true pleasure working with you throughout this process, and we are thrilled to have achieved a successful closing.\n\nAs we wrap up, we would love to hear about your experience working with Eshenbaugh Land Company. Your feedback helps us continue to improve and serve our clients better.\n\nPlease take a moment to complete our brief survey:\nhttps://www.surveymonkey.com/r/VLPJSVD\n\nIf you wouldn't mind, we'd also love a Google review — it means the world to us:\nhttps://www.google.com/search?sca_esv=8133df458a4baded&rlz=1C5CHFA_enUS1002US1002&si=AL3DRZHrmvnFAVQPOO2Bzhf8AX9KZZ6raUI_dT7DG_z0kV2_xzdi6gtGGHPxaKuuNXng8CZnZNaTWg7bQVocnQevTGzs4N9fipELqF0XqfZDfbGLSEQaXzbzkC0aHrFvE2CDA98RhqziNlCuGR0RW5lod0xpRSO_qp2Ds8JQ0PZF0K3CmmIBtTYZcG8RTGX1OCR_NOW1qCT3&q=Eshenbaugh+Land+Company+%7C+Commercial+Land+For+Sale+Reviews&sa=X&ved=2ahUKEwjNjc2n-cCUAxXGSDABHSUzPKMQ0bkNegQIIhAH&biw=2153&bih=926&dpr=2#\n\nWe look forward to working with you again in the future. Please don't hesitate to reach out anytime.\n\nWith gratitude,\n${cwAdvisor||'Ryan Sampson'}\nEshenbaugh Land Company\n813-417-5928 | ryan@thedirtdog.com`;
-    queueAction({
-      type:'commission_email',
-      label:`💌 Client Thank-You → ${cwContact||cwEmail}`,
-      url:`https://mail.google.com/mail/?view=cm&to=${encodeURIComponent(cwEmail)}&su=${encodeURIComponent(tySubject)}&body=${encodeURIComponent(tyBody)}`,
-      deal,
-    });
-  }
-
-  // 6. Task to Krissy: Esh Report + Land listing
-  const krissyDue=new Date(); krissyDue.setDate(krissyDue.getDate()+3);
-  Store.createTask({
-    title:`Esh Report + Land listing — ${cwProject}`,
-    description:`CLOSED WON — POST-CLOSING TASKS\n\nProject: ${cwProject}\nAddress: ${cwAddress}${cwCounty?'\nCounty: '+cwCounty:''}\nSeller: ${cwSeller}\nBuyer: ${cwBuyer}\nClose Date: ${cwClose}\nPurchase Price: ${fmt$(cwPrice)}${cwAcres?'\nAcreage: '+cwAcres:''}\nProposed / Buyer Use: ${cwUse}\nAdvisor: ${cwAdvisor}\n\nAction items:\n1. Add deal summary to Esh Report\n2. Update Land listing report (mark SOLD)\n3. Remove from active listings on websites\n4. Update internal deal database`,
-    assignedTo:'krissy', assignedToName:'Krissy',
-    dealId:deal.id, dealAddress:cwAddress,
-    dueDate:krissyDue.toISOString().slice(0,10), status:'pending',
-    createdBy:currentUser?.uid||'system', createdByName:'Automation', createdAt:Date.now(),
-  }).catch(e=>console.error('[cw-krissy-task]',e));
-
-  showToast('🎉 Closed Won automations fired — check ⚡ Pending panel + Tasks','success',6000);
-};
-
-window.generateCommissionInvoice = function(deal){
-  const today=new Date().toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'});
-  const ciPrice=deal.purchasePrice||deal.contractPrice||0;
-  const ciPct=deal.elcCommissionPct||deal.commissionPct||0;
-  const ciAmt=Math.round(ciPrice*ciPct/100);
-  const ciProject=deal.projectName||deal.propertyAddress||'';
-  const ciSeller=deal.ownershipEntity||'[Seller Entity]';
-  const ciContact=deal.contactPerson||'[Contact Name]';
-  const ciSellerEmail=deal.contactEmail||'';
-  const ciBuyer=deal.buyer||deal.loiBuyer||'[Buyer]';
-  const ciClose=deal.closeDate?fmtDate(deal.closeDate):'[Closing Date]';
-  const ciEscrow=deal.escrowAgent||'';
-  const ciEscrowEmail=deal.escrowAgentEmail||'';
-  const dealOffice=allProfiles[deal.advisorUid]?.office||'';
-  const getDocByType=t=>allDocuments.find(d=>d.type===t&&d.office===dealOffice)||allDocuments.find(d=>d.type===t);
-  const w9Doc=getDocByType('W-9');
-  const wireDoc=getDocByType('Wire Instructions');
-  const w9Display=w9Doc?'(Download from Admin → Documents tab)':'https://ryansampson1.github.io/advisor-dashboard/W-9-ELC.pdf';
-  const invoiceHtml=`<!DOCTYPE html><html><head><title>Commission Invoice</title>
-<style>
-@import url('https://fonts.googleapis.com/css2?family=EB+Garamond:wght@400;600&display=swap');
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:'EB Garamond',Georgia,serif;font-size:13pt;line-height:1.7;color:#111;max-width:680px;margin:52px auto;padding:0 24px}
-.hdr{display:flex;align-items:flex-start;justify-content:space-between;border-bottom:2.5px solid #8B1A1A;padding-bottom:14px;margin-bottom:26px}
-.co-name{font-size:19pt;font-weight:600;letter-spacing:.5px;color:#8B1A1A}
-.co-sub{font-size:8.5pt;letter-spacing:2px;color:#888;margin-top:3px;text-transform:uppercase}
-.co-contact{text-align:right;font-size:9pt;color:#555;line-height:1.6}
-.date-line{margin-bottom:22px}
-.addressee{margin-bottom:22px}
-.re-line{font-weight:600;margin-bottom:18px}
-p{margin-bottom:14px}
-table{width:100%;border-collapse:collapse;margin:18px 0}
-td{padding:5px 12px 5px 0;vertical-align:top}
-td:first-child{font-weight:600;width:210px;white-space:nowrap}
-.fee{background:#fafafa;border:1px solid #e0e0e0;border-radius:6px;padding:14px 20px;margin:18px 0}
-.fee-main{font-weight:600;font-size:12pt}
-.fee-fein{font-size:10pt;color:#666;margin-top:5px}
-.sig{margin-top:42px}
-.sig-name{font-weight:600;margin-top:24px}
-@media print{body{margin:28px;max-width:100%}}
-</style></head><body>
-<div class="hdr">
-  <div>
-    <div class="co-name">ESHENBAUGH LAND COMPANY</div>
-    <div class="co-sub">Brokerage &middot; Advisory &middot; Consulting</div>
-  </div>
-  <div class="co-contact">4830 W Kennedy Blvd, Suite 600<br>Tampa, FL 33609<br>813-417-5928 &middot; ryan@thedirtdog.com</div>
-</div>
-<div class="date-line">${today}</div>
-<div class="addressee">${ciSeller}<br>Attn: ${ciContact}</div>
-<div class="re-line">Re: Brokerage Fee Invoice &mdash; ${ciProject} Sale</div>
-<p>To Whom It May Concern:</p>
-<p>In preparation for the closing between your group and the Buyer outlined below, please allow this letter to be our Broker Invoice for the commission due to Eshenbaugh Land Company upon a successful closing. In addition to this invoice, I have included our W-9 and wire instructions to facilitate the transfer of funds, when appropriate.</p>
-<table>
-  <tr><td>Project:</td><td>${ciProject}</td></tr>
-  <tr><td>Seller:</td><td>${ciSeller}</td></tr>
-  <tr><td>Buyer:</td><td>${ciBuyer}</td></tr>
-  <tr><td>Projected Closing Date:</td><td>${ciClose}</td></tr>
-</table>
-<div class="fee">
-  <div class="fee-main">Brokerage Fee: ${fmt$(ciAmt)} &mdash; ${ciPct}% of ${fmt$(ciPrice)} Purchase Price</div>
-  <div class="fee-fein">FEIN: 47-4797329</div>
-</div>
-<p>It was a pleasure to work with you again. Should you need anything else, don&rsquo;t hesitate to reach out on my cell at 813-417-5928.</p>
-<div class="sig"><p>Sincerely,</p><div class="sig-name">Ryan Sampson</div>Ryan Sampson, CCIM, ALC<br>CEO / Principal &mdash; Eshenbaugh Land Company</div>
-</body></html>`;
-  queueAction({type:'commission_invoice',label:`📄 Commission Invoice — ${ciProject}`,invoiceHtml,deal});
-  const toList=[ciEscrowEmail,ciSellerEmail].filter(Boolean).join(',');
-  const gmailSubject=`Re: Brokerage Fee Invoice — ${ciProject} Sale`;
-  const wireNote=wireDoc?'Wire Instructions: See attached PDF':'Wire Instructions: [Attach ELC wire instructions PDF]';
-  const gmailBody=`Please find attached our commission invoice and W-9 for the closing of ${ciProject}.\n\nInvoice Amount: ${fmt$(ciAmt)} (${ciPct}% of ${fmt$(ciPrice)})\nProjected Closing: ${ciClose}\n\nAttached:\n  - Commission Invoice (PDF)\n  - W-9: ${w9Display}\n  - ${wireNote}\n\nPlease reach out with any questions.\n\n${deal.advisorName||''}\nEshenbaugh Land Company | 813-417-5928`;
-  queueAction({type:'commission_email',label:`📄 Commission Invoice → ${ciEscrow||ciEscrowEmail||'Escrow'}`,url:`https://mail.google.com/mail/?view=cm&to=${encodeURIComponent(toList)}&su=${encodeURIComponent(gmailSubject)}&body=${encodeURIComponent(gmailBody)}`,deal});
-  const ciDue=new Date(); ciDue.setDate(ciDue.getDate()+1);
-  showToast('📄 Commission invoice queued — click ⚡ to open invoice & Gmail draft','info',6000);
-  Store.createTask({
-    title:`Send commission invoice to escrow — ${deal.propertyAddress||ciProject}`,
-    description:`COMMISSION INVOICE AUTOMATION\n\nSteps to complete:\n1. ✅ Invoice PDF opened — save it from the print dialog\n2. Click "Open" in the ⚡ Pending panel to open the pre-filled Gmail draft\n3. Attach the commission invoice PDF (from your Downloads)\n4. Attach W-9 (${w9Display})\n5. Attach wire instructions\n6. Verify recipient: ${ciEscrow||'Escrow Agent'} — ${ciEscrowEmail}\n7. Review and send\n\nCommission: ${fmt$(ciAmt)} (${ciPct}% of ${fmt$(ciPrice)})`,
-    assignedTo:deal.advisorUid, assignedToName:deal.advisorName||deal.advisorEmail,
-    dealId:deal.id, dealAddress:deal.propertyAddress,
-    dueDate:ciDue.toISOString().slice(0,10), status:'pending',
-    createdBy:currentUser?.uid||'system', createdByName:'Automation', createdAt:Date.now(),
-  }).then(()=>showToast('📄 Commission invoice generated — check ⚡ Pending panel','success',5000))
-    .catch(e=>console.error('[commission_invoice]',e));
-};
-
-
 /* =======================================================
    AUTOMATION ENGINE
    ======================================================= */
@@ -5364,15 +5052,6 @@ function fireAutomations(deal, oldStage){
           .catch(e=>console.error('[assign_task]',e));
         break;
       }
-
-      case 'commission_invoice':{
-        window.generateCommissionInvoice(deal);
-        break;
-      }
-      case 'closed_won':{
-        window.generateClosedWonAutomations(deal);
-        break;
-      }
       case 'gdrive':{
         // Queue a Google Drive upload action — requires user to authorize via OAuth in their browser
         const fileName = interpolate(cfg.fileName||`{address} — {stage} ({close_date}).pdf`, deal);
@@ -5433,7 +5112,7 @@ function renderPendingPanel(){
         <div class="text-sm text-gray-800 truncate">${a.label}</div>
       </div>
       <div class="flex gap-1.5 shrink-0">
-        <button onclick="execAction('${a.id}')" class="text-xs bg-blue-50 text-blue-700 hover:bg-blue-100 px-2 py-1 rounded font-medium">${a.type==='webhook'?'Send':a.type==='commission_invoice'?'Print PDF':'Open'}</button>
+        <button onclick="execAction('${a.id}')" class="text-xs bg-blue-50 text-blue-700 hover:bg-blue-100 px-2 py-1 rounded font-medium">${a.type==='webhook'?'Send':'Open'}</button>
         <button onclick="dismissAction('${a.id}')" class="text-xs text-gray-400 hover:text-red-500 px-1">✕</button>
       </div>
     </div>`).join('');
@@ -5446,11 +5125,6 @@ window.execAction = id => {
     fetch(a.url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(a.payload)})
       .then(()=>showToast('Webhook sent!','success'))
       .catch(()=>showToast('Webhook failed — check URL','error'));
-  } else if(a.type==='commission_invoice'){
-    // Open invoice in new window and trigger print dialog
-    const iWin=window.open('','_blank','width=820,height=1060');
-    if(iWin){ iWin.document.write(a.invoiceHtml); iWin.document.close(); iWin.focus(); setTimeout(()=>iWin.print(),800); }
-    else { showToast('Pop-up blocked — allow pop-ups for this site and try again','error',5000); return; }
   } else if(a.url) window.open(a.url,'_blank');
   dismissAction(id);
 };
@@ -5501,7 +5175,6 @@ function renderShell(){
     {id:'leaderboard',   label:'🏆 Leaderboard',    admin:true, manager:true},
     {id:'manageStages',  label:'🗂 Stages',         admin:true},
     {id:'officeManagers',label:'🏢 Offices',        admin:true},
-    {id:'documents',     label:'📂 Documents',     admin:true},
     {id:'eos',           label:'🧭 EOS',            always:true},
     {id:'comps',         label:'🗺 Comps',          advisor:true},
     {id:'drive',         label:'📁 Drive',          always:true},
@@ -5590,7 +5263,7 @@ function renderCurrentView(){
   const map={board:viewBoard,tasks:viewTasks,calendar:viewCalendar,dashboard:viewDashboard,projection:viewProjection,
     commissions:viewMyCommissions,
     splits:viewSplits,automations:viewAutomations,users:viewUsers,leaderboard:viewLeaderboard,
-    manageStages:viewManageStages,officeManagers:viewOfficeManagers,documents:viewDocuments,
+    manageStages:viewManageStages,officeManagers:viewOfficeManagers,
     eos:()=>viewEOS('rocks'),comps:viewComps,drive:viewDrive,hr:viewHR};
   (map[currentView]||viewBoard)();
 }
@@ -6137,86 +5810,51 @@ window.handleDrop = (ev,newStage) => {
   const deal=allDeals.find(d=>d.id===id);
   if(!deal) return;
   if(!currentUser.isAdmin&&deal.advisorUid!==currentUser.uid){ showToast('You can only move your own deals','warning'); return; }
-
-  // Allow re-drop to same stage to retrigger automations (e.g. went back then returned)
+  if(deal.stage===newStage) return;
+  // Listing requires signed listing agreement upload
+  if(newStage==='Listing'){
+    openDealModal(id);
+    document.getElementById('f-stage').value='Listing';
+    document.getElementById('f-prob').value=STAGE_PROB['Listing'];
+    renderStageFields('Listing', deal);
+    showToast('Upload the signed listing agreement to complete this move','info',6000);
+    return;
+  }
+  // Under Contract requires contract details + upload
+  if(newStage==='Under Contract'){
+    openDealModal(id);
+    document.getElementById('f-stage').value='Under Contract';
+    document.getElementById('f-prob').value=STAGE_PROB['Under Contract'];
+    renderStageFields('Under Contract', deal);
+    showToast('Fill in the contract details to complete this move','info',6000);
+    return;
+  }
+  // Due Diligence / Closing / Closed Won require purchase price & closing details
+  if(['Due Diligence','Closing','Closed Won'].includes(newStage)){
+    openDealModal(id);
+    document.getElementById('f-stage').value=newStage;
+    document.getElementById('f-prob').value=STAGE_PROB[newStage]??deal.probability;
+    renderStageFields(newStage, deal);
+    document.getElementById('stage-fields').classList.remove('hidden');
+    showToast(`Fill in the required details to move to ${newStage}`,'info',6000);
+    return;
+  }
+  // For all other stages: check if a custom gate is configured
+  if(openGateModal(id, newStage)) return;
   const oldStage=deal.stage;
-  const stageChanged = oldStage !== newStage;
-
-  // Check custom gate for the destination stage
-  if(stageChanged && openGateModal(id, newStage)) return;
-
   const upd={
-    stage:newStage, probability:STAGE_PROB[newStage]??deal.probability,
-    updatedAt:Date.now(),
-    // Only set stageEnteredAt on a real stage change
-    ...(stageChanged ? {stageEnteredAt:Date.now()} : {}),
-    ...(!deal.listingEnteredAt  && newStage==='Listing'         ? {listingEnteredAt:Date.now()}   : {}),
-    ...(!deal.contractEnteredAt && newStage==='Under Contract'  ? {contractEnteredAt:Date.now()}  : {}),
+    stage:newStage, probability:STAGE_PROB[newStage],
+    stageEnteredAt:Date.now(), updatedAt:Date.now(),
+    // Track first-entry timestamps for KPI counting — never overwrite once set
+    ...(!deal.listingEnteredAt    && newStage==='Listing'          ? {listingEnteredAt:Date.now()}    : {}),
+    ...(!deal.contractEnteredAt   && newStage==='Under Contract'   ? {contractEnteredAt:Date.now()}   : {}),
   };
-
   Store.updateDeal(id,upd).then(()=>{
     Object.assign(deal,upd);
-    // Always fire automations on every drop (including same-stage re-drop)
-    fireAutomations(deal, stageChanged ? oldStage : null);
+    fireAutomations(deal,oldStage);
     viewBoard();
-
-    // Check for missing fields across skipped stages and prompt user
-    const missing = getMissingStageFields(deal, newStage, stageChanged ? oldStage : null);
-    if(missing.length){
-      showToast(`Moved to ${newStage} ✓`,'success',2500);
-      setTimeout(()=>{
-        const labels = missing.slice(0,4).map(m=>m.label).join(', ')+(missing.length>4?` +${missing.length-4} more`:'');
-        showToast(
-          `⚠️ Missing fields for ${newStage}: ${labels} — <u style="cursor:pointer" onclick="openDealModalForMissing('${id}','${newStage}','${oldStage}')">Complete now</u>`,
-          'warning', 10000
-        );
-      }, 800);
-    } else {
-      showToast(`Moved to ${newStage}`,'success');
-    }
-  }).catch(e=>{ console.error('[handleDrop]',e); showToast('Move failed — '+e.message,'error'); });
-};
-
-/* Returns array of {key, label, stage} for fields missing in newStage + skipped stages */
-function getMissingStageFields(deal, newStage, oldStage){
-  const ALL_STAGES=['Prospect','Listing','Under Contract','Due Diligence','Rezoning/Permitting','Closing','Closed Won','Closed Lost','Contract Terminated'];
-  const REQUIRED={
-    'Listing':            [{key:'listedPrice',label:'Listed Price'},{key:'elcCommissionPct',label:'Commission %'},{key:'sign',label:'Sign'}],
-    'Under Contract':     [{key:'contractPrice',label:'Contract Price'},{key:'buyer',label:'Buyer'},{key:'escrowAgent',label:'Escrow Agent'},{key:'escrowAgentEmail',label:'Escrow Email'}],
-    'Due Diligence':      [{key:'psaEffectiveDate',label:'PSA Effective Date'},{key:'ddExpirationDate',label:'DD Expiration Date'}],
-    'Rezoning/Permitting':[{key:'rezoneExpiration',label:'Rezoning Expiration'}],
-    'Closing':            [{key:'purchasePrice',label:'Purchase Price'},{key:'elcCommissionPct',label:'Commission %'},{key:'closeDate',label:'Closing Date'},{key:'escrowAgent',label:'Escrow Agent'},{key:'escrowAgentEmail',label:'Escrow Email'}],
-    'Closed Won':         [{key:'purchasePrice',label:'Purchase Price'},{key:'buyer',label:'Buyer'},{key:'elcCommissionPct',label:'Commission %'}],
-  };
-  // Determine which stages to check: newStage + any skipped stages between old and new
-  const oldIdx = ALL_STAGES.indexOf(oldStage);
-  const newIdx = ALL_STAGES.indexOf(newStage);
-  const stagesToCheck = [newStage];
-  if(oldIdx>=0 && newIdx>oldIdx+1){
-    for(let i=oldIdx+1;i<newIdx;i++){
-      if(ALL_STAGES[i] && REQUIRED[ALL_STAGES[i]]) stagesToCheck.push(ALL_STAGES[i]);
-    }
-  }
-  const missing=[]; const seen=new Set();
-  for(const st of stagesToCheck){
-    for(const {key,label} of (REQUIRED[st]||[])){
-      if(!seen.has(key) && !deal[key]){ missing.push({key,label,stage:st}); seen.add(key); }
-    }
-  }
-  return missing;
-}
-
-/* Open deal modal showing all missing fields for the new stage + skipped stages */
-window.openDealModalForMissing = function(id, newStage, oldStage){
-  openDealModal(id);
-  const deal = allDeals.find(d=>d.id===id);
-  if(!deal) return;
-  // Set stage selector to newStage
-  const stageEl = document.getElementById('f-stage');
-  if(stageEl) stageEl.value = newStage;
-  // Render fields for newStage + any skipped stages with missing data
-  renderStageFieldsWithSkipped(newStage, oldStage, deal);
-  document.getElementById('stage-fields')?.classList.remove('hidden');
+    showToast(`Moved to ${newStage}`,'success');
+  });
 };
 
 /* =======================================================
@@ -7788,114 +7426,6 @@ window.deleteAdvisor = async (uid, name, email) => {
   }
 };
 
-
-/* =======================================================
-   VIEW: DOCUMENTS (super admin)
-   ======================================================= */
-const DOC_TYPES=['W-9','Wire Instructions','Commission Invoice Template','Letterhead','Other'];
-function viewDocuments(){
-  if(activeChart){activeChart.destroy();activeChart=null;}
-  const offices=[...new Set(Object.values(allProfiles).map(p=>p.office).filter(Boolean))];
-  const grouped={};
-  allDocuments.forEach(d=>{ const k=d.office||'(All Offices)'; if(!grouped[k])grouped[k]=[]; grouped[k].push(d); });
-  setContent(`
-    <div class="flex items-center justify-between mb-5">
-      <div>
-        <h2 class="text-xl font-bold text-gray-800">&#128194; Automation Documents</h2>
-        <p class="text-sm text-gray-500 mt-0.5">Store W-9s, wire instructions, and other files used by stage automations. Upload per-office for multi-office setups.</p>
-      </div>
-    </div>
-    <div class="bg-white rounded-2xl border p-5 mb-5">
-      <div class="text-sm font-bold text-gray-700 mb-3">Upload New Document</div>
-      <div class="grid grid-cols-2 gap-3 mb-3">
-        <div>
-          <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Document Type</label>
-          <select id="doc-type" class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-red-300">
-            ${DOC_TYPES.map(t=>`<option value="${t}">${t}</option>`).join('')}
-          </select>
-        </div>
-        <div>
-          <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Office (blank = all offices)</label>
-          <select id="doc-office" class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-red-300">
-            <option value="">(All Offices)</option>
-            ${offices.map(o=>`<option value="${o}">${o}</option>`).join('')}
-          </select>
-        </div>
-      </div>
-      <div id="doc-drop-zone" ondragover="event.preventDefault()" ondrop="handleDocDrop(event)"
-        class="border-2 border-dashed border-gray-200 rounded-xl p-6 text-center cursor-pointer hover:border-red-300 transition-colors"
-        onclick="document.getElementById('doc-file-input').click()">
-        <div class="text-3xl mb-1">&#128206;</div>
-        <div class="text-sm text-gray-500">Click or drag &amp; drop a file (PDF, DOCX, PNG &mdash; max 900 KB)</div>
-        <div id="doc-file-name" class="text-xs text-green-600 mt-1 font-medium"></div>
-      </div>
-      <input type="file" id="doc-file-input" class="hidden" accept=".pdf,.docx,.doc,.png,.jpg" onchange="handleDocFileSelect(event)">
-      <button onclick="uploadDocument()" class="mt-3 brand-btn px-5 py-2 rounded-lg text-sm font-semibold">Upload Document</button>
-    </div>
-    <div class="space-y-4">
-      ${Object.keys(grouped).length===0
-        ?'<div class="bg-white rounded-2xl border p-8 text-center text-gray-400 text-sm">No documents uploaded yet. Upload your W-9 and wire instructions to enable commission invoice automations.</div>'
-        :Object.entries(grouped).map(([office,docs])=>`
-          <div>
-            <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">${office}</div>
-            <div class="space-y-2">
-              ${docs.map(d=>`
-                <div class="bg-white rounded-xl border p-4 flex items-center gap-4">
-                  <div class="text-2xl">${docTypeIcon(d.type)}</div>
-                  <div class="flex-1 min-w-0">
-                    <div class="text-sm font-semibold text-gray-800">${d.name||d.fileName||'Untitled'}</div>
-                    <div class="text-xs text-gray-400 mt-0.5">${d.type} &nbsp;&middot;&nbsp; ${d.office||'All Offices'} &nbsp;&middot;&nbsp; ${d.fileName||''} &nbsp;&middot;&nbsp; Uploaded ${d.uploadedAt?new Date(d.uploadedAt).toLocaleDateString():'—'} by ${d.uploadedByName||'Admin'}</div>
-                  </div>
-                  <div class="flex gap-2 shrink-0">
-                    ${d.fileDataUrl?`<a href="data:${d.mimeType||'application/octet-stream'};base64,${d.fileDataUrl}" download="${d.fileName||d.name||'document'}" class="text-xs bg-blue-50 text-blue-600 hover:bg-blue-100 px-3 py-1 rounded-lg font-medium">&#11015; Download</a>`:''}
-                    <button onclick="deleteDocument('${d.id}')" class="text-xs text-red-400 hover:text-red-600 px-2 py-1 rounded hover:bg-red-50">Delete</button>
-                  </div>
-                </div>`).join('')}
-            </div>
-          </div>`).join('')}
-    </div>
-  `);
-}
-function docTypeIcon(t){
-  return {'W-9':'&#128203;','Wire Instructions':'&#127974;','Commission Invoice Template':'&#128196;','Letterhead':'&#128394;'}[t]||'&#128193;';
-}
-let _docFileData=null;
-function handleDocFileSelect(e){const f=e.target.files[0];if(f)readDocFile(f);}
-window.handleDocDrop=function(e){e.preventDefault();const f=e.dataTransfer.files[0];if(f)readDocFile(f);};
-function readDocFile(file){
-  if(file.size>950000){showToast('File too large — max 900 KB','error');return;}
-  const r=new FileReader();
-  r.onload=ev=>{
-    const du=ev.target.result;
-    _docFileData={dataUrl:du,base64:du.split(',')[1],name:file.name,mimeType:file.type,size:file.size};
-    const lbl=document.getElementById('doc-file-name');
-    if(lbl)lbl.textContent=`✅ ${file.name} (${Math.round(file.size/1024)} KB)`;
-  };
-  r.readAsDataURL(file);
-}
-window.uploadDocument=async function(){
-  if(!_docFileData){showToast('Please select a file first','error');return;}
-  const type=document.getElementById('doc-type')?.value||'Other';
-  const office=document.getElementById('doc-office')?.value||'';
-  const name=type+(office?` — ${office}`:'');
-  showToast('Uploading…','info',2000);
-  try{
-    await Store.saveDocument({name,type,office,fileName:_docFileData.name,mimeType:_docFileData.mimeType,
-      fileDataUrl:_docFileData.base64,uploadedAt:Date.now(),
-      uploadedBy:currentUser?.uid||'',uploadedByName:currentUser?.name||''});
-    _docFileData=null;
-    showToast(`✅ ${name} uploaded successfully`,'success');
-    viewDocuments();
-  }catch(e){console.error('[uploadDocument]',e);showToast('Upload failed: '+e.message,'error');}
-};
-window.deleteDocument=async function(id){
-  if(!confirm('Delete this document? Automations will fall back to defaults.'))return;
-  await Store.deleteDocument(id);
-  allDocuments=allDocuments.filter(d=>d.id!==id);
-  showToast('Document deleted','info');
-  viewDocuments();
-};
-
 /* =======================================================
    VIEW: AUTOMATIONS (admin)
    ======================================================= */
@@ -7938,8 +7468,6 @@ function autoSummary(rule){
     case 'calendar': return `Event: ${cfg.title||'?'}`;
     case 'docusign': return `URL: ${cfg.url||'?'}`;
     case 'webhook':  return `POST → ${cfg.url||'?'}`;
-    case 'commission_invoice': return '📄 Auto-generate commission invoice PDF + Gmail draft + advisor task';
-    case 'closed_won': return '🎉 Closed Won suite: gift task, closing statement email, sign removal, press release, client thank-you + survey';
     default: return JSON.stringify(cfg);
   }
 }
@@ -9133,8 +8661,18 @@ function viewEOS(sub='rocks'){
       </div>`).join('');
 
     // ── editable checklist (todos / cascades) ────────────────────────────
-    const checklistHtml = (storeKey, fnAdd, fnCheck, fnDelete, placeholder) => {
+    // showAssign=true adds a person picker and wires into the Tasks system
+    const checklistHtml = (storeKey, fnAdd, fnCheck, fnDelete, placeholder, showAssign=false) => {
       const items = eosGet(storeKey, []);
+      const allUsers = Object.entries(allProfiles)
+        .map(([uid,p])=>({uid, name:p.name||p.email||uid}))
+        .filter(u=>u.name && u.name.length<60)
+        .sort((a,b)=>a.name.localeCompare(b.name));
+      const assignSel = showAssign ? `
+        <select id="sel-${storeKey}" class="border rounded-lg px-2 py-1.5 text-sm outline-none focus:border-gray-400 bg-white" style="min-width:130px">
+          <option value="">Assign to…</option>
+          ${allUsers.map(u=>`<option value="${u.uid}" data-name="${u.name}">${u.name}</option>`).join('')}
+        </select>` : '';
       return `
         <div class="space-y-1.5 mb-3" id="cl-${storeKey}">
           ${items.length===0 ? `<p class="text-sm text-gray-400 italic">Nothing yet — add below.</p>` :
@@ -9146,15 +8684,19 @@ function viewEOS(sub='rocks'){
                   title="${it.done?'Uncheck':'Mark done'}">
                   ${it.done?'<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>':''}
                 </button>
-                <span class="flex-1 text-sm ${it.done?'line-through text-gray-400':'text-gray-800'}">${it.text}</span>
+                <div class="flex-1 min-w-0">
+                  <span class="text-sm ${it.done?'line-through text-gray-400':'text-gray-800'}">${it.text}</span>
+                  ${it.assignedToName?`<span class="ml-1.5 text-xs font-medium text-blue-500">→ ${it.assignedToName}</span>`:''}
+                </div>
                 <button onclick="${fnDelete}('${storeKey}','${it.id}')"
                   class="opacity-0 group-hover:opacity-100 text-gray-300 hover:text-red-400 text-xs transition shrink-0">✕</button>
               </div>`).join('')}
         </div>
-        <div class="flex gap-2">
+        <div class="flex gap-2 flex-wrap">
           <input id="inp-${storeKey}" type="text" placeholder="${placeholder}"
-            class="flex-1 border rounded-lg px-3 py-1.5 text-sm outline-none focus:border-gray-400"
+            class="flex-1 border rounded-lg px-3 py-1.5 text-sm outline-none focus:border-gray-400" style="min-width:160px"
             onkeydown="if(event.key==='Enter')${fnAdd}('${storeKey}')"/>
+          ${assignSel}
           <button onclick="${fnAdd}('${storeKey}')"
             class="px-3 py-1.5 rounded-lg text-sm font-semibold text-white transition"
             style="background:var(--brand-black)">+ Add</button>
@@ -9229,7 +8771,7 @@ function viewEOS(sub='rocks'){
         ${section('📣','Customer / Employee Headlines','5', headlineContent,'#7c3aed')}
 
         ${section('✅','To-Do List','5',
-          checklistHtml(todoKey,'l10AddItem','l10ToggleItem','l10DeleteItem','Add a to-do item…'),
+          checklistHtml(todoKey,'l10AddItem','l10ToggleItem','l10DeleteItem','Add a to-do item…',true),
         '#D97706')}
 
         ${section('🔥','IDS — Issues List','60', idsIssues.length===0?emptyMsg:issueList(idsIssues),'#DA291C')}
@@ -9238,7 +8780,7 @@ function viewEOS(sub='rocks'){
           <div class="space-y-5 text-sm">
             <div>
               <p class="font-bold text-gray-800 mb-2">1. To-Do Recap</p>
-              ${checklistHtml(todoKey,'l10AddItem','l10ToggleItem','l10DeleteItem','Add a to-do from IDS…')}
+              ${checklistHtml(todoKey,'l10AddItem','l10ToggleItem','l10DeleteItem','Add a to-do from IDS…',true)}
             </div>
             <div>
               <p class="font-bold text-gray-800 mb-2">2. Cascading Messages</p>
@@ -9429,10 +8971,50 @@ window.l10AddItem = (storeKey) => {
   const inp = document.getElementById('inp-'+storeKey);
   const text = inp?.value.trim();
   if(!text) return;
+
+  // Assignee
+  const sel = document.getElementById('sel-'+storeKey);
+  const assignedTo     = sel?.value || '';
+  const assignedToName = sel?.options[sel.selectedIndex]?.dataset?.name || '';
+
+  // End-of-week due date (this Friday; if today >= Fri, next Friday)
+  const now3 = new Date();
+  const dow3 = now3.getDay(); // 0=Sun..6=Sat
+  const daysToFri = dow3 <= 5 ? (5 - dow3) || 7 : 6; // if today IS Fri (5) → next Fri (7 days)
+  const friday = new Date(now3);
+  friday.setDate(now3.getDate() + (dow3 === 5 ? 7 : 5 - dow3));
+  friday.setHours(23,59,59,0);
+  const dueDateStr = friday.toISOString().split('T')[0]; // YYYY-MM-DD
+
+  // Save to L-10 list
   const list = eosGet(storeKey,[]);
-  list.push({id:'td-'+Date.now(), text, done:false, createdAt:Date.now()});
+  list.push({id:'td-'+Date.now(), text, done:false, assignedTo, assignedToName, createdAt:Date.now()});
   eosSave(storeKey, list);
   inp.value='';
+  if(sel) sel.value='';
+
+  // Auto-create Task if someone is assigned
+  if(assignedTo){
+    const taskData = {
+      title:          text,
+      description:    'L-10 Meeting To-Do',
+      assignedTo,
+      assignedToName,
+      dueDate:        dueDateStr,
+      status:         'pending',
+      createdBy:      currentUser.uid,
+      createdByName:  currentUser.name||currentUser.email,
+      createdAt:      Date.now(),
+      source:         'l10'
+    };
+    Store.createTask(taskData)
+      .then(id=>{
+        allTasks.push({...taskData, id});
+        showToast(`✅ Task assigned to ${assignedToName} — due ${friday.toLocaleDateString('en-US',{month:'short',day:'numeric'})}`, 'success');
+      })
+      .catch(()=>showToast('To-do saved but task creation failed','warning'));
+  }
+
   viewEOS('l10');
 };
 
@@ -9781,7 +9363,6 @@ window.handleDealSubmit = async ev => {
     await Store.updateDeal(id,data);
     Object.assign(existing,data);
     if(oldStage!==stage) fireAutomations(existing,oldStage);
-    else if(stage==='Closing') fireAutomations(existing,null); // re-fire Closing automation on form save too
     showToast('Deal updated','success');
   } else {
     data.createdAt=Date.now();
