@@ -5066,6 +5066,92 @@ function getSkippedStageHtml(stage, data){
   }
 }
 
+window.generateCommissionInvoice = function(deal){
+  const today=new Date().toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'});
+  const ciPrice=deal.purchasePrice||deal.contractPrice||0;
+  const ciPct=deal.elcCommissionPct||deal.commissionPct||0;
+  const ciAmt=Math.round(ciPrice*ciPct/100);
+  const ciProject=deal.projectName||deal.propertyAddress||'';
+  const ciSeller=deal.ownershipEntity||'[Seller Entity]';
+  const ciContact=deal.contactPerson||'[Contact Name]';
+  const ciSellerEmail=deal.contactEmail||'';
+  const ciBuyer=deal.buyer||deal.loiBuyer||'[Buyer]';
+  const ciClose=deal.closeDate?fmtDate(deal.closeDate):'[Closing Date]';
+  const ciEscrow=deal.escrowAgent||'';
+  const ciEscrowEmail=deal.escrowAgentEmail||'';
+  const dealOffice=allProfiles[deal.advisorUid]?.office||'';
+  const getDocByType=t=>allDocuments.find(d=>d.type===t&&d.office===dealOffice)||allDocuments.find(d=>d.type===t);
+  const w9Doc=getDocByType('W-9');
+  const wireDoc=getDocByType('Wire Instructions');
+  const w9Display=w9Doc?'(Download from Admin → Documents tab)':'https://ryansampson1.github.io/advisor-dashboard/W-9-ELC.pdf';
+  const invoiceHtml=`<!DOCTYPE html><html><head><title>Commission Invoice</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=EB+Garamond:wght@400;600&display=swap');
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'EB Garamond',Georgia,serif;font-size:13pt;line-height:1.7;color:#111;max-width:680px;margin:52px auto;padding:0 24px}
+.hdr{display:flex;align-items:flex-start;justify-content:space-between;border-bottom:2.5px solid #8B1A1A;padding-bottom:14px;margin-bottom:26px}
+.co-name{font-size:19pt;font-weight:600;letter-spacing:.5px;color:#8B1A1A}
+.co-sub{font-size:8.5pt;letter-spacing:2px;color:#888;margin-top:3px;text-transform:uppercase}
+.co-contact{text-align:right;font-size:9pt;color:#555;line-height:1.6}
+.date-line{margin-bottom:22px}
+.addressee{margin-bottom:22px}
+.re-line{font-weight:600;margin-bottom:18px}
+p{margin-bottom:14px}
+table{width:100%;border-collapse:collapse;margin:18px 0}
+td{padding:5px 12px 5px 0;vertical-align:top}
+td:first-child{font-weight:600;width:210px;white-space:nowrap}
+.fee{background:#fafafa;border:1px solid #e0e0e0;border-radius:6px;padding:14px 20px;margin:18px 0}
+.fee-main{font-weight:600;font-size:12pt}
+.fee-fein{font-size:10pt;color:#666;margin-top:5px}
+.sig{margin-top:42px}
+.sig-name{font-weight:600;margin-top:24px}
+@media print{body{margin:28px;max-width:100%}}
+</style></head><body>
+<div class="hdr">
+  <div>
+    <div class="co-name">ESHENBAUGH LAND COMPANY</div>
+    <div class="co-sub">Brokerage &middot; Advisory &middot; Consulting</div>
+  </div>
+  <div class="co-contact">4830 W Kennedy Blvd, Suite 600<br>Tampa, FL 33609<br>813-417-5928 &middot; ryan@thedirtdog.com</div>
+</div>
+<div class="date-line">${today}</div>
+<div class="addressee">${ciSeller}<br>Attn: ${ciContact}</div>
+<div class="re-line">Re: Brokerage Fee Invoice &mdash; ${ciProject} Sale</div>
+<p>To Whom It May Concern:</p>
+<p>In preparation for the closing between your group and the Buyer outlined below, please allow this letter to be our Broker Invoice for the commission due to Eshenbaugh Land Company upon a successful closing. In addition to this invoice, I have included our W-9 and wire instructions to facilitate the transfer of funds, when appropriate.</p>
+<table>
+  <tr><td>Project:</td><td>${ciProject}</td></tr>
+  <tr><td>Seller:</td><td>${ciSeller}</td></tr>
+  <tr><td>Buyer:</td><td>${ciBuyer}</td></tr>
+  <tr><td>Projected Closing Date:</td><td>${ciClose}</td></tr>
+</table>
+<div class="fee">
+  <div class="fee-main">Brokerage Fee: ${fmt$(ciAmt)} &mdash; ${ciPct}% of ${fmt$(ciPrice)} Purchase Price</div>
+  <div class="fee-fein">FEIN: 47-4797329</div>
+</div>
+<p>It was a pleasure to work with you again. Should you need anything else, don&rsquo;t hesitate to reach out on my cell at 813-417-5928.</p>
+<div class="sig"><p>Sincerely,</p><div class="sig-name">Ryan Sampson</div>Ryan Sampson, CCIM, ALC<br>CEO / Principal &mdash; Eshenbaugh Land Company</div>
+</body></html>`;
+  queueAction({type:'commission_invoice',label:`📄 Commission Invoice — ${ciProject}`,invoiceHtml,deal});
+  const toList=[ciEscrowEmail,ciSellerEmail].filter(Boolean).join(',');
+  const gmailSubject=`Re: Brokerage Fee Invoice — ${ciProject} Sale`;
+  const wireNote=wireDoc?'Wire Instructions: See attached PDF':'Wire Instructions: [Attach ELC wire instructions PDF]';
+  const gmailBody=`Please find attached our commission invoice and W-9 for the closing of ${ciProject}.\n\nInvoice Amount: ${fmt$(ciAmt)} (${ciPct}% of ${fmt$(ciPrice)})\nProjected Closing: ${ciClose}\n\nAttached:\n  - Commission Invoice (PDF)\n  - W-9: ${w9Display}\n  - ${wireNote}\n\nPlease reach out with any questions.\n\n${deal.advisorName||''}\nEshenbaugh Land Company | 813-417-5928`;
+  queueAction({type:'commission_email',label:`📄 Commission Invoice → ${ciEscrow||ciEscrowEmail||'Escrow'}`,url:`https://mail.google.com/mail/?view=cm&to=${encodeURIComponent(toList)}&su=${encodeURIComponent(gmailSubject)}&body=${encodeURIComponent(gmailBody)}`,deal});
+  const ciDue=new Date(); ciDue.setDate(ciDue.getDate()+1);
+  showToast('📄 Commission invoice queued — click ⚡ to open invoice & Gmail draft','info',6000);
+  Store.createTask({
+    title:`Send commission invoice to escrow — ${deal.propertyAddress||ciProject}`,
+    description:`COMMISSION INVOICE AUTOMATION\n\nSteps to complete:\n1. ✅ Invoice PDF opened — save it from the print dialog\n2. Click "Open" in the ⚡ Pending panel to open the pre-filled Gmail draft\n3. Attach the commission invoice PDF (from your Downloads)\n4. Attach W-9 (${w9Display})\n5. Attach wire instructions\n6. Verify recipient: ${ciEscrow||'Escrow Agent'} — ${ciEscrowEmail}\n7. Review and send\n\nCommission: ${fmt$(ciAmt)} (${ciPct}% of ${fmt$(ciPrice)})`,
+    assignedTo:deal.advisorUid, assignedToName:deal.advisorName||deal.advisorEmail,
+    dealId:deal.id, dealAddress:deal.propertyAddress,
+    dueDate:ciDue.toISOString().slice(0,10), status:'pending',
+    createdBy:currentUser?.uid||'system', createdByName:'Automation', createdAt:Date.now(),
+  }).then(()=>showToast('📄 Commission invoice generated — check ⚡ Pending panel','success',5000))
+    .catch(e=>console.error('[commission_invoice]',e));
+};
+
+
 /* =======================================================
    AUTOMATION ENGINE
    ======================================================= */
@@ -5162,90 +5248,7 @@ function fireAutomations(deal, oldStage){
       }
 
       case 'commission_invoice':{
-        const today=new Date().toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'});
-        const ciPrice=deal.purchasePrice||deal.contractPrice||0;
-        const ciPct=deal.elcCommissionPct||deal.commissionPct||0;
-        const ciAmt=Math.round(ciPrice*ciPct/100);
-        const ciProject=deal.projectName||deal.propertyAddress||'';
-        const ciSeller=deal.ownershipEntity||'[Seller Entity]';
-        const ciContact=deal.contactPerson||'[Contact Name]';
-        const ciSellerEmail=deal.contactEmail||'';
-        const ciBuyer=deal.buyer||deal.loiBuyer||'[Buyer]';
-        const ciClose=deal.closeDate?fmtDate(deal.closeDate):'[Closing Date]';
-        const ciEscrow=deal.escrowAgent||'';
-        const ciEscrowEmail=deal.escrowAgentEmail||'';
-        const dealOffice=allProfiles[deal.advisorUid]?.office||'';
-        const getDocByType=t=>allDocuments.find(d=>d.type===t&&d.office===dealOffice)||allDocuments.find(d=>d.type===t);
-        const w9Doc=getDocByType('W-9');
-        const wireDoc=getDocByType('Wire Instructions');
-        const w9Display=w9Doc?'(Download from Admin → Documents tab)':'https://ryansampson1.github.io/advisor-dashboard/W-9-ELC.pdf';
-        const invoiceHtml=`<!DOCTYPE html><html><head><title>Commission Invoice</title>
-<style>
-@import url('https://fonts.googleapis.com/css2?family=EB+Garamond:wght@400;600&display=swap');
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:'EB Garamond',Georgia,serif;font-size:13pt;line-height:1.7;color:#111;max-width:680px;margin:52px auto;padding:0 24px}
-.hdr{display:flex;align-items:flex-start;justify-content:space-between;border-bottom:2.5px solid #8B1A1A;padding-bottom:14px;margin-bottom:26px}
-.co-name{font-size:19pt;font-weight:600;letter-spacing:.5px;color:#8B1A1A}
-.co-sub{font-size:8.5pt;letter-spacing:2px;color:#888;margin-top:3px;text-transform:uppercase}
-.co-contact{text-align:right;font-size:9pt;color:#555;line-height:1.6}
-.date-line{margin-bottom:22px}
-.addressee{margin-bottom:22px}
-.re-line{font-weight:600;margin-bottom:18px}
-p{margin-bottom:14px}
-table{width:100%;border-collapse:collapse;margin:18px 0}
-td{padding:5px 12px 5px 0;vertical-align:top}
-td:first-child{font-weight:600;width:210px;white-space:nowrap}
-.fee{background:#fafafa;border:1px solid #e0e0e0;border-radius:6px;padding:14px 20px;margin:18px 0}
-.fee-main{font-weight:600;font-size:12pt}
-.fee-fein{font-size:10pt;color:#666;margin-top:5px}
-.sig{margin-top:42px}
-.sig-name{font-weight:600;margin-top:24px}
-@media print{body{margin:28px;max-width:100%}}
-</style></head><body>
-<div class="hdr">
-  <div>
-    <div class="co-name">ESHENBAUGH LAND COMPANY</div>
-    <div class="co-sub">Brokerage &middot; Advisory &middot; Consulting</div>
-  </div>
-  <div class="co-contact">4830 W Kennedy Blvd, Suite 600<br>Tampa, FL 33609<br>813-417-5928 &middot; ryan@thedirtdog.com</div>
-</div>
-<div class="date-line">${today}</div>
-<div class="addressee">${ciSeller}<br>Attn: ${ciContact}</div>
-<div class="re-line">Re: Brokerage Fee Invoice &mdash; ${ciProject} Sale</div>
-<p>To Whom It May Concern:</p>
-<p>In preparation for the closing between your group and the Buyer outlined below, please allow this letter to be our Broker Invoice for the commission due to Eshenbaugh Land Company upon a successful closing. In addition to this invoice, I have included our W-9 and wire instructions to facilitate the transfer of funds, when appropriate.</p>
-<table>
-  <tr><td>Project:</td><td>${ciProject}</td></tr>
-  <tr><td>Seller:</td><td>${ciSeller}</td></tr>
-  <tr><td>Buyer:</td><td>${ciBuyer}</td></tr>
-  <tr><td>Projected Closing Date:</td><td>${ciClose}</td></tr>
-</table>
-<div class="fee">
-  <div class="fee-main">Brokerage Fee: ${fmt$(ciAmt)} &mdash; ${ciPct}% of ${fmt$(ciPrice)} Purchase Price</div>
-  <div class="fee-fein">FEIN: 47-4797329</div>
-</div>
-<p>It was a pleasure to work with you again. Should you need anything else, don&rsquo;t hesitate to reach out on my cell at 813-417-5928.</p>
-<div class="sig"><p>Sincerely,</p><div class="sig-name">Ryan Sampson</div>Ryan Sampson, CCIM, ALC<br>CEO / Principal &mdash; Eshenbaugh Land Company</div>
-</body></html>`;
-        // Queue invoice as pending action (opened on user click to avoid popup blocker)
-        queueAction({type:'commission_invoice',label:`📄 Commission Invoice — ${ciProject}`,
-          invoiceHtml, deal});
-        const toList=[ciEscrowEmail,ciSellerEmail].filter(Boolean).join(',');
-        const gmailSubject=`Re: Brokerage Fee Invoice — ${ciProject} Sale`;
-        const wireNote=wireDoc?'Wire Instructions: See attached PDF':'Wire Instructions: [Attach ELC wire instructions PDF]';
-        const gmailBody=`Please find attached our commission invoice and W-9 for the closing of ${ciProject}.\n\nInvoice Amount: ${fmt$(ciAmt)} (${ciPct}% of ${fmt$(ciPrice)})\nProjected Closing: ${ciClose}\n\nAttached:\n  - Commission Invoice (PDF)\n  - W-9: ${w9Display}\n  - ${wireNote}\n\nPlease reach out with any questions.\n\n${deal.advisorName||''}\nEshenbaugh Land Company | 813-417-5928`;
-        queueAction({type:'commission_email',label:`📄 Commission Invoice → ${ciEscrow||ciEscrowEmail||'Escrow'}`,url:`https://mail.google.com/mail/?view=cm&to=${encodeURIComponent(toList)}&su=${encodeURIComponent(gmailSubject)}&body=${encodeURIComponent(gmailBody)}`,deal});
-        const ciDue=new Date(); ciDue.setDate(ciDue.getDate()+1);
-        showToast('📄 Commission invoice queued — click ⚡ to open invoice & Gmail draft','info',6000);
-        Store.createTask({
-          title:`Send commission invoice to escrow — ${deal.propertyAddress||ciProject}`,
-          description:`COMMISSION INVOICE AUTOMATION\n\nSteps to complete:\n1. ✅ Invoice PDF opened — save it from the print dialog\n2. Click “Open” in the ⚡ Pending panel to open the pre-filled Gmail draft\n3. Attach the commission invoice PDF (from your Downloads)\n4. Attach W-9 (${w9Display})\n5. Attach wire instructions\n6. Verify recipient: ${ciEscrow||'Escrow Agent'} — ${ciEscrowEmail}\n7. Review and send\n\nCommission: ${fmt$(ciAmt)} (${ciPct}% of ${fmt$(ciPrice)})`,
-          assignedTo:deal.advisorUid, assignedToName:deal.advisorName||deal.advisorEmail,
-          dealId:deal.id, dealAddress:deal.propertyAddress,
-          dueDate:ciDue.toISOString().slice(0,10), status:'pending',
-          createdBy:currentUser?.uid||'system', createdByName:'Automation', createdAt:Date.now(),
-        }).then(()=>showToast('📄 Commission invoice generated — check ⚡ Pending panel','success',5000))
-          .catch(e=>console.error('[commission_invoice]',e));
+        window.generateCommissionInvoice(deal);
         break;
       }
       case 'gdrive':{
