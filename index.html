@@ -5036,7 +5036,14 @@ function interpolate(tpl, deal){
   return (tpl||'').replace(/\{([\w]+)\}/g,(_,k)=> base[k] ?? `{${k}}`);
 }
 
-window.generateCommissionInvoice = function(deal){
+// Re-opens the commission invoice from a task link
+window.openCommissionInvoice = function(dealId){
+  const deal = allDeals.find(d=>d.id===dealId);
+  if(!deal){ showToast('Deal not found','error'); return; }
+  window.generateCommissionInvoice(deal, true);
+};
+
+window.generateCommissionInvoice = function(deal, openOnly=false){
   const today=new Date().toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'});
   const ciPrice=deal.purchasePrice||deal.contractPrice||0;
   const ciPct=deal.elcCommissionPct||deal.commissionPct||0;
@@ -5103,22 +5110,33 @@ td:first-child{font-weight:600;width:210px;white-space:nowrap}
 </div>
 <img src="https://ryansampson1.github.io/advisor-dashboard/elc-letterhead-footer.jpeg" class="letterhead-footer" alt="">
 </body></html>`;
-  queueAction({type:'commission_invoice',label:`📄 Commission Invoice — ${ciProject}`,invoiceHtml,deal,w9Doc,wireDoc});
+  // Open the invoice immediately
+  const dlBlob=(dUrl,fn)=>{const a=document.createElement('a');a.href=dUrl;a.download=fn;document.body.appendChild(a);a.click();document.body.removeChild(a);};
+  const fetchAndDl=(url,fn)=>{fetch(url).then(r=>r.blob()).then(b=>{const fr=new FileReader();fr.onload=()=>dlBlob(fr.result,fn);fr.readAsDataURL(b);}).catch(()=>{})};
+  if(w9Doc?.url)   fetchAndDl(w9Doc.url,   'W-9-ELC.pdf');
+  if(wireDoc?.url) fetchAndDl(wireDoc.url,  'Wire-Instructions-ELC.pdf');
+  const win=window.open('','_blank');
+  if(win){ win.document.write(invoiceHtml); win.document.close(); setTimeout(()=>win.print(),800); }
+  if(openOnly) return;  // invoked from task link — skip task creation
+
+  // Build Gmail draft URL
   const toList=[ciEscrowEmail,ciSellerEmail].filter(Boolean).join(',');
   const gmailSubject=`Re: Brokerage Fee Invoice — ${ciProject} Sale`;
   const wireNote=wireDoc?'Wire Instructions (auto-downloaded — attach from your Downloads folder)':'Wire Instructions: [Attach ELC wire instructions PDF from your files]';
   const gmailBody=`Please find attached our commission invoice, W-9, and wire instructions for the closing of ${ciProject}.\n\nInvoice Amount: ${fmt$(ciAmt)} (${ciPct}% of ${fmt$(ciPrice)})\nProjected Closing: ${ciClose}\n\nFiles to attach (downloaded to your computer):\n  1. Commission Invoice PDF\n  2. ${w9Doc?'W-9 — Eshenbaugh Land Company':'W-9: '+w9Display}\n  3. ${wireNote}\n\nPlease reach out with any questions.\n\n${deal.advisorName||''}\nEshenbaugh Land Company | 813-417-5928`;
-  queueAction({type:'commission_email',label:`📄 Commission Invoice → ${ciEscrow||ciEscrowEmail||'Escrow'}`,url:`https://mail.google.com/mail/?view=cm&to=${encodeURIComponent(toList)}&su=${encodeURIComponent(gmailSubject)}&body=${encodeURIComponent(gmailBody)}`,deal});
+  const gmailUrl=`https://mail.google.com/mail/?view=cm&to=${encodeURIComponent(toList)}&su=${encodeURIComponent(gmailSubject)}&body=${encodeURIComponent(gmailBody)}`;
+
+  // Create task with direct action buttons
   const ciDue=new Date(); ciDue.setDate(ciDue.getDate()+1);
-  showToast('📄 Commission invoice queued — click ⚡ to open invoice & Gmail draft','info',6000);
   Store.createTask({
     title:`Send commission invoice to escrow — ${deal.propertyAddress||ciProject}`,
-    description:`COMMISSION INVOICE AUTOMATION\n\nSteps to complete:\n1. ✅ Invoice PDF opened — save it from the print dialog\n2. Click "Open" in the ⚡ Pending panel to open the pre-filled Gmail draft\n3. Attach the commission invoice PDF (from your Downloads)\n4. Attach W-9 (${w9Display})\n5. Attach wire instructions\n6. Verify recipient: ${ciEscrow||'Escrow Agent'} — ${ciEscrowEmail}\n7. Review and send\n\nCommission: ${fmt$(ciAmt)} (${ciPct}% of ${fmt$(ciPrice)})`,
+    description:`Commission: ${fmt$(ciAmt)} (${ciPct}% of ${fmt$(ciPrice)}) · Escrow: ${ciEscrow||ciEscrowEmail||'—'}`,
+    invoiceDealId:deal.id, gmailUrl,
     assignedTo:deal.advisorUid, assignedToName:deal.advisorName||deal.advisorEmail,
     dealId:deal.id, dealAddress:deal.propertyAddress,
     dueDate:ciDue.toISOString().slice(0,10), status:'pending',
     createdBy:currentUser?.uid||'system', createdByName:'Automation', createdAt:Date.now(),
-  }).then(()=>showToast('📄 Commission invoice generated — check ⚡ Pending panel','success',5000))
+  }).then(()=>showToast('📄 Invoice opened — task created with links','success',5000))
     .catch(e=>console.error('[commission_invoice]',e));
 };
 
@@ -7056,6 +7074,10 @@ function viewTasks(){
           ${t.dealAddress?`<a onclick="switchView('board')" class="text-xs text-blue-500 hover:underline cursor-pointer shrink-0">${t.dealAddress}</a>`:''}
         </div>
         ${t.description?`<div class="text-xs text-gray-500 mt-0.5 line-clamp-2">${t.description}</div>`:''}
+        ${(t.invoiceDealId||t.gmailUrl)?`<div class="flex gap-2 mt-2 flex-wrap">
+          ${t.invoiceDealId?`<button onclick="openCommissionInvoice('${t.invoiceDealId}')" class="text-xs font-semibold px-2.5 py-1 rounded-lg text-white" style="background:#1a1a1a">📄 Print Invoice</button>`:''}
+          ${t.gmailUrl?`<a href="${t.gmailUrl}" target="_blank" class="text-xs font-semibold px-2.5 py-1 rounded-lg text-white inline-block" style="background:#DA291C">📧 Gmail Draft</a>`:''}
+        </div>`:''}
         <div class="flex items-center gap-3 mt-1.5 flex-wrap">
           <span class="text-xs text-blue-600 font-medium">${t.assignedToName||t.assignedTo}</span>
           ${dueBadge(t)}
