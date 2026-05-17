@@ -4952,10 +4952,14 @@ function buildMonthlyProjection(deals){
 
 function buildYearlyOutlook(deals){
   const now=new Date();
+  const todayStr=now.toISOString().slice(0,10);
   const years=[0,1,2].map(i=>({label:`${now.getFullYear()+i}`,yr:now.getFullYear()+i,remaining:0,closed:0,projected:0}));
   for(const deal of deals){
-    if(isLostStage(deal.stage)||!deal.closeDate) continue;
-    const yr=new Date(deal.closeDate+'T00:00:00').getFullYear();
+    if(isLostStage(deal.stage)) continue;
+    // Won deals without a closeDate still count — default to today
+    const dateStr = deal.closeDate || (isWonStage(deal.stage) ? todayStr : null);
+    if(!dateStr) continue;
+    const yr=new Date(dateStr+'T00:00:00').getFullYear();
     const y=years.find(y=>y.yr===yr);
     if(!y) continue;
     if(isWonStage(deal.stage)){
@@ -6335,7 +6339,11 @@ function viewProjection(){
           return 'Q'+(Math.floor(d.getMonth()/3)+1)+' '+d.getFullYear();
         });
         const rows=cfAdv.map(adv=>{
-          const myD=allDeals.filter(d=>d.advisorUid===adv.uid);
+          const myD=allDeals.filter(d=>
+            d.advisorUid===adv.uid ||
+            (d.coAdvisors||[]).some(ca=>ca.uid===adv.uid) ||
+            (d.coAdvisorUids||[]).includes(adv.uid)
+          );
           const qs=quarterlyPayouts(myD,adv.uid);
           return {adv,qs,total:qs.reduce((s,q)=>s+q.payout,0)};
         }).sort((a,b)=>b.total-a.total);
@@ -6901,7 +6909,11 @@ function viewCommissionForecast(){
   });
 
   const rows=advisors.map(adv=>{
-    const myDeals=allDeals.filter(d=>d.advisorUid===adv.uid);
+    const myDeals=allDeals.filter(d=>
+      d.advisorUid===adv.uid ||
+      (d.coAdvisors||[]).some(ca=>ca.uid===adv.uid) ||
+      (d.coAdvisorUids||[]).includes(adv.uid)
+    );
     const quarters=quarterlyPayouts(myDeals,adv.uid);
     const total=quarters.reduce((s,q)=>s+q.payout,0);
     return {adv,quarters,total};
