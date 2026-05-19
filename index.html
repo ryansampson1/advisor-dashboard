@@ -5369,6 +5369,8 @@ function viewBoard(){
       + '</div>';
   } catch(e){ console.error('KPI bar error:', e); }
 
+
+
   setContent(`
     <div class="flex items-center justify-between mb-5">
       <div>
@@ -7102,12 +7104,236 @@ function bootCRM(){
   });
 }
 
+
+// ═══════════════════════════════════════════════════════════════════
+// CRM — AUTO-CREATE CONTACTS FROM DEAL + PROPERTY GROUP TAGGING
+// ═══════════════════════════════════════════════════════════════════
+
+// ── Parse "First Last" → {firstName, lastName} ─────────────────────
+function _crmParseName(raw) {
+  if(!raw) return {firstName:'',lastName:''};
+  const parts = raw.trim().split(/\s+/);
+  if(parts.length === 1) return {firstName:parts[0], lastName:''};
+  return {firstName:parts[0], lastName:parts.slice(1).join(' ')};
+}
+
+// ── Find existing contact by email or full name ────────────────────
+function _crmFindContact(email, name) {
+  const emailLow = (email||'').toLowerCase().trim();
+  const nameLow  = (name||'').toLowerCase().trim();
+  if(emailLow) {
+    const byEmail = allContacts.find(c =>
+      (c.email||'').toLowerCase()===emailLow || (c.email2||'').toLowerCase()===emailLow
+    );
+    if(byEmail) return byEmail;
+  }
+  if(nameLow) {
+    return allContacts.find(c =>
+      ([c.firstName,c.lastName].filter(Boolean).join(' ').toLowerCase()) === nameLow
+    ) || null;
+  }
+  return null;
+}
+
+// ── Core: ensure a contact exists and is linked to this deal ───────
+async function _crmEnsureContact(nameRaw, email, phone, company, dealId) {
+  if(!nameRaw && !email) return; // Nothing to create
+  const existing = _crmFindContact(email, nameRaw);
+  if(existing) {
+    // Link deal if not already linked
+    const linked = existing.linkedDeals || [];
+    if(!linked.includes(dealId)) {
+      const {doc, updateDoc} = _fbFns;
+      await updateDoc(doc(_fbDb,'contacts',existing.id), {linkedDeals:[...linked,dealId], updatedAt:Date.now()});
+    }
+    return;
+  }
+  // Create new contact
+  if(!_fbDb || !_fbFns) return;
+  const {collection, addDoc} = _fbFns;
+  const {firstName, lastName} = _crmParseName(nameRaw);
+  const contactData = {
+    firstName, lastName,
+    email: (email||'').toLowerCase().trim(),
+    phone: phone||'',
+    company: company||'',
+    source: 'Deal auto-import',
+    groups: [],
+    linkedDeals: [dealId],
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    createdBy: currentUser?.uid||'',
+  };
+  const ref = await addDoc(collection(_fbDb,'contacts'), contactData);
+  allContacts.push({id:ref.id, ...contactData});
+  console.log('[CRM auto-contact] Created:', firstName, lastName, email);
+}
+
+// ── Main: auto-create all relevant contacts from a deal ─────────────
+async function _crmAutoCreateContactsFromDeal(deal) {
+  if(!_fbDb || !_fbFns) return;
+  const id = deal.id;
+  const seen = new Set(); // avoid duplicate creates in same run
+
+  // 1. Primary contact (contactPerson / contactEmail / contactPhone)
+  const cp = deal.contactPerson?.trim();
+  const ce = deal.contactEmail?.trim();
+  const cph = deal.contactPhone?.trim();
+  if(cp || ce) {
+    seen.add((ce||cp).toLowerCase());
+    await _crmEnsureContact(cp, ce, cph, '', id);
+  }
+
+  // 2. Buyer
+  const buyer = deal.buyer?.trim() || deal.loiBuyer?.trim();
+  const buyerKey = (buyer||'').toLowerCase();
+  if(buyer && !seen.has(buyerKey)) {
+    seen.add(buyerKey);
+    await _crmEnsureContact(buyer, '', '', deal.buyerBroker||'', id);
+  }
+
+  // 3. Buyer Broker (if different entity)
+  const bb = deal.buyerBroker?.trim();
+  const bbKey = (bb||'').toLowerCase();
+  if(bb && !seen.has(bbKey)) {
+    seen.add(bbKey);
+    await _crmEnsureContact(bb, '', '', '', id);
+  }
+}
+
+// ── Tag property groups modal ───────────────────────────────────────
+window._crmTagPropertyGroups = dealId => {
+  const deal = allDeals.find(d => d.id === dealId);
+  if(!deal) return;
+  const addr = deal.propertyAddress || deal.projectName || 'Property';
+  const currentGroups = deal.propertyGroups || [];
+
+  const modal = document.createElement('div');
+  modal.id = 'crm-prop-groups-modal';
+  modal.className = 'fixed inset-0 z-50 flex items-center justify-center modal-bg bg-black/40 p-4';
+  modal.innerHTML = `
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md max-h-[80vh] overflow-y-auto">
+      <div class="p-6">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-base font-bold text-gray-800">🏷 Tag Outreach Groups</h2>
+          <button onclick="document.getElementById('crm-prop-groups-modal').remove()" class="text-gray-400 hover:text-gray-700 text-2xl leading-none">&times;</button>
+        </div>
+        <p class="text-sm text-gray-500 mb-4">Select which contact groups to target for <strong>${addr}</strong>. These groups will receive your marketing emails for this property.</p>
+        <div class="border rounded-lg p-3 bg-gray-50 max-h-64 overflow-y-auto space-y-1">
+          ${allCRMGroups.filter(_isGroupVisible).map(g => {
+            const checked = currentGroups.includes(g.id);
+            return `<label class="flex items-center gap-2 cursor-pointer px-2 py-1 hover:bg-white rounded transition">
+              <input type="checkbox" value="${g.id}" ${checked?'checked':''} class="prop-grp-cb accent-blue-600"/>
+              <span class="inline-block w-3 h-3 rounded-full flex-shrink-0" style="background:${g.color||'#e5e7eb'}"></span>
+              <span class="text-sm text-gray-700 flex-1">${g.name}</span>
+              <span class="text-xs text-gray-400">${allContacts.filter(c=>(c.groups||[]).includes(g.id)).length} contacts</span>
+            </label>`;
+          }).join('')}
+          ${allCRMGroups.filter(_isGroupVisible).length===0?'<p class="text-xs text-gray-400 italic p-2">No groups yet — create some in the Groups tab first.</p>':''}
+        </div>
+        <div class="flex gap-2 mt-4">
+          <button onclick="window._crmSavePropertyGroups('${dealId}')" class="flex-1 brand-btn rounded-lg py-2.5 text-sm font-semibold">Save</button>
+          <button onclick="document.getElementById('crm-prop-groups-modal').remove()" class="px-4 border rounded-lg py-2.5 text-sm text-gray-600">Cancel</button>
+        </div>
+      </div>
+    </div>`;
+  document.getElementById('crm-prop-groups-modal')?.remove();
+  document.body.appendChild(modal);
+};
+
+// ── Save property groups to the deal ───────────────────────────────
+window._crmSavePropertyGroups = async dealId => {
+  const checked = [...document.querySelectorAll('.prop-grp-cb:checked')].map(cb => cb.value);
+  if(_fbDb && _fbFns) {
+    const {doc, updateDoc} = _fbFns;
+    await updateDoc(doc(_fbDb,'deals',dealId), {propertyGroups: checked, updatedAt: Date.now()});
+    const deal = allDeals.find(d => d.id === dealId);
+    if(deal) deal.propertyGroups = checked;
+  }
+  document.getElementById('crm-prop-groups-modal')?.remove();
+  window.viewCRM();
+  showToast('Outreach groups saved','success');
+};
+
+// ── Draft property email ────────────────────────────────────────────
+window._crmDraftPropertyEmail = dealId => {
+  const deal = allDeals.find(d => d.id === dealId);
+  if(!deal) return;
+  const addr    = deal.propertyAddress || deal.projectName || 'Property';
+  const proj    = deal.projectName || addr;
+  const county  = deal.county ? `${deal.county} County` : '';
+  const price   = deal.listedPrice||deal.purchasePrice||deal.proposedPrice||0;
+  const priceStr= price ? `$${Number(price).toLocaleString()}` : 'Price Upon Request';
+  const acres   = deal.acres||deal.acreage||'';
+  const acreStr = acres ? `±${acres} acres` : '';
+  const landType= deal.landType || '';
+  const groups  = (deal.propertyGroups||[]).map(gid=>{
+    const g = allCRMGroups.find(x=>x.id===gid);
+    if(!g) return null;
+    const contacts = allContacts.filter(c=>(c.groups||[]).includes(gid)&&c.email);
+    return {group:g, contacts};
+  }).filter(Boolean);
+
+  const tagLine = [acreStr, landType, county].filter(Boolean).join(' · ');
+  const subject = encodeURIComponent(`${proj}${tagLine?' — '+tagLine:''}`);
+  const body = encodeURIComponent(
+`We are pleased to present the following land opportunity for your consideration:
+
+PROPERTY: ${addr}
+${proj !== addr ? 'PROJECT: '+proj+'\n' : ''}${county ? 'COUNTY: '+county+'\n' : ''}${acreStr ? 'ACREAGE: '+acreStr+'\n' : ''}${landType ? 'LAND TYPE: '+landType+'\n' : ''}ASKING PRICE: ${priceStr}
+
+${deal.notes ? deal.notes+'\n\n' : ''}Please let us know if you have interest or questions. We would be happy to provide additional materials.
+
+Best regards,
+${currentUser?.name||''}
+Eshenbaugh Land Company
+813-417-5928`
+  );
+
+  // Show a modal with group-by-group bcc breakdown + mailto link
+  const modal = document.createElement('div');
+  modal.id = 'crm-draft-email-modal';
+  modal.className = 'fixed inset-0 z-50 flex items-center justify-center modal-bg bg-black/40 p-4';
+  modal.innerHTML = `
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[85vh] overflow-y-auto">
+      <div class="p-6">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-base font-bold">✉️ Draft Property Email</h2>
+          <button onclick="document.getElementById('crm-draft-email-modal').remove()" class="text-gray-400 hover:text-gray-700 text-2xl leading-none">&times;</button>
+        </div>
+        <p class="text-sm text-gray-500 mb-3">Choose a group to send to. Each button opens a pre-filled email in your mail client with all contacts in that group as BCC.</p>
+        <div class="space-y-2 mb-4">
+          ${groups.length===0?'<p class="text-sm text-gray-400 italic">No groups tagged — tag groups first.</p>':
+            groups.map(({group:g, contacts:cts}) => {
+              if(!cts.length) return `<div class="p-3 border rounded-lg text-sm text-gray-400">${g.name} — no contacts with emails</div>`;
+              const bcc = encodeURIComponent(cts.map(c=>c.email).join(','));
+              const link = `mailto:?bcc=${bcc}&subject=${subject}&body=${body}`;
+              return `<a href="${link}" class="flex items-center justify-between p-3 border rounded-lg hover:bg-gray-50 transition group" onclick="document.getElementById('crm-draft-email-modal').remove()">
+                <div class="flex items-center gap-2">
+                  <span class="w-3 h-3 rounded-full flex-shrink-0" style="background:${g.color||'#e5e7eb'}"></span>
+                  <span class="text-sm font-semibold text-gray-800">${g.name}</span>
+                  <span class="text-xs text-gray-400">${cts.length} contact${cts.length!==1?'s':''}</span>
+                </div>
+                <span class="text-xs text-blue-600 group-hover:underline">Open in Mail →</span>
+              </a>`;
+            }).join('')
+          }
+        </div>
+        <button onclick="document.getElementById('crm-draft-email-modal').remove()" class="w-full border rounded-lg py-2 text-sm text-gray-600">Close</button>
+      </div>
+    </div>`;
+  document.getElementById('crm-draft-email-modal')?.remove();
+  document.body.appendChild(modal);
+};
+
 // ── CRM filter state ───────────────────────────────────────────────
 window._crmGroupFilter    = window._crmGroupFilter    || '';
 window._crmSearchFilter   = window._crmSearchFilter   || '';
 window._crmView           = window._crmView           || 'contacts'; // 'contacts' | 'groups' | 'companies'
 window._crmCompanySearch  = window._crmCompanySearch  || '';
 window._crmNoGroupFilter  = window._crmNoGroupFilter  || false;
+window._crmPropSearch     = window._crmPropSearch     || '';
+window._crmPropStageFilter= window._crmPropStageFilter|| '';
 
 // ── Main view ──────────────────────────────────────────────────────
 function viewCRM(){
@@ -7342,6 +7568,99 @@ function viewCRM(){
         <span class="text-sm font-medium">New Group</span>
       </button>
     </div>`;
+  // ── Properties view ───────────────────────────────────────────────
+  const _propSearch = (window._crmPropSearch||'').toLowerCase();
+  const _propStageF = window._crmPropStageFilter||'';
+
+  // Use visibleDeals() to respect advisor/admin filtering
+  let propDeals = (typeof visibleDeals === 'function' ? visibleDeals() : allDeals) || [];
+  if(_propStageF) propDeals = propDeals.filter(d => d.stage === _propStageF);
+  if(_propSearch) propDeals = propDeals.filter(d => {
+    const hay = [d.propertyAddress, d.projectName, d.county, d.contactPerson, d.buyer].filter(Boolean).join(' ').toLowerCase();
+    return hay.includes(_propSearch);
+  });
+
+  // Collect unique stages for filter dropdown
+  const _propStages = [...new Set(allDeals.map(d=>d.stage).filter(Boolean))].sort();
+
+  const _fmtPrice = v => v ? '$'+Number(v).toLocaleString() : '—';
+  const _stageBadgeColor = stage => {
+    if(!stage) return '#9ca3af';
+    const s = stage.toLowerCase();
+    if(s.includes('prospect')||s.includes('proposal')) return '#6366f1';
+    if(s.includes('listing')) return '#f59e0b';
+    if(s.includes('loi')) return '#8b5cf6';
+    if(s.includes('contract')||s.includes('due diligence')) return '#3b82f6';
+    if(s.includes('closing')||s.includes('rezoning')) return '#0891b2';
+    if(s.includes('sold')||s.includes('closed')) return '#22c55e';
+    if(s.includes('lost')||s.includes('terminated')) return '#ef4444';
+    return '#9ca3af';
+  };
+
+  const propertiesHtml = `
+    <div class="flex flex-wrap gap-2 mb-4 items-center">
+      <input id="crm-prop-search" type="text" placeholder="Search properties…" value="${(window._crmPropSearch||'').replace(/"/g,'&quot;')}"
+        oninput="window._crmPropSearch=this.value;window._crmFocusId='crm-prop-search';window.viewCRM()"
+        class="border rounded-lg px-3 py-1.5 text-sm outline-none flex-1 min-w-48 focus:ring-2 focus:ring-blue-200"/>
+      <select onchange="window._crmPropStageFilter=this.value;window.viewCRM()" class="border rounded-lg px-3 py-1.5 text-sm outline-none">
+        <option value="" ${!_propStageF?'selected':''}>All stages</option>
+        ${_propStages.map(s=>`<option value="${s}" ${_propStageF===s?'selected':''}>${s}</option>`).join('')}
+      </select>
+    </div>
+    <div class="text-xs text-gray-400 mb-3">${propDeals.length} propert${propDeals.length!==1?'ies':'y'}</div>
+    ${propDeals.length===0 ? `
+      <div class="text-center py-16 text-gray-400">
+        <div class="text-5xl mb-3">🏡</div>
+        <div class="font-medium text-gray-500">No properties match this filter.</div>
+      </div>` : `
+    <div class="space-y-3">
+      ${propDeals.map(d => {
+        const addr = d.propertyAddress || d.projectName || 'Unnamed Property';
+        const proj = (d.projectName && d.projectName !== d.propertyAddress) ? d.projectName : '';
+        const price = _fmtPrice(d.purchasePrice||d.listedPrice||d.proposedPrice||d.contractPrice||d.loiPrice||0);
+        const acres = d.acres || d.acreage || '';
+        const badgeColor = _stageBadgeColor(d.stage||'');
+        const taggedGroups = (d.propertyGroups||[]).map(gid=>{
+          const g = allCRMGroups.find(x=>x.id===gid);
+          return g ? `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold" style="background:${g.color||'#e5e7eb'};color:${g.textColor||'#374151'}">${g.name}</span>` : '';
+        }).join('');
+        // Linked contact from CRM
+        const linkedContact = allContacts.find(c=>(c.linkedDeals||[]).includes(d.id));
+        const contactChip = linkedContact
+          ? `<span class="text-xs text-blue-600 cursor-pointer hover:underline" onclick="window._crmView='contacts';window.viewCRM();setTimeout(()=>openContactPanel('${linkedContact.id}'),200)">${[linkedContact.firstName,linkedContact.lastName].filter(Boolean).join(' ')||linkedContact.email}</span>`
+          : (d.contactPerson ? `<span class="text-xs text-gray-500">${d.contactPerson}${d.contactEmail?` &lt;${d.contactEmail}&gt;`:''}</span>` : '<span class="text-xs text-gray-300">—</span>');
+        return `
+        <div class="bg-white rounded-2xl border p-4 hover:border-gray-300 transition">
+          <div class="flex items-start justify-between gap-3 flex-wrap">
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-2 flex-wrap mb-1">
+                <span class="font-semibold text-gray-800 text-sm">${addr}</span>
+                ${proj ? `<span class="text-xs text-gray-400">${proj}</span>` : ''}
+                <span class="text-xs font-semibold px-2 py-0.5 rounded-full text-white" style="background:${badgeColor}">${d.stage||'—'}</span>
+              </div>
+              <div class="flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-gray-500 mb-2">
+                ${d.county ? `<span>📍 ${d.county} County</span>` : ''}
+                ${acres ? `<span>±${acres} ac</span>` : ''}
+                ${price !== '—' ? `<span>💰 ${price}</span>` : ''}
+                <span>👤 ${d.advisorName||'—'}</span>
+              </div>
+              <div class="flex items-center gap-2 text-xs text-gray-500 mb-2">
+                <span class="text-gray-400">Contact:</span>
+                ${contactChip}
+              </div>
+              <div class="flex flex-wrap gap-1 items-center min-h-5">
+                ${taggedGroups || '<span class="text-xs text-gray-300 italic">No outreach groups tagged</span>'}
+              </div>
+            </div>
+            <div class="flex gap-1.5 flex-shrink-0">
+              <button onclick="window._crmTagPropertyGroups('${d.id}')" class="px-3 py-1.5 text-xs font-semibold border rounded-lg text-gray-600 hover:bg-gray-50 transition whitespace-nowrap">🏷 Tag Groups</button>
+              ${(d.propertyGroups||[]).length > 0 ? `<button onclick="window._crmDraftPropertyEmail('${d.id}')" class="px-3 py-1.5 text-xs font-semibold border border-blue-200 rounded-lg text-blue-600 hover:bg-blue-50 transition whitespace-nowrap">✉️ Draft Email</button>` : ''}
+              <button onclick="openDealModal('${d.id}')" class="px-3 py-1.5 text-xs border rounded-lg text-gray-400 hover:text-blue-500 hover:bg-blue-50 transition">✏️</button>
+            </div>
+          </div>
+        </div>`;
+      }).join('')}
+    </div>`}`;
 
   setContent(`
     <div class="flex items-center justify-between mb-6 flex-wrap gap-3">
@@ -7359,9 +7678,10 @@ function viewCRM(){
       ${subNav('contacts','👤 Contacts')}
       ${subNav('companies','🏢 Companies')}
       ${subNav('groups','🏷 Groups')}
+      ${subNav('properties','🏡 Properties')}
     </div>
 
-    ${sub==='contacts' ? contactsHtml : sub==='companies' ? companiesHtml : groupsHtml}
+    ${sub==='contacts' ? contactsHtml : sub==='companies' ? companiesHtml : sub==='groups' ? groupsHtml : propertiesHtml}
   `);
   // Restore keyboard focus to search input after re-render
   if(window._crmFocusId){
@@ -12972,6 +13292,8 @@ window.handleDealSubmit = async ev => {
     const newDeal={...data,id:newId};
     if(!allDeals.find(d=>d.id===newId)) allDeals.push(newDeal);
     fireAutomations(newDeal,null);
+    // Auto-create/link CRM contacts from the new deal
+    _crmAutoCreateContactsFromDeal(newDeal).catch(e=>console.warn('[CRM auto-contact]',e));
     showToast('Deal created','success');
     closeDealModal();
     renderCurrentView();
