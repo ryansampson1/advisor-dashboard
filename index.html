@@ -7358,6 +7358,8 @@ window._crmPropStageFilter= window._crmPropStageFilter|| '';
 // ── Main view ──────────────────────────────────────────────────────
 function viewCRM(){
   bootCRM();
+  // Backfill contacts from existing deals (runs once per session)
+  if(!window._crmContactBackfillDone) window._crmBackfillDealContacts().catch(()=>{});
   // Reset group filter if selected group is no longer visible to this user
   if(window._crmGroupFilter){ const _fg=allCRMGroups.find(x=>x.id===window._crmGroupFilter); if(!_fg||!_isGroupVisible(_fg)) window._crmGroupFilter=''; }
   if(window._crmNoGroupFilter) window._crmGroupFilter=''; // mutually exclusive
@@ -7826,6 +7828,37 @@ function viewCRM(){
 }
 // Expose on window so inline onclick handlers (outside module scope) can call it
 window.viewCRM = viewCRM;
+
+// ── Backfill: ensure all existing deal contacts exist in CRM ───────
+// Runs once per session when CRM is first opened.
+window._crmContactBackfillDone = false;
+window._crmBackfillDealContacts = async function(){
+  if(window._crmContactBackfillDone) return;
+  window._crmContactBackfillDone = true;
+  if(!_fbDb || !_fbFns) return;
+  let created = 0;
+  for(const deal of (allDeals||[])){
+    const id = deal.id;
+    const cp  = deal.contactPerson?.trim();
+    const ce  = deal.contactEmail?.trim();
+    const cph = deal.contactPhone?.trim();
+    if((cp||ce) && typeof _crmEnsureContact === 'function'){
+      const before = (allContacts||[]).length;
+      await _crmEnsureContact(cp, ce, cph, '', id).catch(()=>{});
+      if((allContacts||[]).length > before) created++;
+    }
+    // Buyer fields
+    const buyer = deal.buyer?.trim()||deal.loiBuyer?.trim();
+    if(buyer && typeof _crmEnsureContact === 'function'){
+      await _crmEnsureContact(buyer,'','',deal.buyerBroker||'',id).catch(()=>{});
+    }
+    const bb = deal.buyerBroker?.trim();
+    if(bb && typeof _crmEnsureContact === 'function'){
+      await _crmEnsureContact(bb,'','','',id).catch(()=>{});
+    }
+  }
+  if(created > 0) console.log(`[CRM backfill] Created ${created} contact(s) from existing deals`);
+};
 
 // ── Contact modal ──────────────────────────────────────────────────
 let _editingContactId = null;
@@ -13453,6 +13486,8 @@ window.handleDealSubmit = async ev => {
     await Store.updateDeal(id,data);
     Object.assign(existing,data);
     if(oldStage!==stage) fireAutomations(existing,oldStage);
+    // Auto-create/link CRM contacts whenever a deal is saved (catches edits to contact fields)
+    _crmAutoCreateContactsFromDeal(existing).catch(e=>console.warn('[CRM auto-contact update]',e));
     showToast('Deal updated','success');
   } else {
     data.createdAt=Date.now();
