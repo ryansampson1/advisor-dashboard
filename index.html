@@ -7101,6 +7101,8 @@ window._crmCompanySearch  = window._crmCompanySearch  || '';
 // ── Main view ──────────────────────────────────────────────────────
 function viewCRM(){
   bootCRM();
+  // Reset group filter if selected group is no longer visible to this user
+  if(window._crmGroupFilter){ const _fg=allCRMGroups.find(x=>x.id===window._crmGroupFilter); if(!_fg||!_isGroupVisible(_fg)) window._crmGroupFilter=''; }
   const gf  = window._crmGroupFilter  || '';
   const sf  = (window._crmSearchFilter || '').toLowerCase();
   const sub = window._crmView || 'contacts';
@@ -7115,7 +7117,7 @@ function viewCRM(){
     return true;
   });
 
-  const groupOptions = allCRMGroups.map(g=>
+  const groupOptions = allCRMGroups.filter(_isGroupVisible).map(g=>
     `<option value="${g.id}" ${gf===g.id?'selected':''}>${g.name} (${allContacts.filter(c=>(c.groups||[]).includes(g.id)).length})</option>`
   ).join('');
 
@@ -7177,7 +7179,8 @@ function viewCRM(){
             const name = [c.firstName,c.lastName].filter(Boolean).join(' ')||c.email||'—';
             const groups = (c.groups||[]).map(gid=>{
               const g = allCRMGroups.find(x=>x.id===gid);
-              return g ? `<span class="inline-block px-2 py-0.5 rounded-full text-xs font-semibold mr-1" style="background:${g.color||'#e5e7eb'};color:${g.textColor||'#374151'}">${g.name}</span>` : '';
+              if(!g || !_isGroupVisible(g)) return '';
+              return `<span class="inline-block px-2 py-0.5 rounded-full text-xs font-semibold mr-1" style="background:${g.color||'#e5e7eb'};color:${g.textColor||'#374151'}">${g.name}</span>`;
             }).join('');
             const deals = (c.linkedDeals||[]).map(did=>{
               const d = allDeals.find(x=>x.id===did);
@@ -7287,7 +7290,7 @@ function viewCRM(){
 
   // ── Groups manager ────────────────────────────────────────────────
   const _groupNameCounts = {};
-  for(const g of allCRMGroups){ const k=_normGrp(g.name); _groupNameCounts[k]=(_groupNameCounts[k]||0)+1; }
+  for(const g of allCRMGroups.filter(_isGroupVisible)){ const k=_normGrp(g.name); _groupNameCounts[k]=(_groupNameCounts[k]||0)+1; }
   const _hasDupeGroups = Object.values(_groupNameCounts).some(n=>n>1);
 
   const groupsHtml = `
@@ -7299,19 +7302,22 @@ function viewCRM(){
       </div>
     </div>
     <div class="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-      ${allCRMGroups.map(g=>{
+      ${allCRMGroups.filter(_isGroupVisible).map(g=>{
         const count = allContacts.filter(c=>(c.groups||[]).includes(g.id)).length;
-        return `<div class="bg-white rounded-2xl border p-5 flex items-start gap-3">
+        const isPrivate = g.visibility === 'private';
+        const canEdit = currentUser?.isAdmin || g.createdBy === currentUser?.uid || (g.allowedUsers||[]).includes(currentUser?.uid);
+        const canDelete = currentUser?.isAdmin || g.createdBy === currentUser?.uid;
+        return `<div class="bg-white rounded-2xl border${isPrivate?' border-blue-100':''} p-5 flex items-start gap-3">
           <div class="w-10 h-10 rounded-xl flex items-center justify-center text-lg shrink-0" style="background:${g.color||'#e5e7eb'}">${g.emoji||'👥'}</div>
           <div class="flex-1 min-w-0">
-            <div class="font-semibold text-gray-800">${g.name}</div>
+            <div class="font-semibold text-gray-800 flex items-center gap-1.5">${g.name}${isPrivate?'<span class="text-xs text-gray-400" title="Private — only shared members can see this group">🔒</span>':''}</div>
             <div class="text-xs text-gray-400 mt-0.5">${count} contact${count!==1?'s':''}</div>
             ${g.description?`<div class="text-xs text-gray-500 mt-1 truncate">${g.description}</div>`:''}
           </div>
           <div class="flex gap-1 shrink-0">
             <button onclick="window._crmGroupFilter='${g.id}';window._crmView='contacts';window.viewCRM()" class="text-xs px-2 py-1 border rounded text-gray-600 hover:bg-gray-50">View</button>
-            <button onclick="openGroupModal('${g.id}')" class="text-gray-300 hover:text-blue-500">✏️</button>
-            <button onclick="crmDeleteGroup('${g.id}')" class="text-gray-200 hover:text-red-500">✕</button>
+            ${canEdit?`<button onclick="openGroupModal('${g.id}')" class="text-gray-300 hover:text-blue-500">✏️</button>`:''}
+            ${canDelete?`<button onclick="crmDeleteGroup('${g.id}')" class="text-gray-200 hover:text-red-500">✕</button>`:''}
           </div>
         </div>`;
       }).join('')}
@@ -7326,7 +7332,7 @@ function viewCRM(){
     <div class="flex items-center justify-between mb-6 flex-wrap gap-3">
       <div>
         <h2 class="text-xl font-bold text-gray-800">🤝 CRM</h2>
-        <p class="text-sm text-gray-500 mt-0.5">${allContacts.length} contacts · ${allCRMGroups.length} groups</p>
+        <p class="text-sm text-gray-500 mt-0.5">${allContacts.length} contacts · ${allCRMGroups.filter(_isGroupVisible).length} groups</p>
       </div>
       <div class="flex gap-2">
         <button onclick="openContactModal(null)" class="brand-btn px-4 py-2 rounded-lg text-sm font-semibold">+ Add Contact</button>
@@ -7440,14 +7446,15 @@ window.openContactModal = id => {
           <div>
             <label class="block text-xs font-medium text-gray-600 mb-1">Groups</label>
             <div class="flex flex-wrap gap-2 p-3 border rounded-lg bg-gray-50 min-h-10" id="cm-groups-wrap">
-              ${allCRMGroups.map(g=>{
+              ${allCRMGroups.filter(_isGroupVisible).map(g=>{
                 const sel = (c?.groups||[]).includes(g.id);
+                const isPrivate = g.visibility === 'private';
                 return `<label class="flex items-center gap-1.5 cursor-pointer">
                   <input type="checkbox" value="${g.id}" ${sel?'checked':''} class="accent-blue-600"/>
-                  <span class="text-sm text-gray-700">${g.name}</span>
+                  <span class="text-sm text-gray-700">${g.name}${isPrivate?'<span class="text-[10px] text-gray-400 ml-0.5">🔒</span>':''}</span>
                 </label>`;
               }).join('')}
-              ${allCRMGroups.length===0?'<span class="text-xs text-gray-400 italic">No groups yet — create one in the Groups tab first.</span>':''}
+              ${allCRMGroups.filter(_isGroupVisible).length===0?'<span class="text-xs text-gray-400 italic">No groups yet — create one in the Groups tab first.</span>':''}
             </div>
           </div>
           <div>
@@ -7651,6 +7658,24 @@ window.openGroupModal = id => {
             <label class="block text-xs font-medium text-gray-600 mb-1">Description</label>
             <input id="gm-desc" type="text" value="${g?.description||''}" placeholder="Optional description" class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-200"/>
           </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-2">Visibility</label>
+            <div class="flex gap-2">
+              <button type="button" data-vis="public" onclick="window._setGmVis('public')" class="gm-vis-btn flex-1 border-2 rounded-lg py-2 text-sm font-medium transition ${(!g?.visibility||g.visibility==='public')?'border-blue-500 bg-blue-50 text-blue-700':'border-gray-200 text-gray-500'}">🌍 Public</button>
+              <button type="button" data-vis="private" onclick="window._setGmVis('private')" class="gm-vis-btn flex-1 border-2 rounded-lg py-2 text-sm font-medium transition ${g?.visibility==='private'?'border-blue-500 bg-blue-50 text-blue-700':'border-gray-200 text-gray-500'}">🔒 Private</button>
+            </div>
+            <input type="hidden" id="gm-vis-val" value="${g?.visibility||'public'}"/>
+          </div>
+          <div id="gm-access-section" ${g?.visibility==='private'?'':'style="display:none"'}>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Share with (select team members)</label>
+            <div class="border rounded-lg p-2 max-h-36 overflow-y-auto space-y-0.5 bg-gray-50">
+              ${Object.entries(allProfiles).filter(([uid])=>uid!==currentUser?.uid&&(allProfiles[uid]?.name||allProfiles[uid]?.email)).sort((a,b)=>(a[1].name||a[1].email||'').localeCompare(b[1].name||b[1].email||'')).map(([uid,p])=>{
+                const checked=(g?.allowedUsers||[]).includes(uid);
+                return `<label class="flex items-center gap-2 cursor-pointer px-1 py-0.5 hover:bg-white rounded"><input type="checkbox" value="${uid}" ${checked?'checked':''} class="gm-allow-user accent-blue-600"/><span class="text-sm text-gray-700">${p.name||p.email||uid}</span></label>`;
+              }).join('')}
+              ${!Object.keys(allProfiles).some(uid=>uid!==currentUser?.uid&&(allProfiles[uid]?.name||allProfiles[uid]?.email))?'<span class="text-xs text-gray-400 italic px-1">No other team members found.</span>':''}
+            </div>
+          </div>
         </div>
         <div class="flex gap-2 mt-6">
           <button onclick="saveGroup()" class="flex-1 brand-btn rounded-lg py-2.5 text-sm font-semibold">Save Group</button>
@@ -7673,10 +7698,16 @@ window.saveGroup = async () => {
   if(existing){ showToast(`A group named "${existing.name}" already exists`,'error'); return; }
   const colorVal = document.querySelector('[name=gm-color]:checked')?.value || '#dbeafe|#1e40af';
   const [color, textColor] = colorVal.split('|');
+  const vis = document.getElementById('gm-vis-val')?.value || 'public';
+  const allowedUsers = vis === 'private'
+    ? Array.from(document.querySelectorAll('.gm-allow-user:checked')).map(cb=>cb.value)
+    : [];
   const data = {
     name, emoji: document.getElementById('gm-emoji')?.value.trim()||'👥',
     color, textColor,
     description: document.getElementById('gm-desc')?.value.trim()||'',
+    visibility: vis,
+    allowedUsers,
     updatedAt: Date.now(),
   };
   try {
@@ -7684,6 +7715,7 @@ window.saveGroup = async () => {
       await setDoc(doc(_fbDb,'crmGroups',_editingGroupId), data, {merge:true});
     } else {
       data.createdAt = Date.now();
+      data.createdBy = currentUser?.uid || '';
       await addDoc(collection(_fbDb,'crmGroups'), data);
     }
     document.getElementById('crm-group-modal')?.remove();
@@ -7701,6 +7733,23 @@ const _lev = (a,b) => {
   const dp=[...Array(m+1)].map((_,i)=>[...Array(n+1)].map((_,j)=>i===0?j:j===0?i:0));
   for(let i=1;i<=m;i++) for(let j=1;j<=n;j++) dp[i][j]=a[i-1]===b[j-1]?dp[i-1][j-1]:1+Math.min(dp[i-1][j],dp[i][j-1],dp[i-1][j-1]);
   return dp[m][n];
+};
+
+// ── Group visibility helper ───────────────────────────────────────────
+const _isGroupVisible = g => {
+  if(!g) return false;
+  if(!g.visibility || g.visibility === 'public') return true;
+  if(currentUser?.isAdmin) return true;
+  if(g.createdBy === currentUser?.uid) return true;
+  return (g.allowedUsers||[]).includes(currentUser?.uid);
+};
+window._setGmVis = val => {
+  document.getElementById('gm-vis-val').value = val;
+  document.getElementById('gm-access-section').style.display = val === 'private' ? 'block' : 'none';
+  document.querySelectorAll('.gm-vis-btn').forEach(b => {
+    const active = b.dataset.vis === val;
+    b.className = 'gm-vis-btn flex-1 border-2 rounded-lg py-2 text-sm font-medium transition ' + (active ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-gray-200 text-gray-500');
+  });
 };
 
 // ── Auto-merge exact/normalized duplicates ────────────────────────────
@@ -7753,7 +7802,7 @@ window.crmSmartMergeGroups = async () => {
   const autoMerged = await window.crmMergeDuplicateGroups(false);
 
   // Step 2: find near-matches using Levenshtein on normalized names
-  const groups = (allCRMGroups||[]).filter(g=>g.name);
+  const groups = (allCRMGroups||[]).filter(_isGroupVisible).filter(g=>g.name);
   const pairs = [];
   for(let i=0;i<groups.length;i++){
     const a=groups[i], na=_normGrp(a.name);
@@ -8257,8 +8306,9 @@ window._execManualMergeCompanies = async () => {
 
 // ── Manual Group Merge ──────────────────────────────────────────────
 window.crmManualMergeGroups = () => {
-  if((allCRMGroups||[]).length < 2){ showToast('Need at least 2 groups to merge','error'); return; }
-  const opts = (allCRMGroups||[]).slice().sort((a,b)=>(a.name||'').localeCompare(b.name||'')).map(g=>{
+  const _visibleGroups = (allCRMGroups||[]).filter(_isGroupVisible);
+  if(_visibleGroups.length < 2){ showToast('Need at least 2 groups to merge','error'); return; }
+  const opts = _visibleGroups.slice().sort((a,b)=>(a.name||'').localeCompare(b.name||'')).map(g=>{
     const cnt=(allContacts||[]).filter(c=>(c.groups||[]).includes(g.id)).length;
     const esc=(g.name||'').replace(/"/g,'&quot;');
     return `<option value="${g.id}">${g.name} (${cnt})`;
@@ -8470,7 +8520,7 @@ window.crmGmailSync = () => {
     return;
   }
 
-  const groupOpts = (allCRMGroups||[]).map(g=>`<option value="${g.id}">${g.name}</option>`).join('');
+  const groupOpts = (allCRMGroups||[]).filter(_isGroupVisible).map(g=>`<option value="${g.id}">${g.name}</option>`).join('');
 
   const modal = document.createElement('div');
   modal.id = 'crm-gmail-sync-modal';
@@ -8977,7 +9027,7 @@ window.crmImportCSV = file => {
           <label class="block text-xs font-medium text-gray-600 mb-1">Also add all contacts to group (optional)</label>
           <select id="import-group" class="w-full border rounded-lg px-3 py-2 text-sm outline-none">
             <option value="">No additional group</option>
-            ${(allCRMGroups||[]).map(g=>`<option value="${g.id}">${g.name}</option>`).join('')}
+            ${(allCRMGroups||[]).filter(_isGroupVisible).map(g=>`<option value="${g.id}">${g.name}</option>`).join('')}
           </select>
         </div>
         <p class="text-xs text-gray-400 mb-3">Groups column in CSV will create groups automatically. You will be set as the assigned advisor.</p>
