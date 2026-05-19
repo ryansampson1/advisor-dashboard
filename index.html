@@ -9227,30 +9227,49 @@ window.crmSmartMergeCompanies = async () => {
     }
   }
 
-  // Step 2: find fuzzy pairs among remaining unique names
-  // Strip common corporate suffixes before comparing cores
+  // Step 2: find fuzzy pairs — O(n log n) instead of O(n²)
+  // With 6k+ unique companies, brute-force is ~18M comparisons; this approach does ~60k
   const _stripCoSuffix = s => s.replace(/\b(llc|inc|corp|ltd|co|company|group|properties|realty|real estate|enterprises|solutions|services|associates|partners|holdings|investments|management|consulting)\b/g,'').replace(/\s+/g,' ').trim();
   const uniqueNames=allNames.filter(n=>!autoReplaceMap[n]);
   const pairs=[];
-  const _YIELD=500; let _yc=0;
-  for(let i=0;i<uniqueNames.length;i++){
-    const na=_normGrp(uniqueNames[i]);
-    const ca_core=_stripCoSuffix(na);
-    for(let j=i+1;j<uniqueNames.length;j++){
-      // yield main thread every 500 comparisons to avoid UI freeze
-      if(++_yc%_YIELD===0) await new Promise(r=>setTimeout(r,0));
-      const nb=_normGrp(uniqueNames[j]);
-      const cb_core=_stripCoSuffix(nb);
-      if(na===nb) continue;
-      // same core after stripping suffixes, OR single-edit typo (O(n) fast check)
-      const isSimilar = (ca_core===cb_core && ca_core.length>2) || _within1Edit(na,nb);
-      if(isSimilar){
-        const ca=(allContacts||[]).filter(c=>(c.company||'').trim()===uniqueNames[i]).length;
-        const cb=(allContacts||[]).filter(c=>(c.company||'').trim()===uniqueNames[j]).length;
-        pairs.push({a:{name:uniqueNames[i],ca},b:{name:uniqueNames[j],cb}});
-      }
+  const alreadyPaired=new Set();
+  // Pre-build contact count map so we don't scan allContacts per pair
+  const _coCount={};
+  for(const c of (allContacts||[])){ const co=(c.company||'').trim(); if(co) _coCount[co]=(_coCount[co]||0)+1; }
+
+  // 2a: same-core hash map — O(n)
+  const _coreMap={};
+  for(const name of uniqueNames){
+    const core=_stripCoSuffix(_normGrp(name));
+    if(core.length<=2) continue;
+    if(!_coreMap[core]) _coreMap[core]=[];
+    _coreMap[core].push(name);
+  }
+  for(const grp of Object.values(_coreMap)){
+    if(grp.length<=1) continue;
+    for(let i=0;i<grp.length;i++) for(let j=i+1;j<grp.length;j++){
+      const key=_normGrp(grp[i])+'||'+_normGrp(grp[j]);
+      if(alreadyPaired.has(key)) continue;
+      alreadyPaired.add(key);
+      pairs.push({a:{name:grp[i],ca:_coCount[grp[i]]||0},b:{name:grp[j],cb:_coCount[grp[j]]||0}});
     }
   }
+
+  // 2b: 1-edit typo check via sorted adjacency window — O(n log n)
+  // Names within edit-distance 1 are almost always close in lexicographic sort order
+  const _sorted=uniqueNames.map(n=>({orig:n,norm:_normGrp(n)})).sort((a,b)=>a.norm.localeCompare(b.norm));
+  const _WIN=12;
+  for(let i=0;i<_sorted.length;i++){
+    for(let j=i+1;j<Math.min(i+_WIN+1,_sorted.length);j++){
+      const na=_sorted[i].norm, nb=_sorted[j].norm;
+      if(na===nb||!_within1Edit(na,nb)) continue;
+      const key=na<nb?na+'||'+nb:nb+'||'+na;
+      if(alreadyPaired.has(key)) continue;
+      alreadyPaired.add(key);
+      pairs.push({a:{name:_sorted[i].orig,ca:_coCount[_sorted[i].orig]||0},b:{name:_sorted[j].orig,cb:_coCount[_sorted[j].orig]||0}});
+    }
+  }
+  await new Promise(r=>setTimeout(r,0)); // single yield to keep UI responsive
 
   // Step 3: email-domain rule — same non-generic domain across different company names = likely same company
   const genericDomains=new Set(['gmail.com','yahoo.com','hotmail.com','outlook.com','aol.com','icloud.com','me.com','live.com','msn.com','protonmail.com','mail.com']);
@@ -9264,7 +9283,7 @@ window.crmSmartMergeCompanies = async () => {
     if(!domainToCompanies[domain]) domainToCompanies[domain]=new Set();
     domainToCompanies[domain].add(co);
   }
-  const alreadyPaired=new Set(pairs.map(p=>`${_normGrp(p.a.name)}||${_normGrp(p.b.name)}`));
+  // alreadyPaired already built above — reuse it
   for(const [domain,coSet] of Object.entries(domainToCompanies)){
     const coArr=[...coSet].filter(n=>!autoReplaceMap[n]);
     for(let i=0;i<coArr.length;i++){
