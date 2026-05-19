@@ -5338,7 +5338,17 @@ function renderCurrentView(){
     splits:viewSplits,automations:viewAutomations,users:viewUsers,leaderboard:viewLeaderboard,
     manageStages:viewManageStages,officeManagers:viewOfficeManagers,
     eos:()=>viewEOS('rocks'),comps:viewComps,drive:viewDrive,documents:viewDocuments,hr:viewHR,crm:viewCRM};
-  (map[currentView]||viewBoard)();
+  try {
+    (map[currentView]||viewBoard)();
+  } catch(e) {
+    console.error('[renderCurrentView error] view='+currentView, e);
+    setContent(`<div style="padding:2rem;max-width:600px">
+      <h2 style="color:#ef4444;font-size:1.1rem;font-weight:700;margin-bottom:.75rem">⚠️ View Error</h2>
+      <p style="font-size:.875rem;color:var(--text-2);margin-bottom:.5rem">The <strong>${currentView}</strong> view encountered an error:</p>
+      <pre style="background:#fef2f2;border:1px solid #fca5a5;border-radius:8px;padding:1rem;font-size:.75rem;white-space:pre-wrap;color:#7f1d1d">${(e?.message||String(e)).replace(/</g,'&lt;')}</pre>
+      <p style="font-size:.75rem;color:var(--text-3);margin-top:.75rem">Open your browser console (F12) for the full stack trace, then report this to your admin.</p>
+    </div>`);
+  }
 }
 
 /* =======================================================
@@ -14639,7 +14649,7 @@ function viewHR(){
           <div style="flex:1">
             <div style="font-weight:700;font-size:.875rem;color:#1e1b4b;margin-bottom:.2rem">${h.title||''}</div>
             ${h.body ? `<div style="font-size:.825rem;color:#4c4380;white-space:pre-wrap">${h.body}</div>` : ''}
-            <div style="font-size:.7rem;color:#9ca3af;margin-top:.3rem">${h.createdByName||''} · ${h.createdAt ? new Date(h.createdAt).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) : ''}</div>
+            <div style="font-size:.7rem;color:#9ca3af;margin-top:.3rem">${h.createdByName||''} · ${h.createdAt ? new Date(h.createdAt?.toMillis ? h.createdAt.toMillis() : h.createdAt).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) : ''}</div>
           </div>
           ${isHlAdmin ? `
             <div style="display:flex;gap:.4rem;flex-shrink:0">
@@ -14667,7 +14677,7 @@ function viewHR(){
           <div style="display:flex;flex-direction:column;gap:.75rem">
             <div>
               <label style="font-size:.72rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--text-2);display:block;margin-bottom:.35rem">Your Name</label>
-              <input id="hr-name" type="text" value="${currentUser.name||''}" placeholder="Your name"
+              <input id="hr-name" type="text" value="${currentUser?.name||''}" placeholder="Your name"
                 style="width:100%;border:1px solid var(--border);border-radius:8px;padding:.55rem .75rem;font-size:.875rem;outline:none;font-family:inherit"
                 onfocus="this.style.borderColor='var(--brand-teal)'" onblur="this.style.borderColor='var(--border)'"/>
             </div>
@@ -15301,7 +15311,10 @@ function _updateNavBadges(){
   });
   // ── HR Headlines badge ────────────────────────────────
   const lastSeen = parseInt(localStorage.getItem('hr_headlines_seen')||'0');
-  const newHl = allHeadlines.filter(h=>(h.createdAt||0) > lastSeen).length;
+  const newHl = allHeadlines.filter(h=>{
+    const ts = h.createdAt?.toMillis ? h.createdAt.toMillis() : (h.createdAt||0);
+    return ts > lastSeen;
+  }).length;
   ['nav-badge-hr','mtab-badge-hr'].forEach(elId=>{
     const el=document.getElementById(elId);
     if(!el) return;
@@ -15349,7 +15362,8 @@ function _checkNewTaskNotif(){
   if(_prevHeadlineIds.size > 0){
     const lastSeen = parseInt(localStorage.getItem('hr_headlines_seen')||'0');
     for(const h of allHeadlines){
-      if(!_prevHeadlineIds.has(h.id) && (h.createdAt||0) > lastSeen){
+      const _hts = h.createdAt?.toMillis ? h.createdAt.toMillis() : (h.createdAt||0);
+      if(!_prevHeadlineIds.has(h.id) && _hts > lastSeen){
         _showBriefNotif('📢 New company headline: ' + (h.title||''), 'hr');
         break;
       }
