@@ -9097,7 +9097,19 @@ window.crmSmartMergeContacts = async () => {
     return;
   }
 
-  const rows = pairs.map((p,i)=>{
+  // Open paginated merge modal (100 pairs at a time)
+  window._smctOpenPage(pairs, 0);
+};
+
+window._smctOpenPage = (allPairData, offset) => {
+  const PAGE = 100;
+  const page = allPairData.slice(offset, offset + PAGE);
+  const total = allPairData.length;
+  const end = Math.min(offset + PAGE, total);
+  const hasMore = end < total;
+  const nextCount = Math.min(PAGE, total - end);
+
+  const rows = page.map((p,i)=>{
     const nameA=[p.a.firstName,p.a.lastName].filter(Boolean).join(' ')||p.a.email||'Unknown';
     const nameB=[p.b.firstName,p.b.lastName].filter(Boolean).join(' ')||p.b.email||'Unknown';
     const scoreA=[p.a.firstName,p.a.lastName,p.a.email,p.a.phone,p.a.company].filter(Boolean).length;
@@ -9134,22 +9146,38 @@ window.crmSmartMergeContacts = async () => {
     <div class="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col">
       <div class="p-6 border-b">
         <h3 class="text-lg font-bold text-gray-800">Similar Contacts Found</h3>
-        <p class="text-sm text-gray-500 mt-1">${pairs.length} potential duplicate${pairs.length!==1?'s':''} — select pairs to merge. The kept record gains any missing fields from the removed one.</p>
+        <p class="text-sm text-gray-500 mt-1">Showing ${offset+1}–${end} of ${total} potential duplicate${total!==1?'s':''} — select pairs to merge. The kept record gains any missing fields from the removed one.</p>
       </div>
       <div class="overflow-y-auto flex-1 p-2">
         <table class="w-full"><tbody>${rows}</tbody></table>
       </div>
       <div class="p-4 border-t flex gap-2">
-        <button onclick="window._doSmartMergeContacts(window._smctPairs)" class="flex-1 brand-btn rounded-lg py-2.5 text-sm font-semibold">Merge Selected</button>
+        <button onclick="window._smctPageMerge()" class="flex-1 brand-btn rounded-lg py-2.5 text-sm font-semibold">Merge Selected${hasMore?` &rarr; Next ${nextCount}`:''}</button>
+        ${hasMore?`<button onclick="window._smctSkipPage()" class="px-4 border border-blue-300 text-blue-600 rounded-lg py-2.5 text-sm font-medium">Skip</button>`:''}
         <button onclick="document.getElementById('crm-smart-merge-contacts-modal')?.remove()" class="px-4 border rounded-lg py-2.5 text-sm text-gray-600">Cancel</button>
       </div>
     </div>`;
   document.getElementById('crm-smart-merge-contacts-modal')?.remove();
-  window._smctPairs = pairs.map(p=>({a:p.a.id,b:p.b.id}));
+  window._smctPairs = page.map(p=>({a:p.a.id,b:p.b.id}));
+  window._smctAllPairData = allPairData;
+  window._smctOffset = offset;
   document.body.appendChild(modal);
 };
 
-window._doSmartMergeContacts = async (pairIds) => {
+window._smctPageMerge = async () => {
+  const nextOffset = (window._smctOffset||0) + 100;
+  const hasMore = nextOffset < (window._smctAllPairData||[]).length;
+  await window._doSmartMergeContacts(window._smctPairs, hasMore);
+  if(hasMore) window._smctOpenPage(window._smctAllPairData, nextOffset);
+};
+
+window._smctSkipPage = () => {
+  const nextOffset = (window._smctOffset||0) + 100;
+  document.getElementById('crm-smart-merge-contacts-modal')?.remove();
+  if(nextOffset < (window._smctAllPairData||[]).length) window._smctOpenPage(window._smctAllPairData, nextOffset);
+};
+
+window._doSmartMergeContacts = async (pairIds, suppressViewCRM) => {
   if(!_fbDb||!_fbFns){ showToast('Firebase not ready','error'); return; }
   const {doc, updateDoc, deleteDoc} = _fbFns;
   let mergeCount = 0;
@@ -9191,7 +9219,7 @@ window._doSmartMergeContacts = async (pairIds) => {
     for(const id of toDelete) await deleteDoc(doc(_fbDb,'contacts',id));
     if(mergeCount){
       showToast(`Merged ${mergeCount} contact pair${mergeCount!==1?'s':''} ✓`,'success');
-      viewCRM();
+      if(!suppressViewCRM) viewCRM();
     } else {
       showToast('No pairs selected — check boxes next to the duplicates you want to merge','info',4000);
     }
@@ -9337,6 +9365,18 @@ window.crmSmartMergeCompanies = async () => {
     return;
   }
 
+  // Open paginated merge modal (100 pairs at a time)
+  window._smcOpenPage(pairs, 0, autoMerged);
+};
+
+window._smcOpenPage = (allPairData, offset, autoMerged) => {
+  const PAGE = 100;
+  const page = allPairData.slice(offset, offset + PAGE);
+  const total = allPairData.length;
+  const end = Math.min(offset + PAGE, total);
+  const hasMore = end < total;
+  const nextCount = Math.min(PAGE, total - end);
+
   const modal=document.createElement('div');
   modal.id='crm-smart-merge-co-modal';
   modal.className='fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4';
@@ -9346,9 +9386,9 @@ window.crmSmartMergeCompanies = async () => {
       <button onclick="document.getElementById('crm-smart-merge-co-modal')?.remove()" class="text-gray-400 hover:text-gray-600 text-xl leading-none">✕</button>
     </div>
     <div class="overflow-y-auto flex-1 px-6 py-4 space-y-4">
-      ${autoMerged?`<div class="bg-green-50 border border-green-200 rounded-lg px-3 py-2 text-xs text-green-700">✓ Auto-merged ${autoMerged} exact duplicate name${autoMerged!==1?'s':''}.</div>`:''}
-      <p class="text-xs text-gray-500">Check the pairs you'd like to merge, then choose which name to keep.</p>
-      ${pairs.map((p,i)=>`<div class="border rounded-xl p-4 space-y-2">
+      ${offset===0&&autoMerged?`<div class="bg-green-50 border border-green-200 rounded-lg px-3 py-2 text-xs text-green-700">✓ Auto-merged ${autoMerged} exact duplicate name${autoMerged!==1?'s':''}.</div>`:''}
+      <p class="text-xs text-gray-500">Showing ${offset+1}–${end} of ${total} — check pairs to merge, then choose which name to keep.</p>
+      ${page.map((p,i)=>`<div class="border rounded-xl p-4 space-y-2">
         <label class="flex items-center gap-2 cursor-pointer">
           <input type="checkbox" id="scm-chk-${i}" ${p.hint?'':'checked'} class="w-4 h-4 accent-blue-600"/>
           <span class="text-sm font-semibold text-gray-700">Merge these companies${p.hint?` <span class="font-normal text-blue-500 text-xs">(${p.hint})</span>`:''}</span>
@@ -9366,16 +9406,33 @@ window.crmSmartMergeCompanies = async () => {
       </div>`).join('')}
     </div>
     <div class="px-6 py-4 border-t flex gap-3">
-      <button onclick="window._doSmartMergeCompanies(window._smcPairs)" class="flex-1 brand-btn rounded-lg py-2.5 text-sm font-semibold">Merge Selected</button>
+      <button onclick="window._smcPageMerge()" class="flex-1 brand-btn rounded-lg py-2.5 text-sm font-semibold">Merge Selected${hasMore?` &rarr; Next ${nextCount}`:''}</button>
+      ${hasMore?`<button onclick="window._smcSkipPage()" class="px-4 border border-blue-300 text-blue-600 rounded-lg py-2.5 text-sm font-medium">Skip</button>`:''}
       <button onclick="document.getElementById('crm-smart-merge-co-modal')?.remove()" class="px-4 border rounded-lg py-2.5 text-sm text-gray-600">Cancel</button>
     </div>
   </div>`;
   document.getElementById('crm-smart-merge-co-modal')?.remove();
-  window._smcPairs = pairs.map(p=>({a:p.a.name,b:p.b.name}));
+  window._smcPairs = page.map(p=>({a:p.a.name,b:p.b.name}));
+  window._smcAllPairData = allPairData;
+  window._smcOffset = offset;
+  window._smcAutoMerged = autoMerged;
   document.body.appendChild(modal);
 };
 
-window._doSmartMergeCompanies = async (pairNames) => {
+window._smcPageMerge = async () => {
+  const nextOffset = (window._smcOffset||0) + 100;
+  const hasMore = nextOffset < (window._smcAllPairData||[]).length;
+  await window._doSmartMergeCompanies(window._smcPairs, hasMore);
+  if(hasMore) window._smcOpenPage(window._smcAllPairData, nextOffset, window._smcAutoMerged);
+};
+
+window._smcSkipPage = () => {
+  const nextOffset = (window._smcOffset||0) + 100;
+  document.getElementById('crm-smart-merge-co-modal')?.remove();
+  if(nextOffset < (window._smcAllPairData||[]).length) window._smcOpenPage(window._smcAllPairData, nextOffset, window._smcAutoMerged);
+};
+
+window._doSmartMergeCompanies = async (pairNames, suppressViewCRM) => {
   const {doc, writeBatch} = _fbFns;
   const replaceMap = {};
   let mergeCount = 0;
@@ -9398,7 +9455,7 @@ window._doSmartMergeCompanies = async (pairNames) => {
     await b.commit();
   }
   showToast(`Merged ${mergeCount} company pair${mergeCount!==1?'s':''} ✓`,'success');
-  viewCRM();
+  if(!suppressViewCRM) viewCRM();
 };
 
 // ── Manual Company Merge ─────────────────────────────────────────────
