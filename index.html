@@ -629,6 +629,14 @@ body {
           <textarea id="f-notes" rows="3" placeholder="Any details, acreage, zoning, listing price..."
             class="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none resize-none"></textarea>
         </div>
+        <!-- Likely Buyer Groups -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1.5">🎯 Likely Buyer Groups</label>
+          <div id="f-property-groups-picker" class="flex flex-wrap gap-1.5 p-2 border rounded-xl bg-gray-50 min-h-10 items-center">
+            <span class="text-xs text-gray-400 italic">No groups — create them in the CRM Groups tab</span>
+          </div>
+          <input type="hidden" id="f-property-groups" value="[]"/>
+        </div>
         <!-- Co-Advisors section -->
         <div class="border rounded-xl p-3 bg-blue-50 border-blue-100">
           <div class="flex items-center justify-between mb-1">
@@ -12804,6 +12812,37 @@ window.l10RateMeeting = rating => {
 /* =======================================================
    DEAL MODAL
    ======================================================= */
+// ── Likely Buyer Group picker helpers ────────────────────────────────────────
+window._renderPropertyGroupPicker = function(selectedIds){
+  const picker = document.getElementById('f-property-groups-picker');
+  if(!picker) return;
+  const groups = (typeof allCRMGroups !== 'undefined' ? allCRMGroups : []).filter(g => typeof _isGroupVisible === 'function' ? _isGroupVisible(g) : true);
+  if(!groups.length){
+    picker.innerHTML = '<span class="text-xs text-gray-400 italic">No groups yet — create them in the CRM Groups tab</span>';
+    return;
+  }
+  picker.innerHTML = groups.map(g => {
+    const sel = selectedIds.includes(g.id);
+    const bg  = sel ? (g.color||'#e5e7eb') : '#f9fafb';
+    const col = sel ? (g.textColor||'#374151') : '#6b7280';
+    const bdr = g.color||'#d1d5db';
+    return `<button type="button" onclick="window._togglePropertyGroup('${g.id}')"
+      class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold border transition ${sel?'ring-2 ring-offset-1 ring-blue-300':' hover:opacity-90'}"
+      style="background:${bg};color:${col};border-color:${bdr}"
+      data-gid="${g.id}">${g.emoji||'👥'} ${g.name}</button>`;
+  }).join('');
+};
+window._togglePropertyGroup = function(gid){
+  const hiddenInput = document.getElementById('f-property-groups');
+  if(!hiddenInput) return;
+  let ids = [];
+  try { ids = JSON.parse(hiddenInput.value||'[]'); } catch(e){}
+  if(ids.includes(gid)) ids = ids.filter(x=>x!==gid);
+  else ids.push(gid);
+  hiddenInput.value = JSON.stringify(ids);
+  window._renderPropertyGroupPicker(ids);
+};
+
 window.openDealModal = (id, defaultStage) => {
   editingDealId = id||null;
   const modal=document.getElementById('deal-modal');
@@ -12846,6 +12885,7 @@ window.openDealModal = (id, defaultStage) => {
     document.getElementById('f-advisor-uid').value=deal.advisorUid||currentUser.uid;
     // Populate co-advisors
     (deal.coAdvisors||[]).forEach(ca=>addCoAdvisorRow(ca));
+    document.getElementById('f-property-groups').value = JSON.stringify(deal.propertyGroups||[]);
     stageBadge.textContent='Stage: '+(deal.stage||'Prospect');
     stageBadge.className='text-xs font-semibold mt-0.5 px-2 py-0.5 rounded-full w-fit '+(SC[deal.stage]?.txt||'text-gray-500')+' '+(SC[deal.stage]?.hdr||'bg-gray-100');
     // Render stage-specific gate fields for existing deal
@@ -12888,6 +12928,8 @@ window.openDealModal = (id, defaultStage) => {
     }
   }
   modal.classList.remove('hidden');
+  // Render group picker after modal is visible
+  try { window._renderPropertyGroupPicker(JSON.parse(document.getElementById('f-property-groups').value||'[]')); } catch(e){}
 };
 window.closeDealModal = () => document.getElementById('deal-modal').classList.add('hidden');
 window.recalcRevenue = () => {
@@ -13250,6 +13292,7 @@ window.handleDealSubmit = async ev => {
     dueDiligenceDate:document.getElementById('f-dd').value||null,
     closeDate:document.getElementById('f-close').value||null,
     notes:document.getElementById('f-notes').value.trim(),
+    propertyGroups:(()=>{ try{return JSON.parse(document.getElementById('f-property-groups')?.value||'[]');}catch(e){return [];} })(),
     updatedAt:Date.now(),
     ...sf,
     dueDiligenceDate: sf.ddExpirationDate||sf.closeDate||null,
