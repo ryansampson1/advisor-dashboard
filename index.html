@@ -7384,6 +7384,24 @@ function viewCRM(){
     return true;
   });
 
+  // Sort by last name then first name
+  visible.sort((a,b)=>{
+    const la=(a.lastName||a.firstName||'').toLowerCase();
+    const lb=(b.lastName||b.firstName||'').toLowerCase();
+    if(la<lb) return -1; if(la>lb) return 1;
+    const fa=(a.firstName||'').toLowerCase();
+    const fb=(b.firstName||'').toLowerCase();
+    return fa<fb?-1:fa>fb?1:0;
+  });
+  // Snapshot before alpha filter (for letter availability counts)
+  const _visibleForAlpha = visible;
+  if(window._crmAlphaFilter){
+    visible = visible.filter(c=>{
+      const init = ((c.lastName||c.firstName||'')[0]||'').toUpperCase();
+      return init === window._crmAlphaFilter;
+    });
+  }
+
   const groupOptions = allCRMGroups.filter(_isGroupVisible).map(g=>
     `<option value="${g.id}" ${gf===g.id?'selected':''}>${g.name} (${allContacts.filter(c=>(c.groups||[]).includes(g.id)).length})</option>`
   ).join('');
@@ -7403,6 +7421,27 @@ function viewCRM(){
     if(c.phone){const k=c.phone.replace(/\D/g,'');if(k.length>=10)_ctPhoneCounts[k]=(_ctPhoneCounts[k]||0)+1;}
   }
   const _hasDupeContacts=Object.values(_ctEmailCounts).some(n=>n>1)||Object.values(_ctPhoneCounts).some(n=>n>1);
+  // Build A-Z scrubber bar
+  const _alphaLetters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
+  const _alphaBar = _alphaLetters.map(L => {
+    const has = _visibleForAlpha.some(c => ((c.lastName||c.firstName||'')[0]||'').toUpperCase() === L);
+    const active = window._crmAlphaFilter === L;
+    const baseClass = 'flex-1 py-1 text-xs font-semibold rounded transition-all text-center cursor-pointer select-none';
+    const activeClass = active ? 'text-gray-900' : 'text-gray-400 hover:text-gray-600';
+    const dimClass = !has ? 'opacity-20 pointer-events-none' : '';
+    const inlineStyle = active ? 'background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.12);font-weight:700;color:#111827;' : '';
+    return `<span data-alpha="${L}" class="${baseClass} ${activeClass} ${dimClass}" style="${inlineStyle}">${L}</span>`;
+  }).join('');
+  const _alphaBarHtml = `<div id="crm-alpha-scrubber"
+    class="flex items-stretch gap-0 mb-2.5 bg-gray-100 rounded-xl p-1 cursor-pointer"
+    onpointerdown="window._crmAlpha.start(event)"
+    onpointermove="window._crmAlpha.move(event)"
+    onpointerup="window._crmAlpha.end(event)"
+    onpointercancel="window._crmAlpha.end(event)">
+    <span data-alpha="" class="px-2 py-1 text-xs font-semibold rounded transition-all select-none cursor-pointer ${!window._crmAlphaFilter?'text-gray-900':'text-gray-400 hover:text-gray-600'}" style="${!window._crmAlphaFilter?'background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.12);':''}">All</span>
+    ${_alphaBar}
+  </div>`;
+
   const contactsHtml = `
     <div class="flex flex-wrap gap-2 mb-4 items-center">
       <input id="crm-contact-search" type="text" placeholder="Search name, company, email…" value="${(window._crmSearchFilter||'').replace(/"/g,'&quot;')}"
@@ -7425,7 +7464,8 @@ function viewCRM(){
         <button type="button" onclick="window.crmExportCSV()" class="border rounded-lg px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50">⬇ Export CSV</button>
         ${(typeof _CRM_OUTREACH_IMPORTS!=='undefined'&&_CRM_OUTREACH_IMPORTS.filter(r=>!r.imported&&!r.skipped).length>0)?`<button type="button" onclick="window._crmShowOutreachImports()" class="border border-indigo-200 rounded-lg px-3 py-1.5 text-sm text-indigo-600 hover:bg-indigo-50 whitespace-nowrap font-semibold">📥 Outreach <span class="inline-flex items-center justify-center w-4 h-4 text-xs font-bold text-white bg-indigo-500 rounded-full ml-1">${_CRM_OUTREACH_IMPORTS.filter(r=>!r.imported&&!r.skipped).length}</span></button>`:''}`:''}
     </div>
-    <div class="text-xs text-gray-400 mb-3">${visible.length} contact${visible.length!==1?'s':''} ${gf?'in group':'total'}</div>
+    \${_alphaBarHtml}
+    <div class="text-xs text-gray-400 mb-3">\${visible.length} contact\${visible.length!==1?'s':''} \${gf?'in group':'total'}\${window._crmAlphaFilter?' — last name starts with '+window._crmAlphaFilter:''}</div>
     ${visible.length===0?`
       <div class="text-center py-16 text-gray-400">
         <div class="text-5xl mb-3">👤</div>
@@ -9342,8 +9382,8 @@ window._execManualMergeContacts = async () => {
 };
 
 // ── CRM Outreach Imports (updated nightly by daily-crm-outreach-sync task) ──
-const _CRM_OUTREACH_SYNC_DATE = '';
-const _CRM_OUTREACH_IMPORTS = [];
+const _CRM_OUTREACH_SYNC_DATE = '2026-05-19';
+const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-05-18_0","emailDate":"2026-05-18","emailSubject":"Fwd: Contract - Spring Hill","attachmentNames":["Contract - Spring Hill, FL - Robert Basham.docx","Exhibit B - Escrow Agreement.pdf"],"recipientEmail":"rbasham@mvpholdings.com","recipientName":"Robert Basham","recipientFirstName":"Robert","recipientLastName":"Basham","companyName":"Mvpholdings","propertyHint":"Spring Hill","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-05-18_1","emailDate":"2026-05-18","emailSubject":"Re: Pasadena Master Schedule","attachmentNames":["Pasadena Hills - REZONING Amendment Letter Agreement 5.15.26 comments.docx"],"recipientEmail":"jschwartz@redstoneinvestments.com","recipientName":"Jon Schwartz","recipientFirstName":"Jon","recipientLastName":"Schwartz","companyName":"Redstoneinvestments","propertyHint":"Pasadena Hills","matchedDealId":null,"imported":false,"skipped":false}];
 
 // ── Gmail Sync ───────────────────────────────────────────────────────
 const _GMAIL_SYNC_DATE = '2026-05-19';
@@ -9530,6 +9570,65 @@ window._crmProcessOutreachRecord = async function(r){
         source: 'auto',
       });
     } catch(e){ console.warn('[outreach activity]', e); }
+  }
+};
+
+// ── A-Z scrubber drag handler ─────────────────────────────────────────────────
+window._crmAlphaFilter = window._crmAlphaFilter || '';
+window._crmAlpha = {
+  _dragging: false,
+  _pending: null,
+  start(e) {
+    this._dragging = true;
+    const bar = document.getElementById('crm-alpha-scrubber');
+    if(bar) bar.setPointerCapture(e.pointerId);
+    this._highlight(e);
+  },
+  move(e) {
+    if(!this._dragging) return;
+    this._highlight(e);
+  },
+  end(e) {
+    if(!this._dragging) return;
+    this._dragging = false;
+    const bar = document.getElementById('crm-alpha-scrubber');
+    if(bar) try{ bar.releasePointerCapture(e.pointerId); }catch(_){}
+    if(this._pending !== null){
+      // Toggle off if same letter clicked
+      window._crmAlphaFilter = (window._crmAlphaFilter === this._pending) && !this._moved ? '' : this._pending;
+      this._pending = null;
+      this._moved = false;
+      window.viewCRM();
+    }
+  },
+  click(letter) {
+    // Toggle if same letter; otherwise set new
+    window._crmAlphaFilter = window._crmAlphaFilter === letter ? '' : letter;
+    window.viewCRM();
+  },
+  _moved: false,
+  _highlight(e) {
+    const bar = document.getElementById('crm-alpha-scrubber');
+    if(!bar) return;
+    const x = e.clientX, y = e.clientY;
+    let found = null;
+    for(const btn of bar.querySelectorAll('[data-alpha]')){
+      const r = btn.getBoundingClientRect();
+      if(x >= r.left && x <= r.right && y >= r.top && y <= r.bottom){ found = btn.dataset.alpha; break; }
+    }
+    if(found !== null && found !== this._pending){
+      this._pending = found;
+      this._moved = true;
+      // Visual feedback without re-render
+      for(const btn of bar.querySelectorAll('[data-alpha]')){
+        const on = btn.dataset.alpha === found;
+        btn.style.background   = on ? '#fff' : '';
+        btn.style.boxShadow    = on ? '0 1px 3px rgba(0,0,0,.12)' : '';
+        btn.style.color        = on ? '#111827' : '';
+        btn.style.fontWeight   = on ? '700' : '';
+        btn.style.borderRadius = on ? '6px' : '';
+      }
+    }
   }
 };
 
