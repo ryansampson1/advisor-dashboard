@@ -63,6 +63,36 @@ body {
   white-space: nowrap;
 }
 .tab-btn:hover { color: rgba(255,255,255,.9); }
+
+/* ── Nav badges (task count, HR headline count) ────────── */
+.nav-badge {
+  position:absolute; top:3px; right:1px; min-width:16px; height:16px;
+  background:#ef4444; color:#fff; font-size:9px; font-weight:800;
+  border-radius:8px; display:inline-flex; align-items:center;
+  justify-content:center; padding:0 4px; line-height:1;
+  pointer-events:none; box-shadow:0 1px 4px rgba(0,0,0,.4);
+}
+.mtab-badge {
+  position:absolute; top:2px; right:50%; transform:translateX(50%) translateX(9px);
+  min-width:15px; height:15px; background:#ef4444; color:#fff;
+  font-size:8px; font-weight:800; border-radius:8px; display:inline-flex;
+  align-items:center; justify-content:center; padding:0 3px;
+  pointer-events:none; box-shadow:0 1px 3px rgba(0,0,0,.4);
+}
+/* ── Brief notification popup ───────────────────────────── */
+@keyframes _briefIn  { from{opacity:0;transform:translateY(-14px)} to{opacity:1;transform:translateY(0)} }
+@keyframes _briefOut { from{opacity:1;transform:translateY(0)}      to{opacity:0;transform:translateY(-8px)} }
+.brief-notif {
+  position:fixed; top:68px; right:1.5rem; z-index:99999;
+  background:#1a2332; color:#fff; border-radius:14px;
+  padding:.65rem 1.1rem; font-size:.82rem; font-weight:600;
+  box-shadow:0 6px 28px rgba(0,0,0,.45); display:flex;
+  align-items:center; gap:.55rem; max-width:340px;
+  animation:_briefIn .22s ease forwards;
+  border:1px solid rgba(255,255,255,.12);
+}
+.brief-notif.out { animation:_briefOut .3s ease forwards; }
+
 .tab-btn.active {
   border-bottom-color: var(--brand-red) !important;
   color: #fff !important;
@@ -2899,7 +2929,8 @@ let allDeals     = [];
 let allProfiles  = {};
 let allAutomations = [];
 let allOfficeManagers = []; // [{email, office, name?}] — loaded from DB / localStorage
-let allTasks = [];         // [{id, title, description, assignedTo, assignedToName, dueDate, status, dealId, dealAddress, createdBy, createdAt}]
+let allTasks = [];
+let allHeadlines = [];   // [{id,title,body,createdAt,createdBy,pinned}]         // [{id, title, description, assignedTo, assignedToName, dueDate, status, dealId, dealAddress, createdBy, createdAt}]
 let allDocuments = [];     // [{id, type, office, url, name, uploadedAt}]
 let pendingActions = [];
 let activeChart  = null;
@@ -3862,7 +3893,17 @@ const FB = {
   },
   async signInWithGoogle(){
     const {GoogleAuthProvider, signInWithPopup} = _fbFns;
-    return signInWithPopup(_fbAuth, new GoogleAuthProvider());
+    const _gProvider = new GoogleAuthProvider();
+    _gProvider.addScope('https://www.googleapis.com/auth/calendar.readonly');
+    const _signInResult = await signInWithPopup(_fbAuth, _gProvider);
+    try {
+      const _gcred = GoogleAuthProvider.credentialFromResult(_signInResult);
+      if(_gcred?.accessToken){
+        sessionStorage.setItem('gcal_token', _gcred.accessToken);
+        sessionStorage.setItem('gcal_token_exp', String(Date.now() + 3600*1000));
+      }
+    } catch(e){}
+    return _signInResult;
   },
   onAuthChange(cb){
     _fbFns.onAuthStateChanged(_fbAuth, cb);
@@ -4052,6 +4093,13 @@ const FB = {
         }));
       }
     }
+    // ── HR Headlines listener ──────────────────────────────
+    const {orderBy: _hlOBy, query: _hlQ} = _fbFns;
+    const hlQ = _hlQ(collection(_fbDb,'hrHeadlines'), _hlOBy('createdAt','desc'));
+    _fbUnsubs.push(onSnapshot(hlQ, snap=>{
+      allHeadlines = snap.docs.map(d=>({...d.data(), id:d.id}));
+      onUpdate('headlines');
+    }));
   },
   async createTask(data){
     const {collection, addDoc} = _fbFns;
@@ -4133,6 +4181,8 @@ function scheduleReRender(src){
       '[id^="se-"]:not(.hidden),[id^="pe-"]:not(.hidden)'
     );
     if(!modalOpen && !inlineEditorOpen){ renderCurrentView(); checkListingRenewalReminders(); }
+    _updateNavBadges();
+    _checkNewTaskNotif();
     // Show a subtle live-sync indicator
     const dot=document.getElementById('live-dot');
     if(dot){ dot.classList.add('animate-ping'); setTimeout(()=>dot.classList.remove('animate-ping'),700); }
@@ -5167,8 +5217,8 @@ function renderShell(){
         <!-- Nav -->
         <nav class="flex gap-0.5 overflow-x-auto flex-1" style="scrollbar-width:none">
           ${navItems.map(n=>`
-            <button class="tab-btn ${currentView===n.id?'active':''}"
-              onclick="switchView('${n.id}')">${n.label}</button>`).join('')}
+            <button class="tab-btn ${currentView===n.id?'active':''}" id="tab-btn-${n.id}"
+              style="position:relative" onclick="switchView('${n.id}')">${n.label}<span class="nav-badge" id="nav-badge-${n.id}" style="display:none">0</span></button>`).join('')}
         </nav>
         <div class="flex items-center gap-3 shrink-0">
           ${!DEMO_MODE?`<span class="flex items-center gap-1 text-xs text-green-400" title="Live — changes sync instantly">
@@ -5222,7 +5272,11 @@ window.setAnthropicKey = async (key) => {
   console.log('%c✅ Anthropic key saved to Firestore', 'color:green;font-weight:bold');
 };
 
-window.switchView = id => { currentView=id; renderCurrentView(); updateTabs(); };
+window.switchView = id => {
+  currentView=id;
+  if(id==='hr') { localStorage.setItem('hr_headlines_seen', Date.now()); _updateNavBadges(); }
+  renderCurrentView(); updateTabs();
+};
 window.setOfficeFilter = v => { adminOfficeFilter=v; renderCurrentView(); };
 function updateTabs(){
   document.querySelectorAll('.tab-btn').forEach(b=>{
@@ -5233,6 +5287,7 @@ function updateTabs(){
     const match=b.getAttribute('onclick')=== `switchView('${currentView}')`;
     b.classList.toggle('active',match);
   });
+  _updateNavBadges();
 }
 
 function renderCurrentView(){
@@ -7150,19 +7205,22 @@ function _crmFindContact(email, name) {
 
 // ── Core: ensure a contact exists and is linked to this deal ───────
 async function _crmEnsureContact(nameRaw, email, phone, company, dealId) {
-  if(!nameRaw && !email) return; // Nothing to create
+  if(!nameRaw && !email) return null; // Nothing to create
   const existing = _crmFindContact(email, nameRaw);
   if(existing) {
-    // Link deal if not already linked
-    const linked = existing.linkedDeals || [];
-    if(!linked.includes(dealId)) {
-      const {doc, updateDoc} = _fbFns;
-      await updateDoc(doc(_fbDb,'contacts',existing.id), {linkedDeals:[...linked,dealId], updatedAt:Date.now()});
+    // Link deal if not already linked (only if dealId is a real value)
+    if(dealId) {
+      const linked = existing.linkedDeals || [];
+      if(!linked.includes(dealId)) {
+        const {doc, updateDoc} = _fbFns;
+        await updateDoc(doc(_fbDb,'contacts',existing.id), {linkedDeals:[...linked,dealId], updatedAt:Date.now()});
+        existing.linkedDeals = [...linked, dealId];
+      }
     }
-    return;
+    return existing.id; // ← return the contact ID
   }
   // Create new contact
-  if(!_fbDb || !_fbFns) return;
+  if(!_fbDb || !_fbFns) return null;
   const {collection, addDoc} = _fbFns;
   const {firstName, lastName} = _crmParseName(nameRaw);
   const contactData = {
@@ -7172,7 +7230,7 @@ async function _crmEnsureContact(nameRaw, email, phone, company, dealId) {
     company: company||'',
     source: 'Deal auto-import',
     groups: [],
-    linkedDeals: [dealId],
+    linkedDeals: dealId ? [dealId] : [], // ← guard against null dealId
     createdAt: Date.now(),
     updatedAt: Date.now(),
     createdBy: currentUser?.uid||'',
@@ -7180,6 +7238,7 @@ async function _crmEnsureContact(nameRaw, email, phone, company, dealId) {
   const ref = await addDoc(collection(_fbDb,'contacts'), contactData);
   allContacts.push({id:ref.id, ...contactData});
   console.log('[CRM auto-contact] Created:', firstName, lastName, email);
+  return ref.id; // ← return the new contact ID
 }
 
 // ── Main: auto-create all relevant contacts from a deal ─────────────
@@ -7537,6 +7596,30 @@ function viewCRM(){
 
   let coEntries = Object.values(coMap).sort((a,b)=>a.name.localeCompare(b.name));
   if(csf) coEntries = coEntries.filter(e=>e.name.toLowerCase().includes(csf));
+  // Snapshot before alpha filter (for letter availability)
+  const _visibleForAlphaCo = coEntries.slice();
+  if(window._crmAlphaFilterCo){
+    coEntries = coEntries.filter(e => ((e.name.trim()[0])||'').toUpperCase() === window._crmAlphaFilterCo);
+  }
+  // Build A-Z scrubber for Companies
+  const _alphaBarCo = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('').map(L => {
+    const has = _visibleForAlphaCo.some(e => ((e.name.trim()[0])||'').toUpperCase() === L);
+    const active = window._crmAlphaFilterCo === L;
+    const baseClass = 'flex-1 py-1 text-xs font-semibold rounded transition-all text-center cursor-pointer select-none';
+    const activeClass = active ? 'text-gray-900' : 'text-gray-400 hover:text-gray-600';
+    const dimClass = !has ? 'opacity-20 pointer-events-none' : '';
+    const inlineStyle = active ? 'background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.12);font-weight:700;color:#111827;' : '';
+    return `<span data-alpha="${L}" class="${baseClass} ${activeClass} ${dimClass}" style="${inlineStyle}">${L}</span>`;
+  }).join('');
+  const _alphaBarHtmlCo = `<div id="crm-alpha-scrubber-co"
+    class="flex items-stretch gap-0 mb-2.5 bg-gray-100 rounded-xl p-1 cursor-pointer"
+    onpointerdown="window._crmAlphaCo.start(event)"
+    onpointermove="window._crmAlphaCo.move(event)"
+    onpointerup="window._crmAlphaCo.end(event)"
+    onpointercancel="window._crmAlphaCo.end(event)">
+    <span data-alpha="" class="px-2 py-1 text-xs font-semibold rounded transition-all select-none cursor-pointer ${!window._crmAlphaFilterCo?'text-gray-900':'text-gray-400 hover:text-gray-600'}" style="${!window._crmAlphaFilterCo?'background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.12);':''}">All</span>
+    ${_alphaBarCo}
+  </div>`;
 
   // Detect duplicate/similar company names for smart merge banner
   const _coNameNormCounts = {};
@@ -7549,8 +7632,9 @@ function viewCRM(){
         oninput="window._crmCompanySearch=this.value;window._crmFocusId='crm-company-search';window.viewCRM()"
         class="border rounded-lg px-3 py-1.5 text-sm outline-none flex-1 min-w-48 focus:ring-2 focus:ring-blue-200"/>
       <button onclick="openCompanyModal(null)" class="brand-btn px-4 py-1.5 rounded-lg text-sm font-semibold">+ Add Company</button>
-      <span class="text-xs text-gray-400">${coEntries.length} compan${coEntries.length!==1?'ies':'y'}</span>
+      <span class="text-xs text-gray-400">${coEntries.length} compan${coEntries.length!==1?'ies':'y'}${window._crmAlphaFilterCo?' — starts with '+window._crmAlphaFilterCo:''}</span>
     </div>
+    ${_alphaBarHtmlCo}
     <div class="${_hasDupeCompanies?'bg-amber-50 border border-amber-200':'bg-gray-50 border border-gray-200'} rounded-xl px-4 py-3 mb-4 flex items-center justify-between gap-3">
       <span class="text-xs ${_hasDupeCompanies?'text-amber-700':'text-gray-500'} font-medium">${_hasDupeCompanies?'⚠ Duplicate or similar company names detected — click to review and merge.':'🔍 Merge similar or manually select any two companies to combine.'}</span>
       <div class="flex gap-2 shrink-0">
@@ -7600,11 +7684,38 @@ function viewCRM(){
     </div>`}`;
 
   // ── Groups manager ────────────────────────────────────────────────
+  let visibleGroups = allCRMGroups.filter(_isGroupVisible).sort((a,b)=>a.name.localeCompare(b.name));
+  // Snapshot before alpha filter (for letter availability)
+  const _visibleForAlphaGr = visibleGroups.slice();
+  if(window._crmAlphaFilterGr){
+    visibleGroups = visibleGroups.filter(g => ((g.name.trim()[0])||'').toUpperCase() === window._crmAlphaFilterGr);
+  }
+  // Build A-Z scrubber for Groups
+  const _alphaBarGr = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('').map(L => {
+    const has = _visibleForAlphaGr.some(g => ((g.name.trim()[0])||'').toUpperCase() === L);
+    const active = window._crmAlphaFilterGr === L;
+    const baseClass = 'flex-1 py-1 text-xs font-semibold rounded transition-all text-center cursor-pointer select-none';
+    const activeClass = active ? 'text-gray-900' : 'text-gray-400 hover:text-gray-600';
+    const dimClass = !has ? 'opacity-20 pointer-events-none' : '';
+    const inlineStyle = active ? 'background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.12);font-weight:700;color:#111827;' : '';
+    return `<span data-alpha="${L}" class="${baseClass} ${activeClass} ${dimClass}" style="${inlineStyle}">${L}</span>`;
+  }).join('');
+  const _alphaBarHtmlGr = `<div id="crm-alpha-scrubber-gr"
+    class="flex items-stretch gap-0 mb-2.5 bg-gray-100 rounded-xl p-1 cursor-pointer"
+    onpointerdown="window._crmAlphaGr.start(event)"
+    onpointermove="window._crmAlphaGr.move(event)"
+    onpointerup="window._crmAlphaGr.end(event)"
+    onpointercancel="window._crmAlphaGr.end(event)">
+    <span data-alpha="" class="px-2 py-1 text-xs font-semibold rounded transition-all select-none cursor-pointer ${!window._crmAlphaFilterGr?'text-gray-900':'text-gray-400 hover:text-gray-600'}" style="${!window._crmAlphaFilterGr?'background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.12);':''}">All</span>
+    ${_alphaBarGr}
+  </div>`;
+
   const _groupNameCounts = {};
-  for(const g of allCRMGroups.filter(_isGroupVisible)){ const k=_normGrp(g.name); _groupNameCounts[k]=(_groupNameCounts[k]||0)+1; }
+  for(const g of visibleGroups){ const k=_normGrp(g.name); _groupNameCounts[k]=(_groupNameCounts[k]||0)+1; }
   const _hasDupeGroups = Object.values(_groupNameCounts).some(n=>n>1);
 
   const groupsHtml = `
+    ${_alphaBarHtmlGr}
     <div class="${_hasDupeGroups?'bg-amber-50 border border-amber-200':'bg-gray-50 border border-gray-200'} rounded-xl px-4 py-3 mb-4 flex items-center justify-between gap-3">
       <span class="text-xs ${_hasDupeGroups?'text-amber-700':'text-gray-500'} font-medium">${_hasDupeGroups?'⚠ Duplicate or similar group names detected — click to review and merge.':'🔍 Merge similar groups or manually select any two to combine.'}</span>
       <div class="flex gap-2 shrink-0">
@@ -7613,7 +7724,7 @@ function viewCRM(){
       </div>
     </div>
     <div class="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-      ${allCRMGroups.filter(_isGroupVisible).map(g=>{
+      ${visibleGroups.map(g=>{
         const count = allContacts.filter(c=>(c.groups||[]).includes(g.id)).length;
         const isPrivate = g.visibility === 'private';
         const canEdit = currentUser?.isAdmin || g.createdBy === currentUser?.uid || (g.allowedUsers||[]).includes(currentUser?.uid);
@@ -7650,6 +7761,37 @@ function viewCRM(){
     return hay.includes(_propSearch);
   });
 
+  // Sort by property address / project name
+  propDeals.sort((a,b)=>{
+    const la=(a.propertyAddress||a.projectName||'').toLowerCase();
+    const lb=(b.propertyAddress||b.projectName||'').toLowerCase();
+    return la<lb?-1:la>lb?1:0;
+  });
+  // Snapshot before alpha filter (for letter availability)
+  const _visibleForAlphaPr = propDeals.slice();
+  if(window._crmAlphaFilterPr){
+    propDeals = propDeals.filter(d => ((d.propertyAddress||d.projectName||'')[0]||'').toUpperCase() === window._crmAlphaFilterPr);
+  }
+  // Build A-Z scrubber for Properties
+  const _alphaBarPr = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('').map(L => {
+    const has = _visibleForAlphaPr.some(d => ((d.propertyAddress||d.projectName||'')[0]||'').toUpperCase() === L);
+    const active = window._crmAlphaFilterPr === L;
+    const baseClass = 'flex-1 py-1 text-xs font-semibold rounded transition-all text-center cursor-pointer select-none';
+    const activeClass = active ? 'text-gray-900' : 'text-gray-400 hover:text-gray-600';
+    const dimClass = !has ? 'opacity-20 pointer-events-none' : '';
+    const inlineStyle = active ? 'background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.12);font-weight:700;color:#111827;' : '';
+    return `<span data-alpha="${L}" class="${baseClass} ${activeClass} ${dimClass}" style="${inlineStyle}">${L}</span>`;
+  }).join('');
+  const _alphaBarHtmlPr = `<div id="crm-alpha-scrubber-pr"
+    class="flex items-stretch gap-0 mb-2.5 bg-gray-100 rounded-xl p-1 cursor-pointer"
+    onpointerdown="window._crmAlphaPr.start(event)"
+    onpointermove="window._crmAlphaPr.move(event)"
+    onpointerup="window._crmAlphaPr.end(event)"
+    onpointercancel="window._crmAlphaPr.end(event)">
+    <span data-alpha="" class="px-2 py-1 text-xs font-semibold rounded transition-all select-none cursor-pointer ${!window._crmAlphaFilterPr?'text-gray-900':'text-gray-400 hover:text-gray-600'}" style="${!window._crmAlphaFilterPr?'background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.12);':''}">All</span>
+    ${_alphaBarPr}
+  </div>`;
+
   // Collect unique stages for filter dropdown
   const _propStages = [...new Set(allDeals.map(d=>d.stage).filter(Boolean))].sort();
 
@@ -7677,7 +7819,8 @@ function viewCRM(){
         ${_propStages.map(s=>`<option value="${s}" ${_propStageF===s?'selected':''}>${s}</option>`).join('')}
       </select>
     </div>
-    <div class="text-xs text-gray-400 mb-3">${propDeals.length} propert${propDeals.length!==1?'ies':'y'}</div>
+    ${_alphaBarHtmlPr}
+    <div class="text-xs text-gray-400 mb-3">${propDeals.length} propert${propDeals.length!==1?'ies':'y'}${window._crmAlphaFilterPr?' — starts with '+window._crmAlphaFilterPr:''}</div>
     ${propDeals.length===0 ? `
       <div class="text-center py-16 text-gray-400">
         <div class="text-5xl mb-3">🏡</div>
@@ -9582,6 +9725,7 @@ window._crmImportAllOutreach = async function(){
       await window._crmImportOutreachRow(i).catch(()=>{});
     }
   }
+  document.getElementById('crm-outreach-modal')?.remove(); // ← close the modal
   showToast(`✅ Imported ${pending.length} outreach records`,'success',5000);
 };
 
@@ -9635,63 +9779,70 @@ window._crmProcessOutreachRecord = async function(r){
 };
 
 // ── A-Z scrubber drag handler ─────────────────────────────────────────────────
-window._crmAlphaFilter = window._crmAlphaFilter || '';
-window._crmAlpha = {
-  _dragging: false,
-  _pending: null,
-  start(e) {
-    this._dragging = true;
-    const bar = document.getElementById('crm-alpha-scrubber');
-    if(bar) bar.setPointerCapture(e.pointerId);
-    this._highlight(e);
-  },
-  move(e) {
-    if(!this._dragging) return;
-    this._highlight(e);
-  },
-  end(e) {
-    if(!this._dragging) return;
-    this._dragging = false;
-    const bar = document.getElementById('crm-alpha-scrubber');
-    if(bar) try{ bar.releasePointerCapture(e.pointerId); }catch(_){}
-    if(this._pending !== null){
-      // Toggle off if same letter clicked
-      window._crmAlphaFilter = (window._crmAlphaFilter === this._pending) && !this._moved ? '' : this._pending;
-      this._pending = null;
-      this._moved = false;
+window._crmAlphaFilter   = window._crmAlphaFilter   || '';
+window._crmAlphaFilterCo = window._crmAlphaFilterCo || '';
+window._crmAlphaFilterGr = window._crmAlphaFilterGr || '';
+window._crmAlphaFilterPr = window._crmAlphaFilterPr || '';
+// ── A-Z scrubber factory — shared by Contacts, Companies, Groups, Properties ──
+window._makeAlpha = function(filterKey, barId) {
+  return {
+    _dragging: false,
+    _pending: null,
+    _moved: false,
+    start(e) {
+      this._dragging = true;
+      const bar = document.getElementById(barId);
+      if(bar) bar.setPointerCapture(e.pointerId);
+      this._highlight(e);
+    },
+    move(e) {
+      if(!this._dragging) return;
+      this._highlight(e);
+    },
+    end(e) {
+      if(!this._dragging) return;
+      this._dragging = false;
+      const bar = document.getElementById(barId);
+      if(bar) try{ bar.releasePointerCapture(e.pointerId); }catch(_){}
+      if(this._pending !== null){
+        window[filterKey] = (window[filterKey] === this._pending) && !this._moved ? '' : this._pending;
+        this._pending = null;
+        this._moved = false;
+        window.viewCRM();
+      }
+    },
+    click(letter) {
+      window[filterKey] = window[filterKey] === letter ? '' : letter;
       window.viewCRM();
-    }
-  },
-  click(letter) {
-    // Toggle if same letter; otherwise set new
-    window._crmAlphaFilter = window._crmAlphaFilter === letter ? '' : letter;
-    window.viewCRM();
-  },
-  _moved: false,
-  _highlight(e) {
-    const bar = document.getElementById('crm-alpha-scrubber');
-    if(!bar) return;
-    const x = e.clientX, y = e.clientY;
-    let found = null;
-    for(const btn of bar.querySelectorAll('[data-alpha]')){
-      const r = btn.getBoundingClientRect();
-      if(x >= r.left && x <= r.right && y >= r.top && y <= r.bottom){ found = btn.dataset.alpha; break; }
-    }
-    if(found !== null && found !== this._pending){
-      this._pending = found;
-      this._moved = true;
-      // Visual feedback without re-render
+    },
+    _highlight(e) {
+      const bar = document.getElementById(barId);
+      if(!bar) return;
+      const x = e.clientX, y = e.clientY;
+      let found = null;
       for(const btn of bar.querySelectorAll('[data-alpha]')){
-        const on = btn.dataset.alpha === found;
-        btn.style.background   = on ? '#fff' : '';
-        btn.style.boxShadow    = on ? '0 1px 3px rgba(0,0,0,.12)' : '';
-        btn.style.color        = on ? '#111827' : '';
-        btn.style.fontWeight   = on ? '700' : '';
-        btn.style.borderRadius = on ? '6px' : '';
+        const r = btn.getBoundingClientRect();
+        if(x >= r.left && x <= r.right && y >= r.top && y <= r.bottom){ found = btn.dataset.alpha; break; }
+      }
+      if(found !== null && found !== this._pending){
+        this._pending = found;
+        this._moved = true;
+        for(const btn of bar.querySelectorAll('[data-alpha]')){
+          const on = btn.dataset.alpha === found;
+          btn.style.background   = on ? '#fff' : '';
+          btn.style.boxShadow    = on ? '0 1px 3px rgba(0,0,0,.12)' : '';
+          btn.style.color        = on ? '#111827' : '';
+          btn.style.fontWeight   = on ? '700' : '';
+          btn.style.borderRadius = on ? '6px' : '';
+        }
       }
     }
-  }
+  };
 };
+window._crmAlpha   = window._makeAlpha('_crmAlphaFilter',   'crm-alpha-scrubber');
+window._crmAlphaCo = window._makeAlpha('_crmAlphaFilterCo', 'crm-alpha-scrubber-co');
+window._crmAlphaGr = window._makeAlpha('_crmAlphaFilterGr', 'crm-alpha-scrubber-gr');
+window._crmAlphaPr = window._makeAlpha('_crmAlphaFilterPr', 'crm-alpha-scrubber-pr');
 
 window.crmGmailSync = () => {
   // Compare Gmail contacts against live CRM data
@@ -10341,7 +10492,7 @@ window.crmDoImport = async () => {
             if(!mergedGroups.includes(gid) && !existingGroupNames.has(gname)){ mergedGroups.push(gid); existingGroupNames.add(gname); }
           }
           if(mergedGroups.length !== existingGroupIds.length) updates.groups = mergedGroups;
-          if(Object.keys(updates).length > 1) updateOps.push({id:existingContact.id, updates});
+          if(Object.keys(updates).length > 1 && existingContact.id !== '_new') updateOps.push({id:existingContact.id, updates});
           updateCount++;
         } else {
           dupeCount++;
@@ -10372,7 +10523,7 @@ window.crmDoImport = async () => {
     const BATCH = 400;
     for(let i=0; i<updateOps.length; i+=BATCH){
       const b = writeBatch(_fbDb);
-      for(const op of updateOps.slice(i,i+BATCH)) b.update(doc(_fbDb,'contacts',op.id), op.updates);
+      for(const op of updateOps.slice(i,i+BATCH)) b.set(doc(_fbDb,'contacts',op.id), op.updates, {merge:true});
       await b.commit();
     }
     // Batch insert new contacts
@@ -14208,11 +14359,39 @@ async function launchApp(){
    VIEW: HR
    ======================================================= */
 function viewHR(){
+  // Build headlines HTML
+  const isHlAdmin = currentUser?.isAdmin || currentUser?.isSuperAdmin;
+  const hlHtml = allHeadlines.length || isHlAdmin ? `
+    <div style="margin-bottom:1.75rem">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.85rem">
+        <div style="font-size:.72rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#6366f1;display:flex;align-items:center;gap:.4rem">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8h1a4 4 0 010 8h-1"/><path d="M2 8h16v9a4 4 0 01-4 4H6a4 4 0 01-4-4V8z"/><line x1="6" y1="1" x2="6" y2="4"/><line x1="10" y1="1" x2="10" y2="4"/><line x1="14" y1="1" x2="14" y2="4"/></svg>
+          Company Headlines
+        </div>
+        ${isHlAdmin ? `<button onclick="_hrNewHeadline()" style="background:#6366f1;color:#fff;border:none;border-radius:8px;padding:.3rem .8rem;font-size:.75rem;font-weight:600;cursor:pointer">+ Add Headline</button>` : ''}
+      </div>
+      ${allHeadlines.length ? allHeadlines.map(h=>`
+        <div style="background:#f5f3ff;border-left:3px solid #6366f1;border-radius:0 10px 10px 0;padding:.75rem 1rem;margin-bottom:.6rem;display:flex;align-items:flex-start;gap:.75rem">
+          <div style="flex:1">
+            <div style="font-weight:700;font-size:.875rem;color:#1e1b4b;margin-bottom:.2rem">${h.title||''}</div>
+            ${h.body ? `<div style="font-size:.825rem;color:#4c4380;white-space:pre-wrap">${h.body}</div>` : ''}
+            <div style="font-size:.7rem;color:#9ca3af;margin-top:.3rem">${h.createdByName||''} · ${h.createdAt ? new Date(h.createdAt).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) : ''}</div>
+          </div>
+          ${isHlAdmin ? `
+            <div style="display:flex;gap:.4rem;flex-shrink:0">
+              <button onclick="_hrEditHeadline('${h.id}')" style="background:none;border:1px solid #c4b5fd;color:#6366f1;border-radius:6px;padding:.2rem .5rem;font-size:.7rem;cursor:pointer">Edit</button>
+              <button onclick="_hrDeleteHeadline('${h.id}')" style="background:none;border:1px solid #fca5a5;color:#ef4444;border-radius:6px;padding:.2rem .5rem;font-size:.7rem;cursor:pointer">✕</button>
+            </div>` : ''}
+        </div>
+      `).join('') : `<div style="color:#a5b4fc;font-size:.825rem;padding:.5rem 0">No headlines yet. Click "+ Add Headline" to post a company-wide update.</div>`}
+    </div>
+  ` : '';
+
   setContent(`
     <div style="max-width:860px">
       <h2 style="font-size:1.35rem;font-weight:700;color:var(--text-1);letter-spacing:-.01em;margin-bottom:.35rem">Human Resources</h2>
-      <p style="font-size:.85rem;color:var(--text-2);margin-bottom:1.75rem">Questions about benefits, payroll, time off, or policy? Send us a message or ask the AI assistant below.</p>
-
+      <p style="font-size:.85rem;color:var(--text-2);margin-bottom:1.25rem">Questions about benefits, payroll, time off, or policy? Send us a message or ask the AI assistant below.</p>
+      ${hlHtml}
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:1.25rem;align-items:start">
 
         <!-- ── Email HR ───────────────────────────────────────── -->
@@ -14496,6 +14675,7 @@ async function init(){
       if(currentUser.isOfficeManager && !currentUser.isAdmin) staffViewMode = true;
       // Subscribe to real-time Firestore listeners — UI auto-updates on any change
       await FB.subscribe(fbUser.uid, currentUser.isAdmin||currentUser.isOfficeManager||currentUser.isStaff, scheduleReRender);
+      _startCalendarReminders();
       // Auto-migrate pending profile → real UID on first login
       await FB.migratePendingProfile(fbUser.uid, fbUser.email||'').catch(e=>console.warn('[pending-migrate]',e));
       launchApp();
@@ -14806,17 +14986,17 @@ init();
     </svg>
     Deals
   </div>
-  <div class="mtab" id="mtab-tasks" onclick="mobileTab('tasks')" ontouchstart="">
+  <div class="mtab" id="mtab-tasks" onclick="mobileTab('tasks')" ontouchstart="" style="position:relative">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
       <path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/>
     </svg>
-    Tasks
+    Tasks<span class="mtab-badge" id="mtab-badge-tasks" style="display:none">0</span>
   </div>
-  <div class="mtab" id="mtab-hr" onclick="mobileTab('hr')" ontouchstart="">
+  <div class="mtab" id="mtab-hr" onclick="mobileTab('hr')" ontouchstart="" style="position:relative">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
       <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/>
     </svg>
-    HR
+    HR<span class="mtab-badge" id="mtab-badge-hr" style="display:none">0</span>
   </div>
   <div class="mtab" id="mtab-more" onclick="mobileMoreMenu()" ontouchstart="">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -14829,6 +15009,215 @@ init();
 
 <script>
 // ── Mobile tab switching ─────────────────────────────────────────────────────
+
+
+/* =======================================================
+   NAV BADGES + BRIEF NOTIFICATIONS
+   ======================================================= */
+
+// Update task count & headline count badges on all tab buttons
+function _updateNavBadges(){
+  const uid = currentUser?.uid;
+  if(!uid) return;
+  // ── Tasks badge ──────────────────────────────────────
+  const isFirmV = (currentUser?.isAdmin||currentUser?.isOfficeManager) && !adminViewAsAdvisor && !staffViewMode;
+  const taskCount = isFirmV
+    ? allTasks.filter(t=>t.status==='pending').length
+    : allTasks.filter(t=>t.assignedTo===uid && t.status==='pending').length;
+  ['nav-badge-tasks','mtab-badge-tasks'].forEach(elId=>{
+    const el=document.getElementById(elId);
+    if(!el) return;
+    el.textContent = taskCount > 99 ? '99+' : taskCount;
+    el.style.display = taskCount > 0 ? '' : 'none';
+  });
+  // ── HR Headlines badge ────────────────────────────────
+  const lastSeen = parseInt(localStorage.getItem('hr_headlines_seen')||'0');
+  const newHl = allHeadlines.filter(h=>(h.createdAt||0) > lastSeen).length;
+  ['nav-badge-hr','mtab-badge-hr'].forEach(elId=>{
+    const el=document.getElementById(elId);
+    if(!el) return;
+    el.textContent = newHl > 99 ? '99+' : newHl;
+    el.style.display = newHl > 0 ? '' : 'none';
+  });
+}
+
+// Show a brief auto-dismiss notification popup
+function _showBriefNotif(text, targetView){
+  const existing = document.getElementById('brief-notif-popup');
+  if(existing) existing.remove();
+  const el = document.createElement('div');
+  el.id = 'brief-notif-popup';
+  el.className = 'brief-notif';
+  el.innerHTML = `<span style="flex:1">${text}</span>${targetView?`<button onclick="switchView('${targetView}');this.parentElement.remove()" style="background:rgba(255,255,255,.15);border:none;color:#fff;border-radius:6px;padding:.2rem .5rem;font-size:.72rem;cursor:pointer;flex-shrink:0">View</button>`:''}`;
+  document.body.appendChild(el);
+  const dur = 2200;
+  setTimeout(()=>{
+    el.classList.add('out');
+    setTimeout(()=>el.remove(), 350);
+  }, dur);
+}
+
+// Detect new tasks assigned to the current user
+let _prevTaskIds = new Set();
+let _prevHeadlineIds = new Set();
+function _checkNewTaskNotif(){
+  const uid = currentUser?.uid;
+  if(!uid) return;
+  const myPending = allTasks.filter(t=>t.assignedTo===uid && t.status==='pending');
+  const curIds = new Set(myPending.map(t=>t.id));
+  if(_prevTaskIds.size > 0){
+    for(const t of myPending){
+      if(!_prevTaskIds.has(t.id)){
+        _showBriefNotif('📋 New task assigned: ' + (t.title||'Untitled'), 'tasks');
+        break; // show one popup at a time
+      }
+    }
+  }
+  _prevTaskIds = curIds;
+
+  // Also check for new headlines
+  const curHlIds = new Set(allHeadlines.map(h=>h.id));
+  if(_prevHeadlineIds.size > 0){
+    const lastSeen = parseInt(localStorage.getItem('hr_headlines_seen')||'0');
+    for(const h of allHeadlines){
+      if(!_prevHeadlineIds.has(h.id) && (h.createdAt||0) > lastSeen){
+        _showBriefNotif('📢 New company headline: ' + (h.title||''), 'hr');
+        break;
+      }
+    }
+  }
+  _prevHeadlineIds = curHlIds;
+}
+
+/* =======================================================
+   CALENDAR REMINDERS (Google Calendar API)
+   ======================================================= */
+let _calReminderInterval = null;
+const _calNotified = new Set(JSON.parse(sessionStorage.getItem('gcal_notified')||'[]'));
+
+function _startCalendarReminders(){
+  if(_calReminderInterval) clearInterval(_calReminderInterval);
+  _calReminderInterval = setInterval(_checkCalendarReminders, 45000); // check every 45s
+  setTimeout(_checkCalendarReminders, 3000); // also check shortly after login
+}
+
+async function _checkCalendarReminders(){
+  const token = sessionStorage.getItem('gcal_token');
+  const exp   = parseInt(sessionStorage.getItem('gcal_token_exp')||'0');
+  if(!token || Date.now() > exp) return;
+  try {
+    const now = new Date();
+    const windowEnd = new Date(now.getTime() + 2.75*60*1000); // next 2.75 min
+    const params = new URLSearchParams({
+      timeMin: now.toISOString(),
+      timeMax: windowEnd.toISOString(),
+      singleEvents: 'true',
+      orderBy: 'startTime',
+      maxResults: '10',
+    });
+    const resp = await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events?${params}`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    if(!resp.ok) return;
+    const data = await resp.json();
+    for(const ev of (data.items||[])){
+      const start = ev.start?.dateTime;
+      if(!start) continue;
+      const minsAway = (new Date(start).getTime() - Date.now()) / 60000;
+      if(minsAway >= -0.5 && minsAway <= 2.5 && !_calNotified.has(ev.id)){
+        _calNotified.add(ev.id);
+        sessionStorage.setItem('gcal_notified', JSON.stringify([..._calNotified].slice(-60)));
+        const minLabel = minsAway < 0.5 ? 'Starting now' : `In ~${Math.ceil(minsAway)} min`;
+        _showBriefNotif(`📅 ${minLabel}: ${ev.summary||'Calendar event'}`, 'calendar');
+      }
+    }
+  } catch(e){ /* silent fail — token may have expired */ }
+}
+
+window._reauthCalendarReminders = async function(){
+  if(!_fbFns || !_fbAuth) return;
+  const {GoogleAuthProvider, signInWithPopup} = _fbFns;
+  const provider = new GoogleAuthProvider();
+  provider.addScope('https://www.googleapis.com/auth/calendar.readonly');
+  try {
+    const result = await signInWithPopup(_fbAuth, provider);
+    const cred = GoogleAuthProvider.credentialFromResult(result);
+    if(cred?.accessToken){
+      sessionStorage.setItem('gcal_token', cred.accessToken);
+      sessionStorage.setItem('gcal_token_exp', String(Date.now() + 3600*1000));
+      showToast('Calendar reminders enabled ✓', 'success');
+      _startCalendarReminders();
+    }
+  } catch(e){ showToast('Calendar permission not granted', 'error'); }
+};
+
+/* =======================================================
+   HR HEADLINES — Admin CRUD
+   ======================================================= */
+window._hrNewHeadline = function(){
+  _hrOpenHeadlineModal(null);
+};
+window._hrEditHeadline = function(id){
+  const h = allHeadlines.find(x=>x.id===id);
+  if(h) _hrOpenHeadlineModal(h);
+};
+window._hrDeleteHeadline = async function(id){
+  if(!confirm('Remove this headline?')) return;
+  if(!_fbDb||!_fbFns) return;
+  const {doc: _d, deleteDoc: _del} = _fbFns;
+  await _del(_d(_fbDb,'hrHeadlines',id));
+  showToast('Headline removed','success');
+};
+function _hrOpenHeadlineModal(existing){
+  document.getElementById('hl-modal')?.remove();
+  const m = document.createElement('div');
+  m.id = 'hl-modal';
+  m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9000;display:flex;align-items:center;justify-content:center;padding:1rem';
+  m.innerHTML = `
+    <div style="background:#fff;border-radius:16px;padding:1.75rem;width:100%;max-width:460px;box-shadow:0 20px 60px rgba(0,0,0,.3)">
+      <div style="font-size:1rem;font-weight:700;margin-bottom:1.25rem;color:#1e1b4b">${existing?'Edit':'New'} Company Headline</div>
+      <label style="font-size:.72rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:#6b7280;display:block;margin-bottom:.3rem">Headline Title *</label>
+      <input id="hl-title" type="text" value="${(existing?.title||'').replace(/"/g,'&quot;')}" placeholder="e.g. Q2 all-hands meeting — June 15"
+        style="width:100%;border:1.5px solid #e5e7eb;border-radius:8px;padding:.55rem .75rem;font-size:.875rem;margin-bottom:1rem;outline:none;box-sizing:border-box"
+        onfocus="this.style.borderColor='#6366f1'" onblur="this.style.borderColor='#e5e7eb'"/>
+      <label style="font-size:.72rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:#6b7280;display:block;margin-bottom:.3rem">Details (optional)</label>
+      <textarea id="hl-body" rows="4" placeholder="Additional details visible to all staff and advisors…"
+        style="width:100%;border:1.5px solid #e5e7eb;border-radius:8px;padding:.55rem .75rem;font-size:.875rem;resize:vertical;outline:none;box-sizing:border-box;font-family:inherit"
+        onfocus="this.style.borderColor='#6366f1'" onblur="this.style.borderColor='#e5e7eb'">${existing?.body||''}</textarea>
+      <div style="display:flex;gap:.75rem;margin-top:1.25rem">
+        <button onclick="_hrSaveHeadline('${existing?.id||''}')"
+          style="flex:1;background:#6366f1;color:#fff;border:none;border-radius:8px;padding:.65rem;font-size:.875rem;font-weight:600;cursor:pointer">
+          ${existing?'Save Changes':'Post Headline'}
+        </button>
+        <button onclick="document.getElementById('hl-modal').remove()"
+          style="padding:.65rem 1.1rem;border:1.5px solid #e5e7eb;background:none;border-radius:8px;font-size:.875rem;cursor:pointer;color:#6b7280">
+          Cancel
+        </button>
+      </div>
+    </div>`;
+  document.body.appendChild(m);
+  document.getElementById('hl-title').focus();
+}
+window._hrSaveHeadline = async function(existingId){
+  const title = document.getElementById('hl-title')?.value.trim()||'';
+  const body  = document.getElementById('hl-body')?.value.trim()||'';
+  if(!title){ showToast('Headline title is required','error'); return; }
+  if(!_fbDb||!_fbFns){ showToast('Not connected','error'); return; }
+  const {collection: _col, addDoc: _add, doc: _d, updateDoc: _upd} = _fbFns;
+  if(existingId){
+    await _upd(_d(_fbDb,'hrHeadlines',existingId), { title, body, updatedAt:Date.now() });
+    showToast('Headline updated ✓','success');
+  } else {
+    await _add(_col(_fbDb,'hrHeadlines'), {
+      title, body, createdAt:Date.now(), updatedAt:Date.now(),
+      createdBy: currentUser?.uid||'', createdByName: currentUser?.name||currentUser?.email||''
+    });
+    showToast('Headline posted ✓','success');
+  }
+  document.getElementById('hl-modal')?.remove();
+  if(currentView==='hr') viewHR();
+};
+
 window.mobileTab = function(id){
   document.querySelectorAll('.mtab').forEach(t => t.classList.remove('active'));
   const el = document.getElementById('mtab-' + id);
