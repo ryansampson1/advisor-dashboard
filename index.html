@@ -9165,9 +9165,17 @@ window._smctOpenPage = (allPairData, offset) => {
 };
 
 window._smctPageMerge = async () => {
+  const btn = document.querySelector('#crm-smart-merge-contacts-modal button.brand-btn');
+  if(btn){ btn.disabled=true; btn.textContent='Merging…'; }
   const nextOffset = (window._smctOffset||0) + 100;
   const hasMore = nextOffset < (window._smctAllPairData||[]).length;
-  await window._doSmartMergeContacts(window._smctPairs, hasMore);
+  try {
+    await window._doSmartMergeContacts(window._smctPairs, hasMore);
+  } catch(e) {
+    showToast('Merge error: '+(e?.message||e),'error');
+    if(btn){ btn.disabled=false; btn.textContent='Merge Selected'; }
+    return;
+  }
   if(hasMore) window._smctOpenPage(window._smctAllPairData, nextOffset);
 };
 
@@ -9179,12 +9187,12 @@ window._smctSkipPage = () => {
 
 window._doSmartMergeContacts = async (pairIds, suppressViewCRM) => {
   if(!_fbDb||!_fbFns){ showToast('Firebase not ready','error'); return; }
-  const {doc, updateDoc, deleteDoc} = _fbFns;
-  let mergeCount = 0;
-  const toDelete = [];
+  const {doc, writeBatch} = _fbFns;
   const fields = ['firstName','lastName','phone','officePhone','title','company','address','notes'];
+  const batchOps = []; // {pid, sid, updates}
 
   try {
+    // Phase 1: compute all merge updates (pure sync, reads DOM checkboxes)
     for(let i=0;i<(pairIds||[]).length;i++){
       if(!document.getElementById(`scm-chk-${i}`)?.checked) continue;
       const keep = document.querySelector(`input[name="scm-keep-${i}"]:checked`)?.value||'a';
@@ -9212,17 +9220,33 @@ window._doSmartMergeContacts = async (pairIds, suppressViewCRM) => {
       const md = [...new Set([...(primary.linkedDeals||[]),...(secondary.linkedDeals||[])])];
       if(md.length) updates.linkedDeals = md;
       updates.updatedAt = Date.now();
-      await updateDoc(doc(_fbDb,'contacts',pid), updates);
-      toDelete.push(sid);
-      mergeCount++;
+      batchOps.push({pid, sid, updates});
     }
-    for(const id of toDelete) await deleteDoc(doc(_fbDb,'contacts',id));
-    if(mergeCount){
-      showToast(`Merged ${mergeCount} contact pair${mergeCount!==1?'s':''} ✓`,'success');
-      if(!suppressViewCRM) viewCRM();
-    } else {
+
+    if(!batchOps.length){
       showToast('No pairs selected — check boxes next to the duplicates you want to merge','info',4000);
+      return;
     }
+
+    // Phase 2: batch-write all updates (max 400 per commit)
+    const BATCH_SZ = 400;
+    for(let i=0;i<batchOps.length;i+=BATCH_SZ){
+      const b = writeBatch(_fbDb);
+      for(const {pid,updates} of batchOps.slice(i,i+BATCH_SZ))
+        b.update(doc(_fbDb,'contacts',pid), updates);
+      await b.commit();
+    }
+
+    // Phase 3: batch-delete all secondary contacts
+    for(let i=0;i<batchOps.length;i+=BATCH_SZ){
+      const b = writeBatch(_fbDb);
+      for(const {sid} of batchOps.slice(i,i+BATCH_SZ))
+        b.delete(doc(_fbDb,'contacts',sid));
+      await b.commit();
+    }
+
+    showToast(`Merged ${batchOps.length} contact pair${batchOps.length!==1?'s':''} ✓`,'success');
+    if(!suppressViewCRM) viewCRM();
   } catch(e) {
     console.error('[smart merge contacts]', e);
     showToast('Merge error: '+(e?.message||e),'error');
