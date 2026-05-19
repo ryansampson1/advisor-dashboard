@@ -7672,73 +7672,121 @@ window.crmImportCSV = file => {
   if(!file.files[0]) return;
   const reader = new FileReader();
   reader.onload = e => {
-    const text = e.target.result;
-    const lines = text.trim().split('\n');
+    let text = e.target.result;
+    // Strip UTF-8 BOM if present
+    if(text.charCodeAt(0)===0xFEFF) text=text.slice(1);
+    // Normalize line endings
+    const lines = text.trim().split(/\r?\n/);
     if(lines.length < 2){ showToast('CSV appears empty','error'); return; }
 
-    // Parse header row
+    // Detect delimiter (comma or semicolon)
+    const delim = (lines[0].split(';').length > lines[0].split(',').length) ? ';' : ',';
+
+    // Parse a single CSV row
     const parseCSVRow = row => {
-      const result = []; let cur = ''; let inQ = false;
+      const result=[]; let cur=''; let inQ=false;
       for(const ch of row){
         if(ch==='"'){ inQ=!inQ; }
-        else if(ch===','&&!inQ){ result.push(cur.trim()); cur=''; }
+        else if(ch===delim&&!inQ){ result.push(cur.trim()); cur=''; }
         else { cur+=ch; }
       }
       result.push(cur.trim()); return result;
     };
 
-    const headers = parseCSVRow(lines[0]).map(h=>h.toLowerCase().replace(/[^a-z]/g,''));
-    const rows = lines.slice(1).map(parseCSVRow);
+    // Normalize header: lowercase, letters only
+    const norm = h => h.toLowerCase().replace(/[^a-z]/g,'');
+    const rawHeaders = parseCSVRow(lines[0]);
+    const headers = rawHeaders.map(norm);
+    const rows = lines.slice(1).map(parseCSVRow).filter(r=>r.some(c=>c.trim()));
 
-    // Auto-map common column names
+    // Match header index — exact match first, then substring
     const col = (...candidates) => {
+      for(const c of candidates){
+        const idx = headers.findIndex(h=>h===c);
+        if(idx>=0) return idx;
+      }
       for(const c of candidates){
         const idx = headers.findIndex(h=>h.includes(c));
         if(idx>=0) return idx;
       }
       return -1;
     };
+
     const map = {
-      firstName:       col('firstname','first'),
-      lastName:        col('lastname','last'),
-      email:           col('email'),
-      phone:           col('phone','mobile','cell'),
-      company:         col('company','organization','org'),
-      title:           col('title','jobtitle','role','position'),
-      source:          col('source','leadsource'),
-      notes:           col('notes','comment','description'),
+      firstName:   col('firstname','first','fname','givenname','forename'),
+      lastName:    col('lastname','last','lname','surname','familyname'),
+      fullName:    col('fullname','name','contactname','displayname'),
+      email:       col('email','emailaddress','mail','primaryemail','workemail','homeemail','emailwork','emailhome'),
+      phone:       col('mobilephone','cellphone','mobile','cell','personalphone','homephone','primaryphone','phone'),
+      officePhone: col('officephone','businessphone','workphone','directphone','office','work','businesstel','worktel'),
+      company:     col('company','companyname','organization','organisation','org','employer','firm','account','business'),
+      title:       col('jobtitle','title','role','position','occupation','designation'),
+      source:      col('source','leadsource','leadsrc','origin'),
+      notes:       col('notes','note','comment','comments','description','memo','details'),
+      groups:      col('groups','group','tags','tag','category','categories','list','lists','segment'),
+      address:     col('address','streetaddress','street','mailingaddress','addr'),
+      city:        col('city','town'),
+      state:       col('state','province','region'),
+      zip:         col('zip','zipcode','postalcode','postal'),
     };
 
-    // Store import data globally so onclick doesn't need to embed JSON in HTML attribute
-    window._crmPendingImport = { rows, map };
+    // Build dedup counts for the modal
+    const existingEmails = new Set((allContacts||[]).map(c=>(c.email||'').toLowerCase().trim()).filter(Boolean));
+    const existingNames  = new Set((allContacts||[]).map(c=>`${(c.firstName||'')} ${(c.lastName||'')}`.toLowerCase().trim()).filter(Boolean));
+    let dupeCount=0;
+    rows.forEach(r=>{
+      const get = idx => idx>=0?(r[idx]||'').trim():'';
+      let fn=get(map.firstName), ln=get(map.lastName);
+      if(!fn&&!ln&&map.fullName>=0){ const parts=(r[map.fullName]||'').trim().split(/\s+/); fn=parts[0]||''; ln=parts.slice(1).join(' ')||''; }
+      const em=get(map.email).toLowerCase();
+      const nk=`${fn} ${ln}`.toLowerCase().trim();
+      if((em&&existingEmails.has(em))||(nk&&existingNames.has(nk))) dupeCount++;
+    });
+    const newCount = rows.length - dupeCount;
 
-    // Show preview modal
+    // Detect which fields were found for the user to see
+    const detected = [
+      map.firstName>=0||map.fullName>=0 ? '✓ Name':'✗ Name',
+      map.email>=0     ? '✓ Email':'✗ Email (not found)',
+      (map.phone>=0||map.officePhone>=0) ? '✓ Phone':'✗ Phone (not found)',
+      map.company>=0   ? '✓ Company':'',
+      map.groups>=0    ? '✓ Groups':'',
+    ].filter(Boolean).join(' · ');
+
+    // Preview table (show email + phone now)
     const preview = rows.slice(0,5).map(r=>{
       const get = idx => idx>=0?(r[idx]||''):'';
-      return `<tr class="border-b text-xs"><td class="py-1 px-2">${get(map.firstName)} ${get(map.lastName)}</td><td class="py-1 px-2">${get(map.email)}</td><td class="py-1 px-2">${get(map.company)}</td></tr>`;
+      let fn=get(map.firstName), ln=get(map.lastName);
+      if(!fn&&!ln&&map.fullName>=0){ const parts=(r[map.fullName]||'').trim().split(/\s+/); fn=parts[0]||''; ln=parts.slice(1).join(' ')||''; }
+      const ph = get(map.phone)||get(map.officePhone);
+      return `<tr class="border-b text-xs"><td class="py-1 px-2">${fn} ${ln}</td><td class="py-1 px-2">${get(map.email)}</td><td class="py-1 px-2">${ph}</td><td class="py-1 px-2">${get(map.company)}</td></tr>`;
     }).join('');
+
+    window._crmPendingImport = { rows, map, rawHeaders };
 
     const prevModal = document.createElement('div');
     prevModal.id='crm-import-modal';
     prevModal.className='fixed inset-0 z-50 flex items-center justify-center modal-bg bg-black/40 p-4';
     prevModal.innerHTML=`
-      <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6">
-        <h3 class="text-lg font-bold mb-2">Import ${rows.length} Contact${rows.length!==1?'s':''}</h3>
-        <p class="text-sm text-gray-500 mb-3">Preview of first 5 rows:</p>
-        <div class="overflow-x-auto border rounded-lg mb-4">
+      <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto p-6">
+        <h3 class="text-lg font-bold mb-1">Import ${rows.length} Contact${rows.length!==1?'s':''}</h3>
+        <p class="text-xs text-gray-400 mb-2">${detected}</p>
+        ${dupeCount>0?`<p class="text-xs text-amber-600 mb-3">⚠ ${dupeCount} duplicate${dupeCount!==1?'s':''} detected — will be skipped · ${newCount} new</p>`:''}
+        <div class="overflow-x-auto border rounded-lg mb-3">
           <table class="w-full text-sm"><thead><tr class="bg-gray-50 border-b">
-            <th class="py-1.5 px-2 text-left text-xs">Name</th><th class="py-1.5 px-2 text-left text-xs">Email</th><th class="py-1.5 px-2 text-left text-xs">Company</th>
+            <th class="py-1.5 px-2 text-left text-xs">Name</th><th class="py-1.5 px-2 text-left text-xs">Email</th><th class="py-1.5 px-2 text-left text-xs">Phone</th><th class="py-1.5 px-2 text-left text-xs">Company</th>
           </tr></thead><tbody>${preview}</tbody></table>
         </div>
-        <div class="mb-4">
-          <label class="block text-xs font-medium text-gray-600 mb-1">Add to group (optional)</label>
+        <div class="mb-3">
+          <label class="block text-xs font-medium text-gray-600 mb-1">Also add to group (optional)</label>
           <select id="import-group" class="w-full border rounded-lg px-3 py-2 text-sm outline-none">
-            <option value="">No group</option>
-            ${allCRMGroups.map(g=>`<option value="${g.id}">${g.name}</option>`).join('')}
+            <option value="">No additional group</option>
+            ${(allCRMGroups||[]).map(g=>`<option value="${g.id}">${g.name}</option>`).join('')}
           </select>
         </div>
+        <p class="text-xs text-gray-400 mb-3">Groups in the CSV will be created automatically. Assigned advisor defaults to you.</p>
         <div class="flex gap-2">
-          <button type="button" onclick="window.crmDoImport()" class="flex-1 brand-btn rounded-lg py-2.5 text-sm font-semibold">Import All</button>
+          <button type="button" onclick="window.crmDoImport()" class="flex-1 brand-btn rounded-lg py-2.5 text-sm font-semibold">Import ${newCount} Contact${newCount!==1?'s':''}</button>
           <button type="button" onclick="document.getElementById('crm-import-modal').remove()" class="px-4 border rounded-lg py-2.5 text-sm text-gray-600">Cancel</button>
         </div>
       </div>`;
@@ -7746,7 +7794,7 @@ window.crmImportCSV = file => {
     document.body.appendChild(prevModal);
   };
   reader.readAsText(file.files[0]);
-  file.value=''; // reset input
+  file.value='';
 };
 
 window.crmDoImport = async () => {
@@ -7754,32 +7802,92 @@ window.crmDoImport = async () => {
   const { rows, map } = window._crmPendingImport || {};
   if(!rows||!rows.length){ showToast('No import data found','error'); return; }
   const {addDoc, collection} = _fbFns;
-  const groupId = document.getElementById('import-group')?.value||'';
+  const selectedGroupId = document.getElementById('import-group')?.value||'';
   const get = (row, idx) => idx>=0?(row[idx]||'').trim():'';
-  let count=0;
+
+  // Build dedup index from current contacts
+  const existingEmails = new Set((allContacts||[]).map(c=>(c.email||'').toLowerCase().trim()).filter(Boolean));
+  const existingNames  = new Set((allContacts||[]).map(c=>`${(c.firstName||'')} ${(c.lastName||'')}`.toLowerCase().trim()).filter(Boolean));
+
+  // Build group name→id map (will add newly created ones as we go)
+  const groupMap = {};
+  for(const g of (allCRMGroups||[])){ groupMap[g.name.toLowerCase().trim()] = g.id; }
+
+  let count=0, dupeCount=0, newGroupCount=0;
   try {
     for(const row of rows){
-      const firstName = get(row, map.firstName);
-      const lastName  = get(row, map.lastName);
-      if(!firstName && !lastName && !get(row,map.email)) continue; // skip blank rows
+      // Parse name — support combined "Name" column or split first/last
+      let firstName = get(row, map.firstName);
+      let lastName  = get(row, map.lastName);
+      if(!firstName && !lastName && map.fullName>=0){
+        const parts = (row[map.fullName]||'').trim().split(/\s+/);
+        firstName = parts[0]||'';
+        lastName  = parts.slice(1).join(' ')||'';
+      }
+      const email = get(row, map.email).toLowerCase();
+      if(!firstName && !lastName && !email) continue; // skip blank rows
+
+      // Dedup check
+      const nameKey = `${firstName} ${lastName}`.toLowerCase().trim();
+      if((email && existingEmails.has(email)) || (nameKey && existingNames.has(nameKey))){
+        dupeCount++; continue;
+      }
+
+      // Resolve groups — selected group + any from CSV column
+      const contactGroupIds = selectedGroupId ? [selectedGroupId] : [];
+      const csvGroups = get(row, map.groups);
+      if(csvGroups){
+        const gNames = csvGroups.split(/[,;|]/).map(g=>g.trim()).filter(Boolean);
+        for(const gName of gNames){
+          const gKey = gName.toLowerCase().trim();
+          if(groupMap[gKey]){
+            if(!contactGroupIds.includes(groupMap[gKey])) contactGroupIds.push(groupMap[gKey]);
+          } else {
+            // Create new group
+            const newG = await addDoc(collection(_fbDb,'crmGroups'),{ name:gName, createdAt:Date.now(), createdBy:currentUser.uid });
+            groupMap[gKey] = newG.id;
+            allCRMGroups.push({id:newG.id,name:gName}); // update local cache
+            if(!contactGroupIds.includes(newG.id)) contactGroupIds.push(newG.id);
+            newGroupCount++;
+          }
+        }
+      }
+
+      // Build mailing address from CSV columns if present
+      const addrStreet = get(row, map.address);
+      const addrCity   = get(row, map.city);
+      const addrState  = get(row, map.state).toUpperCase();
+      const addrZip    = get(row, map.zip);
+
       await addDoc(collection(_fbDb,'contacts'),{
         firstName, lastName,
-        email:   get(row,map.email).toLowerCase(),
-        phone:   get(row,map.phone),
-        company: get(row,map.company),
-        title:   get(row,map.title),
-        source:  get(row,map.source),
-        notes:   get(row,map.notes),
-        groups:  groupId ? [groupId] : [],
+        email,
+        phone:       get(row, map.phone),
+        officePhone: get(row, map.officePhone),
+        company:     get(row, map.company),
+        title:       get(row, map.title),
+        source:      get(row, map.source),
+        notes:       get(row, map.notes),
+        mailingAddress: { street:addrStreet, city:addrCity, state:addrState, zip:addrZip },
+        groups:      contactGroupIds,
         linkedDeals: [],
+        assignedTo:   currentUser.uid,
+        assignedName: currentUser.name||'',
         createdAt: Date.now(), updatedAt: Date.now(),
         createdBy: currentUser.uid,
       });
+
+      // Track in local dedup sets to avoid intra-batch dupes
+      if(email) existingEmails.add(email);
+      if(nameKey) existingNames.add(nameKey);
       count++;
     }
     document.getElementById('crm-import-modal')?.remove();
     window._crmPendingImport = null;
-    showToast(`${count} contact${count!==1?'s':''} imported ✓`,'success');
+    let msg = `${count} contact${count!==1?'s':''} imported ✓`;
+    if(dupeCount)    msg += ` · ${dupeCount} duplicate${dupeCount!==1?'s':''} skipped`;
+    if(newGroupCount) msg += ` · ${newGroupCount} new group${newGroupCount!==1?'s':''} created`;
+    showToast(msg,'success');
     viewCRM();
   } catch(e){ showToast('Import failed — '+e.message,'error'); }
 };
