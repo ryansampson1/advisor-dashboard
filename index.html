@@ -1918,23 +1918,39 @@ async function handleProposalTodoAutomation(deal){
   }).catch(()=>{});
 
   // ── 3. Listing Agreement Word doc (template fill) ────────────────────────
+  // ALWAYS create the task first so it never gets silently dropped.
+  // Then attempt to generate the Word doc and attach it; if that fails the
+  // task still exists and the advisor can manually draft the agreement.
   (async()=>{
+    const laName='Listing Agreement - '+addr.replace(/[\/\\:*?"<>|]/g,'-')+'.docx';
+    const taskBase={
+      title:`📝 Review & Sign Listing Agreement — ${addr}`,
+      description:'Listing agreement pre-filled with deal fields (when doc generation succeeds). Review for accuracy, then forward to client for signature (DocuSign or in person). Upload executed copy back to deal record.',
+      assignedTo:deal.advisorUid,assignedToName:deal.advisorName||deal.advisorEmail,assignedToEmail:deal.advisorEmail||'',
+      dealId:deal.id,dealAddress:deal.propertyAddress,
+      dueDate:dueDate(1),status:'pending',
+      createdBy:currentUser?.uid||'system',createdByName:'Automation',createdAt:Date.now(),
+    };
+    // Create the task immediately — guaranteed regardless of doc generation outcome
+    const taskId = await Store.createTask(taskBase).catch(e=>{
+      console.error('[listingAgreement] task creation failed',e); return null;
+    });
+    showToast('📝 Listing Agreement task created','success',2500);
+
+    // Now attempt to generate the filled Word doc and attach it to the task
     try{
       let waited=0;
-      while(!_fbStorage&&waited<4000){await new Promise(r=>setTimeout(r,200));waited+=200;}
+      while(!_fbStorage&&waited<6000){await new Promise(r=>setTimeout(r,200));waited+=200;}
       if(!_fbStorage) throw new Error('Storage not ready');
       if(typeof JSZip==='undefined') throw new Error('JSZip not loaded');
-      // Helper: escape XML special characters for safe injection
       const escXml=s=>(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&apos;');
-      // Decode the embedded template
       const templateBytes=Uint8Array.from(atob(LISTING_AGREEMENT_TEMPLATE_B64),c=>c.charCodeAt(0));
       const zip=await JSZip.loadAsync(templateBytes);
-      // Fill placeholders in document.xml
       let docXml=await zip.file('word/document.xml').async('string');
       const sellerEntity=escXml(deal.clientName||deal.sellerName||clientName||'[Seller Entity]');
       const sellerContact=escXml(deal.sellerContactName||deal.ownerContactName||deal.clientContact||sellerEntity);
       const sellerAddr=escXml(deal.sellerAddress||deal.ownerAddress||deal.mailingAddress||'');
-      const propCity=escXml(deal.city||deal.propertyCity||city||county||'');
+      const propCity=escXml(deal.city||deal.propertyCity||deal.county||county||'');
       const propState=escXml('FL');
       const zipCode=escXml(deal.zip||deal.propertyZip||deal.zipCode||'');
       const sellerPhone=escXml(deal.sellerPhone||deal.ownerPhone||deal.phone||deal.clientPhone||'');
@@ -1956,20 +1972,18 @@ async function handleProposalTodoAutomation(deal){
       const {ref:fbRef,uploadBytes,getDownloadURL}=_fbFns;
       const snap=await uploadBytes(fbRef(_fbStorage,'listing-agreements/'+deal.id+'-'+Date.now()+'.docx'),blob);
       const downloadURL=await getDownloadURL(snap.ref);
-      const laName='Listing Agreement - '+addr.replace(/[\/\\:*?"<>|]/g,'-')+'.docx';
-      await Store.createTask({
-        title:`📝 Review & Sign Listing Agreement — ${addr}`,
-        description:'Listing agreement pre-filled with all deal fields. Review for accuracy, then forward to client for signature (DocuSign or in person). Upload executed copy back to deal record.',
-        attachmentUrl:downloadURL,attachmentName:laName,
-        assignedTo:deal.advisorUid,assignedToName:deal.advisorName||deal.advisorEmail,assignedToEmail:deal.advisorEmail||'',
-        dealId:deal.id,dealAddress:deal.propertyAddress,
-        dueDate:dueDate(1),status:'pending',
-        createdBy:currentUser?.uid||'system',createdByName:'Automation',createdAt:Date.now(),
-      });
-      showToast('📝 Listing Agreement created — ready to review and sign','success',4000);
+      // Attach the doc URL to the task we already created
+      if(taskId){
+        await Store.updateTask(taskId,{
+          attachmentUrl:downloadURL, attachmentName:laName,
+          description:'Listing agreement pre-filled with all deal fields. Review for accuracy, then forward to client for signature (DocuSign or in person). Upload executed copy back to deal record.',
+        }).catch(()=>{});
+      }
+      showToast('📝 Listing Agreement doc attached to task','success',3000);
     }catch(e){
-      console.error('[listingAgreement]',e);
-      showToast('📝 Listing agreement generation failed — see console','warning',4000);
+      console.error('[listingAgreement doc generation]',e);
+      // Task already exists above — just warn that the doc didn't attach
+      showToast('📝 Listing Agreement task created (doc generation failed — draft manually)','warning',5000);
     }
   })();
 
