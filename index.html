@@ -8832,13 +8832,30 @@ window.saveGroup = async () => {
 // ── Group name helpers ─────────────────────────────────────────────────
 // Strip punctuation/special chars, collapse spaces — so "Apt Dev- Market Rate" ≡ "Apt Dev Market Rate"
 const _normGrp = name => (name||'').toLowerCase().replace(/[^a-z0-9\s]/g,'').replace(/\s+/g,' ').trim();
-// Levenshtein edit distance
+// Levenshtein edit distance (full — kept for contacts merge)
 const _lev = (a,b) => {
   const m=a.length,n=b.length;
   if(!m) return n; if(!n) return m;
   const dp=[...Array(m+1)].map((_,i)=>[...Array(n+1)].map((_,j)=>i===0?j:j===0?i:0));
   for(let i=1;i<=m;i++) for(let j=1;j<=n;j++) dp[i][j]=a[i-1]===b[j-1]?dp[i-1][j-1]:1+Math.min(dp[i-1][j],dp[i][j-1],dp[i-1][j-1]);
   return dp[m][n];
+};
+// Fast O(n) "within exactly 1 edit" check — replaces _lev for company merge hot-path
+const _within1Edit = (a,b) => {
+  const la=a.length, lb=b.length;
+  if(Math.abs(la-lb)>1) return false;
+  if(la===lb){
+    let diffs=0;
+    for(let i=0;i<la;i++){ if(a[i]!==b[i]&&++diffs>1) return false; }
+    return diffs===1;
+  }
+  const [sh,lo]=la<lb?[a,b]:[b,a];
+  let i=0,j=0,skipped=false;
+  while(i<sh.length&&j<lo.length){
+    if(sh[i]!==lo[j]){ if(skipped) return false; skipped=true; j++; }
+    else{ i++; j++; }
+  }
+  return true;
 };
 
 // ── Group visibility helper ───────────────────────────────────────────
@@ -9215,18 +9232,18 @@ window.crmSmartMergeCompanies = async () => {
   const _stripCoSuffix = s => s.replace(/\b(llc|inc|corp|ltd|co|company|group|properties|realty|real estate|enterprises|solutions|services|associates|partners|holdings|investments|management|consulting)\b/g,'').replace(/\s+/g,' ').trim();
   const uniqueNames=allNames.filter(n=>!autoReplaceMap[n]);
   const pairs=[];
+  const _YIELD=500; let _yc=0;
   for(let i=0;i<uniqueNames.length;i++){
     const na=_normGrp(uniqueNames[i]);
     const ca_core=_stripCoSuffix(na);
     for(let j=i+1;j<uniqueNames.length;j++){
+      // yield main thread every 500 comparisons to avoid UI freeze
+      if(++_yc%_YIELD===0) await new Promise(r=>setTimeout(r,0));
       const nb=_normGrp(uniqueNames[j]);
       const cb_core=_stripCoSuffix(nb);
       if(na===nb) continue;
-      const dist=_lev(na,nb);
-      const maxLen=Math.max(na.length,nb.length);
-      // Only flag as similar if: same core after stripping suffixes, OR edit distance ≤ 1 (single typo/char)
-      // Explicitly NOT matching just because names share a common word like "development"
-      const isSimilar = (ca_core===cb_core && ca_core.length>2) || dist===1;
+      // same core after stripping suffixes, OR single-edit typo (O(n) fast check)
+      const isSimilar = (ca_core===cb_core && ca_core.length>2) || _within1Edit(na,nb);
       if(isSimilar){
         const ca=(allContacts||[]).filter(c=>(c.company||'').trim()===uniqueNames[i]).length;
         const cb=(allContacts||[]).filter(c=>(c.company||'').trim()===uniqueNames[j]).length;
