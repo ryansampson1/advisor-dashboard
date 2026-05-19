@@ -7197,20 +7197,26 @@ function bootCRM(){
   if(window._crmReady) return;
   window._crmReady = true;
   const {collection, onSnapshot, query, orderBy} = _fbFns;
+  // Debounce: collapse burst of 3 independent snapshot fires into a single render
+  let _crmRenderTimer = null;
+  const _crmScheduleRender = () => {
+    clearTimeout(_crmRenderTimer);
+    _crmRenderTimer = setTimeout(()=>{ if(currentView==='crm') viewCRM(); }, 80);
+  };
   // Contacts
   onSnapshot(query(collection(_fbDb,'contacts'), orderBy('lastName','asc')), snap=>{
     allContacts = snap.docs.map(d=>({id:d.id,...d.data()}));
-    if(currentView==='crm') viewCRM();
+    _crmScheduleRender();
   });
   // Groups
   onSnapshot(collection(_fbDb,'crmGroups'), snap=>{
     allCRMGroups = snap.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>a.name.localeCompare(b.name));
-    if(currentView==='crm') viewCRM();
+    _crmScheduleRender();
   });
   // Companies (standalone records)
   onSnapshot(collection(_fbDb,'crmCompanies'), snap=>{
     allCRMCompanies = snap.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>(a.name||'').localeCompare(b.name||''));
-    if(currentView==='crm') viewCRM();
+    _crmScheduleRender();
   });
 }
 
@@ -7486,6 +7492,8 @@ function viewCRM(){
   // Filter contacts
   let visible = allContacts.filter(c=>{
     if(window._crmNoGroupFilter && (c.groups||[]).length > 0) return false;
+    if(window._crmNoEmailFilter && (c.email||'').trim()) return false;
+    if(window._crmNoPhoneFilter && (c.phone||'').trim()) return false;
     if(gf && !(c.groups||[]).includes(gf)) return false;
     if(sf){
       const hay = [c.firstName,c.lastName,c.email,c.email2,c.company,c.phone].filter(Boolean).join(' ').toLowerCase();
@@ -7552,12 +7560,20 @@ function viewCRM(){
     ${_alphaBar}
   </div>`;
 
+  // Precompute O(1) lookup maps — eliminates O(n²) array.find() in the row loop
+  const _crmDealMap = new Map((allDeals||[]).map(d=>[d.id,d]));
+  const _crmGrpMap  = new Map((allCRMGroups||[]).map(g=>[g.id,g]));
+  // Reset "show all" when filters change
+  if(window._crmShowAllContacts && (sf||gf||window._crmAlphaFilter||window._crmNoGroupFilter||window._crmNoEmailFilter||window._crmNoPhoneFilter)) window._crmShowAllContacts = false;
+
   const contactsHtml = `
     <div class="flex flex-wrap gap-2 mb-4 items-center">
       <input id="crm-contact-search" type="text" placeholder="Search name, company, email…" value="${(window._crmSearchFilter||'').replace(/"/g,'&quot;')}"
         oninput="window._crmSearchFilter=this.value;window._crmFocusId='crm-contact-search';window.viewCRM()"
         class="border rounded-lg px-3 py-1.5 text-sm outline-none flex-1 min-w-48 focus:ring-2 focus:ring-blue-200"/>
       <button type="button" onclick="window._crmNoGroupFilter=!window._crmNoGroupFilter;window._crmGroupFilter='';window.viewCRM()" class="border rounded-lg px-3 py-1.5 text-sm font-semibold whitespace-nowrap transition ${window._crmNoGroupFilter?'bg-amber-50 border-amber-300 text-amber-700':'border-gray-300 text-gray-600 hover:bg-gray-50'}" title="Show only contacts not assigned to any group">⚑ No Groups${window._crmNoGroupFilter?' <span class=\"text-xs font-normal\">(on)</span>':''}</button>
+      <button type="button" onclick="window._crmNoEmailFilter=!window._crmNoEmailFilter;window.viewCRM()" class="border rounded-lg px-3 py-1.5 text-sm font-semibold whitespace-nowrap transition ${window._crmNoEmailFilter?'bg-rose-50 border-rose-300 text-rose-700':'border-gray-300 text-gray-600 hover:bg-gray-50'}" title="Show only contacts missing an email address">✉ No Email${window._crmNoEmailFilter?' <span class=\"text-xs font-normal\">(on)</span>':''}</button>
+      <button type="button" onclick="window._crmNoPhoneFilter=!window._crmNoPhoneFilter;window.viewCRM()" class="border rounded-lg px-3 py-1.5 text-sm font-semibold whitespace-nowrap transition ${window._crmNoPhoneFilter?'bg-rose-50 border-rose-300 text-rose-700':'border-gray-300 text-gray-600 hover:bg-gray-50'}" title="Show only contacts missing a phone number">📵 No Phone${window._crmNoPhoneFilter?' <span class=\"text-xs font-normal\">(on)</span>':''}</button>
       <select onchange="window._crmGroupFilter=this.value;window._crmNoGroupFilter=false;window.viewCRM()" class="border rounded-lg px-3 py-1.5 text-sm outline-none ${window._crmNoGroupFilter?'opacity-40 pointer-events-none':''}" ${window._crmNoGroupFilter?'disabled':''}>
         <option value="" ${!gf?'selected':''}>All groups</option>
         ${groupOptions}
@@ -7575,7 +7591,7 @@ function viewCRM(){
         ${(typeof _CRM_OUTREACH_IMPORTS!=='undefined'&&_CRM_OUTREACH_IMPORTS.filter(r=>!r.imported&&!r.skipped).length>0)?`<button type="button" onclick="window._crmShowOutreachImports()" class="border border-indigo-200 rounded-lg px-3 py-1.5 text-sm text-indigo-600 hover:bg-indigo-50 whitespace-nowrap font-semibold">📥 Outreach <span class="inline-flex items-center justify-center w-4 h-4 text-xs font-bold text-white bg-indigo-500 rounded-full ml-1">${_CRM_OUTREACH_IMPORTS.filter(r=>!r.imported&&!r.skipped).length}</span></button>`:''}`:''}
     </div>
     ${_alphaBarHtml}
-    <div class="text-xs text-gray-400 mb-3">${visible.length} contact${visible.length!==1?'s':''} ${gf?'in group':'total'}${window._crmAlphaFilter?' — last name starts with '+window._crmAlphaFilter:''}</div>
+    <div class="text-xs text-gray-400 mb-3">${visible.length} contact${visible.length!==1?'s':''} ${gf?'in group':window._crmNoEmailFilter?'missing email':window._crmNoPhoneFilter?'missing phone':'total'}${window._crmAlphaFilter?' — last name starts with '+window._crmAlphaFilter:''}${visible.length>250&&!window._crmShowAllContacts?` — showing first 250 &nbsp;<button type="button" onclick="window._crmShowAllContacts=true;window.viewCRM()" class="text-blue-500 hover:underline font-semibold">Show all ${visible.length}</button>`:''}</div>
     ${visible.length===0?`
       <div class="text-center py-16 text-gray-400">
         <div class="text-5xl mb-3">👤</div>
@@ -7596,15 +7612,15 @@ function viewCRM(){
           </tr>
         </thead>
         <tbody class="divide-y divide-gray-100">
-          ${visible.map(c=>{
+          ${(window._crmShowAllContacts?visible:visible.slice(0,250)).map(c=>{
             const name = [c.firstName,c.lastName].filter(Boolean).join(' ')||c.email||'—';
             const groups = (c.groups||[]).map(gid=>{
-              const g = allCRMGroups.find(x=>x.id===gid);
+              const g = _crmGrpMap.get(gid);
               if(!g || !_isGroupVisible(g)) return '';
               return `<span class="inline-block px-2 py-0.5 rounded-full text-xs font-semibold mr-1" style="background:${g.color||'#e5e7eb'};color:${g.textColor||'#374151'}">${g.name}</span>`;
             }).join('');
             const deals = (c.linkedDeals||[]).map(did=>{
-              const d = allDeals.find(x=>x.id===did);
+              const d = _crmDealMap.get(did);
               return d ? `<span class="text-xs text-blue-600 mr-1 cursor-pointer hover:underline" onclick="switchView('board')">${d.projectName||d.propertyAddress||'Deal'}</span>` : '';
             }).join('');
             const added = c.createdAt ? new Date(c.createdAt).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'2-digit'}) : '—';
@@ -14270,8 +14286,8 @@ window.handleDealSubmit = async ev => {
     await Store.updateDeal(id,data);
     Object.assign(existing,data);
     if(oldStage!==stage) fireAutomations(existing,oldStage);
-    // Auto-create/link CRM contacts whenever a deal is saved (catches edits to contact fields)
-    _crmAutoCreateContactsFromDeal(existing).catch(e=>console.warn('[CRM auto-contact update]',e));
+    // NOTE: auto-create intentionally removed from edit path — running on every save
+    // caused deleted CRM contacts to reappear. Contacts are seeded once at deal creation only.
     showToast('Deal updated','success');
     // Trigger gate modal if stage changed and gate has questions (same as drag-and-drop)
     if(oldStage!==stage && !inlineGateData){
