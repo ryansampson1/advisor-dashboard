@@ -7286,6 +7286,15 @@ async function _crmEnsureContact(nameRaw, email, phone, company, dealId) {
 // ── Main: auto-create all relevant contacts from a deal ─────────────
 async function _crmAutoCreateContactsFromDeal(deal) {
   if(!_fbDb || !_fbFns) return;
+  // Ensure the CRM listener is running so allContacts is populated
+  bootCRM();
+  // Wait up to 3s for the first snapshot to arrive if allContacts is still empty
+  if(allContacts.length === 0) {
+    for(let i=0; i<30; i++){
+      await new Promise(r=>setTimeout(r,100));
+      if(allContacts.length > 0) break;
+    }
+  }
   const id = deal.id;
   const seen = new Set(); // avoid duplicate creates in same run
 
@@ -14833,6 +14842,11 @@ async function init(){
       if(currentUser.isOfficeManager && !currentUser.isAdmin) staffViewMode = true;
       // Subscribe to real-time Firestore listeners — UI auto-updates on any change
       await FB.subscribe(fbUser.uid, currentUser.isAdmin||currentUser.isOfficeManager||currentUser.isStaff, scheduleReRender);
+      // Boot CRM contact listener immediately at login so allContacts is populated
+      // before any deal save/drag fires _crmAutoCreateContactsFromDeal.
+      // Without this, allContacts is empty until the CRM tab is opened, causing
+      // the duplicate-check to miss existing contacts and create fresh duplicates.
+      bootCRM();
       _startCalendarReminders();
       // Auto-migrate pending profile → real UID on first login
       await FB.migratePendingProfile(fbUser.uid, fbUser.email||'').catch(e=>console.warn('[pending-migrate]',e));
