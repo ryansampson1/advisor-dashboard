@@ -7264,7 +7264,16 @@ function viewCRM(){
     </div>`}`;
 
   // ── Groups manager ────────────────────────────────────────────────
+  // Detect duplicate-named groups for the merge button
+  const _groupNameCounts = {};
+  for(const g of allCRMGroups){ const k=(g.name||'').toLowerCase().trim(); _groupNameCounts[k]=(_groupNameCounts[k]||0)+1; }
+  const _hasDupeGroups = Object.values(_groupNameCounts).some(n=>n>1);
+
   const groupsHtml = `
+    ${_hasDupeGroups?`<div class="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 mb-4 flex items-center justify-between gap-3">
+      <span class="text-xs text-amber-700 font-medium">⚠ Duplicate group names detected — contacts may show the same group twice.</span>
+      <button onclick="window.crmMergeDuplicateGroups()" class="text-xs brand-btn px-3 py-1.5 rounded-lg font-semibold whitespace-nowrap">Merge Duplicates</button>
+    </div>`:''}
     <div class="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
       ${allCRMGroups.map(g=>{
         const count = allContacts.filter(c=>(c.groups||[]).includes(g.id)).length;
@@ -7628,6 +7637,10 @@ window.saveGroup = async () => {
   const {doc, setDoc, addDoc, collection} = _fbFns;
   const name = document.getElementById('gm-name')?.value.trim();
   if(!name){ showToast('Group name is required','error'); return; }
+  // Prevent duplicate names
+  const nameKey = name.toLowerCase().trim();
+  const existing = (allCRMGroups||[]).find(g => g.id !== _editingGroupId && (g.name||'').toLowerCase().trim() === nameKey);
+  if(existing){ showToast(`A group named "${existing.name}" already exists`,'error'); return; }
   const colorVal = document.querySelector('[name=gm-color]:checked')?.value || '#dbeafe|#1e40af';
   const [color, textColor] = colorVal.split('|');
   const data = {
@@ -7646,6 +7659,62 @@ window.saveGroup = async () => {
     document.getElementById('crm-group-modal')?.remove();
     showToast(`Group ${_editingGroupId?'updated':'created'} ✓`,'success');
   } catch(e){ showToast('Save failed — '+e.message,'error'); }
+};
+
+// ── Merge duplicate groups (same name → one canonical group) ──────────
+window.crmMergeDuplicateGroups = async (showResult=true) => {
+  if(!_fbDb||!_fbFns) return 0;
+  const {doc, deleteDoc, writeBatch} = _fbFns;
+
+  // Group allCRMGroups by normalized name
+  const byName = {};
+  for(const g of (allCRMGroups||[])){
+    const key = (g.name||'').toLowerCase().trim();
+    if(!byName[key]) byName[key] = [];
+    byName[key].push(g);
+  }
+  const duplicateSets = Object.values(byName).filter(arr => arr.length > 1);
+  if(duplicateSets.length === 0){
+    if(showResult) showToast('No duplicate groups found ✓','success');
+    return 0;
+  }
+
+  // For each duplicate set: oldest = canonical; build replacement map dup→canonical
+  const replaceMap = {}; // dupId → canonicalId
+  for(const dupes of duplicateSets){
+    dupes.sort((a,b) => (a.createdAt||0) - (b.createdAt||0));
+    const canonId = dupes[0].id;
+    for(const d of dupes.slice(1)) replaceMap[d.id] = canonId;
+  }
+  const dupIds = new Set(Object.keys(replaceMap));
+
+  // Update contacts: replace dup IDs with canonical (batch 400 ops at a time)
+  const contactsToFix = (allContacts||[]).filter(c => (c.groups||[]).some(id => dupIds.has(id)));
+  const BATCH = 400;
+  for(let i=0; i<contactsToFix.length; i+=BATCH){
+    const batch = writeBatch(_fbDb);
+    for(const contact of contactsToFix.slice(i,i+BATCH)){
+      const seen = new Set();
+      const newGroups = [];
+      for(const id of (contact.groups||[])){
+        const canonical = replaceMap[id] || id;
+        if(!seen.has(canonical)){ seen.add(canonical); newGroups.push(canonical); }
+      }
+      batch.update(doc(_fbDb,'contacts',contact.id), {groups:newGroups, updatedAt:Date.now()});
+    }
+    await batch.commit();
+  }
+
+  // Delete duplicate group docs (batch)
+  const deleteIds = [...dupIds];
+  for(let i=0; i<deleteIds.length; i+=BATCH){
+    const batch = writeBatch(_fbDb);
+    for(const id of deleteIds.slice(i,i+BATCH)) batch.delete(doc(_fbDb,'crmGroups',id));
+    await batch.commit();
+  }
+
+  if(showResult) showToast(`Merged ${deleteIds.length} duplicate group${deleteIds.length!==1?'s':''} ✓`,'success');
+  return deleteIds.length;
 };
 
 window.crmDeleteGroup = async id => {
@@ -7908,11 +7977,11 @@ window.crmDoImport = async () => {
 
       if(existingContact){
         if(importMode === 'update'){
-          // Fill only blank fields — never overwrite existing data
+          // Always overwrite email/phone from CSV if present; fill blanks for other fields
           const updates = { updatedAt: Date.now() };
-          if(!existingContact.email        && email)                updates.email       = email;
-          if(!existingContact.phone        && get(row,map.phone))   updates.phone       = get(row,map.phone);
-          if(!existingContact.officePhone  && get(row,map.officePhone)) updates.officePhone = get(row,map.officePhone);
+          if(email)                        updates.email       = email;
+          if(get(row,map.phone))           updates.phone       = get(row,map.phone);
+          if(get(row,map.officePhone))     updates.officePhone = get(row,map.officePhone);
           if(!existingContact.company      && get(row,map.company)) updates.company     = get(row,map.company);
           if(!existingContact.title        && get(row,map.title))   updates.title       = get(row,map.title);
           if(!existingContact.source       && get(row,map.source))  updates.source      = get(row,map.source);
@@ -7923,10 +7992,15 @@ window.crmDoImport = async () => {
           if(!ea.city   && get(row,map.city))    updates['mailingAddress.city']   = get(row,map.city);
           if(!ea.state  && get(row,map.state))   updates['mailingAddress.state']  = get(row,map.state).toUpperCase();
           if(!ea.zip    && get(row,map.zip))     updates['mailingAddress.zip']    = get(row,map.zip);
-          // Groups — always merge (union)
+          // Groups — merge by name so duplicate-named group IDs don't stack
           const existingGroupIds = existingContact.groups || [];
+          const existingGroupNames = new Set(existingGroupIds.map(id=>{ const g=allCRMGroups.find(x=>x.id===id); return g?(g.name||'').toLowerCase().trim():''; }).filter(Boolean));
           const mergedGroups = [...existingGroupIds];
-          for(const gid of csvGroupIds){ if(!mergedGroups.includes(gid)) mergedGroups.push(gid); }
+          for(const gid of csvGroupIds){
+            const g = allCRMGroups.find(x=>x.id===gid);
+            const gname = g?(g.name||'').toLowerCase().trim():'';
+            if(!mergedGroups.includes(gid) && !existingGroupNames.has(gname)){ mergedGroups.push(gid); existingGroupNames.add(gname); }
+          }
           if(mergedGroups.length !== existingGroupIds.length) updates.groups = mergedGroups;
 
           if(Object.keys(updates).length > 1) { // more than just updatedAt
