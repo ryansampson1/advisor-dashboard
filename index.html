@@ -495,7 +495,13 @@ body {
       <div class="flex items-center justify-between mb-2">
         <div>
           <h2 id="deal-modal-title" class="text-xl font-bold">Add Deal</h2>
-          <div id="deal-modal-stage-badge" class="text-xs font-semibold text-gray-400 mt-0.5"></div>
+          <div id="deal-modal-stage-badge" class="flex items-center gap-1.5 mt-1">
+            <span id="deal-modal-stage-dot" class="inline-block w-2 h-2 rounded-full flex-shrink-0" style="background:#9ca3af"></span>
+            <select id="f-stage-select"
+              class="text-xs font-semibold bg-transparent border-0 outline-none cursor-pointer text-gray-600 p-0 leading-none"
+              onchange="document.getElementById('f-stage').value=this.value; window._setStageBadge(this.value); window.onStageChange();">
+            </select>
+          </div>
         </div>
         <button onclick="closeDealModal()" class="text-gray-400 hover:text-gray-700 text-2xl leading-none">&times;</button>
       </div>
@@ -5807,12 +5813,7 @@ window.handleDrop = (ev,newStage) => {
     document.getElementById('f-stage').value = newStage;
     document.getElementById('f-prob').value = STAGE_PROB[newStage] ?? deal.probability ?? 10;
     // Update the badge to show where the card is moving TO
-    const sb = document.getElementById('deal-modal-stage-badge');
-    if(sb){
-      sb.textContent = 'Stage: ' + newStage;
-      sb.className = 'text-xs font-semibold mt-0.5 px-2 py-0.5 rounded-full w-fit '
-        + (SC[newStage]?.txt||'text-gray-500') + ' ' + (SC[newStage]?.hdr||'bg-gray-100');
-    }
+    window._setStageBadge(newStage);
     // Re-render stage fields for the destination stage (includes auto-fill + effective date)
     renderStageFields(newStage, deal);
     const sf = document.getElementById('stage-fields');
@@ -13002,6 +13003,36 @@ window._togglePropertyGroup = function(gid){
   window._renderPropertyGroupPicker(ids);
 };
 
+// ── Stage badge / select helper ──────────────────────────────────────────────
+window._setStageBadge = function(stage){
+  // Sync hidden input
+  const hidden = document.getElementById('f-stage');
+  if(hidden) hidden.value = stage||'';
+  // Update colored dot
+  const dot = document.getElementById('deal-modal-stage-dot');
+  if(dot){
+    const s=(stage||'').toLowerCase();
+    let color='#9ca3af';
+    if(s.includes('prospect')||s.includes('proposal')) color='#6366f1';
+    else if(s.includes('listing')) color='#f59e0b';
+    else if(s.includes('loi')) color='#8b5cf6';
+    else if(s.includes('contract')||s.includes('due diligence')) color='#3b82f6';
+    else if(s.includes('closing')||s.includes('rezoning')||s.includes('permitting')) color='#0891b2';
+    else if(s.includes('sold')||s.includes('closed won')) color='#22c55e';
+    else if(s.includes('lost')||s.includes('terminated')||s.includes('withdrawn')) color='#ef4444';
+    dot.style.backgroundColor = color;
+  }
+  // Populate select options from live STAGES array
+  const sel = document.getElementById('f-stage-select');
+  if(!sel) return;
+  const stages = (typeof STAGES !== 'undefined' && STAGES.length) ? STAGES : (stage ? [stage] : []);
+  // Rebuild options if count differs (first call or STAGES changed)
+  if(sel.options.length !== stages.length){
+    sel.innerHTML = stages.map(s=>`<option value="${s}">${s}</option>`).join('');
+  }
+  sel.value = stage||'';
+};
+
 window.openDealModal = (id, defaultStage) => {
   editingDealId = id||null;
   const modal=document.getElementById('deal-modal');
@@ -13045,8 +13076,7 @@ window.openDealModal = (id, defaultStage) => {
     // Populate co-advisors
     (deal.coAdvisors||[]).forEach(ca=>addCoAdvisorRow(ca));
     document.getElementById('f-property-groups').value = JSON.stringify(deal.propertyGroups||[]);
-    stageBadge.textContent='Stage: '+(deal.stage||'Prospect');
-    stageBadge.className='text-xs font-semibold mt-0.5 px-2 py-0.5 rounded-full w-fit '+(SC[deal.stage]?.txt||'text-gray-500')+' '+(SC[deal.stage]?.hdr||'bg-gray-100');
+    window._setStageBadge(deal.stage||'Prospect');
     // Render stage-specific gate fields for existing deal
     const sfEdit = document.getElementById('stage-fields');
     if(sfEdit){
@@ -13076,8 +13106,7 @@ window.openDealModal = (id, defaultStage) => {
     const stage = defaultStage || STAGES[0] || 'Prospect';
     document.getElementById('f-stage').value=stage;
     document.getElementById('f-prob').value=STAGE_PROB[stage]??10;
-    stageBadge.textContent='Stage: '+stage;
-    stageBadge.className='text-xs font-semibold mt-0.5 px-2 py-0.5 rounded-full w-fit '+(SC[stage]?.txt||'text-gray-500')+' '+(SC[stage]?.hdr||'bg-gray-100');
+    window._setStageBadge(stage);
     // Always render stage-specific fields — unhide the container if there's content
     const sf = document.getElementById('stage-fields');
     if(sf){
@@ -13107,6 +13136,7 @@ window.recalcRevenue = () => {
 window.onStageChange  = () => {
   const stage=document.getElementById('f-stage').value;
   document.getElementById('f-prob').value=STAGE_PROB[stage]??10;
+  window._setStageBadge(stage);
   // Preserve any data already entered before re-rendering fields
   renderStageFields(stage, collectStageFields());
 };
@@ -13489,6 +13519,16 @@ window.handleDealSubmit = async ev => {
     // Auto-create/link CRM contacts whenever a deal is saved (catches edits to contact fields)
     _crmAutoCreateContactsFromDeal(existing).catch(e=>console.warn('[CRM auto-contact update]',e));
     showToast('Deal updated','success');
+    // Trigger gate modal if stage changed and gate has questions (same as drag-and-drop)
+    if(oldStage!==stage && !inlineGateData){
+      const editGate=getStageGate(stage);
+      if(editGate?.enabled && editGate.fields?.length){
+        closeDealModal();
+        renderCurrentView();
+        openGateModal(id, stage);
+        return;
+      }
+    }
   } else {
     data.createdAt=Date.now();
     data.stageEnteredAt=Date.now();
