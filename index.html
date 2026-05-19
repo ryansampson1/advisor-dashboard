@@ -7229,8 +7229,11 @@ function viewCRM(){
       <span class="text-xs text-gray-400">${coEntries.length} compan${coEntries.length!==1?'ies':'y'}</span>
     </div>
     <div class="${_hasDupeCompanies?'bg-amber-50 border border-amber-200':'bg-gray-50 border border-gray-200'} rounded-xl px-4 py-3 mb-4 flex items-center justify-between gap-3">
-      <span class="text-xs ${_hasDupeCompanies?'text-amber-700':'text-gray-500'} font-medium">${_hasDupeCompanies?'⚠ Duplicate or similar company names detected — click to review and merge.':'🔍 Use smart merge to find and consolidate similar company names.'}</span>
-      <button onclick="window.crmSmartMergeCompanies()" class="text-xs ${_hasDupeCompanies?'brand-btn':'border border-gray-300 text-gray-600 hover:bg-white'} px-3 py-1.5 rounded-lg font-semibold whitespace-nowrap">Find &amp; Merge Similar</button>
+      <span class="text-xs ${_hasDupeCompanies?'text-amber-700':'text-gray-500'} font-medium">${_hasDupeCompanies?'⚠ Duplicate or similar company names detected — click to review and merge.':'🔍 Merge similar or manually select any two companies to combine.'}</span>
+      <div class="flex gap-2 shrink-0">
+        <button onclick="window.crmSmartMergeCompanies()" class="text-xs ${_hasDupeCompanies?'brand-btn':'border border-gray-300 text-gray-600 hover:bg-white'} px-3 py-1.5 rounded-lg font-semibold whitespace-nowrap">Find &amp; Merge Similar</button>
+        <button onclick="window.crmManualMergeCompanies()" class="text-xs border border-gray-300 text-gray-600 hover:bg-white px-3 py-1.5 rounded-lg font-semibold whitespace-nowrap">Merge Two…</button>
+      </div>
     </div>
     ${coEntries.length===0?`<div class="text-center py-16 text-gray-400"><div class="text-5xl mb-3">🏢</div><div class="font-medium text-gray-500">No companies yet.</div><button onclick="openCompanyModal(null)" class="mt-3 brand-btn px-4 py-2 rounded-lg text-sm font-semibold">+ Add Company</button></div>`:`
     <div class="space-y-4">
@@ -7879,16 +7882,23 @@ window.crmSmartMergeCompanies = async () => {
   }
 
   // Step 2: find fuzzy pairs among remaining unique names
+  // Strip common corporate suffixes before comparing cores
+  const _stripCoSuffix = s => s.replace(/\b(llc|inc|corp|ltd|co|company|group|properties|realty|real estate|enterprises|solutions|services|associates|partners|holdings|investments|management|consulting)\b/g,'').replace(/\s+/g,' ').trim();
   const uniqueNames=allNames.filter(n=>!autoReplaceMap[n]);
   const pairs=[];
   for(let i=0;i<uniqueNames.length;i++){
     const na=_normGrp(uniqueNames[i]);
+    const ca_core=_stripCoSuffix(na);
     for(let j=i+1;j<uniqueNames.length;j++){
       const nb=_normGrp(uniqueNames[j]);
+      const cb_core=_stripCoSuffix(nb);
       if(na===nb) continue;
+      const dist=_lev(na,nb);
       const maxLen=Math.max(na.length,nb.length);
-      const threshold=maxLen<=5?1:maxLen<=10?2:3;
-      if(_lev(na,nb)<=threshold){
+      // Only flag as similar if: same core after stripping suffixes, OR edit distance ≤ 1 (single typo/char)
+      // Explicitly NOT matching just because names share a common word like "development"
+      const isSimilar = (ca_core===cb_core && ca_core.length>2) || dist===1;
+      if(isSimilar){
         const ca=(allContacts||[]).filter(c=>(c.company||'').trim()===uniqueNames[i]).length;
         const cb=(allContacts||[]).filter(c=>(c.company||'').trim()===uniqueNames[j]).length;
         pairs.push({a:{name:uniqueNames[i],ca},b:{name:uniqueNames[j],cb}});
@@ -7962,6 +7972,95 @@ window._doSmartMergeCompanies = async (pairNames) => {
     await b.commit();
   }
   showToast(`Merged ${mergeCount} company pair${mergeCount!==1?'s':''} ✓`,'success');
+  viewCRM();
+};
+
+// ── Manual Company Merge ─────────────────────────────────────────────
+window.crmManualMergeCompanies = () => {
+  // Build sorted list of all unique company names from contacts
+  const names = [...new Set((allContacts||[]).map(c=>(c.company||'').trim()).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
+  if(names.length < 2){ showToast('Need at least 2 companies to merge','error'); return; }
+
+  const opts = names.map(n=>{
+    const cnt = (allContacts||[]).filter(c=>(c.company||'').trim()===n).length;
+    const esc = n.replace(/"/g,'&quot;');
+    return `<option value="${esc}">${n} (${cnt})`;
+  }).join('');
+
+  const modal = document.createElement('div');
+  modal.id = 'crm-manual-merge-co-modal';
+  modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4';
+  modal.innerHTML = `<div class="bg-white rounded-2xl shadow-2xl w-full max-w-md flex flex-col">
+    <div class="px-6 py-4 border-b flex items-center justify-between">
+      <h3 class="font-bold text-gray-800 text-lg">Merge Two Companies</h3>
+      <button onclick="document.getElementById('crm-manual-merge-co-modal')?.remove()" class="text-gray-400 hover:text-gray-600 text-xl leading-none">✕</button>
+    </div>
+    <div class="px-6 py-5 space-y-4">
+      <p class="text-xs text-gray-500">Select the two company names to merge, then choose which name to keep. All contacts from both will be moved to the kept name.</p>
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1.5">Company A</label>
+        <select id="mmco-a" class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-200">
+          <option value="">— select —</option>${opts}
+        </select>
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1.5">Company B</label>
+        <select id="mmco-b" class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-200">
+          <option value="">— select —</option>${opts}
+        </select>
+      </div>
+      <div id="mmco-keep-wrap" class="hidden space-y-1.5">
+        <label class="block text-xs font-semibold text-gray-600">Keep which name?</label>
+        <label class="flex items-center gap-2 cursor-pointer"><input type="radio" name="mmco-keep" value="a" checked class="accent-blue-600"/> <span id="mmco-label-a" class="text-sm text-gray-700"></span></label>
+        <label class="flex items-center gap-2 cursor-pointer"><input type="radio" name="mmco-keep" value="b" class="accent-blue-600"/> <span id="mmco-label-b" class="text-sm text-gray-700"></span></label>
+      </div>
+    </div>
+    <div class="px-6 py-4 border-t flex gap-3">
+      <button onclick="window._execManualMergeCompanies()" class="flex-1 brand-btn rounded-xl py-2.5 text-sm font-semibold">Merge</button>
+      <button onclick="document.getElementById('crm-manual-merge-co-modal')?.remove()" class="px-4 border rounded-xl py-2.5 text-sm text-gray-600">Cancel</button>
+    </div>
+  </div>`;
+  document.getElementById('crm-manual-merge-co-modal')?.remove();
+  document.body.appendChild(modal);
+
+  // Show keep-radio when both selects have a value
+  const update = () => {
+    const a = document.getElementById('mmco-a')?.value;
+    const b = document.getElementById('mmco-b')?.value;
+    const wrap = document.getElementById('mmco-keep-wrap');
+    if(a && b && a !== b){
+      const ca=(allContacts||[]).filter(c=>(c.company||'').trim()===a).length;
+      const cb=(allContacts||[]).filter(c=>(c.company||'').trim()===b).length;
+      document.getElementById('mmco-label-a').textContent=`${a} (${ca} contact${ca!==1?'s':''})`;
+      document.getElementById('mmco-label-b').textContent=`${b} (${cb} contact${cb!==1?'s':''})`;
+      wrap?.classList.remove('hidden');
+    } else {
+      wrap?.classList.add('hidden');
+    }
+  };
+  document.getElementById('mmco-a')?.addEventListener('change', update);
+  document.getElementById('mmco-b')?.addEventListener('change', update);
+};
+
+window._execManualMergeCompanies = async () => {
+  const a = document.getElementById('mmco-a')?.value;
+  const b = document.getElementById('mmco-b')?.value;
+  if(!a||!b){ showToast('Select two companies','error'); return; }
+  if(a===b){ showToast('Select two different companies','error'); return; }
+  const keep = document.querySelector('input[name="mmco-keep"]:checked')?.value||'a';
+  const canon = keep==='a'?a:b;
+  const dupName = keep==='a'?b:a;
+  document.getElementById('crm-manual-merge-co-modal')?.remove();
+  const {doc, writeBatch} = _fbFns;
+  const toFix=(allContacts||[]).filter(c=>(c.company||'').trim()===dupName);
+  const BATCH=400;
+  for(let i=0;i<toFix.length;i+=BATCH){
+    const b2=writeBatch(_fbDb);
+    for(const contact of toFix.slice(i,i+BATCH))
+      b2.update(doc(_fbDb,'contacts',contact.id),{company:canon,updatedAt:Date.now()});
+    await b2.commit();
+  }
+  showToast(`Merged "${dupName}" → "${canon}" (${toFix.length} contact${toFix.length!==1?'s':''} updated) ✓`,'success');
   viewCRM();
 };
 
