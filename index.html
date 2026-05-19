@@ -7136,11 +7136,11 @@ function viewCRM(){
         <option value="" ${!gf?'selected':''}>All groups</option>
         ${groupOptions}
       </select>
-      ${currentUser.isAdmin?`<label class="brand-btn text-sm font-semibold px-4 py-1.5 rounded-lg cursor-pointer">
+      <label class="brand-btn text-sm font-semibold px-4 py-1.5 rounded-lg cursor-pointer">
         ⬆ Import CSV
-        <input type="file" accept=".csv" class="hidden" onchange="crmImportCSV(this)"/>
+        <input type="file" accept=".csv" class="hidden" onchange="window.crmImportCSV(this)"/>
       </label>
-      <button onclick="crmExportCSV()" class="border rounded-lg px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50">⬇ Export CSV</button>`:''}
+      ${currentUser.isAdmin?`<button type="button" onclick="window.crmExportCSV()" class="border rounded-lg px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50">⬇ Export CSV</button>`:''}
     </div>
     <div class="text-xs text-gray-400 mb-3">${visible.length} contact${visible.length!==1?'s':''} ${gf?'in group':'total'}</div>
     ${visible.length===0?`
@@ -7709,6 +7709,9 @@ window.crmImportCSV = file => {
       notes:           col('notes','comment','description'),
     };
 
+    // Store import data globally so onclick doesn't need to embed JSON in HTML attribute
+    window._crmPendingImport = { rows, map };
+
     // Show preview modal
     const preview = rows.slice(0,5).map(r=>{
       const get = idx => idx>=0?(r[idx]||''):'';
@@ -7735,8 +7738,8 @@ window.crmImportCSV = file => {
           </select>
         </div>
         <div class="flex gap-2">
-          <button onclick="crmDoImport(${JSON.stringify(rows).replace(/</g,'\\u003c')},${JSON.stringify(map).replace(/</g,'\\u003c')})" class="flex-1 brand-btn rounded-lg py-2.5 text-sm font-semibold">Import All</button>
-          <button onclick="document.getElementById('crm-import-modal').remove()" class="px-4 border rounded-lg py-2.5 text-sm text-gray-600">Cancel</button>
+          <button type="button" onclick="window.crmDoImport()" class="flex-1 brand-btn rounded-lg py-2.5 text-sm font-semibold">Import All</button>
+          <button type="button" onclick="document.getElementById('crm-import-modal').remove()" class="px-4 border rounded-lg py-2.5 text-sm text-gray-600">Cancel</button>
         </div>
       </div>`;
     document.getElementById('crm-import-modal')?.remove();
@@ -7746,7 +7749,10 @@ window.crmImportCSV = file => {
   file.value=''; // reset input
 };
 
-window.crmDoImport = async (rows, map) => {
+window.crmDoImport = async () => {
+  if(!_fbDb||!_fbFns){ showToast('Not connected — try refreshing','error'); return; }
+  const { rows, map } = window._crmPendingImport || {};
+  if(!rows||!rows.length){ showToast('No import data found','error'); return; }
   const {addDoc, collection} = _fbFns;
   const groupId = document.getElementById('import-group')?.value||'';
   const get = (row, idx) => idx>=0?(row[idx]||'').trim():'';
@@ -7772,7 +7778,9 @@ window.crmDoImport = async (rows, map) => {
       count++;
     }
     document.getElementById('crm-import-modal')?.remove();
+    window._crmPendingImport = null;
     showToast(`${count} contact${count!==1?'s':''} imported ✓`,'success');
+    viewCRM();
   } catch(e){ showToast('Import failed — '+e.message,'error'); }
 };
 
