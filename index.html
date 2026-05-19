@@ -9447,7 +9447,7 @@ window._crmShowOutreachImports = function(){
             ${r.companyName?`<span class="text-xs bg-gray-100 rounded-full px-2 py-0.5">${r.companyName}</span>`:''}
             <span class="text-xs text-gray-400">${r.recipientEmail||''}</span>
           </div>
-          <div class="mt-1">🏡 ${dealLabel}</div>
+          <div class="mt-1 flex items-center gap-2 flex-wrap" id="oi-deal-${idx}">🏡 ${dealLabel} <button onclick="window._crmChangeOutreachDeal(${idx})" class="text-xs text-blue-500 hover:text-blue-700 underline flex-shrink-0">${deal ? 'Change' : '+ Assign deal'}</button></div>
         </div>
         <div class="flex gap-1.5 flex-shrink-0">
           ${imported
@@ -9511,6 +9511,68 @@ window._crmSkipOutreachRow = function(idx){
   const r = _CRM_OUTREACH_IMPORTS[idx];
   if(r) r.skipped = true;
   document.getElementById(`oi-row-${idx}`)?.remove();
+};
+
+window._crmChangeOutreachDeal = function(idx){
+  // Toggle the inline deal picker
+  const existing = document.getElementById(`oi-deal-picker-${idx}`);
+  if(existing){ existing.remove(); return; }
+
+  const dealContainer = document.getElementById(`oi-deal-${idx}`);
+  if(!dealContainer) return;
+
+  const picker = document.createElement('div');
+  picker.id = `oi-deal-picker-${idx}`;
+  picker.className = 'w-full mt-2 border rounded-xl bg-white shadow-lg p-2';
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.placeholder = 'Search deals by address or name…';
+  input.className = 'w-full border rounded-lg px-2 py-1.5 text-sm mb-2 outline-none focus:ring-2 focus:ring-blue-200';
+
+  const list = document.createElement('div');
+  list.className = 'max-h-44 overflow-y-auto divide-y divide-gray-100';
+
+  const renderList = (filter) => {
+    const f = filter.toLowerCase();
+    const matches = (allDeals||[]).filter(d => {
+      const hay = [(d.propertyAddress||''),(d.projectName||''),(d.county||'')].join(' ').toLowerCase();
+      return !f || hay.includes(f);
+    }).slice(0,25);
+    list.innerHTML = matches.length
+      ? matches.map(d => {
+          const label = d.propertyAddress||d.projectName||d.id;
+          const sub = d.county ? `<span class="text-gray-400"> · ${d.county}</span>` : '';
+          return `<div class="px-2 py-2 text-sm hover:bg-blue-50 cursor-pointer rounded-lg" onclick="window._crmSetOutreachDeal(${idx},'${d.id}')">${label}${sub}</div>`;
+        }).join('')
+      : '<div class="text-sm text-gray-400 p-2 text-center">No deals found</div>';
+  };
+
+  input.addEventListener('input', e => renderList(e.target.value));
+  renderList('');
+  picker.appendChild(input);
+  picker.appendChild(list);
+
+  // Insert picker below the deal label row
+  dealContainer.parentNode.insertBefore(picker, dealContainer.nextSibling);
+  input.focus();
+};
+
+window._crmSetOutreachDeal = function(idx, dealId){
+  const r = _CRM_OUTREACH_IMPORTS[idx];
+  if(!r) return;
+  r.matchedDealId = dealId;
+  // Remove picker
+  document.getElementById(`oi-deal-picker-${idx}`)?.remove();
+  // Refresh the deal label in-place
+  const deal = (allDeals||[]).find(d=>d.id===dealId);
+  const dealLabel = deal
+    ? `<span class="text-green-700 font-semibold text-xs">✓ ${deal.propertyAddress||deal.projectName||'Unnamed'}</span>`
+    : `<span class="text-amber-600 text-xs italic">No match</span>`;
+  const container = document.getElementById(`oi-deal-${idx}`);
+  if(container){
+    container.innerHTML = `🏡 ${dealLabel} <button onclick="window._crmChangeOutreachDeal(${idx})" class="text-xs text-blue-500 hover:text-blue-700 underline flex-shrink-0">Change</button>`;
+  }
 };
 
 window._crmImportAllOutreach = async function(){
