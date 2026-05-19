@@ -8974,7 +8974,8 @@ window.crmSmartMergeContacts = async () => {
     for(let i=0;i<grp.length;i++) for(let j=i+1;j<grp.length;j++){
       const a=grp[i],b=grp[j];
       const fa=(a.firstName||'').toLowerCase().trim(), fb=(b.firstName||'').toLowerCase().trim();
-      if(!fa||!fb||fa[0]!==fb[0]) continue;
+      // Require first 2 chars match to avoid Jay/Joan/Jim/Joe false positives
+      if(!fa||!fb||fa.slice(0,2)!==fb.slice(0,2)) continue;
       if(_lev(fa,fb)>2) continue;
       const key=[a.id,b.id].sort().join('|');
       if(!seen.has(key)){ seen.add(key); pairs.push({a,b,reason:'same last name "'+a.lastName+'", similar first name'}); }
@@ -9039,47 +9040,57 @@ window.crmSmartMergeContacts = async () => {
 };
 
 window._doSmartMergeContacts = async (pairIds) => {
+  if(!_fbDb||!_fbFns){ showToast('Firebase not ready','error'); return; }
   const {doc, updateDoc, deleteDoc} = _fbFns;
   let mergeCount = 0;
   const toDelete = [];
   const fields = ['firstName','lastName','phone','officePhone','title','company','address','notes'];
 
-  for(let i=0;i<pairIds.length;i++){
-    if(!document.getElementById(`scm-chk-${i}`)?.checked) continue;
-    const keep = document.querySelector(`input[name="scm-keep-${i}"]:checked`)?.value||'a';
-    const pid = keep==='a' ? pairIds[i].a : pairIds[i].b;
-    const sid = keep==='a' ? pairIds[i].b : pairIds[i].a;
-    const primary = (allContacts||[]).find(c=>c.id===pid);
-    const secondary = (allContacts||[]).find(c=>c.id===sid);
-    if(!primary||!secondary) continue;
-    const updates = {};
-    for(const f of fields){ if(!primary[f]&&secondary[f]) updates[f]=secondary[f]; }
-    // Handle emails: preserve both; use Gmail-synced address as primary
-    const _pe=(primary.email||'').toLowerCase().trim();
-    const _se=(secondary.email||'').toLowerCase().trim();
-    if(!_pe&&_se){ updates.email=_se; }
-    else if(_pe&&_se&&_pe!==_se){
-      const _gEmails=new Set((typeof _GMAIL_SYNC_DATA!=='undefined'?_GMAIL_SYNC_DATA:[]).map(g=>(g.email||'').toLowerCase()));
-      if(!_gEmails.has(_pe)&&_gEmails.has(_se)){ updates.email=_se; if(!primary.email2) updates.email2=_pe; }
-      else { if(!primary.email2) updates.email2=_se; }
+  try {
+    for(let i=0;i<(pairIds||[]).length;i++){
+      if(!document.getElementById(`scm-chk-${i}`)?.checked) continue;
+      const keep = document.querySelector(`input[name="scm-keep-${i}"]:checked`)?.value||'a';
+      const pid = keep==='a' ? pairIds[i].a : pairIds[i].b;
+      const sid = keep==='a' ? pairIds[i].b : pairIds[i].a;
+      const primary = (allContacts||[]).find(c=>c.id===pid);
+      const secondary = (allContacts||[]).find(c=>c.id===sid);
+      if(!primary||!secondary) continue;
+      const updates = {};
+      for(const f of fields){ if(!primary[f]&&secondary[f]) updates[f]=secondary[f]; }
+      // Handle emails: preserve both; use Gmail-synced address as primary
+      const _pe=(primary.email||'').toLowerCase().trim();
+      const _se=(secondary.email||'').toLowerCase().trim();
+      if(!_pe&&_se){ updates.email=_se; }
+      else if(_pe&&_se&&_pe!==_se){
+        const _gEmails=new Set((typeof _GMAIL_SYNC_DATA!=='undefined'?_GMAIL_SYNC_DATA:[]).map(g=>(g.email||'').toLowerCase()));
+        if(!_gEmails.has(_pe)&&_gEmails.has(_se)){ updates.email=_se; if(!primary.email2) updates.email2=_pe; }
+        else { if(!primary.email2) updates.email2=_se; }
+      }
+      if(!updates.email2&&!primary.email2&&secondary.email2){
+        const _se2=(secondary.email2||'').toLowerCase().trim();
+        if(_se2&&_se2!==(updates.email||_pe)) updates.email2=_se2;
+      }
+      updates.groups = [...new Set([...(primary.groups||[]),...(secondary.groups||[])])];
+      const md = [...new Set([...(primary.linkedDeals||[]),...(secondary.linkedDeals||[])])];
+      if(md.length) updates.linkedDeals = md;
+      updates.updatedAt = Date.now();
+      await updateDoc(doc(_fbDb,'contacts',pid), updates);
+      toDelete.push(sid);
+      mergeCount++;
     }
-    if(!updates.email2&&!primary.email2&&secondary.email2){
-      const _se2=(secondary.email2||'').toLowerCase().trim();
-      if(_se2&&_se2!==(updates.email||_pe)) updates.email2=_se2;
+    for(const id of toDelete) await deleteDoc(doc(_fbDb,'contacts',id));
+    if(mergeCount){
+      showToast(`Merged ${mergeCount} contact pair${mergeCount!==1?'s':''} ✓`,'success');
+      viewCRM();
+    } else {
+      showToast('No pairs selected — check boxes next to the duplicates you want to merge','info',4000);
     }
-    updates.groups = [...new Set([...(primary.groups||[]),...(secondary.groups||[])])];
-    const md = [...new Set([...(primary.linkedDeals||[]),...(secondary.linkedDeals||[])])];
-    if(md.length) updates.linkedDeals = md;
-    updates.updatedAt = Date.now();
-    await updateDoc(doc(_fbDb,'contacts',pid), updates);
-    toDelete.push(sid);
-    mergeCount++;
+  } catch(e) {
+    console.error('[smart merge contacts]', e);
+    showToast('Merge error: '+(e?.message||e),'error');
+  } finally {
+    document.getElementById('crm-smart-merge-contacts-modal')?.remove();
   }
-  document.getElementById('crm-smart-merge-contacts-modal')?.remove();
-  if(!mergeCount) return;
-  for(const id of toDelete) await deleteDoc(doc(_fbDb,'contacts',id));
-  showToast(`Merged ${mergeCount} contact pair${mergeCount!==1?'s':''} ✓`,'success');
-  viewCRM();
 };
 
 // ── Smart Company Merge ─────────────────────────────────────────────
