@@ -5080,6 +5080,34 @@ const ADVISOR_BIOS = {
       }
     }
   }
+
+  // ── Active Clients group auto-sync ─────────────────────────────────
+  const _ACG = 'YBMHOkd1hrljAHrIc8Nd';
+  if(_fbFns && _fbDb && (deal.stage==='Listing'||deal.stage==='Lost Listing')){
+    const {doc:_d,updateDoc:_u}=_fbFns;
+    const _lc=(allContacts||[]).filter(c=>(c.linkedDeals||[]).includes(deal.id));
+    if(deal.stage==='Listing'){
+      for(const ct of _lc){
+        if((ct.groups||[]).includes(_ACG)) continue;
+        const ng=[...(ct.groups||[]),_ACG];
+        _u(_d(_fbDb,'contacts',ct.id),{groups:ng,updatedAt:Date.now()}).catch(()=>{});
+        ct.groups=ng;
+      }
+      if(_lc.length) showToast(`Added ${_lc.length} contact${_lc.length!==1?'s':''} to Active Clients ✓`,'success',3000);
+    } else {
+      let removed=0;
+      for(const ct of _lc){
+        if(!(ct.groups||[]).includes(_ACG)) continue;
+        const other=(allDeals||[]).filter(d=>d.id!==deal.id&&d.stage==='Listing'&&(ct.linkedDeals||[]).includes(d.id));
+        if(other.length===0){
+          const ng=(ct.groups||[]).filter(g=>g!==_ACG);
+          _u(_d(_fbDb,'contacts',ct.id),{groups:ng,updatedAt:Date.now()}).catch(()=>{});
+          ct.groups=ng; removed++;
+        }
+      }
+      if(removed) showToast(`Removed ${removed} contact${removed!==1?'s':''} from Active Clients ✓`,'info',3000);
+    }
+  }
 }
 
 function buildMailtoUrl(cfg,deal){
@@ -7751,7 +7779,7 @@ function viewCRM(){
             ${g.description?`<div class="text-xs text-gray-500 mt-1 truncate">${g.description}</div>`:''}
           </div>
           <div class="flex gap-1 shrink-0">
-            <button onclick="window._crmGroupFilter='${g.id}';window._crmView='contacts';window.viewCRM()" class="text-xs px-2 py-1 border rounded text-gray-600 hover:bg-gray-50">View</button>
+            <button onclick="openGroupPanel('${g.id}')" class="text-xs px-2 py-1 border rounded text-gray-600 hover:bg-gray-50">View</button>
             ${canEdit?`<button onclick="openGroupModal('${g.id}')" class="text-gray-300 hover:text-blue-500">✏️</button>`:''}
             ${canDelete?`<button onclick="crmDeleteGroup('${g.id}')" class="text-gray-200 hover:text-red-500">✕</button>`:''}
           </div>
@@ -8181,6 +8209,60 @@ window.closeContactPanel = () => {
   document.getElementById('crm-panel-backdrop')?.remove();
   if (_crmPanelUnsub) { _crmPanelUnsub(); _crmPanelUnsub = null; }
   _crmPanelContactId = null;
+};
+
+// ── Group slide-out panel ────────────────────────────────────────────
+window.openGroupPanel = gid => {
+  const g = allCRMGroups.find(x => x.id === gid);
+  if(!g) return;
+  document.getElementById('crm-group-panel')?.remove();
+  document.getElementById('crm-group-panel-backdrop')?.remove();
+  const members = (allContacts||[]).filter(c => (c.groups||[]).includes(gid));
+  const rows = members.map(c => {
+    const name = [c.firstName, c.lastName].filter(Boolean).join(' ') || c.email || '—';
+    const co = c.company ? `<span class="text-xs text-gray-400 ml-1">${c.company}</span>` : '';
+    const ph = c.phone || c.officePhone || '';
+    return `<div class="flex items-center justify-between px-4 py-2.5 hover:bg-gray-50 border-b border-gray-50 cursor-pointer" onclick="closeGroupPanel();setTimeout(()=>openContactPanel('${c.id}'),50)">
+      <div class="min-w-0 flex-1">
+        <div class="text-sm font-medium text-gray-900 truncate">${name}${co}</div>
+        ${c.email ? `<div class="text-xs text-gray-400 truncate">${c.email}</div>` : (ph ? `<div class="text-xs text-gray-400">${ph}</div>` : '')}
+      </div>
+      <span class="text-xs text-blue-500 ml-3 shrink-0">→</span>
+    </div>`;
+  }).join('') || '<div class="px-4 py-6 text-sm text-gray-400 text-center italic">No contacts in this group yet.</div>';
+  const backdrop = document.createElement('div');
+  backdrop.id = 'crm-group-panel-backdrop';
+  backdrop.className = 'fixed inset-0 bg-black/20 z-40';
+  backdrop.onclick = closeGroupPanel;
+  document.body.appendChild(backdrop);
+  const panel = document.createElement('div');
+  panel.id = 'crm-group-panel';
+  panel.className = 'fixed inset-y-0 right-0 w-full sm:w-[420px] bg-white shadow-2xl z-50 flex flex-col';
+  panel.style.transform = 'translateX(100%)';
+  panel.style.transition = 'transform 0.28s cubic-bezier(.4,0,.2,1)';
+  panel.innerHTML = `
+    <div class="flex items-center justify-between px-5 py-4 border-b">
+      <div class="flex items-center gap-2.5 min-w-0">
+        <div class="w-9 h-9 rounded-xl flex items-center justify-center text-base shrink-0" style="background:${g.color||'#e5e7eb'}">${g.emoji||'👥'}</div>
+        <div class="min-w-0">
+          <h2 class="text-base font-bold text-gray-900 truncate">${g.name}</h2>
+          <p class="text-xs text-gray-400 mt-0.5">${members.length} contact${members.length!==1?'s':''}</p>
+        </div>
+      </div>
+      <div class="flex items-center gap-1.5 shrink-0 ml-2">
+        <button onclick="closeGroupPanel();window._crmGroupFilter='${gid}';window._crmView='contacts';window.viewCRM()" class="text-xs px-2.5 py-1.5 border rounded-lg text-gray-600 hover:bg-gray-50 font-medium">Full list →</button>
+        <button onclick="closeGroupPanel()" class="p-2 rounded-lg text-gray-400 hover:text-gray-700 hover:bg-gray-100 text-lg leading-none">&times;</button>
+      </div>
+    </div>
+    <div class="flex-1 overflow-y-auto">${rows}</div>
+  `;
+  document.body.appendChild(panel);
+  requestAnimationFrame(() => { panel.style.transform = 'translateX(0)'; });
+};
+window.closeGroupPanel = () => {
+  const p = document.getElementById('crm-group-panel');
+  if(p){ p.style.transform='translateX(100%)'; setTimeout(()=>p.remove(),300); }
+  document.getElementById('crm-group-panel-backdrop')?.remove();
 };
 
 // ── Subscribe to activities (real-time) ─────────────────────────────
