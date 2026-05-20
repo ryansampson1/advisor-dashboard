@@ -3075,6 +3075,7 @@ async function autoFillDealFromDoc(file, stage){
 
   try {
     let docText = '';
+    let imageBlocks = []; // fallback for image-based PDFs
     const ext = file.name.split('.').pop().toLowerCase();
 
     if(ext === 'pdf'){
@@ -3092,6 +3093,30 @@ async function autoFillDealFromDoc(file, stage){
         pages.push(tc.items.map(s=>s.str).join(' '));
       }
       docText = pages.join('\n\n');
+
+      // ── Image fallback: if text is sparse (scanned / DocuSign image PDF) ──
+      if(docText.trim().length < 200){
+        if(overlay){ const lbl=overlay.querySelector('div:last-child'); if(lbl) lbl.textContent='Scanned PDF detected — switching to vision…'; }
+        const pdfForImg = await pdfjsLib.getDocument({data: await file.arrayBuffer()}).promise;
+        const MAX_IMG_PAGES = 10; // cap to keep request size reasonable
+        for(let i=1; i<=Math.min(pdfForImg.numPages, MAX_IMG_PAGES); i++){
+          const pg   = await pdfForImg.getPage(i);
+          const vp   = pg.getViewport({scale: 1.5}); // 1.5x = good balance of quality vs size
+          const canvas = document.createElement('canvas');
+          canvas.width  = vp.width;
+          canvas.height = vp.height;
+          await pg.render({canvasContext: canvas.getContext('2d'), viewport: vp}).promise;
+          const b64 = canvas.toDataURL('image/jpeg', 0.82).split(',')[1];
+          imageBlocks.push({
+            type: 'image',
+            source: { type: 'base64', media_type: 'image/jpeg', data: b64 }
+          });
+        }
+        if(!imageBlocks.length){
+          showToast('Could not render PDF pages for vision analysis','warning');
+          overlay?.remove(); return;
+        }
+      }
     } else if(ext === 'docx' || ext === 'doc'){
       if(typeof mammoth === 'undefined'){
         showToast('Word library not loaded yet, please try again in a moment','warning');
@@ -3105,17 +3130,13 @@ async function autoFillDealFromDoc(file, stage){
       overlay?.remove(); return;
     }
 
-    if(!docText.trim()){
+    if(!docText.trim() && !imageBlocks.length){
       showToast('Could not extract text from this document','warning');
       overlay?.remove(); return;
     }
 
-    // Use up to 50k characters for thorough extraction
-    const truncated = docText.slice(0, 50000);
-
-    const prompt = `You are a commercial real estate paralegal. Your job is to read this document and produce a CRITICAL DATES & KEY TERMS LIST — extracting every important field you can find.
-
-Return a single valid JSON object with exactly these keys (use null for anything not found — never guess):
+    // Shared extraction instructions used by both text and vision paths
+    const extractionSchema = `Return a single valid JSON object with exactly these keys (use null for anything not found — never guess):
 
 {
   "projectName":             "name of the property, tract, or project",
@@ -3130,15 +3151,15 @@ Return a single valid JSON object with exactly these keys (use null for anything
   "elcCommissionPct":        numeric commission percentage (e.g. 5 for 5%),
   "listingEffectiveDate":    "listing agreement effective date YYYY-MM-DD",
   "listingExpiration":       "listing agreement expiration date YYYY-MM-DD",
-  "effectiveDate":           "contract/PSA effective or execution date YYYY-MM-DD",
+  "effectiveDate":           "contract/PSA effective or execution date YYYY-MM-DD — this is the date the LAST party signed",
   "psaEffectiveDate":        "PSA effective date YYYY-MM-DD (if separate from effectiveDate)",
-  "ddExpirationDate":        "due diligence / inspection period expiration date YYYY-MM-DD",
+  "ddExpirationDate":        "due diligence / inspection period expiration date YYYY-MM-DD — calculate from effectiveDate + DD days if not stated explicitly",
   "financingContingencyDate":"financing contingency deadline YYYY-MM-DD",
-  "titleCommitmentDate":     "title commitment delivery deadline YYYY-MM-DD",
-  "closeDate":               "scheduled or proposed closing date YYYY-MM-DD",
+  "titleCommitmentDate":     "title commitment delivery deadline YYYY-MM-DD — calculate from effectiveDate + days stated if not explicit",
+  "closeDate":               "scheduled or proposed closing date YYYY-MM-DD — calculate from contract terms if not stated as a fixed date",
   "escrowAgent":             "escrow agent or title company name",
   "escrowAgentEmail":        "escrow agent email address",
-  "earnestMoney":            numeric earnest money deposit amount,
+  "earnestMoney":            numeric initial earnest money deposit amount,
   "acreage":                 numeric acreage or square footage,
   "county":                  "county where property is located",
   "buyerUse":                "buyer's intended use of the property",
@@ -3147,13 +3168,27 @@ Return a single valid JSON object with exactly these keys (use null for anything
 }
 
 IMPORTANT: Return ONLY the JSON object. No markdown, no explanation, no code fences.
-
-Document:
-"""
-${truncated}
-"""`;
+For calculated dates (DD expiration, closing, etc.) — DO the math and return the actual YYYY-MM-DD date.`;
 
     if(overlay){ const lbl=overlay.querySelector('div:last-child'); if(lbl) lbl.textContent='Analyzing with AI…'; }
+
+    // Build message content — image blocks OR text
+    let msgContent;
+    if(imageBlocks.length){
+      // Vision path: pages as images + instruction text at end
+      msgContent = [
+        ...imageBlocks,
+        { type: 'text', text:
+          'You are a commercial real estate paralegal. Read these contract pages and produce a CRITICAL DATES & KEY TERMS LIST.\n\n'+
+          extractionSchema
+        }
+      ];
+    } else {
+      // Text path
+      const truncated = docText.slice(0, 50000);
+      msgContent = 'You are a commercial real estate paralegal. Your job is to read this document and produce a CRITICAL DATES & KEY TERMS LIST — extracting every important field you can find.\n\n'+
+        extractionSchema+'\n\nDocument:\n"""\n'+truncated+'\n"""';
+    }
 
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -3166,7 +3201,7 @@ ${truncated}
       body: JSON.stringify({
         model: 'claude-sonnet-4-6',
         max_tokens: 1500,
-        messages: [{role:'user', content: prompt}]
+        messages: [{role:'user', content: msgContent}]
       })
     });
 
