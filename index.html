@@ -3395,7 +3395,7 @@ function _applyCriticalDates(){
 }
 window._applyCriticalDates = _applyCriticalDates;
 
-function _sendCriticalDatesTask(vals){
+async function _sendCriticalDatesTask(vals){
   try {
     // Resolve advisor from form
     const advUid   = document.getElementById('f-advisor-uid')?.value || currentUser?.uid || '';
@@ -3418,56 +3418,133 @@ function _sendCriticalDatesTask(vals){
       }
     }
 
-    // Label definitions for the task body
-    const labelMap = {
-      projectName:'Property / Project',seller:'Seller',buyer:'Buyer',loiBuyer:'Buyer (LOI)',
-      buyerBroker:"Buyer's Broker",buyerUse:"Buyer's Intended Use",
-      listingPrice:'Listing Price',loiPrice:'LOI Price',purchasePrice:'Purchase Price',
-      contractPrice:'Contract Price',elcCommissionPct:'Commission %',earnestMoney:'Earnest Money',
-      acreage:'Acreage',county:'County',
-      listingEffectiveDate:'Listing Effective',listingExpiration:'Listing Expiration',
-      effectiveDate:'Contract Effective',psaEffectiveDate:'PSA Effective',
-      ddExpirationDate:'Due Diligence Exp.',financingContingencyDate:'Financing Contingency',
-      titleCommitmentDate:'Title Commitment',closeDate:'Closing Date',
-      escrowAgent:'Escrow / Title Co.',escrowAgentEmail:'Escrow Email',
-      referralPct:'Referral Fee %',referralTo:'Referral Recipient',
-    };
+    // Label definitions (order matters — this is the display order)
+    const labelMap = [
+      ['projectName',             'Property / Project'],
+      ['county',                  'County'],
+      ['seller',                  'Seller'],
+      ['buyer',                   'Buyer'],
+      ['loiBuyer',                'Buyer (LOI)'],
+      ['buyerBroker',             "Buyer's Broker"],
+      ['buyerUse',                "Buyer's Intended Use"],
+      ['listingPrice',            'Listing / Asking Price'],
+      ['loiPrice',                'LOI Offer Price'],
+      ['purchasePrice',           'Purchase Price'],
+      ['contractPrice',           'Contract Price'],
+      ['elcCommissionPct',        'Commission %'],
+      ['earnestMoney',            'Earnest Money Deposit'],
+      ['acreage',                 'Acreage'],
+      ['listingEffectiveDate',    'Listing Effective Date'],
+      ['listingExpiration',       'Listing Expiration Date'],
+      ['effectiveDate',           'Contract Effective Date'],
+      ['psaEffectiveDate',        'PSA Effective Date'],
+      ['titleCommitmentDate',     'Title Commitment Deadline'],
+      ['ddExpirationDate',        'Due Diligence Expiration'],
+      ['financingContingencyDate','Financing Contingency Deadline'],
+      ['closeDate',               'Closing Date'],
+      ['escrowAgent',             'Escrow / Title Company'],
+      ['escrowAgentEmail',        'Escrow Agent Email'],
+      ['referralPct',             'Referral Fee %'],
+      ['referralTo',              'Referral Fee Recipient'],
+    ];
 
     const fmt$ = v => { const n=parseFloat(v); return !isNaN(n) ? '$'+n.toLocaleString() : v; };
     const isMoneyKey = k => ['listingPrice','loiPrice','purchasePrice','contractPrice','earnestMoney'].includes(k);
     const isPctKey   = k => ['elcCommissionPct','referralPct'].includes(k);
 
-    const lines = Object.entries(labelMap)
-      .filter(([k]) => vals[k])
-      .map(([k,lbl]) => {
-        let v = String(vals[k]);
-        if(isMoneyKey(k)) v = fmt$(v);
-        else if(isPctKey(k)) v = v+'%';
-        return `  • ${lbl}: ${v}`;
-      });
+    const filledRows = labelMap.filter(([k]) => vals[k] !== null && vals[k] !== undefined && String(vals[k]).trim() !== '');
+    if(!filledRows.length) return;
 
-    if(!lines.length) return; // nothing to send
+    const formatVal = ([k]) => {
+      let v = String(vals[k]);
+      if(isMoneyKey(k)) v = fmt$(v);
+      else if(isPctKey(k)) v = v+'%';
+      return v;
+    };
 
-    const body =
+    const bulletLines = filledRows.map(([k,lbl]) => `  • ${lbl}: ${formatVal([k])}`);
+
+    const taskBody =
       `AI extracted the following critical dates and key terms from the uploaded document for ${address}.\n\n`+
       `Please review for accuracy before the deal advances to the next stage.\n\n`+
-      `CRITICAL DATES LIST:\n${lines.join('\n')}\n\n`+
+      `CRITICAL DATES LIST:\n${bulletLines.join('\n')}\n\n`+
       `If any values are incorrect, open the deal card and update the fields manually.`;
 
-    Store.createTask({
-      title: 'Review Critical Dates — '+address,
-      description: body,
+    // ── Generate Excel attachment (SheetJS) ────────────────────────────
+    let attachmentUrl = '';
+    let attachmentName = '';
+    if(window.XLSX && _fbStorage && _fbFns){
+      try {
+        const today = new Date().toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+        const sheetRows = [
+          ['CRITICAL DATES & KEY TERMS', ''],
+          [address, ''],
+          ['Generated: '+today, ''],
+          ['', ''],
+          ['Field', 'Value'],
+          ...filledRows.map(([k,lbl]) => [lbl, formatVal([k])]),
+          ['', ''],
+          ['Prepared by Eshenbaugh Land Company', ''],
+        ];
+        const wb = XLSX.utils.book_new();
+        const ws = XLSX.utils.aoa_to_sheet(sheetRows);
+        ws['!cols'] = [{wch:32}, {wch:42}];
+        // Bold the header rows
+        ['A1','A5','B5'].forEach(cell => { if(ws[cell]) ws[cell].s = {font:{bold:true}}; });
+        XLSX.utils.book_append_sheet(wb, ws, 'Critical Dates');
+        const xlsBuf = XLSX.write(wb, {type:'array', bookType:'xlsx'});
+        const blob = new Blob([xlsBuf], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+        const {ref:fbRef, uploadBytes, getDownloadURL} = _fbFns;
+        const storePath = 'critical-dates/'+(dealId||'new')+'-ai-'+Date.now()+'.xlsx';
+        const snap = await uploadBytes(fbRef(_fbStorage, storePath), blob);
+        attachmentUrl  = await getDownloadURL(snap.ref);
+        attachmentName = 'Critical Dates — '+address+'.xlsx';
+      } catch(xe){ console.warn('[critical-dates-excel]', xe); }
+    }
+
+    const taskBase = {
       assignedTo:      advUid,
       assignedToName:  advName,
       assignedToEmail: advEmail,
       dealId:          dealId,
       dealAddress:     address,
-      dueDate:         new Date(Date.now()+86400000).toISOString().split('T')[0], // due tomorrow
+      dueDate:         new Date(Date.now()+86400000).toISOString().split('T')[0],
       status:          'pending',
       createdBy:       currentUser?.uid||'system',
       createdByName:   'AI Auto-Fill',
       createdAt:       Date.now(),
-    }).catch(e=>console.error('[critical-dates-task]',e));
+    };
+
+    // Task 1: Review + Excel attachment
+    await Store.createTask({
+      ...taskBase,
+      title: 'Review Critical Dates — '+address,
+      description: taskBody,
+      ...(attachmentUrl ? {attachmentUrl, attachmentName} : {}),
+    }).catch(e=>console.error('[critical-dates-task-1]',e));
+
+    // Task 2: Forward to client via Gmail
+    const buyerName = vals.buyer || vals.loiBuyer || 'Buyer';
+    const clientBody =
+      `Hi ${buyerName},\n\n`+
+      `Thank you for executing the Purchase and Sale Agreement for ${address}. `+
+      `Please find below the critical dates for your transaction. `+
+      `These are contractually binding deadlines — please calendar them right away.\n\n`+
+      `CRITICAL DATES:\n${bulletLines.join('\n')}\n\n`+
+      `Please deliver your initial deposit to the escrow agent by the due date above `+
+      `and begin your due diligence period immediately. `+
+      `Do not hesitate to call or email with any questions.\n\n`+
+      `Best regards,\n${advName}\nEshenbaugh Land Company | 813-417-5928`;
+
+    await Store.createTask({
+      ...taskBase,
+      title: 'Email critical dates to client — '+address,
+      description: clientBody,
+      gmailUrl: 'https://mail.google.com/mail/?view=cm&su='+
+        encodeURIComponent('Critical Dates — '+address)+
+        '&body='+encodeURIComponent(clientBody),
+      ...(attachmentUrl ? {attachmentUrl, attachmentName} : {}),
+    }).catch(e=>console.error('[critical-dates-task-2]',e));
 
   } catch(e){ console.error('[_sendCriticalDatesTask]',e); }
 }
