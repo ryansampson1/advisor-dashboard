@@ -849,16 +849,21 @@ const APP_CONFIG = {
 /* =======================================================
    CONSTANTS
    ======================================================= */
-const DEFAULT_STAGES = ["Prospect","Listing","Under Contract","Due Diligence","Closing","Closed Won","Closed Lost"];
-const DEFAULT_STAGE_PROB = {Prospect:10,Listing:25,"Under Contract":50,"Due Diligence":75,Closing:90,"Closed Won":100,"Closed Lost":0};
+const DEFAULT_STAGES = ["Prospect","Listing","LOI","Due Diligence (Under Contract)","Closing","Closed Won","Closed Lost"];
+const DEFAULT_STAGE_PROB = {Prospect:10,Listing:25,"LOI":40,"Due Diligence (Under Contract)":65,Closing:90,"Closed Won":100,"Closed Lost":0};
+// Legacy stage names that map to the new consolidated stage (for backward compat with deals in Firestore)
+const STAGE_ALIAS = {
+  "Under Contract": "Due Diligence (Under Contract)",
+  "Due Diligence":  "Due Diligence (Under Contract)",
+};
 const BASE_SC = {
-  Prospect:        {hdr:"bg-gray-200",   col:"bg-gray-50",   txt:"text-gray-700"},
-  Listing:         {hdr:"bg-blue-100",   col:"bg-blue-50",   txt:"text-blue-700"},
-  "Under Contract":{hdr:"bg-yellow-100", col:"bg-yellow-50", txt:"text-yellow-700"},
-  "Due Diligence": {hdr:"bg-orange-100", col:"bg-orange-50", txt:"text-orange-700"},
-  Closing:         {hdr:"bg-purple-100", col:"bg-purple-50", txt:"text-purple-700"},
-  "Closed Won":    {hdr:"bg-green-100",  col:"bg-green-50",  txt:"text-green-700"},
-  "Closed Lost":   {hdr:"bg-red-100",    col:"bg-red-50",    txt:"text-red-700"},
+  Prospect:                        {hdr:"bg-gray-200",   col:"bg-gray-50",   txt:"text-gray-700"},
+  Listing:                         {hdr:"bg-blue-100",   col:"bg-blue-50",   txt:"text-blue-700"},
+  LOI:                             {hdr:"bg-sky-100",    col:"bg-sky-50",    txt:"text-sky-700"},
+  "Due Diligence (Under Contract)":{hdr:"bg-orange-100", col:"bg-orange-50", txt:"text-orange-700"},
+  Closing:                         {hdr:"bg-purple-100", col:"bg-purple-50", txt:"text-purple-700"},
+  "Closed Won":                    {hdr:"bg-green-100",  col:"bg-green-50",  txt:"text-green-700"},
+  "Closed Lost":                   {hdr:"bg-red-100",    col:"bg-red-50",    txt:"text-red-700"},
 };
 const CUSTOM_COLOR_POOL = [
   {hdr:"bg-pink-100",  col:"bg-pink-50",  txt:"text-pink-700"},
@@ -889,9 +894,33 @@ function applyStagesList(list){
 
 function loadCustomStages(){
   const raw = localStorage.getItem(K('allStages'));
-  // First run: seed the unified list from the original 7 defaults
+  // First run: seed the unified list from the updated defaults
   if(!raw){ localStorage.setItem(K('allStages'), JSON.stringify(SEED_ALL_STAGES)); }
-  const list = JSON.parse(localStorage.getItem(K('allStages'))||'[]');
+  let list = JSON.parse(localStorage.getItem(K('allStages'))||'[]');
+
+  // ── One-time migration: merge "Under Contract" + "Due Diligence" → "Due Diligence (Under Contract)" ──
+  const hasOldUC = list.some(s => s.name === 'Under Contract');
+  const hasOldDD = list.some(s => s.name === 'Due Diligence');
+  const hasNewStage = list.some(s => s.name === 'Due Diligence (Under Contract)');
+  if((hasOldUC || hasOldDD) && !hasNewStage){
+    // Insert the merged stage at the position of the first old one found, removing both
+    const ucIdx = list.findIndex(s => s.name === 'Under Contract');
+    const ddIdx = list.findIndex(s => s.name === 'Due Diligence');
+    const insertAt = ucIdx >= 0 ? ucIdx : ddIdx;
+    const newStage = {name:'Due Diligence (Under Contract)', prob:65};
+    list = list.filter(s => s.name !== 'Under Contract' && s.name !== 'Due Diligence');
+    list.splice(insertAt >= 0 ? insertAt : list.length, 0, newStage);
+    localStorage.setItem(K('allStages'), JSON.stringify(list));
+  }
+  // Also ensure LOI is in the list (may not be present for existing users)
+  const hasLOI = list.some(s => s.name === 'LOI');
+  if(!hasLOI){
+    const listingIdx = list.findIndex(s => s.name === 'Listing');
+    const insertAt = listingIdx >= 0 ? listingIdx + 1 : 2;
+    list.splice(insertAt, 0, {name:'LOI', prob:40});
+    localStorage.setItem(K('allStages'), JSON.stringify(list));
+  }
+
   applyStagesList(list);
 }
 
@@ -3678,30 +3707,26 @@ function renderStageFields(stage, data={}){
       <div class="border-t pt-4 mt-1">
         <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">Listing Details</div>
         <div class="space-y-3">
+          <!-- Hidden data fields — populated by autofill, saved on submit -->
           <input type="hidden" id="sf-project-name" value="${data.projectName||''}"/>
-          <div class="grid grid-cols-2 gap-3">
-            ${inp('sf-listed-price','Listing Price ($)','number','1450000',data.listedPrice,isManual)}
-            ${inp('sf-listing-effective','Effective Date','date','',data.listingEffectiveDate,isManual)}
-          </div>
-          <div class="grid grid-cols-2 gap-3">
-            ${inp('sf-listing-expiration','Listing Expiration Date','date','',data.listingExpiration,isManual)}
-            <div>
-              <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Commission %</label>
-              <div class="flex items-center border rounded-lg overflow-hidden">
-                <input id="sf-elc-commission" type="number" min="0" max="100" step="0.25"
-                  placeholder="3.0" value="${data.elcCommissionPct||data.commissionPct||data.dealCommissionPct||''}"
-                  class="flex-1 px-3 py-2 text-sm outline-none"/>
-                <span class="px-3 py-2 bg-gray-50 text-gray-500 text-sm font-semibold border-l">%</span>
-              </div>
+          <input type="hidden" id="sf-listed-price" value="${data.listedPrice||''}"/>
+          <input type="hidden" id="sf-listing-effective" value="${data.listingEffectiveDate||''}"/>
+          <input type="hidden" id="sf-listing-expiration" value="${data.listingExpiration||''}"/>
+          <input type="hidden" id="sf-elc-commission" value="${data.elcCommissionPct||data.commissionPct||data.dealCommissionPct||''}"/>
+          <input type="hidden" id="sf-commission-type" value="${data.commissionType||'fixed'}"/>
+          <input type="hidden" id="sf-sign" value="${data.sign||'yes'}"/>
+          <!-- Co-Broke: visible -->
+          ${sel('sf-cobroke','Co-Broke Offered',
+            [{v:'yes',l:'Yes'},{v:'no',l:'No'}], data.cobroke||'yes')}
+          <!-- Likely Buyer Groups — only shown at Listing stage -->
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1.5">🎯 Likely Buyer Groups</label>
+            <div id="sf-listing-groups-picker" class="flex flex-wrap gap-1.5 p-2 border rounded-xl bg-gray-50 min-h-10 items-center">
+              <span class="text-xs text-gray-400 italic">Loading groups…</span>
             </div>
+            <p class="text-xs text-gray-400 mt-1">Groups selected here travel with the deal through all stages.</p>
           </div>
-          <div class="grid grid-cols-2 gap-3">
-            ${sel('sf-commission-type','Commission Type',
-              [{v:'fixed',l:'Fixed'},{v:'variable',l:'Variable'}], data.commissionType||'fixed')}
-            ${sel('sf-cobroke','Co-Broke Offered',
-              [{v:'yes',l:'Yes'},{v:'no',l:'No'}], data.cobroke||'yes')}
-          </div>
-          ${(()=>{const r=document.getElementById('f-representation');return (!r||r.value!=='buyer')?sel('sf-sign','Sign',[{v:'yes',l:'Yes'},{v:'no',l:'No'},{v:'custom',l:'Custom'}],data.sign||'yes'):'';})()}
+          <!-- Auto-fill block -->
           ${docModeBlock('listing', docMode,
             fileZone('listing-upload-zone','sf-listing-file','listing-upload-label',
               'handleListingSelect(event)','handleListingDrop(event)',lfName,'Signed Listing Agreement'),
@@ -3717,17 +3742,16 @@ function renderStageFields(stage, data={}){
     const loiFile = stageFiles[`${dealKey}__loi`];
     const loiName = loiFile?.name || data.loiFileName || '';
     const docMode = 'upload';
-    const isManual = false;
     container.innerHTML=`
       <div class="border-t pt-4 mt-1">
         <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">LOI Details</div>
         <div class="space-y-3">
+          <!-- Hidden data fields — populated by autofill -->
           <input type="hidden" id="sf-project-name" value="${data.projectName||''}"/>
-          <div class="grid grid-cols-2 gap-3">
-            ${inp('sf-loi-price','LOI Price ($)','number','1400000',data.loiPrice,isManual)}
-            ${inp('sf-loi-buyer','Buyer','text','Jane Doe LLC',data.loiBuyer,isManual)}
-          </div>
-          ${inp('sf-close-date','Expected Closing Date','date','',data.closeDate,isManual)}
+          <input type="hidden" id="sf-loi-price" value="${data.loiPrice||''}"/>
+          <input type="hidden" id="sf-loi-buyer" value="${data.loiBuyer||''}"/>
+          <input type="hidden" id="sf-close-date" value="${data.closeDate||''}"/>
+          <!-- Auto-fill block -->
           ${docModeBlock('loi', docMode,
             fileZone('loi-upload-zone','sf-loi-file','loi-upload-label',
               "handleStageFileSelect(event,'loi')",
@@ -3740,113 +3764,30 @@ function renderStageFields(stage, data={}){
     return;
   }
 
-  // ── UNDER CONTRACT ───────────────────────────────────────────────
-  if(stage==='Under Contract'){
-    const cf = contractFiles[dealKey];
-    const hasFile = !!cf || !!data.contractFileName;
-    const fileName = cf?.name || data.contractFileName || '';
+  // ── DUE DILIGENCE (UNDER CONTRACT) — also handles legacy "Under Contract" and "Due Diligence" stages ──
+  if(stage==='Due Diligence (Under Contract)' || stage==='Under Contract' || stage==='Due Diligence' || stage.includes('Due Diligence')){
+    const psaFile = stageFiles[`${dealKey}__psa`] || contractFiles[dealKey];
+    const psaName = psaFile?.name || data.psaFileName || data.contractFileName || '';
     const docMode = 'upload';
-    const isManual = false;
-    container.innerHTML=`
-      <div class="border-t pt-4 mt-1">
-        <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">Contract Details</div>
-        <div class="space-y-3">
-          <input type="hidden" id="sf-project-name" value="${data.projectName||''}"/>
-          ${inp('sf-contract-price','Contract Price ($)','number','1400000',data.contractPrice,isManual)}
-          <div class="grid grid-cols-2 gap-3">
-            ${inp('sf-buyer','Buyer Name','text','Jane Doe',data.buyer,isManual)}
-            ${inp('sf-buyer-broker','Buyer Broker','text','ABC Realty',data.buyerBroker)}
-          </div>
-          <div class="grid grid-cols-2 gap-3">
-            ${inp('sf-escrow-agent','Escrow Agent','text','First Title Co.',data.escrowAgent,isManual)}
-            ${inp('sf-escrow-email','Escrow Email','email','escrow@title.com',data.escrowAgentEmail)}
-          </div>
-          ${inp('sf-close-date','Expected Closing Date','date','',data.closeDate,isManual)}
-          <!-- Referral Fee -->
-          <div class="rounded-xl border border-amber-200 bg-amber-50 p-3 space-y-2">
-            <div class="text-xs font-bold text-amber-700 uppercase tracking-wide">💸 Referral Fee</div>
-            <div>
-              <label class="block text-xs font-semibold text-gray-600 mb-1">Is a referral fee due?</label>
-              <div class="flex gap-2">
-                <label class="flex items-center gap-1.5 cursor-pointer">
-                  <input type="radio" name="sf-referral-due" id="sf-referral-due-no" value="no" ${(data.referralDue||'no')==='no'?'checked':''} onchange="_onReferralToggle()" class="accent-amber-500"/> <span class="text-sm text-gray-700">No</span>
-                </label>
-                <label class="flex items-center gap-1.5 cursor-pointer">
-                  <input type="radio" name="sf-referral-due" id="sf-referral-due-yes" value="yes" ${data.referralDue==='yes'?'checked':''} onchange="_onReferralToggle()" class="accent-amber-500"/> <span class="text-sm text-gray-700">Yes</span>
-                </label>
-              </div>
-            </div>
-            <div id="sf-referral-fields" class="${data.referralDue==='yes'?'':'hidden'} grid grid-cols-2 gap-3">
-              <div>
-                <label class="block text-xs font-semibold text-gray-600 mb-1">Referral % of Gross Commission</label>
-                <input id="sf-referral-pct" type="number" min="0" max="100" step="0.1" placeholder="e.g. 25"
-                  value="${data.referralPct||''}" oninput="_updateReferralPreview()"
-                  class="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-400 outline-none"/>
-              </div>
-              <div>
-                <label class="block text-xs font-semibold text-gray-600 mb-1">Referral To (Name / Company)</label>
-                <input id="sf-referral-to" type="text" placeholder="e.g. John Smith / ABC Realty"
-                  value="${data.referralTo||''}" oninput="_updateReferralPreview()"
-                  class="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-400 outline-none"/>
-              </div>
-            </div>
-            <div id="sf-referral-preview" class="${data.referralDue==='yes'&&(data.referralPct||0)>0?'':'hidden'} text-xs text-amber-700 font-medium pt-0.5">
-              Net commission = Gross − <span id="sf-referral-calc-pct">${data.referralPct||0}</span>% referral to <span id="sf-referral-calc-to">${data.referralTo||'—'}</span>
-            </div>
-          </div>
-          ${docModeBlock('uc', docMode, `
-            <div id="uc-upload-zone" class="upload-zone ${hasFile?'has-file':''}" onclick="document.getElementById('sf-contract-file').click()"
-              ondragover="event.preventDefault();this.classList.add('dragover')"
-              ondragleave="this.classList.remove('dragover')"
-              ondrop="handleContractDrop(event)">
-              <input id="sf-contract-file" type="file" accept=".pdf,.doc,.docx" class="hidden" onchange="handleContractSelect(event)"/>
-              <div id="upload-label" class="text-sm ${hasFile?'text-green-700 font-medium':'text-gray-400'}">
-                ${hasFile ? '✅ '+fileName : '📎 Drop contract PDF here or click to upload'}
-              </div>
-            </div>`, 'Under Contract')}
-        </div>
-      </div>`;
-    appendInlineGateFields(container, stage, data, dealKey);
-    return;
-  }
-
-  // ── DUE DILIGENCE ────────────────────────────────────────────────
-  if(stage==='Due Diligence' || stage.includes('Due Diligence')){
-    const psaFile = stageFiles[`${dealKey}__psa`];
-    const psaName = psaFile?.name || data.psaFileName || '';
     const price   = data.purchasePrice||data.contractPrice||data.loiPrice||data.listedPrice||'';
-    const comm    = data.commissionAmount||data.expectedRevenue||'';
-    const docMode = 'upload';
-    const isManual = false;
     container.innerHTML=`
       <div class="border-t pt-4 mt-1">
         <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">Due Diligence Details</div>
         <div class="space-y-3">
+          <!-- Hidden data fields — populated by autofill -->
           <input type="hidden" id="sf-project-name" value="${data.projectName||''}"/>
-          ${inp('sf-effective-date','Effective Date','date','',data.effectiveDate,true)}
-          <div class="grid grid-cols-2 gap-3">
-            ${inp('sf-purchase-price','Purchase Price ($)','number','e.g. 1500000',price,isManual)}
-            <div>
-              <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Commission %</label>
-              <div class="flex items-center border rounded-lg overflow-hidden">
-                <input id="sf-elc-commission" type="number" min="0" max="100" step="0.25"
-                  placeholder="3.0" value="${data.elcCommissionPct||data.dealCommissionPct||data.commissionPct||''}"
-                  class="flex-1 px-3 py-2 text-sm outline-none"/>
-                <span class="px-3 py-2 bg-gray-50 text-gray-500 text-sm font-semibold border-l">%</span>
-              </div>
-            </div>
-          </div>
-          <div class="grid grid-cols-2 gap-3">
-            ${inp('sf-psa-effective-date','PSA Effective Date','date','',data.psaEffectiveDate)}
-            ${inp('sf-escrow-agent','Escrow Agent Name','text','First Title Co.',data.escrowAgent,isManual)}
-          </div>
-          <div class="grid grid-cols-2 gap-3">
-            ${inp('sf-escrow-email','Escrow Agent Email','email','escrow@title.com',data.escrowAgentEmail)}
-            ${inp('sf-dd-date','DD Expiration Date','date','',data.ddExpirationDate||data.dueDiligenceDate,isManual)}
-          </div>
-          ${inp('sf-close-date','Proposed Closing Date','date','',data.closeDate,isManual)}
-          ${inp('sf-buyer-broker','Buyer Broker (if applicable)','text','ABC Realty',data.buyerBroker)}
-          <!-- Referral Fee -->
+          <input type="hidden" id="sf-purchase-price" value="${price}"/>
+          <input type="hidden" id="sf-contract-price" value="${data.contractPrice||''}"/>
+          <input type="hidden" id="sf-buyer" value="${data.buyer||''}"/>
+          <input type="hidden" id="sf-buyer-broker" value="${data.buyerBroker||''}"/>
+          <input type="hidden" id="sf-escrow-agent" value="${data.escrowAgent||''}"/>
+          <input type="hidden" id="sf-escrow-email" value="${data.escrowAgentEmail||''}"/>
+          <input type="hidden" id="sf-effective-date" value="${data.effectiveDate||''}"/>
+          <input type="hidden" id="sf-psa-effective-date" value="${data.psaEffectiveDate||''}"/>
+          <input type="hidden" id="sf-dd-date" value="${data.ddExpirationDate||data.dueDiligenceDate||''}"/>
+          <input type="hidden" id="sf-close-date" value="${data.closeDate||''}"/>
+          <input type="hidden" id="sf-elc-commission" value="${data.elcCommissionPct||data.dealCommissionPct||data.commissionPct||''}"/>
+          <!-- Referral Fee — visible -->
           <div class="rounded-xl border border-amber-200 bg-amber-50 p-3 space-y-2">
             <div class="text-xs font-bold text-amber-700 uppercase tracking-wide">💸 Referral Fee</div>
             <div>
@@ -3878,12 +3819,13 @@ function renderStageFields(stage, data={}){
               Net commission = Gross − <span id="sf-referral-calc-pct">${data.referralPct||0}</span>% referral to <span id="sf-referral-calc-to">${data.referralTo||'—'}</span>
             </div>
           </div>
+          <!-- Auto-fill block -->
           ${docModeBlock('dd', docMode,
             fileZone('psa-upload-zone','sf-psa-file','psa-upload-label',
               "handleStageFileSelect(event,'psa')",
               "handleStageFileDrop(event,'psa')",
               psaName,'PSA / Contract'),
-            'Due Diligence')}
+            'Due Diligence (Under Contract)')}
         </div>
       </div>`;
     appendInlineGateFields(container, stage, data, dealKey);
@@ -4027,34 +3969,35 @@ function renderStageFields(stage, data={}){
       <div class="border-t pt-4 mt-1">
         <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">Closing Details</div>
 
-        <!-- Core closing fields — always editable (critical for new deals added directly to Sold) -->
+        <!-- Core closing fields — hidden data + visible buyer use + autofill -->
         <div class="space-y-3 mb-4">
+          <!-- Hidden data fields — preserved from prior stages / autofill -->
           <input type="hidden" id="sf-project-name" value="${data.projectName||''}"/>
-          ${inp('sf-close-date','Confirmed Close Date','date','',data.closeDate)}
-          <div class="grid grid-cols-2 gap-3">
-            ${inp('sf-purchase-price','Purchase Price ($)','number','1400000',clPrice)}
-            <div>
-              <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Commission %</label>
-              <div class="flex items-center border rounded-lg overflow-hidden">
-                <input id="sf-elc-commission" type="number" min="0" max="100" step="0.25"
-                  placeholder="3.0" value="${data.elcCommissionPct||data.dealCommissionPct||data.commissionPct||''}"
-                  class="flex-1 px-3 py-2 text-sm outline-none"/>
-                <span class="px-3 py-2 bg-gray-50 text-gray-500 text-sm font-semibold border-l">%</span>
+          <input type="hidden" id="sf-close-date" value="${data.closeDate||''}"/>
+          <input type="hidden" id="sf-purchase-price" value="${clPrice}"/>
+          <input type="hidden" id="sf-elc-commission" value="${data.elcCommissionPct||data.dealCommissionPct||data.commissionPct||''}"/>
+          <input type="hidden" id="sf-buyer" value="${data.buyer||''}"/>
+          <input type="hidden" id="sf-buyer-broker" value="${data.buyerBroker||''}"/>
+          <input type="hidden" id="sf-escrow-agent" value="${data.escrowAgent||''}"/>
+          <input type="hidden" id="sf-escrow-email" value="${data.escrowAgentEmail||''}"/>
+          <input type="hidden" id="sf-press-release" value="${data.pressRelease||'no'}"/>
+          <input type="hidden" id="sf-client-gift" value="${data.clientGift||'no'}"/>
+          <!-- Visible: Buyer Use + autofill -->
+          ${inp('sf-buyer-use','Buyer Proposed Use','text','Residential Development',data.buyerUse)}
+          <!-- Autofill from closing statement -->
+          <div class="rounded-xl border border-purple-100 bg-purple-50/60 p-3 space-y-2.5">
+            <input type="hidden" id="sf-doc-mode" value="upload"/>
+            <div class="space-y-2">
+              <div class="flex items-center gap-2">
+                <input id="ai-doc-input-sold" type="file" accept=".pdf,.doc,.docx" class="hidden"
+                  onchange="(async(e)=>{ const f=e.target.files[0]; if(f) await autoFillDealFromDoc(f,'Sold'); e.target.value=''; })(event)"/>
+                <button type="button" onclick="document.getElementById('ai-doc-input-sold').click()"
+                  class="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-lg border border-purple-200 bg-white text-purple-700 hover:bg-purple-100 transition-colors">
+                  ✨ Auto-fill from Closing Statement
+                </button>
+                <span class="text-xs text-gray-400">Upload PDF to extract final numbers</span>
               </div>
             </div>
-          </div>
-          <div class="grid grid-cols-2 gap-3">
-            ${inp('sf-buyer','Buyer','text','Jane Doe LLC',data.buyer)}
-            ${inp('sf-buyer-broker','Buyer Broker','text','ABC Realty',data.buyerBroker)}
-          </div>
-          <div class="grid grid-cols-2 gap-3">
-            ${inp('sf-escrow-agent','Escrow Agent','text','First Title Co.',data.escrowAgent)}
-            ${inp('sf-escrow-email','Escrow Email','email','escrow@title.com',data.escrowAgentEmail)}
-          </div>
-          ${inp('sf-buyer-use','Buyer Use / Intended Use','text','Residential Development',data.buyerUse)}
-          <div class="grid grid-cols-2 gap-3">
-            ${sel('sf-press-release','Press Release',[{v:'yes',l:'Yes'},{v:'no',l:'No'}], data.pressRelease||'no')}
-            ${sel('sf-client-gift','Client Gift',[{v:'yes',l:'Yes'},{v:'no',l:'No'}], data.clientGift||'no')}
           </div>
           <button type="button"
             onclick="(()=>{ const _d=window._closingDeal||{}; const d={..._d, purchasePrice:parseFloat(document.getElementById('sf-purchase-price')?.value)||_d.purchasePrice||0, elcCommissionPct:parseFloat(document.getElementById('sf-elc-commission')?.value)||_d.elcCommissionPct||0, closeDate:document.getElementById('sf-close-date')?.value||_d.closeDate||'', escrowAgent:document.getElementById('sf-escrow-agent')?.value||_d.escrowAgent||'', escrowAgentEmail:document.getElementById('sf-escrow-email')?.value||_d.escrowAgentEmail||'', buyer:document.getElementById('sf-buyer')?.value||_d.buyer||'', projectName:document.getElementById('sf-project-name')?.value||_d.projectName||''}; window.generateCommissionInvoice(d); })()"
@@ -5806,7 +5749,11 @@ function viewBoard(){
   const deals=visibleDeals();
   const byStage={};
   STAGES.forEach(s=>byStage[s]=[]);
-  deals.forEach(d=>{ if(byStage[d.stage]) byStage[d.stage].push(d); });
+  deals.forEach(d=>{
+    const effectiveStage = STAGE_ALIAS[d.stage] || d.stage;
+    if(byStage[effectiveStage]) byStage[effectiveStage].push(d);
+    else if(byStage[d.stage]) byStage[d.stage].push(d);
+  });
 
   // ── KPIs — firm-wide for admin, advisor-specific otherwise ──────────────
   let kpiBar = '';
@@ -6075,49 +6022,52 @@ function renderCard(deal){
   // ── Stage-specific field rows ──────────────────────────────────────
   let stageRows = '';
   const st = deal.stage || '';
+  const projName = deal.projectName || '';
 
   if(st === 'LOI'){
-    // LOI: Price, DD expiration, Closing date, Buyer
+    // LOI: Project Name, Price, Buyer, DD Exp, Closing
     stageRows = [
+      projName ? row('Project', projName) : '',
       row('Price',   price>0 ? fmt$(price) : ''),
+      row('Buyer',   deal.loiBuyer||deal.buyer||''),
       row('DD Exp',  deal.ddExpirationDate||deal.dueDiligenceDate ? fmtDate(deal.ddExpirationDate||deal.dueDiligenceDate) : ''),
       row('Closing', deal.closeDate ? fmtDate(deal.closeDate) : ''),
-      row('Buyer',   deal.loiBuyer||deal.buyer||''),
     ].join('');
 
-  } else if(st === 'Due Diligence'){
-    // DD: Price, PSA effective date, DD expiration, Closing
+  } else if(st === 'Due Diligence (Under Contract)' || st === 'Due Diligence' || st === 'Under Contract'){
+    // Due Diligence (UC): Project Name, Price, DD Exp, Closing, Referral (if any)
     stageRows = [
+      projName ? row('Project', projName) : '',
       row('Price',       price>0 ? fmt$(price) : ''),
-      row('Effective',   deal.psaEffectiveDate ? fmtDate(deal.psaEffectiveDate) : ''),
+      row('Buyer',       deal.buyer||deal.loiBuyer||''),
       row('DD Exp',      deal.ddExpirationDate||deal.dueDiligenceDate ? fmtDate(deal.ddExpirationDate||deal.dueDiligenceDate) : ''),
       row('Closing',     deal.closeDate ? fmtDate(deal.closeDate) : ''),
+      deal.referralDue==='yes'&&deal.referralPct>0 ? row('Referral', deal.referralPct+'% → '+(deal.referralTo||'')) : '',
     ].join('');
 
   } else if(/^listing$/i.test(st.trim())){
-    // Listing: Price, Commission %, Start date, Expiration, Acreage
+    // Listing: Project Name, Price, Commission %, Start, Expiration
     stageRows = [
+      projName ? row('Project', projName) : '',
       row('Price',   price>0 ? fmt$(price) : ''),
       row('Comm',    commPct),
       row('Start',   deal.listingEffectiveDate ? fmtDate(deal.listingEffectiveDate) : ''),
       row('Expires', deal.listingExpiration ? fmtDate(deal.listingExpiration) : ''),
-      row('Acres',   deal.acreage||deal.acres||''),
     ].join('');
 
   } else if(st === 'Proposal Outstanding'){
-    // Proposal Outstanding: Price, Contact person + phone, Days in stage
+    // Proposal Outstanding: Price, Contact person + phone
     stageRows = [
       row('Price',   price>0 ? fmt$(price) : ''),
       row('Contact', deal.contactPerson||''),
       row('Phone',   deal.contactPhone||''),
     ].join('');
-    // Days in stage shown prominently (added below alongside footer)
 
   } else if(st === 'Closing'){
-    // Closing: Price, Commission %, Closing date, Escrow agent
+    // Closing: Project Name, Price, Closing date, Escrow agent
     stageRows = [
+      projName ? row('Project', projName) : '',
       row('Price',    price>0 ? fmt$(price) : ''),
-      row('Comm',     commPct),
       row('Closing',  deal.closeDate ? fmtDate(deal.closeDate) : ''),
       row('Escrow',   deal.escrowAgent||''),
     ].join('');
@@ -6133,12 +6083,12 @@ function renderCard(deal){
     ].join('');
 
   } else {
-    // Default: Price, DD, Close, Commission %
+    // Default: Project Name (if any), Price, DD, Close
     stageRows = [
+      projName ? row('Project', projName) : '',
       row('Price',   price>0 ? fmt$(price) : ''),
       row('DD',      deal.dueDiligenceDate ? fmtDate(deal.dueDiligenceDate) : ''),
       row('Close',   deal.closeDate        ? fmtDate(deal.closeDate)        : ''),
-      commPct ? row('Comm', commPct) : '',
     ].join('');
   }
 
@@ -12450,7 +12400,7 @@ window.moveStage = (i,dir) => {
   saveCustomStages(list); updateStageDropdowns(); viewManageStages();
 };
 window.resetStages = () => {
-  if(!confirm('Reset to the original 7 stages? Any custom stages will be removed.')) return;
+  if(!confirm('Reset to the default stages? Any custom stages will be removed.')) return;
   localStorage.setItem(K('allStages'), JSON.stringify(SEED_ALL_STAGES));
   loadCustomStages(); updateStageDropdowns();
   showToast('Stages reset to defaults','info'); viewManageStages();
@@ -14960,7 +14910,7 @@ window.handleDealSubmit = async ev => {
   // (built-in stage templates use sf-* IDs, not gf-* IDs, so gf- elements won't exist)
   const sf = collectStageFields();
   // Require Effective Date for contract-active stages (including custom stages containing these keywords)
-  const needsEffDate = ['Due Diligence','Rezoning/Permitting','Closing'].includes(stage)
+  const needsEffDate = ['Due Diligence','Due Diligence (Under Contract)','Rezoning/Permitting','Closing'].includes(stage)
     || stage.includes('Due Diligence') || stage.includes('Rezoning') || stage.includes('Permitting')
     || (stage.includes('Closing') && !stage.includes('Closed'));
   if(needsEffDate && !sf.effectiveDate){
