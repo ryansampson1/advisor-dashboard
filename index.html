@@ -7155,9 +7155,15 @@ window.openPropertyDetail = (dealId) => {
     ? atts.map((a, i) => {
         const deleteBtn = a.deletable
           ? `<button onclick="event.preventDefault();event.stopPropagation();_pdwDeleteAttachment('${dealId}','${encodeURIComponent(a.url||'')}','${encodeURIComponent(a.name||'')}')" title="Remove" style="margin-left:.25rem;background:none;border:none;color:#9ca3af;cursor:pointer;font-size:.75rem;padding:0;line-height:1" onmouseover="this.style.color='#ef4444'" onmouseout="this.style.color='#9ca3af'">✕</button>` : '';
+        const isImg = /\.(jpg|jpeg|png|gif|webp|heic|heif|avif)$/i.test(a.name||'');
+        const alreadyCardPhoto = a.url && deal.primaryPhotoUrl && a.url === deal.primaryPhotoUrl;
+        const photoBtn = (isImg && a.url && a.deletable && !alreadyCardPhoto)
+          ? `<button onclick="event.preventDefault();event.stopPropagation();_pdwSetCardPhoto('${dealId}','${encodeURIComponent(a.url)}')" title="Set as card banner photo" style="margin-left:.25rem;background:none;border:none;color:#9ca3af;cursor:pointer;font-size:.8rem;padding:0;line-height:1" onmouseover="this.style.color='#7c3aed'" onmouseout="this.style.color='#9ca3af'">📸</button>`
+          : (alreadyCardPhoto ? `<span style="margin-left:.25rem;font-size:.7rem;color:#7c3aed" title="Currently used as card banner">📸</span>` : '');
+        const icon = isImg ? '🖼️' : '📎';
         return a.url
-          ? `<span class="att-chip" style="display:inline-flex;align-items:center"><a href="${a.url}" target="_blank" rel="noopener" style="color:inherit;text-decoration:none">📎 ${a.name}</a>${deleteBtn}</span>`
-          : `<span class="att-chip" style="opacity:.7;cursor:default;display:inline-flex;align-items:center" title="File stored locally in this session">📎 ${a.name}${deleteBtn}</span>`;
+          ? `<span class="att-chip" style="display:inline-flex;align-items:center"><a href="${a.url}" target="_blank" rel="noopener" style="color:inherit;text-decoration:none">${icon} ${a.name}</a>${photoBtn}${deleteBtn}</span>`
+          : `<span class="att-chip" style="opacity:.7;cursor:default;display:inline-flex;align-items:center" title="File stored locally in this session">${icon} ${a.name}${deleteBtn}</span>`;
       }).join('')
     : '';
 
@@ -7569,27 +7575,57 @@ window._pdwUploadAttachment = async (dealId, file) => {
     showToast('Storage not connected — cannot upload', 'error');
     return;
   }
+  const isImage = file.type.startsWith('image/') || /\.(jpg|jpeg|png|gif|webp|heic|heif|avif)$/i.test(file.name);
   try {
     const { ref: fbRef, uploadBytes, getDownloadURL } = _fbFns;
     const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
-    const storePath = `dealDocs/${dealId}/general_${Date.now()}_${safeName}`;
-    const snap = await uploadBytes(fbRef(_fbStorage, storePath), file);
-    const url = await getDownloadURL(snap.ref);
-    // Append to deal.dealAttachments array
     const deal = allDeals.find(d => d.id === dealId);
-    const existing = deal?.dealAttachments || [];
-    const updated = [...existing, {
-      name: file.name,
-      url,
-      uploadedAt: Date.now(),
-      uploadedBy: currentUser?.displayName || currentUser?.name || currentUser?.email || '',
-    }];
-    await Store.updateDeal(dealId, { dealAttachments: updated, updatedAt: Date.now() });
-    if (deal) deal.dealAttachments = updated;
-    showToast(`✅ ${file.name} attached`, 'success', 3000);
+    if (isImage) {
+      // Route images to card banner photo
+      const ext = (file.name.split('.').pop()||'jpg').replace(/[^a-z]/gi,'').toLowerCase()||'jpg';
+      const storePath = `dealPhotos/${dealId}/primary_${Date.now()}.${ext}`;
+      const snap = await uploadBytes(fbRef(_fbStorage, storePath), file);
+      const url = await getDownloadURL(snap.ref);
+      await Store.updateDeal(dealId, { primaryPhotoUrl: url, updatedAt: Date.now() });
+      if (deal) deal.primaryPhotoUrl = url;
+      showToast('📸 Photo set as card banner!', 'success', 3000);
+      // Refresh the kanban board + drawer
+      if (typeof renderBoard === 'function') renderBoard();
+      setTimeout(() => window.openPropertyDetail && window.openPropertyDetail(dealId), 350);
+    } else {
+      // Non-images go to general attachments
+      const storePath = `dealDocs/${dealId}/general_${Date.now()}_${safeName}`;
+      const snap = await uploadBytes(fbRef(_fbStorage, storePath), file);
+      const url = await getDownloadURL(snap.ref);
+      const existing = deal?.dealAttachments || [];
+      const updated = [...existing, {
+        name: file.name,
+        url,
+        uploadedAt: Date.now(),
+        uploadedBy: currentUser?.displayName || currentUser?.name || currentUser?.email || '',
+      }];
+      await Store.updateDeal(dealId, { dealAttachments: updated, updatedAt: Date.now() });
+      if (deal) deal.dealAttachments = updated;
+      showToast(`✅ ${file.name} attached`, 'success', 3000);
+    }
   } catch (e) {
     console.warn('[pdwUpload]', e);
     showToast(`Upload failed: ${e.message}`, 'error');
+  }
+};
+
+window._pdwSetCardPhoto = async (dealId, encodedUrl) => {
+  const url = decodeURIComponent(encodedUrl);
+  try {
+    await Store.updateDeal(dealId, { primaryPhotoUrl: url, updatedAt: Date.now() });
+    const deal = allDeals.find(d => d.id === dealId);
+    if (deal) deal.primaryPhotoUrl = url;
+    showToast('📸 Card banner photo updated!', 'success', 3000);
+    if (typeof renderBoard === 'function') renderBoard();
+    setTimeout(() => window.openPropertyDetail && window.openPropertyDetail(dealId), 350);
+  } catch(e) {
+    console.warn('[pdwSetCardPhoto]', e);
+    showToast('Failed to set card photo: ' + e.message, 'error');
   }
 };
 
