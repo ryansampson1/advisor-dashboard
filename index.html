@@ -672,14 +672,6 @@ body {
           <textarea id="f-notes" rows="3" placeholder="Any details, acreage, zoning, listing price..."
             class="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none resize-none"></textarea>
         </div>
-        <!-- Likely Buyer Groups -->
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1.5">🎯 Likely Buyer Groups</label>
-          <div id="f-property-groups-picker" class="flex flex-wrap gap-1.5 p-2 border rounded-xl bg-gray-50 min-h-10 items-center">
-            <span class="text-xs text-gray-400 italic">No groups — create them in the CRM Groups tab</span>
-          </div>
-          <input type="hidden" id="f-property-groups" value="[]"/>
-        </div>
         <!-- Co-Advisors section -->
         <div class="border rounded-xl p-3 bg-blue-50 border-blue-100">
           <div class="flex items-center justify-between mb-1">
@@ -688,6 +680,14 @@ body {
           </div>
           <p class="text-xs text-blue-400 mb-2">Each co-advisor sees this deal in their pipeline. Set their commission split %.</p>
           <div id="co-advisors-list" class="space-y-2"></div>
+        </div>
+        <!-- Likely Buyer Groups -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1.5">🎯 Likely Buyer Groups</label>
+          <div id="f-property-groups-picker" class="flex flex-wrap gap-1.5 p-2 border rounded-xl bg-gray-50 min-h-10 items-center">
+            <span class="text-xs text-gray-400 italic">No groups — create them in the CRM Groups tab</span>
+          </div>
+          <input type="hidden" id="f-property-groups" value="[]"/>
         </div>
         <div id="stage-fields" class="hidden"></div>
         <div class="flex gap-3 pt-1">
@@ -3612,28 +3612,16 @@ function renderStageFields(stage, data={}){
     </div>`;
   };
 
-  // docModeBlock — renders the upload/manual toggle + upload zone for a stage.
+  // docModeBlock — renders the upload zone + auto-fill button for a stage (upload-only, no manual toggle).
   // stageKey: short slug ('listing','loi','uc','dd')
-  // docMode:  'upload' (default) or 'manual'
   // uploadZoneHtml: the fileZone() output to embed inside the upload section
   // aiStage: stage string passed to autoFillDealFromDoc
   const docModeBlock = (stageKey, docMode, uploadZoneHtml, aiStage) => {
-    const isManual = docMode === 'manual';
     const aiId = `ai-doc-input-${stageKey}`;
     return `
-    <div class="rounded-xl border ${isManual?'border-blue-200 bg-blue-50':'border-purple-100 bg-purple-50/60'} p-3 space-y-2.5">
-      <div class="flex gap-1.5 bg-white border border-gray-200 p-1 rounded-xl">
-        <button type="button" onclick="_onDocModeChange('${stageKey}','upload')"
-          class="flex-1 py-1.5 px-2 rounded-lg text-xs font-semibold transition text-center ${!isManual?'bg-gray-900 text-white':'text-gray-500 hover:bg-gray-100'}">
-          📎 Upload &amp; Auto-Fill
-        </button>
-        <button type="button" onclick="_onDocModeChange('${stageKey}','manual')"
-          class="flex-1 py-1.5 px-2 rounded-lg text-xs font-semibold transition text-center ${isManual?'bg-gray-900 text-white':'text-gray-500 hover:bg-gray-100'}">
-          ✏️ Enter Manually
-        </button>
-      </div>
-      <input type="hidden" id="sf-doc-mode" value="${docMode||'upload'}"/>
-      <div id="sf-doc-upload-section" class="${isManual?'hidden':'space-y-2'}">
+    <div class="rounded-xl border border-purple-100 bg-purple-50/60 p-3 space-y-2.5">
+      <input type="hidden" id="sf-doc-mode" value="upload"/>
+      <div class="space-y-2">
         <div class="flex items-center gap-2">
           <input id="${aiId}" type="file" accept=".pdf,.doc,.docx" class="hidden"
             onchange="(async(e)=>{ const f=e.target.files[0]; if(f) await autoFillDealFromDoc(f,'${aiStage}'); e.target.value=''; })(event)"/>
@@ -3641,11 +3629,10 @@ function renderStageFields(stage, data={}){
             class="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-lg border border-purple-200 bg-white text-purple-700 hover:bg-purple-100 transition-colors">
             ✨ Auto-fill from Document
           </button>
-          <span class="text-xs text-gray-400">Upload PDF or Word to auto-populate fields above</span>
+          <span class="text-xs text-gray-400">Upload PDF or Word to auto-populate fields</span>
         </div>
         ${uploadZoneHtml}
       </div>
-      ${isManual?`<p class="text-xs text-blue-600 font-medium">All fields marked <span class="text-red-500 font-bold">*</span> are required — must be filled to save.</p>`:''}
     </div>`;
   };
 
@@ -3685,13 +3672,13 @@ function renderStageFields(stage, data={}){
   if(stage==='Listing'){
     const lf = listingFiles[dealKey];
     const lfName = lf?.name || data.listingAgreementFileName || '';
-    const docMode = data.docMode || 'upload';
-    const isManual = docMode === 'manual';
+    const docMode = 'upload';
+    const isManual = false;
     container.innerHTML=`
       <div class="border-t pt-4 mt-1">
         <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">Listing Details</div>
         <div class="space-y-3">
-          ${inp('sf-project-name','Project Name','text','Tract 12 – Live Oak Ranch',data.projectName,isManual)}
+          <input type="hidden" id="sf-project-name" value="${data.projectName||''}"/>
           <div class="grid grid-cols-2 gap-3">
             ${inp('sf-listed-price','Listing Price ($)','number','1450000',data.listedPrice,isManual)}
             ${inp('sf-listing-effective','Effective Date','date','',data.listingEffectiveDate,isManual)}
@@ -3699,11 +3686,10 @@ function renderStageFields(stage, data={}){
           <div class="grid grid-cols-2 gap-3">
             ${inp('sf-listing-expiration','Listing Expiration Date','date','',data.listingExpiration,isManual)}
             <div>
-              <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Commission %${isManual?' <span class="text-red-500">*</span>':''}</label>
+              <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Commission %</label>
               <div class="flex items-center border rounded-lg overflow-hidden">
                 <input id="sf-elc-commission" type="number" min="0" max="100" step="0.25"
                   placeholder="3.0" value="${data.elcCommissionPct||data.commissionPct||data.dealCommissionPct||''}"
-                  ${isManual?'required':''}
                   class="flex-1 px-3 py-2 text-sm outline-none"/>
                 <span class="px-3 py-2 bg-gray-50 text-gray-500 text-sm font-semibold border-l">%</span>
               </div>
@@ -3730,13 +3716,13 @@ function renderStageFields(stage, data={}){
   if(stage==='LOI'){
     const loiFile = stageFiles[`${dealKey}__loi`];
     const loiName = loiFile?.name || data.loiFileName || '';
-    const docMode = data.docMode || 'upload';
-    const isManual = docMode === 'manual';
+    const docMode = 'upload';
+    const isManual = false;
     container.innerHTML=`
       <div class="border-t pt-4 mt-1">
         <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">LOI Details</div>
         <div class="space-y-3">
-          ${inp('sf-project-name','Project Name','text','Tract 12 – Live Oak Ranch',data.projectName)}
+          <input type="hidden" id="sf-project-name" value="${data.projectName||''}"/>
           <div class="grid grid-cols-2 gap-3">
             ${inp('sf-loi-price','LOI Price ($)','number','1400000',data.loiPrice,isManual)}
             ${inp('sf-loi-buyer','Buyer','text','Jane Doe LLC',data.loiBuyer,isManual)}
@@ -3759,13 +3745,13 @@ function renderStageFields(stage, data={}){
     const cf = contractFiles[dealKey];
     const hasFile = !!cf || !!data.contractFileName;
     const fileName = cf?.name || data.contractFileName || '';
-    const docMode = data.docMode || 'upload';
-    const isManual = docMode === 'manual';
+    const docMode = 'upload';
+    const isManual = false;
     container.innerHTML=`
       <div class="border-t pt-4 mt-1">
         <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">Contract Details</div>
         <div class="space-y-3">
-          ${inp('sf-project-name','Project Name','text','Tract 12 – Live Oak Ranch',data.projectName)}
+          <input type="hidden" id="sf-project-name" value="${data.projectName||''}"/>
           ${inp('sf-contract-price','Contract Price ($)','number','1400000',data.contractPrice,isManual)}
           <div class="grid grid-cols-2 gap-3">
             ${inp('sf-buyer','Buyer Name','text','Jane Doe',data.buyer,isManual)}
@@ -3830,22 +3816,21 @@ function renderStageFields(stage, data={}){
     const psaName = psaFile?.name || data.psaFileName || '';
     const price   = data.purchasePrice||data.contractPrice||data.loiPrice||data.listedPrice||'';
     const comm    = data.commissionAmount||data.expectedRevenue||'';
-    const docMode = data.docMode || 'upload';
-    const isManual = docMode === 'manual';
+    const docMode = 'upload';
+    const isManual = false;
     container.innerHTML=`
       <div class="border-t pt-4 mt-1">
         <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">Due Diligence Details</div>
         <div class="space-y-3">
-          ${inp('sf-project-name','Project Name','text','Tract 12 – Live Oak Ranch',data.projectName)}
+          <input type="hidden" id="sf-project-name" value="${data.projectName||''}"/>
           ${inp('sf-effective-date','Effective Date','date','',data.effectiveDate,true)}
           <div class="grid grid-cols-2 gap-3">
             ${inp('sf-purchase-price','Purchase Price ($)','number','e.g. 1500000',price,isManual)}
             <div>
-              <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Commission %${isManual?' <span class="text-red-500">*</span>':''}</label>
+              <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Commission %</label>
               <div class="flex items-center border rounded-lg overflow-hidden">
                 <input id="sf-elc-commission" type="number" min="0" max="100" step="0.25"
                   placeholder="3.0" value="${data.elcCommissionPct||data.dealCommissionPct||data.commissionPct||''}"
-                  ${isManual?'required':''}
                   class="flex-1 px-3 py-2 text-sm outline-none"/>
                 <span class="px-3 py-2 bg-gray-50 text-gray-500 text-sm font-semibold border-l">%</span>
               </div>
@@ -3912,7 +3897,7 @@ function renderStageFields(stage, data={}){
       <div class="border-t pt-4 mt-1">
         <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">Rezoning / Permitting</div>
         <div class="space-y-3">
-          ${inp('sf-project-name','Project Name','text','Tract 12 – Live Oak Ranch',data.projectName)}
+          <input type="hidden" id="sf-project-name" value="${data.projectName||''}"/>
           ${inp('sf-effective-date','Effective Date','date','',data.effectiveDate,true)}
           <div class="grid grid-cols-2 gap-3">
             ${inp('sf-purchase-price','Purchase Price ($)','number','e.g. 1500000',rzPrice)}
@@ -3960,7 +3945,7 @@ function renderStageFields(stage, data={}){
       <div class="border-t pt-4 mt-1">
         <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">Closing Details</div>
         <div class="space-y-3">
-          ${inp('sf-project-name','Project Name','text','Tract 12 – Live Oak Ranch',data.projectName)}
+          <input type="hidden" id="sf-project-name" value="${data.projectName||''}"/>
           ${inp('sf-effective-date','Effective Date','date','',data.effectiveDate,true)}
           ${inp('sf-close-date','Confirmed Closing Date','date','',data.closeDate)}
           <div class="grid grid-cols-2 gap-3">
@@ -4044,7 +4029,7 @@ function renderStageFields(stage, data={}){
 
         <!-- Core closing fields — always editable (critical for new deals added directly to Sold) -->
         <div class="space-y-3 mb-4">
-          ${inp('sf-project-name','Project Name','text','Tract 12 – Live Oak Ranch',data.projectName)}
+          <input type="hidden" id="sf-project-name" value="${data.projectName||''}"/>
           ${inp('sf-close-date','Confirmed Close Date','date','',data.closeDate)}
           <div class="grid grid-cols-2 gap-3">
             ${inp('sf-purchase-price','Purchase Price ($)','number','1400000',clPrice)}
