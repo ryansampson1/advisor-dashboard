@@ -3987,43 +3987,51 @@ function renderStageFields(stage, data={}){
   if(stage==='Closing' || (stage.includes('Closing') && !stage.includes('Closed'))){
     const clPrice = data.purchasePrice||data.contractPrice||data.loiPrice||'';
     window._closingDeal = data;
+    const fmt$ = v => (v>0) ? '$'+Number(v).toLocaleString() : '—';
+    const fmtDate = iso => iso ? new Date(iso+'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) : '—';
+    const row = (label, val) => (val && val!=='—') ? `
+      <div class="flex justify-between items-start gap-3 py-1.5 border-b border-gray-100 last:border-0">
+        <span class="text-xs text-gray-400 uppercase tracking-wide shrink-0 pt-0.5 w-28">${label}</span>
+        <span class="text-sm font-medium text-gray-800 text-right leading-snug">${val}</span>
+      </div>` : '';
     container.innerHTML=`
       <div class="border-t pt-4 mt-1">
         <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">Closing Details</div>
         <div class="space-y-3">
-          <input type="hidden" id="sf-project-name" value="${data.projectName||''}"/>
-          ${inp('sf-effective-date','Effective Date','date','',data.effectiveDate,true)}
-          ${inp('sf-close-date','Confirmed Closing Date','date','',data.closeDate)}
-          <div class="grid grid-cols-2 gap-3">
-            ${inp('sf-purchase-price','Purchase Price ($)','number','1400000',clPrice)}
-            <div>
-              <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Commission %</label>
-              <div class="flex items-center border rounded-lg overflow-hidden">
-                <input id="sf-elc-commission" type="number" min="0" max="100" step="0.25"
-                  placeholder="3.0" value="${data.elcCommissionPct||data.dealCommissionPct||data.commissionPct||''}"
-                  class="flex-1 px-3 py-2 text-sm outline-none"/>
-                <span class="px-3 py-2 bg-gray-50 text-gray-500 text-sm font-semibold border-l">%</span>
-              </div>
+          <!-- Hidden inputs — preserve all contract data; also read by commission invoice generator -->
+          <input type="hidden" id="sf-project-name"    value="${data.projectName||''}"/>
+          <input type="hidden" id="sf-purchase-price"  value="${clPrice}"/>
+          <input type="hidden" id="sf-elc-commission"  value="${data.elcCommissionPct||data.dealCommissionPct||data.commissionPct||''}"/>
+          <input type="hidden" id="sf-buyer"           value="${data.buyer||''}"/>
+          <input type="hidden" id="sf-buyer-broker"    value="${data.buyerBroker||''}"/>
+          <input type="hidden" id="sf-escrow-agent"    value="${data.escrowAgent||''}"/>
+          <input type="hidden" id="sf-escrow-email"    value="${data.escrowAgentEmail||''}"/>
+          <input type="hidden" id="sf-psa-effective-date" value="${data.psaEffectiveDate||''}"/>
+          <input type="hidden" id="sf-dd-date"         value="${data.ddExpirationDate||''}"/>
+          <input type="hidden" id="sf-earnest-money"   value="${data.earnestMoney||''}"/>
+          <!-- Read-only contract reference (carried from DD / Rezoning) -->
+          <div>
+            <div class="flex items-center gap-2 mb-2">
+              <span class="text-xs font-bold text-gray-400 uppercase tracking-widest">Contract Reference</span>
+              <span class="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full font-semibold">Read Only</span>
+            </div>
+            <div class="bg-gray-50 rounded-xl px-3 pt-1 pb-0.5">
+              ${row('Project', data.projectName)}
+              ${row('Purchase Price', fmt$(clPrice))}
+              ${row('Commission', (data.elcCommissionPct||data.dealCommissionPct||data.commissionPct) ? (data.elcCommissionPct||data.dealCommissionPct||data.commissionPct)+'%' : '')}
+              ${row('Buyer', data.buyer)}
+              ${row('Buyer Broker', data.buyerBroker)}
+              ${row('Escrow Agent', data.escrowAgent)}
+              ${row('Escrow Email', data.escrowAgentEmail)}
+              ${row('PSA Effective', fmtDate(data.psaEffectiveDate))}
+              ${row('DD Expiration', fmtDate(data.ddExpirationDate))}
+              ${row('Earnest Money', data.earnestMoney>0 ? fmt$(data.earnestMoney) : '')}
             </div>
           </div>
-          <div class="grid grid-cols-2 gap-3">
-            ${inp('sf-buyer','Buyer','text','Jane Doe LLC',data.buyer)}
-            ${inp('sf-buyer-broker','Buyer Broker','text','ABC Realty',data.buyerBroker)}
-          </div>
-          <div class="grid grid-cols-2 gap-3">
-            ${inp('sf-escrow-agent','Escrow Agent','text','First Title Co.',data.escrowAgent)}
-            ${inp('sf-escrow-email','Escrow Email','email','escrow@title.com',data.escrowAgentEmail)}
-          </div>
-          <div class="flex items-center gap-2 pt-1">
-            <input id="ai-doc-input-cl" type="file" accept=".pdf,.doc,.docx" class="hidden"
-              onchange="(async(e)=>{ const f=e.target.files[0]; if(f) await autoFillDealFromDoc(f,'Closing'); e.target.value=''; })(event)"/>
-            <button type="button"
-              onclick="document.getElementById('ai-doc-input-cl').click()"
-              class="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-lg border border-purple-200 bg-purple-50 text-purple-700 hover:bg-purple-100 transition-colors">
-              ✨ Auto-fill from Document
-            </button>
-            <span class="text-xs text-gray-400">Upload a PDF or Word contract to extract fields automatically</span>
-          </div>
+          <!-- Editable: closing-specific dates only -->
+          ${inp('sf-effective-date','Effective Date','date','',data.effectiveDate,true)}
+          ${inp('sf-close-date','Confirmed Closing Date','date','',data.closeDate)}
+          <!-- Commission Invoice -->
           <button type="button"
             onclick="(()=>{ const _d=window._closingDeal||{}; const d={..._d, purchasePrice:parseFloat(document.getElementById('sf-purchase-price')?.value)||_d.purchasePrice||0, elcCommissionPct:parseFloat(document.getElementById('sf-elc-commission')?.value)||_d.elcCommissionPct||0, closeDate:document.getElementById('sf-close-date')?.value||_d.closeDate||'', escrowAgent:document.getElementById('sf-escrow-agent')?.value||_d.escrowAgent||'', escrowAgentEmail:document.getElementById('sf-escrow-email')?.value||_d.escrowAgentEmail||'', buyer:document.getElementById('sf-buyer')?.value||_d.buyer||'', projectName:document.getElementById('sf-project-name')?.value||_d.projectName||''}; window.generateCommissionInvoice(d); })()"
             class="w-full flex items-center justify-center gap-2 bg-red-700 hover:bg-red-800 text-white font-semibold rounded-xl px-4 py-3 text-sm transition-colors mt-2">
