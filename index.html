@@ -3401,18 +3401,22 @@ function appendInlineGateFields(container, stage, data, dealKey){
 }
 
 // ── AI Document Auto-Fill ─────────────────────────────────────────────────────
-async function autoFillDealFromDoc(file, stage){
+async function autoFillDealFromDoc(file, stage, opts = {}){
   const apiKey = APP_CONFIG.ai?.anthropicKey;
   if(!apiKey){
     showToast('No AI key set — go to ⚡ Automations to add one','warning');
     return;
   }
 
-  // Show spinner overlay on the stage-fields container
-  const container = document.getElementById('stage-fields');
+  // Show spinner overlay — either on caller-provided container or stage-fields
+  const container = opts.spinnerContainer || document.getElementById('stage-fields');
   const overlay = document.createElement('div');
   overlay.id = 'ai-fill-overlay';
-  overlay.className = 'absolute inset-0 bg-white/80 flex flex-col items-center justify-center rounded-xl z-10';
+  if(opts.spinnerContainer){
+    overlay.style.cssText = 'position:absolute;inset:0;background:rgba(255,255,255,.88);display:flex;flex-direction:column;align-items:center;justify-content:center;border-radius:.75rem;z-index:10;';
+  } else {
+    overlay.className = 'absolute inset-0 bg-white/80 flex flex-col items-center justify-center rounded-xl z-10';
+  }
   overlay.innerHTML = '<div class="animate-spin text-3xl mb-2">⚙️</div><div class="text-sm font-semibold text-gray-600">Reading document…</div>';
   if(container){ container.style.position='relative'; container.appendChild(overlay); }
 
@@ -3581,7 +3585,8 @@ For calculated dates (DD expiration, closing, etc.) — DO the math and return t
     }
 
     overlay?.remove();
-    _showCriticalDatesReview(extracted, stage);
+    if(opts.onExtracted) opts.onExtracted(extracted);
+    else _showCriticalDatesReview(extracted, stage);
 
   } catch(err){
     console.error('[autoFillDealFromDoc]', err);
@@ -3757,6 +3762,168 @@ function _applyCriticalDates(){
   _sendCriticalDatesTask(vals);
 }
 window._applyCriticalDates = _applyCriticalDates;
+
+// ── Drawer-specific critical dates review: same panel but saves directly to Firestore ──
+function _showCriticalDatesReviewForDeal(extracted, dealId){
+  document.getElementById('critical-dates-panel')?.remove();
+
+  const allFields = [
+    ['projectName',             'Property / Project Name',         'text'],
+    ['seller',                  'Seller',                          'text'],
+    ['buyer',                   'Buyer',                           'text'],
+    ['loiBuyer',                'Buyer (LOI)',                     'text'],
+    ['buyerBroker',             "Buyer's Broker",                  'text'],
+    ['buyerUse',                "Buyer's Intended Use",            'text'],
+    ['listingPrice',            'Listing / Asking Price ($)',       'number'],
+    ['loiPrice',                'LOI Offer Price ($)',              'number'],
+    ['purchasePrice',           'Purchase Price ($)',               'number'],
+    ['contractPrice',           'Contract Price ($)',               'number'],
+    ['elcCommissionPct',        'Commission (%)',                   'number'],
+    ['earnestMoney',            'Earnest Money Deposit ($)',        'number'],
+    ['acreage',                 'Acreage / Sq Ft',                 'number'],
+    ['county',                  'County',                          'text'],
+    ['listingEffectiveDate',    'Listing Effective Date',          'date'],
+    ['listingExpiration',       'Listing Expiration Date',         'date'],
+    ['effectiveDate',           'Contract Effective Date',         'date'],
+    ['psaEffectiveDate',        'PSA Effective Date',              'date'],
+    ['ddExpirationDate',        'Due Diligence Expiration',        'date'],
+    ['financingContingencyDate','Financing Contingency Deadline',  'date'],
+    ['titleCommitmentDate',     'Title Commitment Deadline',       'date'],
+    ['closeDate',               'Closing Date',                    'date'],
+    ['escrowAgent',             'Escrow / Title Company',          'text'],
+    ['escrowAgentEmail',        'Escrow Agent Email',              'email'],
+    ['referralPct',             'Referral Fee (%)',                'number'],
+    ['referralTo',              'Referral Fee Recipient',          'text'],
+  ];
+
+  const alwaysShow = new Set(['projectName','buyer','purchasePrice','closeDate','escrowAgent']);
+  const rows = allFields.filter(([key])=> alwaysShow.has(key) || (extracted[key] !== null && extracted[key] !== undefined));
+
+  const rowsHtml = rows.map(([key, label, type])=>{
+    const val = extracted[key] ?? '';
+    const dispVal = val === null ? '' : String(val);
+    const isEmpty = dispVal === '';
+    return `
+      <div class="flex items-center gap-2 py-1.5 border-b border-gray-100 last:border-0">
+        <label class="w-44 flex-shrink-0 text-xs font-medium text-gray-500">${label}</label>
+        <input data-cd-key="${key}" type="${type}" value="${dispVal.replace(/"/g,'&quot;')}"
+          placeholder="${isEmpty?'not found':''}"
+          class="flex-1 border rounded-lg px-2.5 py-1.5 text-sm outline-none focus:ring-2 focus:ring-blue-400 ${isEmpty?'border-gray-200 bg-gray-50 text-gray-400 placeholder-gray-300':'border-blue-200 bg-blue-50 text-gray-800 font-medium'}"/>
+      </div>`;
+  }).join('');
+
+  const foundCount = rows.filter(([key])=> extracted[key] !== null && extracted[key] !== undefined && String(extracted[key]).trim() !== '').length;
+
+  const panel = document.createElement('div');
+  panel.id = 'critical-dates-panel';
+  panel.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.5);padding:16px;';
+  panel.innerHTML = `
+    <div style="background:#fff;border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,0.25);width:100%;max-width:580px;max-height:90vh;display:flex;flex-direction:column;overflow:hidden;">
+      <div style="padding:16px 20px 12px;border-bottom:1px solid #f1f5f9;flex-shrink:0;">
+        <div style="display:flex;align-items:center;justify-content:space-between;">
+          <div>
+            <div style="font-size:15px;font-weight:700;color:#111;">✨ Critical Dates &amp; Key Terms</div>
+            <div style="font-size:12px;color:#64748b;margin-top:2px;">AI found <strong>${foundCount}</strong> field${foundCount===1?'':'s'} — review and correct before saving to deal</div>
+          </div>
+          <button onclick="document.getElementById('critical-dates-panel')?.remove()"
+            style="width:28px;height:28px;border-radius:50%;border:1px solid #e2e8f0;background:#f8fafc;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;color:#64748b;">✕</button>
+        </div>
+      </div>
+      <div style="flex:1;overflow-y:auto;padding:8px 20px;">
+        ${rowsHtml}
+      </div>
+      <div style="padding:12px 20px;border-top:1px solid #f1f5f9;display:flex;gap:8px;flex-shrink:0;">
+        <button onclick="_applyCriticalDatesToDeal('${dealId}')"
+          style="flex:1;background:#111;color:#fff;font-size:13px;font-weight:600;padding:10px 16px;border-radius:10px;border:none;cursor:pointer;">
+          ✅ Apply &amp; Save to Deal
+        </button>
+        <button onclick="document.getElementById('critical-dates-panel')?.remove()"
+          style="padding:10px 16px;border-radius:10px;border:1px solid #e2e8f0;background:#f8fafc;font-size:13px;color:#374151;cursor:pointer;">
+          Cancel
+        </button>
+      </div>
+    </div>`;
+  document.body.appendChild(panel);
+}
+window._showCriticalDatesReviewForDeal = _showCriticalDatesReviewForDeal;
+
+async function _applyCriticalDatesToDeal(dealId){
+  const panel = document.getElementById('critical-dates-panel');
+  if(!panel) return;
+
+  const inputs = panel.querySelectorAll('input[data-cd-key]');
+  const vals = {};
+  inputs.forEach(el => { const v = el.value.trim(); if(v) vals[el.dataset.cdKey] = v; });
+
+  const fieldMap = {
+    projectName:             'projectName',
+    seller:                  'contactPerson',
+    buyer:                   'buyer',
+    loiBuyer:                'loiBuyer',
+    buyerBroker:             'buyerBroker',
+    buyerUse:                'buyerUse',
+    listingPrice:            'listedPrice',
+    loiPrice:                'loiPrice',
+    purchasePrice:           'purchasePrice',
+    contractPrice:           'contractPrice',
+    elcCommissionPct:        'elcCommissionPct',
+    earnestMoney:            'earnestMoney',
+    acreage:                 'acreage',
+    county:                  'county',
+    listingEffectiveDate:    'listingEffectiveDate',
+    listingExpiration:       'listingExpiration',
+    effectiveDate:           'effectiveDate',
+    psaEffectiveDate:        'psaEffectiveDate',
+    ddExpirationDate:        'ddExpirationDate',
+    financingContingencyDate:'financingContingencyDate',
+    titleCommitmentDate:     'titleCommitmentDate',
+    closeDate:               'closeDate',
+    escrowAgent:             'escrowAgent',
+    escrowAgentEmail:        'escrowAgentEmail',
+    referralPct:             'referralPct',
+    referralTo:              'referralTo',
+  };
+  const numericFields = new Set(['listingPrice','loiPrice','purchasePrice','contractPrice','elcCommissionPct','earnestMoney','acreage','referralPct']);
+
+  const update = {};
+  let filled = 0;
+  for(const [key, dealField] of Object.entries(fieldMap)){
+    if(vals[key] !== undefined && vals[key] !== ''){
+      update[dealField] = numericFields.has(key) ? (parseFloat(vals[key]) || vals[key]) : vals[key];
+      filled++;
+    }
+  }
+  if(update.referralPct && parseFloat(update.referralPct) > 0) update.referralDue = 'yes';
+
+  if(!filled){ showToast('No fields to apply', 'warning'); panel.remove(); return; }
+
+  try {
+    await Store.updateDeal(dealId, update);
+    panel.remove();
+    showToast('✅ Applied '+filled+' field'+(filled===1?'':'s')+' to deal', 'success');
+    // Refresh drawer so updated values show immediately
+    setTimeout(()=> window.openPropertyDetail && window.openPropertyDetail(dealId), 200);
+  } catch(err){
+    console.error('[_applyCriticalDatesToDeal]', err);
+    showToast('Failed to save: '+err.message, 'error');
+  }
+}
+window._applyCriticalDatesToDeal = _applyCriticalDatesToDeal;
+
+// Drawer auto-fill handler — validates file type then kicks off extraction
+window._pdwHandleAutoFill = function(dealId, files){
+  if(!files || !files.length) return;
+  const file = files[0];
+  const ext = (file.name.split('.').pop()||'').toLowerCase();
+  if(!['pdf','doc','docx'].includes(ext)){
+    showToast('Please upload a PDF or Word document (.pdf, .doc, .docx)', 'warning'); return;
+  }
+  const zone = document.getElementById('pdw-autofill-zone');
+  autoFillDealFromDoc(file, null, {
+    spinnerContainer: zone,
+    onExtracted: (extracted) => _showCriticalDatesReviewForDeal(extracted, dealId)
+  });
+};
 
 async function _sendCriticalDatesTask(vals){
   try {
@@ -6948,6 +7115,22 @@ window.openPropertyDetail = (dealId) => {
     <div class="prop-section">
       <div class="prop-section-title">Attachments</div>
       ${attChips ? `<div style="display:flex;flex-wrap:wrap;gap:.4rem;margin-bottom:.65rem">${attChips}</div>` : ''}
+      <!-- Auto-fill zone -->
+      <div id="pdw-autofill-zone"
+        style="position:relative;border:2px dashed #c7d2fe;border-radius:.75rem;padding:.75rem 1rem;text-align:center;cursor:pointer;background:#fafafe;transition:border-color .15s,background .15s;margin-bottom:.65rem"
+        onclick="document.getElementById('pdw-autofill-input').click()"
+        ondragover="event.preventDefault();this.style.borderColor='#818cf8';this.style.background='#eef2ff'"
+        ondragleave="this.style.borderColor='#c7d2fe';this.style.background='#fafafe'"
+        ondrop="event.preventDefault();this.style.borderColor='#c7d2fe';this.style.background='#fafafe';_pdwHandleAutoFill('${dealId}',event.dataTransfer.files)"
+        onmouseover="this.style.borderColor='#818cf8'" onmouseout="this.style.borderColor='#c7d2fe'">
+        <div style="font-size:.8rem;color:#4f46e5;pointer-events:none">
+          <span style="font-size:1.1rem;display:block;margin-bottom:.15rem">✨</span>
+          Drop listing agreement or contract to auto-fill deal fields
+          <span style="display:block;font-size:.72rem;color:#9ca3af;margin-top:.15rem">PDF or Word document</span>
+        </div>
+      </div>
+      <input id="pdw-autofill-input" type="file" accept=".pdf,.doc,.docx" style="display:none"
+        onchange="_pdwHandleAutoFill('${dealId}',this.files);this.value=''"/>
       <!-- Drop zone -->
       <div id="pdw-drop-zone"
         style="border:2px dashed #e5e7eb;border-radius:.75rem;padding:.85rem 1rem;text-align:center;cursor:pointer;transition:border-color .15s,background .15s"
