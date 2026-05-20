@@ -3272,6 +3272,43 @@ function renderStageFields(stage, data={}){
     </div>`;
   };
 
+  // docModeBlock — renders the upload/manual toggle + upload zone for a stage.
+  // stageKey: short slug ('listing','loi','uc','dd')
+  // docMode:  'upload' (default) or 'manual'
+  // uploadZoneHtml: the fileZone() output to embed inside the upload section
+  // aiStage: stage string passed to autoFillDealFromDoc
+  const docModeBlock = (stageKey, docMode, uploadZoneHtml, aiStage) => {
+    const isManual = docMode === 'manual';
+    const aiId = `ai-doc-input-${stageKey}`;
+    return `
+    <div class="rounded-xl border ${isManual?'border-blue-200 bg-blue-50':'border-purple-100 bg-purple-50/60'} p-3 space-y-2.5">
+      <div class="flex gap-1.5 bg-white border border-gray-200 p-1 rounded-xl">
+        <button type="button" onclick="_onDocModeChange('${stageKey}','upload')"
+          class="flex-1 py-1.5 px-2 rounded-lg text-xs font-semibold transition text-center ${!isManual?'bg-gray-900 text-white':'text-gray-500 hover:bg-gray-100'}">
+          📎 Upload &amp; Auto-Fill
+        </button>
+        <button type="button" onclick="_onDocModeChange('${stageKey}','manual')"
+          class="flex-1 py-1.5 px-2 rounded-lg text-xs font-semibold transition text-center ${isManual?'bg-gray-900 text-white':'text-gray-500 hover:bg-gray-100'}">
+          ✏️ Enter Manually
+        </button>
+      </div>
+      <input type="hidden" id="sf-doc-mode" value="${docMode||'upload'}"/>
+      <div id="sf-doc-upload-section" class="${isManual?'hidden':'space-y-2'}">
+        <div class="flex items-center gap-2">
+          <input id="${aiId}" type="file" accept=".pdf,.doc,.docx" class="hidden"
+            onchange="(async(e)=>{ const f=e.target.files[0]; if(f) await autoFillDealFromDoc(f,'${aiStage}'); e.target.value=''; })(event)"/>
+          <button type="button" onclick="document.getElementById('${aiId}').click()"
+            class="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-lg border border-purple-200 bg-white text-purple-700 hover:bg-purple-100 transition-colors">
+            ✨ Auto-fill from Document
+          </button>
+          <span class="text-xs text-gray-400">Upload PDF or Word to auto-populate fields above</span>
+        </div>
+        ${uploadZoneHtml}
+      </div>
+      ${isManual?`<p class="text-xs text-blue-600 font-medium">All fields marked <span class="text-red-500 font-bold">*</span> are required — must be filled to save.</p>`:''}
+    </div>`;
+  };
+
   const dealKey = editingDealId||'new';
 
   // ── PROSPECT ─────────────────────────────────────────────────────
@@ -3308,22 +3345,25 @@ function renderStageFields(stage, data={}){
   if(stage==='Listing'){
     const lf = listingFiles[dealKey];
     const lfName = lf?.name || data.listingAgreementFileName || '';
+    const docMode = data.docMode || 'upload';
+    const isManual = docMode === 'manual';
     container.innerHTML=`
       <div class="border-t pt-4 mt-1">
         <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">Listing Details</div>
         <div class="space-y-3">
-          ${inp('sf-project-name','Project Name','text','Tract 12 – Live Oak Ranch',data.projectName)}
+          ${inp('sf-project-name','Project Name','text','Tract 12 – Live Oak Ranch',data.projectName,isManual)}
           <div class="grid grid-cols-2 gap-3">
-            ${inp('sf-listed-price','Listing Price ($)','number','1450000',data.listedPrice)}
-            ${inp('sf-listing-effective','Effective Date','date','',data.listingEffectiveDate)}
+            ${inp('sf-listed-price','Listing Price ($)','number','1450000',data.listedPrice,isManual)}
+            ${inp('sf-listing-effective','Effective Date','date','',data.listingEffectiveDate,isManual)}
           </div>
           <div class="grid grid-cols-2 gap-3">
-            ${inp('sf-listing-expiration','Listing Expiration Date','date','',data.listingExpiration)}
+            ${inp('sf-listing-expiration','Listing Expiration Date','date','',data.listingExpiration,isManual)}
             <div>
-              <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Commission %</label>
+              <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Commission %${isManual?' <span class="text-red-500">*</span>':''}</label>
               <div class="flex items-center border rounded-lg overflow-hidden">
                 <input id="sf-elc-commission" type="number" min="0" max="100" step="0.25"
                   placeholder="3.0" value="${data.elcCommissionPct||data.commissionPct||data.dealCommissionPct||''}"
+                  ${isManual?'required':''}
                   class="flex-1 px-3 py-2 text-sm outline-none"/>
                 <span class="px-3 py-2 bg-gray-50 text-gray-500 text-sm font-semibold border-l">%</span>
               </div>
@@ -3336,8 +3376,10 @@ function renderStageFields(stage, data={}){
               [{v:'yes',l:'Yes'},{v:'no',l:'No'}], data.cobroke||'yes')}
           </div>
           ${(()=>{const r=document.getElementById('f-representation');return (!r||r.value!=='buyer')?sel('sf-sign','Sign',[{v:'yes',l:'Yes'},{v:'no',l:'No'},{v:'custom',l:'Custom'}],data.sign||'yes'):'';})()}
-          ${fileZone('listing-upload-zone','sf-listing-file','listing-upload-label',
-            'handleListingSelect(event)','handleListingDrop(event)',lfName,'Signed Listing Agreement')}
+          ${docModeBlock('listing', docMode,
+            fileZone('listing-upload-zone','sf-listing-file','listing-upload-label',
+              'handleListingSelect(event)','handleListingDrop(event)',lfName,'Signed Listing Agreement'),
+            'Listing')}
         </div>
       </div>`;
     appendInlineGateFields(container, stage, data, dealKey);
@@ -3348,20 +3390,24 @@ function renderStageFields(stage, data={}){
   if(stage==='LOI'){
     const loiFile = stageFiles[`${dealKey}__loi`];
     const loiName = loiFile?.name || data.loiFileName || '';
+    const docMode = data.docMode || 'upload';
+    const isManual = docMode === 'manual';
     container.innerHTML=`
       <div class="border-t pt-4 mt-1">
         <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">LOI Details</div>
         <div class="space-y-3">
           ${inp('sf-project-name','Project Name','text','Tract 12 – Live Oak Ranch',data.projectName)}
           <div class="grid grid-cols-2 gap-3">
-            ${inp('sf-loi-price','LOI Price ($)','number','1400000',data.loiPrice)}
-            ${inp('sf-loi-buyer','Buyer','text','Jane Doe LLC',data.loiBuyer)}
+            ${inp('sf-loi-price','LOI Price ($)','number','1400000',data.loiPrice,isManual)}
+            ${inp('sf-loi-buyer','Buyer','text','Jane Doe LLC',data.loiBuyer,isManual)}
           </div>
-          ${inp('sf-close-date','Expected Closing Date','date','',data.closeDate)}
-          ${fileZone('loi-upload-zone','sf-loi-file','loi-upload-label',
-            "handleStageFileSelect(event,'loi')",
-            "handleStageFileDrop(event,'loi')",
-            loiName,'LOI Document')}
+          ${inp('sf-close-date','Expected Closing Date','date','',data.closeDate,isManual)}
+          ${docModeBlock('loi', docMode,
+            fileZone('loi-upload-zone','sf-loi-file','loi-upload-label',
+              "handleStageFileSelect(event,'loi')",
+              "handleStageFileDrop(event,'loi')",
+              loiName,'LOI Document'),
+            'LOI')}
         </div>
       </div>`;
     appendInlineGateFields(container, stage, data, dealKey);
@@ -3373,21 +3419,23 @@ function renderStageFields(stage, data={}){
     const cf = contractFiles[dealKey];
     const hasFile = !!cf || !!data.contractFileName;
     const fileName = cf?.name || data.contractFileName || '';
+    const docMode = data.docMode || 'upload';
+    const isManual = docMode === 'manual';
     container.innerHTML=`
       <div class="border-t pt-4 mt-1">
         <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">Contract Details</div>
         <div class="space-y-3">
           ${inp('sf-project-name','Project Name','text','Tract 12 – Live Oak Ranch',data.projectName)}
-          ${inp('sf-contract-price','Contract Price ($)','number','1400000',data.contractPrice)}
+          ${inp('sf-contract-price','Contract Price ($)','number','1400000',data.contractPrice,isManual)}
           <div class="grid grid-cols-2 gap-3">
-            ${inp('sf-buyer','Buyer Name','text','Jane Doe',data.buyer)}
+            ${inp('sf-buyer','Buyer Name','text','Jane Doe',data.buyer,isManual)}
             ${inp('sf-buyer-broker','Buyer Broker','text','ABC Realty',data.buyerBroker)}
           </div>
           <div class="grid grid-cols-2 gap-3">
-            ${inp('sf-escrow-agent','Escrow Agent','text','First Title Co.',data.escrowAgent)}
+            ${inp('sf-escrow-agent','Escrow Agent','text','First Title Co.',data.escrowAgent,isManual)}
             ${inp('sf-escrow-email','Escrow Email','email','escrow@title.com',data.escrowAgentEmail)}
           </div>
-          ${inp('sf-close-date','Expected Closing Date','date','',data.closeDate)}
+          ${inp('sf-close-date','Expected Closing Date','date','',data.closeDate,isManual)}
           <!-- Referral Fee -->
           <div class="rounded-xl border border-amber-200 bg-amber-50 p-3 space-y-2">
             <div class="text-xs font-bold text-amber-700 uppercase tracking-wide">💸 Referral Fee</div>
@@ -3420,28 +3468,16 @@ function renderStageFields(stage, data={}){
               Net commission = Gross − <span id="sf-referral-calc-pct">${data.referralPct||0}</span>% referral to <span id="sf-referral-calc-to">${data.referralTo||'—'}</span>
             </div>
           </div>
-          <div>
-            <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Contract Copy <span class="text-red-500">*</span></label>
-          <div class="flex items-center gap-2 pt-1">
-            <input id="ai-doc-input-uc" type="file" accept=".pdf,.doc,.docx" class="hidden"
-              onchange="(async(e)=>{ const f=e.target.files[0]; if(f) await autoFillDealFromDoc(f,'Under Contract'); e.target.value=''; })(event)"/>
-            <button type="button"
-              onclick="document.getElementById('ai-doc-input-uc').click()"
-              class="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-lg border border-purple-200 bg-purple-50 text-purple-700 hover:bg-purple-100 transition-colors">
-              ✨ Auto-fill from Document
-            </button>
-            <span class="text-xs text-gray-400">Upload a PDF or Word contract to extract fields automatically</span>
-          </div>
-                      <div id="upload-zone" class="upload-zone ${hasFile?'has-file':''}" onclick="document.getElementById('sf-contract-file').click()"
+          ${docModeBlock('uc', docMode, `
+            <div id="uc-upload-zone" class="upload-zone ${hasFile?'has-file':''}" onclick="document.getElementById('sf-contract-file').click()"
               ondragover="event.preventDefault();this.classList.add('dragover')"
               ondragleave="this.classList.remove('dragover')"
               ondrop="handleContractDrop(event)">
               <input id="sf-contract-file" type="file" accept=".pdf,.doc,.docx" class="hidden" onchange="handleContractSelect(event)"/>
               <div id="upload-label" class="text-sm ${hasFile?'text-green-700 font-medium':'text-gray-400'}">
-                ${hasFile ? '✅ '+fileName : '📎 Drop PDF here or click to upload'}
+                ${hasFile ? '✅ '+fileName : '📎 Drop contract PDF here or click to upload'}
               </div>
-            </div>
-          </div>
+            </div>`, 'Under Contract')}
         </div>
       </div>`;
     appendInlineGateFields(container, stage, data, dealKey);
@@ -3454,6 +3490,8 @@ function renderStageFields(stage, data={}){
     const psaName = psaFile?.name || data.psaFileName || '';
     const price   = data.purchasePrice||data.contractPrice||data.loiPrice||data.listedPrice||'';
     const comm    = data.commissionAmount||data.expectedRevenue||'';
+    const docMode = data.docMode || 'upload';
+    const isManual = docMode === 'manual';
     container.innerHTML=`
       <div class="border-t pt-4 mt-1">
         <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">Due Diligence Details</div>
@@ -3461,12 +3499,13 @@ function renderStageFields(stage, data={}){
           ${inp('sf-project-name','Project Name','text','Tract 12 – Live Oak Ranch',data.projectName)}
           ${inp('sf-effective-date','Effective Date','date','',data.effectiveDate,true)}
           <div class="grid grid-cols-2 gap-3">
-            ${inp('sf-purchase-price','Purchase Price ($)','number','e.g. 1500000',price)}
+            ${inp('sf-purchase-price','Purchase Price ($)','number','e.g. 1500000',price,isManual)}
             <div>
-              <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Commission %</label>
+              <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Commission %${isManual?' <span class="text-red-500">*</span>':''}</label>
               <div class="flex items-center border rounded-lg overflow-hidden">
                 <input id="sf-elc-commission" type="number" min="0" max="100" step="0.25"
                   placeholder="3.0" value="${data.elcCommissionPct||data.dealCommissionPct||data.commissionPct||''}"
+                  ${isManual?'required':''}
                   class="flex-1 px-3 py-2 text-sm outline-none"/>
                 <span class="px-3 py-2 bg-gray-50 text-gray-500 text-sm font-semibold border-l">%</span>
               </div>
@@ -3474,13 +3513,13 @@ function renderStageFields(stage, data={}){
           </div>
           <div class="grid grid-cols-2 gap-3">
             ${inp('sf-psa-effective-date','PSA Effective Date','date','',data.psaEffectiveDate)}
-            ${inp('sf-escrow-agent','Escrow Agent Name','text','First Title Co.',data.escrowAgent)}
+            ${inp('sf-escrow-agent','Escrow Agent Name','text','First Title Co.',data.escrowAgent,isManual)}
           </div>
           <div class="grid grid-cols-2 gap-3">
             ${inp('sf-escrow-email','Escrow Agent Email','email','escrow@title.com',data.escrowAgentEmail)}
-            ${inp('sf-dd-date','DD Expiration Date','date','',data.ddExpirationDate||data.dueDiligenceDate)}
+            ${inp('sf-dd-date','DD Expiration Date','date','',data.ddExpirationDate||data.dueDiligenceDate,isManual)}
           </div>
-          ${inp('sf-close-date','Proposed Closing Date','date','',data.closeDate)}
+          ${inp('sf-close-date','Proposed Closing Date','date','',data.closeDate,isManual)}
           ${inp('sf-buyer-broker','Buyer Broker (if applicable)','text','ABC Realty',data.buyerBroker)}
           <!-- Referral Fee -->
           <div class="rounded-xl border border-amber-200 bg-amber-50 p-3 space-y-2">
@@ -3514,20 +3553,12 @@ function renderStageFields(stage, data={}){
               Net commission = Gross − <span id="sf-referral-calc-pct">${data.referralPct||0}</span>% referral to <span id="sf-referral-calc-to">${data.referralTo||'—'}</span>
             </div>
           </div>
-          <div class="flex items-center gap-2 pt-1">
-            <input id="ai-doc-input-dd" type="file" accept=".pdf,.doc,.docx" class="hidden"
-              onchange="(async(e)=>{ const f=e.target.files[0]; if(f) await autoFillDealFromDoc(f,'Due Diligence'); e.target.value=''; })(event)"/>
-            <button type="button"
-              onclick="document.getElementById('ai-doc-input-dd').click()"
-              class="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-lg border border-purple-200 bg-purple-50 text-purple-700 hover:bg-purple-100 transition-colors">
-              ✨ Auto-fill from Document
-            </button>
-            <span class="text-xs text-gray-400">Upload a PDF or Word contract to extract fields automatically</span>
-          </div>
-          ${fileZone('psa-upload-zone','sf-psa-file','psa-upload-label',
-            "handleStageFileSelect(event,'psa')",
-            "handleStageFileDrop(event,'psa')",
-            psaName,'PSA / Contract')}
+          ${docModeBlock('dd', docMode,
+            fileZone('psa-upload-zone','sf-psa-file','psa-upload-label',
+              "handleStageFileSelect(event,'psa')",
+              "handleStageFileDrop(event,'psa')",
+              psaName,'PSA / Contract'),
+            'Due Diligence')}
         </div>
       </div>`;
     appendInlineGateFields(container, stage, data, dealKey);
@@ -14368,6 +14399,22 @@ function calcGrossLease(annualRate, termYears, increasePct, intervalYears){
 }
 window.calcGrossLease = calcGrossLease;
 
+// ── Document mode toggle (Upload & Auto-fill ↔ Enter Manually) ────────────────
+// Called when the advisor clicks "Upload & Auto-Fill" or "Enter Manually" on a stage form.
+// Re-renders the stage fields with the new docMode so required attributes are applied correctly.
+window._onDocModeChange = function(stageKey, mode){
+  const stageEl = document.getElementById('f-stage');
+  if(!stageEl) return;
+  const stage = stageEl.value;
+  const sf = document.getElementById('stage-fields');
+  if(!sf) return;
+  const currentData = (typeof collectStageFields === 'function') ? collectStageFields() : {};
+  currentData.docMode = mode;
+  renderStageFields(stage, currentData);
+  if(sf.innerHTML.trim()){ sf.classList.remove('hidden'); }
+  else { sf.classList.add('hidden'); }
+};
+
 // ── Referral fee toggle ────────────────────────────────────────────────────────
 window._onReferralToggle = function(){
   const isYes = document.getElementById('sf-referral-due-yes')?.checked;
@@ -14547,6 +14594,8 @@ function collectStageFields(){
     referralDue: (()=>{ const el=document.querySelector('input[name="sf-referral-due"]:checked'); return el?el.value:'no'; })(),
     referralPct: gf('sf-referral-pct'),
     referralTo:  g('sf-referral-to'),
+    // Document mode: 'upload' (default) or 'manual'
+    docMode: g('sf-doc-mode') || 'upload',
     // Due Diligence
     // DD / Rezoning / Closing effective date (drives quarterly goal bucketing)
     effectiveDate:    g('sf-effective-date'),
@@ -14596,6 +14645,26 @@ window.handleDealSubmit = async ev => {
     return;
   }
 
+  // Manual mode validation — enforce required fields when advisor chose "Enter Manually"
+  if(sf.docMode === 'manual'){
+    const manualRequired = {
+      'Listing':         [{id:'sf-listed-price',label:'Listing Price'},{id:'sf-listing-effective',label:'Effective Date'},{id:'sf-listing-expiration',label:'Expiration Date'},{id:'sf-elc-commission',label:'Commission %'}],
+      'LOI':             [{id:'sf-loi-price',label:'LOI Price'},{id:'sf-loi-buyer',label:'Buyer'},{id:'sf-close-date',label:'Expected Closing Date'}],
+      'Under Contract':  [{id:'sf-contract-price',label:'Contract Price'},{id:'sf-buyer',label:'Buyer Name'},{id:'sf-escrow-agent',label:'Escrow Agent'},{id:'sf-close-date',label:'Expected Closing Date'}],
+      'Due Diligence':   [{id:'sf-purchase-price',label:'Purchase Price'},{id:'sf-elc-commission',label:'Commission %'},{id:'sf-escrow-agent',label:'Escrow Agent'},{id:'sf-dd-date',label:'DD Expiration Date'},{id:'sf-close-date',label:'Proposed Closing Date'}],
+    };
+    const reqs = manualRequired[stage] || [];
+    for(const req of reqs){
+      const el = document.getElementById(req.id);
+      if(!el) continue;
+      if(!el.value || el.value.trim()===''){
+        el.focus(); el.style.outline='2px solid #DC2626';
+        showToast(`${req.label} is required when entering manually`,'warning');
+        return;
+      }
+      el.style.outline=''; // clear any previous error highlight
+    }
+  }
 
   // Validate + collect inline gate fields
   let inlineGateData = null;
