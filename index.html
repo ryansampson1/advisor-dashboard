@@ -3100,26 +3100,32 @@ async function autoFillDealFromDoc(file, stage){
       // one dollar amount to trust the text extraction.
       const textIsReal = docText.trim().length > 1500 && /\$\s*[\d,]/.test(docText);
       if(!textIsReal){
-        if(overlay){ const lbl=overlay.querySelector('div:last-child'); if(lbl) lbl.textContent='Image PDF detected — reading with vision…'; }
+        if(overlay){ const lbl=overlay.querySelector('div:last-child'); if(lbl) lbl.textContent='Image PDF — rendering pages for vision…'; }
         const pdfForImg = await pdfjsLib.getDocument({data: await file.arrayBuffer()}).promise;
-        const MAX_IMG_PAGES = 10; // cap to keep request size reasonable
+        const MAX_IMG_PAGES = 8;
         for(let i=1; i<=Math.min(pdfForImg.numPages, MAX_IMG_PAGES); i++){
-          const pg   = await pdfForImg.getPage(i);
-          const vp   = pg.getViewport({scale: 1.5}); // 1.5x = good balance of quality vs size
-          const canvas = document.createElement('canvas');
-          canvas.width  = vp.width;
-          canvas.height = vp.height;
-          await pg.render({canvasContext: canvas.getContext('2d'), viewport: vp}).promise;
-          const b64 = canvas.toDataURL('image/jpeg', 0.82).split(',')[1];
-          imageBlocks.push({
-            type: 'image',
-            source: { type: 'base64', media_type: 'image/jpeg', data: b64 }
-          });
+          try {
+            const pg     = await pdfForImg.getPage(i);
+            const vp     = pg.getViewport({scale: 1.0}); // 1.0x keeps each page ~100-150KB
+            const canvas = document.createElement('canvas');
+            canvas.width  = vp.width;
+            canvas.height = vp.height;
+            const ctx = canvas.getContext('2d');
+            await pg.render({canvasContext: ctx, viewport: vp}).promise;
+            const b64 = canvas.toDataURL('image/jpeg', 0.72).split(',')[1];
+            if(b64 && b64.length > 100){
+              imageBlocks.push({
+                type: 'image',
+                source: { type: 'base64', media_type: 'image/jpeg', data: b64 }
+              });
+            }
+          } catch(pgErr){ console.warn('[autofill] page '+i+' render failed:', pgErr); }
         }
         if(!imageBlocks.length){
-          showToast('Could not render PDF pages for vision analysis','warning');
+          showToast('Could not render PDF pages — try a Word doc instead','warning');
           overlay?.remove(); return;
         }
+        if(overlay){ const lbl=overlay.querySelector('div:last-child'); if(lbl) lbl.textContent='Sending '+imageBlocks.length+' pages to AI…'; }
       }
     } else if(ext === 'docx' || ext === 'doc'){
       if(typeof mammoth === 'undefined'){
@@ -3210,24 +3216,31 @@ For calculated dates (DD expiration, closing, etc.) — DO the math and return t
     });
 
     if(!resp.ok){
-      const err = await resp.text();
-      throw new Error('Claude API error '+resp.status+': '+err);
+      const errBody = await resp.text();
+      let errMsg = 'API error '+resp.status;
+      try { const ej=JSON.parse(errBody); errMsg=ej?.error?.message||errMsg; } catch(x){}
+      throw new Error(errMsg);
     }
 
     const json = await resp.json();
     const raw = json.content?.[0]?.text || '';
-    const jsonStr = raw.replace(/```json\s*/gi,'').replace(/```/g,'').trim();
+    // Strip any markdown fences the model might add
+    const jsonStr = raw.replace(/^```[a-z]*\s*/i,'').replace(/```\s*$/,'').trim();
     let extracted;
-    try { extracted = JSON.parse(jsonStr); }
-    catch(e){ throw new Error('Could not parse AI response: '+jsonStr.slice(0,300)); }
+    try {
+      extracted = JSON.parse(jsonStr);
+    } catch(e){
+      console.error('[autofill] raw AI response:', raw);
+      throw new Error('AI returned unexpected format — check console for raw output');
+    }
 
     overlay?.remove();
     _showCriticalDatesReview(extracted, stage);
 
   } catch(err){
-    console.error('autoFillDealFromDoc error:', err);
+    console.error('[autoFillDealFromDoc]', err);
     overlay?.remove();
-    showToast('AI parse failed: '+err.message,'error');
+    showToast('Auto-fill failed: '+err.message, 'error', 8000);
   }
 }
 window.autoFillDealFromDoc = autoFillDealFromDoc;
