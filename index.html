@@ -3319,7 +3319,15 @@ function renderStageFields(stage, data={}){
           </div>
           <div class="grid grid-cols-2 gap-3">
             ${inp('sf-listing-expiration','Listing Expiration Date','date','',data.listingExpiration)}
-            ${inp('sf-commission-amount','Commission Amount ($)','number','43500',data.commissionAmount)}
+            <div>
+              <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Commission %</label>
+              <div class="flex items-center border rounded-lg overflow-hidden">
+                <input id="sf-elc-commission" type="number" min="0" max="100" step="0.25"
+                  placeholder="3.0" value="${data.elcCommissionPct||data.commissionPct||data.dealCommissionPct||''}"
+                  class="flex-1 px-3 py-2 text-sm outline-none"/>
+                <span class="px-3 py-2 bg-gray-50 text-gray-500 text-sm font-semibold border-l">%</span>
+              </div>
+            </div>
           </div>
           <div class="grid grid-cols-2 gap-3">
             ${sel('sf-commission-type','Commission Type',
@@ -3717,7 +3725,7 @@ function renderStageFields(stage, data={}){
           infoRow('Listed Price', data.listedPrice>0 ? fmt$(data.listedPrice) : ''),
           infoRow('Listing Effective', data.listingEffectiveDate ? fmtDate(data.listingEffectiveDate) : ''),
           infoRow('Listing Expiration', data.listingExpiration ? fmtDate(data.listingExpiration) : ''),
-          infoRow('Commission Amount', data.commissionAmount>0 ? fmt$(data.commissionAmount) : ''),
+          infoRow('Commission', (()=>{ const pct=data.elcCommissionPct||data.commissionPct||data.dealCommissionPct; if(pct>0) return pct+'%'; const amt=data.commissionAmount; const price=data.listedPrice||data.purchasePrice||0; if(amt>0&&price>0) return +((amt/price)*100).toFixed(2)+'%'; return amt>0?fmt$(amt):''; })()),
           infoRow('Co-Advisor', data.coAdvisorName ? `${data.coAdvisorName} (${data.coAdvisorSplit||0}% split)` : ''),
         ])}
 
@@ -5698,6 +5706,16 @@ function renderCard(deal){
     ? `<div class="mb-1.5">${buyerRepBadge}${referralBadge}${leaseBadge}${deal.landType?`<span class="inline-block text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-500 font-medium">${deal.landType}</span>`:''}</div>`
     : '';
 
+  // ── Commission % helper (used on card rows) ───────────────────────
+  const commPct = (()=>{
+    const pct = deal.elcCommissionPct||deal.commissionPct||deal.dealCommissionPct||deal.listingCommissionPct;
+    if(pct>0) return pct+'%';
+    const amt   = deal.commissionAmount||0;
+    const base  = deal.listedPrice||deal.purchasePrice||deal.contractPrice||0;
+    if(amt>0 && base>0) return +((amt/base)*100).toFixed(2)+'%';
+    return '';
+  })();
+
   // ── Stage-specific field rows ──────────────────────────────────────
   let stageRows = '';
   const st = deal.stage || '';
@@ -5721,13 +5739,13 @@ function renderCard(deal){
     ].join('');
 
   } else if(/^listing$/i.test(st.trim())){
-    // Listing: Price, Start date, Expiration, Acreage, Zoning
+    // Listing: Price, Commission %, Start date, Expiration, Acreage
     stageRows = [
       row('Price',   price>0 ? fmt$(price) : ''),
+      row('Comm',    commPct),
       row('Start',   deal.listingEffectiveDate ? fmtDate(deal.listingEffectiveDate) : ''),
       row('Expires', deal.listingExpiration ? fmtDate(deal.listingExpiration) : ''),
       row('Acres',   deal.acreage||deal.acres||''),
-      row('Zoning',  deal.zoning||''),
     ].join('');
 
   } else if(st === 'Proposal Outstanding'){
@@ -5740,10 +5758,10 @@ function renderCard(deal){
     // Days in stage shown prominently (added below alongside footer)
 
   } else if(st === 'Closing'){
-    // Closing: Price, Commission, Closing date, Escrow agent
+    // Closing: Price, Commission %, Closing date, Escrow agent
     stageRows = [
       row('Price',    price>0 ? fmt$(price) : ''),
-      row('Comm',     rev>0 ? fmt$(rev) : ''),
+      row('Comm',     commPct),
       row('Closing',  deal.closeDate ? fmtDate(deal.closeDate) : ''),
       row('Escrow',   deal.escrowAgent||''),
     ].join('');
@@ -5759,12 +5777,12 @@ function renderCard(deal){
     ].join('');
 
   } else {
-    // Default: Price, DD, Close, Commission
+    // Default: Price, DD, Close, Commission %
     stageRows = [
       row('Price',   price>0 ? fmt$(price) : ''),
       row('DD',      deal.dueDiligenceDate ? fmtDate(deal.dueDiligenceDate) : ''),
       row('Close',   deal.closeDate        ? fmtDate(deal.closeDate)        : ''),
-      rev>0&&price>0 ? row('Commission', fmt$(rev)) : '',
+      commPct ? row('Comm', commPct) : '',
     ].join('');
   }
 
