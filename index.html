@@ -983,8 +983,8 @@ const APP_CONFIG = {
   // List emails here to grant early access during beta.
   // To go live for everyone, set crmEnabled: true (beta list is ignored).
   crm: {
-    enabled: false,
-    betaEmails: ['ryan@thedirtdog.com'],
+    enabled: true,
+    betaEmails: [],
   },
 };
 
@@ -6877,32 +6877,6 @@ window.openPropertyDetail = (dealId) => {
     histHtml = `<span style="font-size:.8rem;color:#9ca3af;font-style:italic">No history yet — stage transitions will be tracked going forward.</span>`;
   }
 
-  // ── Activity / notes ────────────────────────────────────────
-  const rawNotes = (deal.notes || '').trim();
-  const noteLines = rawNotes ? rawNotes.split('\n').filter(Boolean) : [];
-  const activities = noteLines.map(line => {
-    const m = line.match(/^\[([^\]]+)\]\s*(.*)/);
-    const ts   = m ? m[1] : '';
-    const text = m ? m[2] : line;
-    const icon = /email|sent|received/i.test(text) ? '📧'
-               : /call|phone|talked|spoke/i.test(text) ? '📞'
-               : /auto:|automation/i.test(text) ? '⚙️'
-               : /stage|moved/i.test(text) ? '🔄'
-               : '📝';
-    return {ts, text, icon};
-  }).reverse(); // newest first
-
-  const actHtml = activities.length
-    ? activities.map(a => `
-        <div class="activity-item">
-          <div class="activity-icon">${a.icon}</div>
-          <div class="activity-body">
-            <div style="color:#1f2937;line-height:1.4">${a.text.replace(/</g,'&lt;')}</div>
-            ${a.ts ? `<div class="activity-ts">${a.ts}</div>` : ''}
-          </div>
-        </div>`).join('')
-    : `<span style="font-size:.8rem;color:#9ca3af;font-style:italic">No activity yet.</span>`;
-
   // ── All key fields ──────────────────────────────────────────
   const allFields = [
     row('Address',        deal.propertyAddress),
@@ -6978,16 +6952,20 @@ window.openPropertyDetail = (dealId) => {
     <!-- Activity Log -->
     <div class="prop-section">
       <div class="prop-section-title">Activity & Notes</div>
-      <div id="pdw-activity-feed">${actHtml}</div>
-      <div id="prop-add-note-row">
-        <input id="prop-note-input" type="text" placeholder="Add a note, call, or email log…" onkeydown="if(event.key==='Enter')_pdwAddNote('${dealId}')"/>
-        <button class="prop-note-btn" onclick="_pdwAddNote('${dealId}')">+ Log</button>
+      <div id="pdw-activity-feed" style="min-height:32px"><span style="font-size:.75rem;color:#9ca3af">Loading…</span></div>
+      <div id="prop-add-note-row" style="margin-top:.65rem;display:flex;gap:.5rem;flex-wrap:wrap">
+        <button class="prop-note-btn" onclick="_pdwOpenLog('${dealId}','note')">📝 Note</button>
+        <button class="prop-note-btn" onclick="_pdwOpenLog('${dealId}','call')">📞 Call</button>
+        <button class="prop-note-btn" onclick="_pdwOpenLog('${dealId}','meeting')">📅 Meeting</button>
       </div>
+      <div id="pdw-log-form" class="hidden" style="margin-top:.75rem;background:#f9fafb;border-radius:.75rem;padding:.75rem;border:1px solid #e5e7eb"></div>
     </div>
   `;
 
   drawer.classList.add('open');
   overlay.classList.add('open');
+  // Load activity feed async (sub-collection + legacy notes)
+  setTimeout(() => window._propLoadActivities(dealId, 'pdw-activity-feed'), 50);
 };
 
 window.closePropertyDetail = () => {
@@ -6995,23 +6973,243 @@ window.closePropertyDetail = () => {
   document.getElementById('prop-detail-overlay')?.classList.remove('open');
 };
 
-window._pdwAddNote = (dealId) => {
-  const input = document.getElementById('prop-note-input');
-  const text = (input?.value || '').trim();
-  if (!text) return;
+// ── Deal activity logger: writes to deals/{dealId}/activities + cross-logs to linked contacts ──
+window._dealLogActivity = async (dealId, type, data = {}) => {
+  if (!_fbDb || !_fbFns) { alert('Not connected to database.'); return; }
+  const {collection, addDoc} = _fbFns;
+  const activity = {
+    type,
+    createdAt: Date.now(),
+    createdBy: currentUser?.uid || '',
+    createdByName: currentUser?.displayName || currentUser?.name || '',
+    body: data.body || '',
+    ...( data.callDate     ? {callDate: data.callDate}         : {} ),
+    ...( data.callDuration ? {callDuration: data.callDuration} : {} ),
+    ...( data.meetingTitle ? {meetingTitle: data.meetingTitle} : {} ),
+    ...( data.meetingDate  ? {meetingDate: data.meetingDate}   : {} ),
+  };
+  // Write to deal sub-collection
+  await addDoc(collection(_fbDb, 'deals', dealId, 'activities'), activity);
+  // Cross-log to all linked CRM contacts
   const deal = allDeals.find(d => d.id === dealId);
-  if (!deal) return;
-  const ts = new Date().toLocaleString();
-  const newNotes = (deal.notes || '') + (deal.notes ? '\n' : '') + `[${ts}] ${text}`;
-  Store.updateDeal(dealId, {notes: newNotes, updatedAt: Date.now()});
-  deal.notes = newNotes;
-  input.value = '';
-  // Refresh activity feed
-  openPropertyDetail(dealId);
+  const propLabel = deal ? (deal.projectName || deal.propertyAddress || 'property') : 'property';
+  const linkedContacts = (allContacts || []).filter(c => (c.linkedDeals || []).includes(dealId));
+  for (const c of linkedContacts) {
+    await _crmLogActivity(c.id, type, {
+      ...activity,
+      body: `[${propLabel}] ${activity.body}`,
+    });
+  }
+};
+
+// ── Load + render property activity feed (Firestore sub-collection + legacy deal.notes) ──
+window._propLoadActivities = async (dealId, feedElId) => {
+  const feedEl = document.getElementById(feedElId || ('prop-act-feed-' + dealId));
+  if (!feedEl) return;
+  feedEl.innerHTML = '<span style="font-size:.75rem;color:#9ca3af">Loading…</span>';
+  const deal = allDeals.find(d => d.id === dealId);
+  const activities = [];
+
+  // Legacy entries from deal.notes string (backward compat)
+  if (deal?.notes) {
+    const lines = deal.notes.split('\n').filter(Boolean);
+    for (const line of lines) {
+      const m = line.match(/^\[([^\]]+)\]\s*(.*)/);
+      const tsStr = m ? m[1] : '';
+      const text  = m ? m[2] : line;
+      const ts    = tsStr ? new Date(tsStr).getTime() : 0;
+      const icon  = /email|sent|received/i.test(text) ? '📧'
+                  : /call|phone|talked|spoke/i.test(text)  ? '📞'
+                  : /auto:|automation/i.test(text)          ? '⚙️'
+                  : /stage|moved/i.test(text)               ? '🔄'
+                  : '📝';
+      activities.push({ ts, tsStr, icon, text, type: 'legacy' });
+    }
+  }
+
+  // New structured activities from Firestore sub-collection
+  if (_fbDb && _fbFns) {
+    try {
+      const { collection, query, orderBy, getDocs } = _fbFns;
+      const q = query(collection(_fbDb, 'deals', dealId, 'activities'), orderBy('createdAt', 'desc'));
+      const snap = await getDocs(q);
+      snap.forEach(docSnap => {
+        const a = { id: docSnap.id, ...docSnap.data() };
+        const icon   = a.type === 'call'    ? '📞'
+                     : a.type === 'meeting' ? '📅'
+                     : a.type === 'email'   ? '📧' : '📝';
+        const title  = a.type === 'call'    ? '📞 Call'
+                     : a.type === 'meeting' ? `📅 ${a.meetingTitle || 'Meeting'}`
+                     : '📝 Note';
+        const meta   = a.type === 'call'    && a.callDate    ? ` · ${a.callDate}${a.callDuration ? ` (${a.callDuration} min)` : ''}`
+                     : a.type === 'meeting' && a.meetingDate ? ` · ${a.meetingDate}` : '';
+        const tsStr  = a.createdAt ? new Date(a.createdAt).toLocaleString() : '';
+        activities.push({ ts: a.createdAt || 0, tsStr, icon, text: a.body || '', title, meta, createdByName: a.createdByName || '', type: a.type });
+      });
+    } catch (e) { /* sub-collection may not exist yet — that's fine */ }
+  }
+
+  // Sort newest first, de-dup legacy entries that now have structured counterparts
+  activities.sort((a, b) => b.ts - a.ts);
+
+  if (!activities.length) {
+    feedEl.innerHTML = '<span style="font-size:.75rem;color:#9ca3af;font-style:italic">No activity logged yet.</span>';
+    return;
+  }
+
+  feedEl.innerHTML = activities.map(a => `
+    <div class="activity-item" style="display:flex;gap:.5rem;padding:.4rem 0;border-bottom:1px solid #f3f4f6">
+      <div class="activity-icon" style="font-size:1rem;width:1.25rem;flex-shrink:0;margin-top:.1rem">${a.icon}</div>
+      <div style="flex:1;min-width:0">
+        ${a.title ? `<div style="font-size:.68rem;font-weight:600;color:#6b7280;text-transform:uppercase;letter-spacing:.04em;margin-bottom:.1rem">${a.title}${a.meta || ''}</div>` : ''}
+        <div style="color:#1f2937;line-height:1.45;font-size:.8rem">${(a.text || '').replace(/</g, '&lt;') || '<em style="color:#9ca3af">No notes</em>'}</div>
+        <div style="font-size:.7rem;color:#9ca3af;margin-top:.15rem">${a.tsStr}${a.createdByName ? ' · ' + a.createdByName : ''}</div>
+      </div>
+    </div>`).join('');
+};
+
+// ── Property Detail Drawer: open inline log form ─────────────────────────────
+window._pdwOpenLog = (dealId, type) => {
+  const form = document.getElementById('pdw-log-form');
+  if (!form) return;
+  const today = new Date().toISOString().split('T')[0];
+  form.classList.remove('hidden');
+  if (type === 'note') {
+    form.innerHTML = `
+      <div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.5rem">
+        <span style="font-size:.75rem;font-weight:700;color:#4f46e5">📝 Log Note</span>
+        <button onclick="document.getElementById('pdw-log-form').classList.add('hidden')" style="margin-left:auto;background:none;border:none;color:#9ca3af;cursor:pointer;font-size:1.1rem;line-height:1">&times;</button>
+      </div>
+      <textarea id="pdw-log-body" rows="3" placeholder="What happened?" style="width:100%;border:1px solid #e5e7eb;border-radius:.5rem;padding:.5rem .75rem;font-size:.85rem;outline:none;resize:none;box-sizing:border-box"></textarea>
+      <div style="display:flex;gap:.5rem;margin-top:.5rem">
+        <button onclick="window._pdwSaveLog('${dealId}','note')" style="flex:1;background:#4f46e5;color:#fff;border:none;border-radius:.5rem;padding:.45rem;font-size:.8rem;font-weight:600;cursor:pointer">Save Note</button>
+        <button onclick="document.getElementById('pdw-log-form').classList.add('hidden')" style="padding:.45rem .75rem;border:1px solid #e5e7eb;border-radius:.5rem;font-size:.8rem;cursor:pointer;background:#fff">Cancel</button>
+      </div>`;
+    form.querySelector('#pdw-log-body')?.focus();
+  } else if (type === 'call') {
+    form.innerHTML = `
+      <div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.5rem">
+        <span style="font-size:.75rem;font-weight:700;color:#16a34a">📞 Log Call</span>
+        <button onclick="document.getElementById('pdw-log-form').classList.add('hidden')" style="margin-left:auto;background:none;border:none;color:#9ca3af;cursor:pointer;font-size:1.1rem;line-height:1">&times;</button>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:.5rem;margin-bottom:.5rem">
+        <div><label style="font-size:.7rem;color:#6b7280;display:block;margin-bottom:.2rem">Date</label>
+        <input id="pdw-log-call-date" type="date" value="${today}" style="width:100%;border:1px solid #e5e7eb;border-radius:.5rem;padding:.4rem .6rem;font-size:.82rem;outline:none;box-sizing:border-box"/></div>
+        <div><label style="font-size:.7rem;color:#6b7280;display:block;margin-bottom:.2rem">Duration (min)</label>
+        <input id="pdw-log-call-dur" type="number" min="1" placeholder="e.g. 15" style="width:100%;border:1px solid #e5e7eb;border-radius:.5rem;padding:.4rem .6rem;font-size:.82rem;outline:none;box-sizing:border-box"/></div>
+      </div>
+      <textarea id="pdw-log-body" rows="2" placeholder="What was discussed?" style="width:100%;border:1px solid #e5e7eb;border-radius:.5rem;padding:.5rem .75rem;font-size:.85rem;outline:none;resize:none;box-sizing:border-box"></textarea>
+      <div style="display:flex;gap:.5rem;margin-top:.5rem">
+        <button onclick="window._pdwSaveLog('${dealId}','call')" style="flex:1;background:#16a34a;color:#fff;border:none;border-radius:.5rem;padding:.45rem;font-size:.8rem;font-weight:600;cursor:pointer">Save Call</button>
+        <button onclick="document.getElementById('pdw-log-form').classList.add('hidden')" style="padding:.45rem .75rem;border:1px solid #e5e7eb;border-radius:.5rem;font-size:.8rem;cursor:pointer;background:#fff">Cancel</button>
+      </div>`;
+    form.querySelector('#pdw-log-call-date')?.focus();
+  } else if (type === 'meeting') {
+    form.innerHTML = `
+      <div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.5rem">
+        <span style="font-size:.75rem;font-weight:700;color:#2563eb">📅 Log Meeting</span>
+        <button onclick="document.getElementById('pdw-log-form').classList.add('hidden')" style="margin-left:auto;background:none;border:none;color:#9ca3af;cursor:pointer;font-size:1.1rem;line-height:1">&times;</button>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:.5rem;margin-bottom:.5rem">
+        <div><label style="font-size:.7rem;color:#6b7280;display:block;margin-bottom:.2rem">Meeting Title</label>
+        <input id="pdw-log-mtg-title" type="text" placeholder="e.g. Site visit" style="width:100%;border:1px solid #e5e7eb;border-radius:.5rem;padding:.4rem .6rem;font-size:.82rem;outline:none;box-sizing:border-box"/></div>
+        <div><label style="font-size:.7rem;color:#6b7280;display:block;margin-bottom:.2rem">Date</label>
+        <input id="pdw-log-mtg-date" type="date" value="${today}" style="width:100%;border:1px solid #e5e7eb;border-radius:.5rem;padding:.4rem .6rem;font-size:.82rem;outline:none;box-sizing:border-box"/></div>
+      </div>
+      <textarea id="pdw-log-body" rows="2" placeholder="Notes from the meeting…" style="width:100%;border:1px solid #e5e7eb;border-radius:.5rem;padding:.5rem .75rem;font-size:.85rem;outline:none;resize:none;box-sizing:border-box"></textarea>
+      <div style="display:flex;gap:.5rem;margin-top:.5rem">
+        <button onclick="window._pdwSaveLog('${dealId}','meeting')" style="flex:1;background:#2563eb;color:#fff;border:none;border-radius:.5rem;padding:.45rem;font-size:.8rem;font-weight:600;cursor:pointer">Save Meeting</button>
+        <button onclick="document.getElementById('pdw-log-form').classList.add('hidden')" style="padding:.45rem .75rem;border:1px solid #e5e7eb;border-radius:.5rem;font-size:.8rem;cursor:pointer;background:#fff">Cancel</button>
+      </div>`;
+    form.querySelector('#pdw-log-mtg-title')?.focus();
+  }
+};
+
+window._pdwSaveLog = async (dealId, type) => {
+  const body = document.getElementById('pdw-log-body')?.value.trim() || '';
+  const data = { body };
+  if (type === 'call') {
+    data.callDate = document.getElementById('pdw-log-call-date')?.value || '';
+    const dur = parseInt(document.getElementById('pdw-log-call-dur')?.value);
+    if (dur) data.callDuration = dur;
+  } else if (type === 'meeting') {
+    data.meetingTitle = document.getElementById('pdw-log-mtg-title')?.value.trim() || '';
+    data.meetingDate  = document.getElementById('pdw-log-mtg-date')?.value || '';
+  }
+  await window._dealLogActivity(dealId, type, data);
+  document.getElementById('pdw-log-form')?.classList.add('hidden');
+  await window._propLoadActivities(dealId, 'pdw-activity-feed');
   setTimeout(() => {
-    const feed = document.getElementById('pdw-activity-feed');
-    if (feed) feed.scrollIntoView({behavior:'smooth', block:'nearest'});
+    document.getElementById('pdw-activity-feed')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }, 80);
+};
+
+// ── CRM Properties card: open inline log form ────────────────────────────────
+window._propOpenLog = (dealId, type) => {
+  const form = document.getElementById('prop-log-form-' + dealId);
+  if (!form) return;
+  const today = new Date().toISOString().split('T')[0];
+  form.classList.remove('hidden');
+  const closeBtn = `<button onclick="event.stopPropagation();document.getElementById('prop-log-form-${dealId}').classList.add('hidden')" style="margin-left:auto;background:none;border:none;color:#9ca3af;cursor:pointer;font-size:1.1rem;line-height:1">&times;</button>`;
+  const cancelBtn = `<button onclick="event.stopPropagation();document.getElementById('prop-log-form-${dealId}').classList.add('hidden')" style="padding:.35rem .65rem;border:1px solid #e5e7eb;border-radius:.5rem;font-size:.75rem;cursor:pointer;background:#fff">Cancel</button>`;
+  if (type === 'note') {
+    form.innerHTML = `
+      <div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem">
+        <span style="font-size:.72rem;font-weight:700;color:#4f46e5">📝 Log Note</span>${closeBtn}
+      </div>
+      <textarea id="plo-body" rows="2" placeholder="What happened?" onclick="event.stopPropagation()" style="width:100%;border:1px solid #e5e7eb;border-radius:.5rem;padding:.4rem .6rem;font-size:.8rem;outline:none;resize:none;box-sizing:border-box"></textarea>
+      <div style="display:flex;gap:.4rem;margin-top:.4rem">
+        <button onclick="event.stopPropagation();window._propSaveLog('${dealId}','note')" style="flex:1;background:#4f46e5;color:#fff;border:none;border-radius:.5rem;padding:.35rem;font-size:.75rem;font-weight:600;cursor:pointer">Save</button>
+        ${cancelBtn}
+      </div>`;
+    form.querySelector('#plo-body')?.focus();
+  } else if (type === 'call') {
+    form.innerHTML = `
+      <div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem">
+        <span style="font-size:.72rem;font-weight:700;color:#16a34a">📞 Log Call</span>${closeBtn}
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:.4rem;margin-bottom:.4rem">
+        <input id="plo-call-date" type="date" value="${today}" onclick="event.stopPropagation()" style="border:1px solid #e5e7eb;border-radius:.5rem;padding:.35rem .55rem;font-size:.78rem;outline:none;box-sizing:border-box"/>
+        <input id="plo-call-dur" type="number" min="1" placeholder="Duration (min)" onclick="event.stopPropagation()" style="border:1px solid #e5e7eb;border-radius:.5rem;padding:.35rem .55rem;font-size:.78rem;outline:none;box-sizing:border-box"/>
+      </div>
+      <textarea id="plo-body" rows="2" placeholder="What was discussed?" onclick="event.stopPropagation()" style="width:100%;border:1px solid #e5e7eb;border-radius:.5rem;padding:.4rem .6rem;font-size:.8rem;outline:none;resize:none;box-sizing:border-box"></textarea>
+      <div style="display:flex;gap:.4rem;margin-top:.4rem">
+        <button onclick="event.stopPropagation();window._propSaveLog('${dealId}','call')" style="flex:1;background:#16a34a;color:#fff;border:none;border-radius:.5rem;padding:.35rem;font-size:.75rem;font-weight:600;cursor:pointer">Save</button>
+        ${cancelBtn}
+      </div>`;
+    form.querySelector('#plo-call-date')?.focus();
+  } else if (type === 'meeting') {
+    form.innerHTML = `
+      <div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem">
+        <span style="font-size:.72rem;font-weight:700;color:#2563eb">📅 Log Meeting</span>${closeBtn}
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:.4rem;margin-bottom:.4rem">
+        <input id="plo-mtg-title" type="text" placeholder="Meeting title" onclick="event.stopPropagation()" style="border:1px solid #e5e7eb;border-radius:.5rem;padding:.35rem .55rem;font-size:.78rem;outline:none;box-sizing:border-box"/>
+        <input id="plo-mtg-date" type="date" value="${today}" onclick="event.stopPropagation()" style="border:1px solid #e5e7eb;border-radius:.5rem;padding:.35rem .55rem;font-size:.78rem;outline:none;box-sizing:border-box"/>
+      </div>
+      <textarea id="plo-body" rows="2" placeholder="Notes from the meeting…" onclick="event.stopPropagation()" style="width:100%;border:1px solid #e5e7eb;border-radius:.5rem;padding:.4rem .6rem;font-size:.8rem;outline:none;resize:none;box-sizing:border-box"></textarea>
+      <div style="display:flex;gap:.4rem;margin-top:.4rem">
+        <button onclick="event.stopPropagation();window._propSaveLog('${dealId}','meeting')" style="flex:1;background:#2563eb;color:#fff;border:none;border-radius:.5rem;padding:.35rem;font-size:.75rem;font-weight:600;cursor:pointer">Save</button>
+        ${cancelBtn}
+      </div>`;
+    form.querySelector('#plo-mtg-title')?.focus();
+  }
+};
+
+window._propSaveLog = async (dealId, type) => {
+  const body = document.getElementById('plo-body')?.value.trim() || '';
+  const data = { body };
+  if (type === 'call') {
+    data.callDate = document.getElementById('plo-call-date')?.value || '';
+    const dur = parseInt(document.getElementById('plo-call-dur')?.value);
+    if (dur) data.callDuration = dur;
+  } else if (type === 'meeting') {
+    data.meetingTitle = document.getElementById('plo-mtg-title')?.value.trim() || '';
+    data.meetingDate  = document.getElementById('plo-mtg-date')?.value || '';
+  }
+  await window._dealLogActivity(dealId, type, data);
+  document.getElementById('prop-log-form-' + dealId)?.classList.add('hidden');
+  await window._propLoadActivities(dealId, 'prop-act-feed-' + dealId);
 };
 
 /* =======================================================
@@ -9138,6 +9336,7 @@ window._togglePropCard = function(id){
   if(!body) return;
   const hidden = body.classList.toggle('hidden');
   if(chevron) chevron.style.transform = hidden ? '' : 'rotate(180deg)';
+  if(!hidden) window._propLoadActivities(id, 'prop-act-feed-'+id);
 };
 
 window._crmTagPropertyGroups = dealId => {
@@ -9768,7 +9967,6 @@ function viewCRM(){
                 ${acres ? `<div><span class="text-gray-400">Acreage</span><div class="font-medium text-gray-700">±${acres} ac</div></div>` : ''}
                 ${d.advisorName ? `<div><span class="text-gray-400">Advisor</span><div class="font-medium text-gray-700">${d.advisorName}</div></div>` : ''}
               </div>
-              ${d.notes ? `<div class="mt-2"><span class="text-xs text-gray-400">Notes</span><div class="text-xs text-gray-700 mt-0.5 whitespace-pre-wrap leading-relaxed bg-gray-50 rounded-lg px-3 py-2">${d.notes.replace(/</g,'&lt;')}</div></div>` : ''}
             </div>
             <!-- Financial -->
             ${(d.purchasePrice||d.listedPrice||d.loiPrice||d.contractPrice||d.proposedPrice||expectedRev) ? `
@@ -9852,6 +10050,21 @@ function viewCRM(){
                 <button onclick="event.stopPropagation();window._crmTagPropertyGroups('${d.id}')" class="text-xs text-gray-400 hover:text-blue-500 border rounded-lg px-2 py-0.5 ml-1">+ Tag Groups</button>
                 ${(d.propertyGroups||[]).length > 0 ? `<button onclick="event.stopPropagation();window._crmDraftPropertyEmail('${d.id}')" class="text-xs border border-blue-200 text-blue-600 hover:bg-blue-50 rounded-lg px-2 py-0.5">✉️ Draft Email</button>` : ''}
               </div>
+            </div>
+            <!-- Activity feed -->
+            <div>
+              <div class="flex items-center justify-between mb-2">
+                <div class="text-xs font-bold text-gray-400 uppercase tracking-wide">📋 Activity</div>
+                <div class="flex gap-1">
+                  <button onclick="event.stopPropagation();window._propOpenLog('${d.id}','note')" class="text-xs px-2 py-0.5 border rounded-lg text-gray-500 hover:bg-gray-50 transition">📝 Note</button>
+                  <button onclick="event.stopPropagation();window._propOpenLog('${d.id}','call')" class="text-xs px-2 py-0.5 border rounded-lg text-gray-500 hover:bg-gray-50 transition">📞 Call</button>
+                  <button onclick="event.stopPropagation();window._propOpenLog('${d.id}','meeting')" class="text-xs px-2 py-0.5 border rounded-lg text-gray-500 hover:bg-gray-50 transition">📅 Meeting</button>
+                </div>
+              </div>
+              <div id="prop-act-feed-${d.id}" class="space-y-2 mb-2 min-h-6">
+                <span class="text-xs text-gray-300 italic">Expand to load activity…</span>
+              </div>
+              <div id="prop-log-form-${d.id}" class="hidden bg-gray-50 rounded-xl p-3 border border-gray-200 mt-1"></div>
             </div>
           </div>
         </div>`;
