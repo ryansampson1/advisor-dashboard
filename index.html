@@ -2530,7 +2530,18 @@ function handleLostListingAutomation(deal){
   const addr    = deal.propertyAddress||deal.projectName||'property';
   const dueDate = n=>{ const d=new Date(); d.setDate(d.getDate()+n); return d.toISOString().slice(0,10); };
 
-  /* ── Build overlay ── */
+  /* ── If answers were already saved via the modal, fire tasks directly ── */
+  if(deal.stage==='Lost Listing' && (deal.protectionList || deal.signOnProperty)){
+    _fireLostListingTasks(deal, {protection: deal.protectionList||'no', sign: deal.signOnProperty||'no'}, addr, dueDate);
+    return;
+  }
+  /* ── Lost Proposal: no follow-up tasks needed ── */
+  if(deal.stage==='Lost Proposal'){
+    showToast('✅ Lost Proposal logged','info',3000);
+    return;
+  }
+
+  /* ── Build overlay (fallback for stages not caught above) ── */
   const overlay = document.createElement('div');
   overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:2000;display:flex;align-items:center;justify-content:center;font-family:inherit';
   const card = document.createElement('div');
@@ -2604,47 +2615,53 @@ function handleLostListingAutomation(deal){
 
     card.querySelector('#ll-submit').addEventListener('click', async ()=>{
       document.body.removeChild(overlay);
-      const tasks=[];
-
-      /* Protection list → task to advisor */
-      if(answers.protection==='yes'){
-        tasks.push(Store.createTask({
-          title:`📋 Create Protection List — ${addr}`,
-          description:`The listing for ${addr} has been lost. A protection list is required.\n\nProperty: ${addr}\nAdvisor: ${deal.advisorName||deal.advisorEmail||''}\nClient/Seller: ${deal.clientName||deal.seller||''}\n\n□ Prepare protection list of prospective buyers introduced to the property during the listing period\n□ Confirm effective protection period dates per the listing agreement\n□ Deliver protection list to client in writing`,
-          assignedTo:deal.advisorUid||null,
-          assignedToName:deal.advisorName||deal.advisorEmail||'Advisor',
-          assignedToEmail:deal.advisorEmail||'',
-          dealId:deal.id, dealAddress:deal.propertyAddress,
-          dueDate:dueDate(3), status:'pending',
-          createdBy:currentUser?.uid||'system', createdByName:'Automation', createdAt:Date.now(),
-        }).catch(e=>console.error('[ll-protection]',e)));
-      }
-
-      /* Sign still up → task to marketing to remove sign + Telzio */
-      if(answers.sign==='yes'){
-        const mktHit=Object.entries(allProfiles).find(([,p])=>(p.email||'').toLowerCase()==='marketing@thedirtdog.com');
-        tasks.push(Store.createTask({
-          title:`🪧 Remove Sign & Telzio — ${addr}`,
-          description:`The listing for ${addr} has been lost and the sign is still on the property.\n\nProperty: ${addr}\nAdvisor: ${deal.advisorName||deal.advisorEmail||''}\n\n□ Schedule sign retrieval from property\n□ Remove Telzio tracking number associated with this listing\n□ Confirm sign is back in storage and in good condition\n□ Notify advisor once complete`,
-          assignedTo:mktHit?.[0]||null,
-          assignedToName:mktHit?.[1]?.name||'Marketing',
-          assignedToEmail:'marketing@thedirtdog.com',
-          dealId:deal.id, dealAddress:deal.propertyAddress,
-          dueDate:dueDate(2), status:'pending',
-          createdBy:currentUser?.uid||'system', createdByName:'Automation', createdAt:Date.now(),
-        }).catch(e=>console.error('[ll-sign]',e)));
-      }
-
-      await Promise.allSettled(tasks);
-      const msgs=[];
-      if(answers.protection==='yes') msgs.push('protection list → '+( deal.advisorName||'advisor'));
-      if(answers.sign==='yes') msgs.push('sign removal → Marketing');
-      showToast(
-        msgs.length ? '📋 Lost Listing: '+msgs.join(' + ') : '✅ Lost Listing logged — no follow-up needed',
-        msgs.length ? 'success' : 'info', 5000
-      );
+      await _fireLostListingTasks(deal, answers, addr, dueDate);
     });
   });
+}
+
+async function _fireLostListingTasks(deal, answers, addr, dueDate){
+  addr    = addr    || deal.propertyAddress||deal.projectName||'property';
+  dueDate = dueDate || (n=>{ const d=new Date(); d.setDate(d.getDate()+n); return d.toISOString().slice(0,10); });
+  const tasks=[];
+
+  /* Protection list → task to advisor */
+  if(answers.protection==='yes'){
+    tasks.push(Store.createTask({
+      title:`📋 Create Protection List — ${addr}`,
+      description:`The listing for ${addr} has been lost. A protection list is required.\n\nProperty: ${addr}\nAdvisor: ${deal.advisorName||deal.advisorEmail||''}\nClient/Seller: ${deal.clientName||deal.seller||''}\n\n□ Prepare protection list of prospective buyers introduced to the property during the listing period\n□ Confirm effective protection period dates per the listing agreement\n□ Deliver protection list to client in writing`,
+      assignedTo:deal.advisorUid||null,
+      assignedToName:deal.advisorName||deal.advisorEmail||'Advisor',
+      assignedToEmail:deal.advisorEmail||'',
+      dealId:deal.id, dealAddress:deal.propertyAddress,
+      dueDate:dueDate(3), status:'pending',
+      createdBy:currentUser?.uid||'system', createdByName:'Automation', createdAt:Date.now(),
+    }).catch(e=>console.error('[ll-protection]',e)));
+  }
+
+  /* Sign still up → task to marketing to remove sign + Telzio */
+  if(answers.sign==='yes'){
+    const mktHit=Object.entries(allProfiles).find(([,p])=>(p.email||'').toLowerCase()==='marketing@thedirtdog.com');
+    tasks.push(Store.createTask({
+      title:`🪧 Remove Sign & Telzio — ${addr}`,
+      description:`The listing for ${addr} has been lost and the sign is still on the property.\n\nProperty: ${addr}\nAdvisor: ${deal.advisorName||deal.advisorEmail||''}\n\n□ Schedule sign retrieval from property\n□ Remove Telzio tracking number associated with this listing\n□ Confirm sign is back in storage and in good condition\n□ Notify advisor once complete`,
+      assignedTo:mktHit?.[0]||null,
+      assignedToName:mktHit?.[1]?.name||'Marketing',
+      assignedToEmail:'marketing@thedirtdog.com',
+      dealId:deal.id, dealAddress:deal.propertyAddress,
+      dueDate:dueDate(2), status:'pending',
+      createdBy:currentUser?.uid||'system', createdByName:'Automation', createdAt:Date.now(),
+    }).catch(e=>console.error('[ll-sign]',e)));
+  }
+
+  await Promise.allSettled(tasks);
+  const msgs=[];
+  if(answers.protection==='yes') msgs.push('protection list → '+(deal.advisorName||'advisor'));
+  if(answers.sign==='yes') msgs.push('sign removal → Marketing');
+  showToast(
+    msgs.length ? '📋 Lost Listing: '+msgs.join(' + ') : '✅ Lost Listing logged — no follow-up needed',
+    msgs.length ? 'success' : 'info', 5000
+  );
 }
 
 async function ensureLostListingAutomations(){
@@ -4189,9 +4206,31 @@ function renderStageFields(stage, data={}){
     return;
   }
 
-  // ── LOST LISTING / LOST PROPOSAL / other ─────────────────────────
-  if(isLostStage(stage) || stage==='Lost Listing' || stage==='Lost Proposal'){
-    container.innerHTML = '';
+  // ── LOST LISTING ─────────────────────────────────────────────────
+  if(stage==='Lost Listing'){
+    container.innerHTML=`
+      <div class="border-t pt-4 mt-1">
+        <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">Lost Listing Details</div>
+        <div class="space-y-3">
+          ${ta('sf-lost-reason','Reason for Losing Listing','Why was the listing lost?',data.lostReason)}
+          ${sel('sf-protection-list','Protection List Needed?',[{v:'yes',l:'Yes'},{v:'no',l:'No'}],data.protectionList||'no')}
+          ${sel('sf-sign-on-property','Is the Sign Still on the Property?',[{v:'yes',l:'Yes — needs removal'},{v:'no',l:'No'}],data.signOnProperty||'no')}
+        </div>
+      </div>`;
+    appendInlineGateFields(container, stage, data, dealKey);
+    return;
+  }
+
+  // ── LOST PROPOSAL / other lost stages ────────────────────────────
+  if(isLostStage(stage) || stage==='Lost Proposal'){
+    container.innerHTML=`
+      <div class="border-t pt-4 mt-1">
+        <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">Lost Proposal Details</div>
+        <div class="space-y-3">
+          ${ta('sf-lost-reason','Reason for Losing Proposal','Why was the proposal not accepted?',data.lostReason)}
+        </div>
+      </div>`;
+    appendInlineGateFields(container, stage, data, dealKey);
     return;
   }
 
@@ -6482,6 +6521,11 @@ window.handleDrop = (ev,newStage) => {
   // Any stage that has a built-in renderStageFields form — open the deal modal so autofill is available
   if(/due.?diligence|sold|loi/i.test(newStage)){
     openModalForStage(`Fill in the required details to move to ${newStage}`);
+    return;
+  }
+  // Contract Terminated and lost stages — open modal to capture reason/follow-up questions
+  if(newStage==='Contract Terminated' || newStage==='Lost Listing' || newStage==='Lost Proposal' || isLostStage(newStage)){
+    openModalForStage(`Enter details for moving to ${newStage}`);
     return;
   }
   // For all other stages: check if a custom gate is configured
@@ -15021,6 +15065,10 @@ function collectStageFields(){
     removeSign:    g('sf-remove-sign'),
     // Contract Terminated
     terminationReason: g('sf-termination-reason'),
+    // Lost Listing / Lost Proposal
+    lostReason:       g('sf-lost-reason'),
+    protectionList:   g('sf-protection-list'),
+    signOnProperty:   g('sf-sign-on-property'),
     // Sold notes override (shown in comprehensive Sold edit view)
     ...(document.getElementById('sf-sold-notes') ? {notes: g('sf-sold-notes')} : {}),
   };
