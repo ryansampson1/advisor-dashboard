@@ -10281,19 +10281,16 @@ window._crmProcessOutreachRecord = async function(r){
       attachList ? `Attachments: ${attachList}` : '',
       `Subject: ${r.emailSubject||''}`,
     ].filter(Boolean).join('\n');
+    // Use _crmLogActivity (same code path as manual activity logging) so Firestore rules match
     try {
-      await addDoc(collection(_fbDb, 'contacts', contactId, 'activities'), {
-        type:'email',
-        subject:`📧 Brochure sent — ${propLabel}`,
+      await window._crmLogActivity(contactId, 'email', {
         body: actBody,
-        date: r.emailDate||new Date().toISOString().slice(0,10),
-        createdAt: Date.now(),
-        createdBy: currentUser?.uid||'auto',
-        source: 'auto',
+        emailSubject: `📧 Brochure sent — ${propLabel}`,
+        autoLogged: true,
       });
     } catch(e){
       console.warn('[outreach activity]', e);
-      showToast('⚠️ Contact saved but activity log failed — check the contact\'s timeline', 'warning', 5000);
+      showToast(`⚠️ Activity log failed (${e?.code||e?.message||'unknown'}) — contact was saved`, 'warning', 8000);
     }
   }
 };
@@ -14958,8 +14955,8 @@ async function launchApp(){
    VIEW: HR
    ======================================================= */
 function viewHR(){
-  // Build headlines HTML
-  const isHlAdmin = currentUser?.isAdmin || currentUser?.isSuperAdmin;
+  // Build headlines HTML — only true admin (not advisor/staff view mode) can add/edit
+  const isHlAdmin = (currentUser?.isAdmin || currentUser?.isSuperAdmin) && !adminViewAsAdvisor && !staffViewMode;
   const hlHtml = allHeadlines.length || isHlAdmin ? `
     <div style="margin-bottom:1.75rem">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.85rem">
@@ -15795,17 +15792,20 @@ function _hrOpenHeadlineModal(existing){
         style="width:100%;border:1.5px solid #e5e7eb;border-radius:8px;padding:.55rem .75rem;font-size:.875rem;resize:vertical;outline:none;box-sizing:border-box;font-family:inherit"
         onfocus="this.style.borderColor='#6366f1'" onblur="this.style.borderColor='#e5e7eb'">${existing?.body||''}</textarea>
       <div style="display:flex;gap:.75rem;margin-top:1.25rem">
-        <button onclick="_hrSaveHeadline('${existing?.id||''}')"
+        <button id="hl-save-btn"
           style="flex:1;background:#6366f1;color:#fff;border:none;border-radius:8px;padding:.65rem;font-size:.875rem;font-weight:600;cursor:pointer">
           ${existing?'Save Changes':'Post Headline'}
         </button>
-        <button onclick="document.getElementById('hl-modal').remove()"
+        <button id="hl-cancel-btn"
           style="padding:.65rem 1.1rem;border:1.5px solid #e5e7eb;background:none;border-radius:8px;font-size:.875rem;cursor:pointer;color:#6b7280">
           Cancel
         </button>
       </div>
     </div>`;
   document.body.appendChild(m);
+  // Use addEventListener instead of inline onclick — avoids CSP / scope issues
+  document.getElementById('hl-save-btn').addEventListener('click', () => window._hrSaveHeadline(existing?.id||''));
+  document.getElementById('hl-cancel-btn').addEventListener('click', () => document.getElementById('hl-modal')?.remove());
   document.getElementById('hl-title').focus();
 }
 window._hrSaveHeadline = async function(existingId){
