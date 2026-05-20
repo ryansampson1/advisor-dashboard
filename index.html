@@ -3210,8 +3210,13 @@ For calculated dates (DD expiration, closing, etc.) — DO the math and return t
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-6',
-        max_tokens: 1500,
-        messages: [{role:'user', content: msgContent}]
+        max_tokens: 1800,
+        // Pre-fill the assistant turn with '{' — forces the model to
+        // continue with JSON rather than a conversational response
+        messages: [
+          {role:'user',    content: msgContent},
+          {role:'assistant', content: '{'}
+        ]
       })
     });
 
@@ -3223,15 +3228,17 @@ For calculated dates (DD expiration, closing, etc.) — DO the math and return t
     }
 
     const json = await resp.json();
-    const raw = json.content?.[0]?.text || '';
-    // Strip any markdown fences the model might add
-    const jsonStr = raw.replace(/^```[a-z]*\s*/i,'').replace(/```\s*$/,'').trim();
+    // The model continues from our '{' pre-fill, so prepend it back
+    const raw = '{' + (json.content?.[0]?.text || '');
+    // Extract the JSON object — grab from first { to last }
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    const jsonStr = jsonMatch ? jsonMatch[0] : raw;
     let extracted;
     try {
       extracted = JSON.parse(jsonStr);
     } catch(e){
       console.error('[autofill] raw AI response:', raw);
-      throw new Error('AI returned unexpected format — check console for raw output');
+      throw new Error('AI returned unexpected format — check console for details');
     }
 
     overlay?.remove();
