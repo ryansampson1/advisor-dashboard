@@ -581,6 +581,13 @@ body {
               <option value="Other">Other</option>
             </select>
           </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Representation</label>
+            <select id="f-representation" onchange="_onRepresentationChange()" class="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none bg-white">
+              <option value="seller">🏷️ Seller Rep</option>
+              <option value="buyer">🤝 Buyer Rep</option>
+            </select>
+          </div>
         </div>
         <div>
           <label class="block text-sm font-medium text-gray-700 mb-1">Contract (Contact Name)</label>
@@ -1105,8 +1112,8 @@ async function ensureSoldAutomations(){
      config:{assignToEmail:'krissy@thedirtdog.com', dueDays:'3',
              taskTitle:'Send Closing Statement — {address}',
              taskDesc:'Send the final closing statement to all parties for {address}. Closing date: {close_date}. Buyer: {buyer}.'}},
-    {id:'auto-8', _v:1, stage:'Sold', type:'assign_task', active:true,
-     config:{assignToEmail:'krissy@thedirtdog.com', dueDays:'7',
+    {id:'auto-8', _v:2, stage:'Sold', type:'assign_task', active:true,
+     config:{assignToEmail:'krissy@thedirtdog.com', dueDays:'7', skipForBuyer:true,
              taskTitle:'Remove from websites + archive Google Drive — {address}',
              taskDesc:'1. Remove {address} from all active listing websites.\n2. Archive the Google Drive folder for this deal.\n3. Update the internal deal tracker.'}},
     {id:'auto-9', _v:2, stage:'Sold', type:'sign_pickup_confirm', active:true, config:{}},
@@ -1120,8 +1127,8 @@ async function ensureSoldAutomations(){
      config:{assignToEmail:'krissy@thedirtdog.com', dueDays:'5',
              taskTitle:'Order closing gift for client — {address}',
              taskDesc:'Order a closing gift for the client on {address}. Buyer: {buyer}. Check with {advisor_name} for preference or use the standard gift package.'}},
-    {id:'auto-12', _v:1, stage:'Sold', type:'assign_task', active:true,
-     config:{assignToEmail:'marketing@thedirtdog.com', dueDays:'7',
+    {id:'auto-12', _v:2, stage:'Sold', type:'assign_task', active:true,
+     config:{assignToEmail:'marketing@thedirtdog.com', dueDays:'7', skipForBuyer:true,
              taskTitle:'Mark as Sold on Eshenbaugh Report + remove from Available Land — {address}',
              taskDesc:'1. Update the Eshenbaugh Land Report to mark {address} as SOLD.\n2. Remove from the Available Land inventory list.\n3. Add sale details: {price}, {close_date}, {county} County, {acres} acres.'}},
     {id:'auto-15', _v:1, stage:'Sold', type:'sold_wire_confirm', active:true, config:{}},
@@ -3320,8 +3327,7 @@ function renderStageFields(stage, data={}){
             ${sel('sf-cobroke','Co-Broke Offered',
               [{v:'yes',l:'Yes'},{v:'no',l:'No'}], data.cobroke||'yes')}
           </div>
-          ${sel('sf-sign','Sign',
-            [{v:'yes',l:'Yes'},{v:'no',l:'No'},{v:'custom',l:'Custom'}], data.sign||'yes')}
+          ${(()=>{const r=document.getElementById('f-representation');return (!r||r.value!=='buyer')?sel('sf-sign','Sign',[{v:'yes',l:'Yes'},{v:'no',l:'No'},{v:'custom',l:'Custom'}],data.sign||'yes'):'';})()}
           ${fileZone('listing-upload-zone','sf-listing-file','listing-upload-label',
             'handleListingSelect(event)','handleListingDrop(event)',lfName,'Signed Listing Agreement')}
         </div>
@@ -4860,6 +4866,8 @@ function fireAutomations(deal, oldStage){
         break;
       }
       case 'assign_task':{
+        // Skip marketing/listing tasks for Buyer Rep deals
+        if(cfg.skipForBuyer && deal.representation === 'buyer') break;
         // Calculate due date from offset
         let dueDate = null;
         if(cfg.dueDays && parseInt(cfg.dueDays)>0){
@@ -4897,6 +4905,8 @@ function fireAutomations(deal, oldStage){
         break;
       }
       case 'sign_pickup_confirm':{
+        // Skip sign pickup for Buyer Rep deals — no sign was placed
+        if(deal.representation === 'buyer') break;
         handleSignPickupAutomation(deal);
         break;
       }
@@ -4954,6 +4964,8 @@ const ADVISOR_BIOS = {
 };
 
       case 'press_release':{
+        // Skip press release for Buyer Rep deals — marketing handled differently
+        if(deal.representation === 'buyer') break;
         const prTitle = `Press Release Draft — ${deal.propertyAddress||deal.projectName||'Property'}`;
         const prDue = new Date(); prDue.setDate(prDue.getDate()+2);
         const prFileName = `Press Release - ${(deal.propertyAddress||deal.projectName||'Property').replace(/[\/\\:*?"<>|]/g,'-')}.docx`;
@@ -5604,12 +5616,15 @@ function renderCard(deal){
        </div>`
     : '';
 
-  // ── Land type badge + deal type badge ───────────────────────────────────
+  // ── Land type badge + deal type badge + representation badge ────────────
   const leaseBadge = deal.dealType==='lease'
     ? `<span class="inline-block text-xs px-1.5 py-0.5 rounded-full font-semibold mr-1 mb-1.5" style="background:#d1fae5;color:#065f46">📋 Lease</span>`
     : '';
-  const landTypeBadge = (deal.landType||deal.dealType==='lease')
-    ? `<div class="mb-1.5">${leaseBadge}${deal.landType?`<span class="inline-block text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-500 font-medium">${deal.landType}</span>`:''}</div>`
+  const buyerRepBadge = deal.representation==='buyer'
+    ? `<span class="inline-block text-xs px-1.5 py-0.5 rounded-full font-semibold mr-1 mb-1.5" style="background:#ede9fe;color:#5b21b6">🤝 Buyer Rep</span>`
+    : '';
+  const landTypeBadge = (deal.landType||deal.dealType==='lease'||deal.representation==='buyer')
+    ? `<div class="mb-1.5">${buyerRepBadge}${leaseBadge}${deal.landType?`<span class="inline-block text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-500 font-medium">${deal.landType}</span>`:''}</div>`
     : '';
 
   // ── Stage-specific field rows ──────────────────────────────────────
@@ -5883,8 +5898,8 @@ function renderStaffCard(deal){
     stageRows = row('Price', price > 0 ? fmt$(price) : '');
   }
 
-  const ltBadge = deal.landType
-    ? `<div class="inline-block text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-500 font-medium mb-1.5">${deal.landType}</div>`
+  const ltBadge = (deal.landType||deal.representation==='buyer')
+    ? `<div class="mb-1.5">${deal.representation==='buyer'?`<span class="inline-block text-xs px-1.5 py-0.5 rounded-full font-semibold mr-1" style="background:#ede9fe;color:#5b21b6">🤝 Buyer Rep</span>`:''}${deal.landType?`<span class="inline-block text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-500 font-medium">${deal.landType}</span>`:''}</div>`
     : '';
   return `
     <div class="deal-card bg-white rounded-xl px-3 pt-2.5 pb-2 shadow-sm border border-white/80 select-none min-w-0 cursor-default">
@@ -14150,6 +14165,9 @@ window.openDealModal = (id, defaultStage) => {
   document.getElementById('co-advisors-list').innerHTML='';
   // Reset deal type to Sale (default)
   setDealType('sale');
+  // Reset representation to Seller (default)
+  const reprEl = document.getElementById('f-representation');
+  if(reprEl) reprEl.value = 'seller';
 
   if(id){
     titleEl.textContent='Edit Deal';
@@ -14161,6 +14179,7 @@ window.openDealModal = (id, defaultStage) => {
     document.getElementById('f-folio').value=deal.folioNumber||'';
     document.getElementById('f-county').value=deal.county||'';
     const ltEl=document.getElementById('f-land-type'); if(ltEl) ltEl.value=deal.landType||'';
+    const reprEl2=document.getElementById('f-representation'); if(reprEl2) reprEl2.value=deal.representation||'seller';
     document.getElementById('f-contact-person').value=deal.contactPerson||deal.contract||'';
     document.getElementById('f-contact-phone').value=deal.contactPhone||'';
     document.getElementById('f-contact-email').value=deal.contactEmail||'';
@@ -14259,6 +14278,21 @@ function calcGrossLease(annualRate, termYears, increasePct, intervalYears){
   return Math.round(total);
 }
 window.calcGrossLease = calcGrossLease;
+
+// ── Representation change handler ─────────────────────────────────────────────
+// When advisor switches Seller ↔ Buyer rep, re-render stage fields so that
+// signage-related inputs are shown/hidden appropriately.
+window._onRepresentationChange = function(){
+  const stageEl = document.getElementById('f-stage');
+  if(!stageEl) return;
+  const stage = stageEl.value;
+  const sf = document.getElementById('stage-fields');
+  if(!sf) return;
+  const currentData = (typeof collectStageFields === 'function') ? collectStageFields() : {};
+  renderStageFields(stage, currentData);
+  if(sf.innerHTML.trim()){ sf.classList.remove('hidden'); }
+  else { sf.classList.add('hidden'); }
+};
 
 window.setDealType = type => {
   document.getElementById('f-deal-type').value = type;
@@ -14574,6 +14608,7 @@ window.handleDealSubmit = async ev => {
     folioNumber:(document.getElementById('f-folio')?.value||'').trim(),
     county:(document.getElementById('f-county')?.value||'').trim(),
     landType:(document.getElementById('f-land-type')?.value||'').trim(),
+    representation:(document.getElementById('f-representation')?.value||'seller'),
     contactPerson:(document.getElementById('f-contact-person')?.value||'').trim(),
     contactPhone:(document.getElementById('f-contact-phone')?.value||'').trim(),
     contactEmail:(document.getElementById('f-contact-email')?.value||'').trim(),
