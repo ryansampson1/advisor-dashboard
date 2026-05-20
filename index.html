@@ -3986,51 +3986,69 @@ function renderStageFields(stage, data={}){
   // ── CLOSING ──────────────────────────────────────────────────────
   if(stage==='Closing' || (stage.includes('Closing') && !stage.includes('Closed'))){
     const clPrice = data.purchasePrice||data.contractPrice||data.loiPrice||'';
+    const clComm  = data.elcCommissionPct||data.dealCommissionPct||data.commissionPct||'';
     window._closingDeal = data;
     const fmt$ = v => (v>0) ? '$'+Number(v).toLocaleString() : '—';
     const fmtDate = iso => iso ? new Date(iso+'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) : '—';
     const row = (label, val) => (val && val!=='—') ? `
       <div class="flex justify-between items-start gap-3 py-1.5 border-b border-gray-100 last:border-0">
-        <span class="text-xs text-gray-400 uppercase tracking-wide shrink-0 pt-0.5 w-28">${label}</span>
+        <span class="text-xs text-gray-400 uppercase tracking-wide shrink-0 pt-0.5 w-32">${label}</span>
         <span class="text-sm font-medium text-gray-800 text-right leading-snug">${val}</span>
       </div>` : '';
+    // Detect whether the deal went through Rezoning/Permitting
+    const hasRezoning = !!(data.rezoneExpiration || (data.effectiveDate && data.rezoneExpiration !== undefined));
+    const csFile = stageFiles[`${dealKey}__closing-statement`];
+    const csName = csFile?.name || data.closingStatementFileName || '';
     container.innerHTML=`
       <div class="border-t pt-4 mt-1">
         <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">Closing Details</div>
         <div class="space-y-3">
           <!-- Hidden inputs — preserve all contract data; also read by commission invoice generator -->
-          <input type="hidden" id="sf-project-name"    value="${data.projectName||''}"/>
-          <input type="hidden" id="sf-purchase-price"  value="${clPrice}"/>
-          <input type="hidden" id="sf-elc-commission"  value="${data.elcCommissionPct||data.dealCommissionPct||data.commissionPct||''}"/>
-          <input type="hidden" id="sf-buyer"           value="${data.buyer||''}"/>
-          <input type="hidden" id="sf-buyer-broker"    value="${data.buyerBroker||''}"/>
-          <input type="hidden" id="sf-escrow-agent"    value="${data.escrowAgent||''}"/>
-          <input type="hidden" id="sf-escrow-email"    value="${data.escrowAgentEmail||''}"/>
-          <input type="hidden" id="sf-psa-effective-date" value="${data.psaEffectiveDate||''}"/>
-          <input type="hidden" id="sf-dd-date"         value="${data.ddExpirationDate||''}"/>
-          <input type="hidden" id="sf-earnest-money"   value="${data.earnestMoney||''}"/>
-          <!-- Read-only contract reference (carried from DD / Rezoning) -->
+          <input type="hidden" id="sf-project-name"       value="${data.projectName||''}"/>
+          <input type="hidden" id="sf-purchase-price"     value="${clPrice}"/>
+          <input type="hidden" id="sf-elc-commission"     value="${clComm}"/>
+          <input type="hidden" id="sf-buyer"              value="${data.buyer||''}"/>
+          <input type="hidden" id="sf-buyer-broker"       value="${data.buyerBroker||''}"/>
+          <input type="hidden" id="sf-escrow-agent"       value="${data.escrowAgent||''}"/>
+          <input type="hidden" id="sf-escrow-email"       value="${data.escrowAgentEmail||''}"/>
+          <input type="hidden" id="sf-psa-effective-date" value="${data.psaEffectiveDate||data.effectiveDate||''}"/>
+          <input type="hidden" id="sf-effective-date"     value="${data.effectiveDate||''}"/>
+          <input type="hidden" id="sf-dd-date"            value="${data.ddExpirationDate||''}"/>
+          <input type="hidden" id="sf-earnest-money"      value="${data.earnestMoney||''}"/>
+          <input type="hidden" id="sf-rezone-expiration"  value="${data.rezoneExpiration||''}"/>
+          <input type="hidden" id="sf-close-date"         value="${data.closeDate||''}"/>
+
+          <!-- Read-only reference panel (carried from DD / Rezoning) -->
           <div>
             <div class="flex items-center gap-2 mb-2">
               <span class="text-xs font-bold text-gray-400 uppercase tracking-widest">Contract Reference</span>
               <span class="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full font-semibold">Read Only</span>
             </div>
             <div class="bg-gray-50 rounded-xl px-3 pt-1 pb-0.5">
-              ${row('Project', data.projectName)}
-              ${row('Purchase Price', fmt$(clPrice))}
-              ${row('Commission', (data.elcCommissionPct||data.dealCommissionPct||data.commissionPct) ? (data.elcCommissionPct||data.dealCommissionPct||data.commissionPct)+'%' : '')}
-              ${row('Buyer', data.buyer)}
-              ${row('Buyer Broker', data.buyerBroker)}
-              ${row('Escrow Agent', data.escrowAgent)}
-              ${row('Escrow Email', data.escrowAgentEmail)}
-              ${row('PSA Effective', fmtDate(data.psaEffectiveDate))}
-              ${row('DD Expiration', fmtDate(data.ddExpirationDate))}
-              ${row('Earnest Money', data.earnestMoney>0 ? fmt$(data.earnestMoney) : '')}
+              ${row('Project',         data.projectName)}
+              ${row('Purchase Price',  fmt$(clPrice))}
+              ${row('Commission',      clComm ? clComm+'%' : '')}
+              ${row('Buyer',           data.buyer)}
+              ${row('Buyer Broker',    data.buyerBroker)}
+              ${row('Escrow Agent',    data.escrowAgent)}
+              ${row('Escrow Email',    data.escrowAgentEmail)}
+              ${row('PSA Effective',   fmtDate(data.psaEffectiveDate||data.effectiveDate))}
+              ${row('DD Expiration',   fmtDate(data.ddExpirationDate))}
+              ${row('Earnest Money',   data.earnestMoney>0 ? fmt$(data.earnestMoney) : '')}
+              ${data.rezoneExpiration ? row('Rezoning Expiration', fmtDate(data.rezoneExpiration)) : ''}
+              ${row('Projected Close', fmtDate(data.closeDate))}
             </div>
           </div>
-          <!-- Editable: closing-specific dates only -->
-          ${inp('sf-effective-date','Effective Date','date','',data.effectiveDate,true)}
-          ${inp('sf-close-date','Confirmed Closing Date','date','',data.closeDate)}
+
+          <!-- Proposed Use -->
+          ${inp('sf-buyer-use','Proposed Use for the Property','text','e.g. Multifamily Development',data.buyerUse)}
+
+          <!-- Closing Statement Upload -->
+          ${fileZone('cl-cs-upload-zone','sf-cs-file','cl-cs-upload-label',
+            "handleStageFileSelect(event,'closing-statement')",
+            "handleStageFileDrop(event,'closing-statement')",
+            csName,'Upload Closing Statement')}
+
           <!-- Commission Invoice -->
           <button type="button"
             onclick="(()=>{ const _d=window._closingDeal||{}; const d={..._d, purchasePrice:parseFloat(document.getElementById('sf-purchase-price')?.value)||_d.purchasePrice||0, elcCommissionPct:parseFloat(document.getElementById('sf-elc-commission')?.value)||_d.elcCommissionPct||0, closeDate:document.getElementById('sf-close-date')?.value||_d.closeDate||'', escrowAgent:document.getElementById('sf-escrow-agent')?.value||_d.escrowAgent||'', escrowAgentEmail:document.getElementById('sf-escrow-email')?.value||_d.escrowAgentEmail||'', buyer:document.getElementById('sf-buyer')?.value||_d.buyer||'', projectName:document.getElementById('sf-project-name')?.value||_d.projectName||''}; window.generateCommissionInvoice(d); })()"
@@ -15033,9 +15051,8 @@ window.handleDealSubmit = async ev => {
   // (built-in stage templates use sf-* IDs, not gf-* IDs, so gf- elements won't exist)
   const sf = collectStageFields();
   // Require Effective Date for contract-active stages (including custom stages containing these keywords)
-  const needsEffDate = ['Due Diligence','Due Diligence (Under Contract)','Rezoning/Permitting','Closing'].includes(stage)
-    || stage.includes('Due Diligence') || stage.includes('Rezoning') || stage.includes('Permitting')
-    || (stage.includes('Closing') && !stage.includes('Closed'));
+  const needsEffDate = ['Due Diligence','Due Diligence (Under Contract)','Rezoning/Permitting'].includes(stage)
+    || stage.includes('Due Diligence') || stage.includes('Rezoning') || stage.includes('Permitting');
   if(needsEffDate && !sf.effectiveDate){
     const el=document.getElementById('sf-effective-date');
     if(el){ el.focus(); el.style.outline='2px solid #DC2626'; }
