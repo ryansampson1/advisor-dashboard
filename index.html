@@ -2701,6 +2701,28 @@ async function ensureProspectAutomations(){
   }
 }
 
+// Called from handleDealSubmit when advisor answers "yes" to ready-for-websites
+// Only fires when the answer newly flips to yes (not on every save).
+function _fireListingWebsiteTask(deal){
+  const addr  = deal.propertyAddress||deal.projectName||'property';
+  const price = deal.listedPrice>0 ? '$'+Number(deal.listedPrice).toLocaleString() : 'TBD';
+  const acres = deal.acreage||deal.acres||'—';
+  const county= deal.county||'';
+  const dueDate = (n=>{const d=new Date();d.setDate(d.getDate()+n);return d.toISOString().slice(0,10);})(3);
+  const krissyEmail = 'krissy@thedirtdog.com';
+  const krissyHit = Object.entries(allProfiles||{}).find(([,p])=>(p.email||'').toLowerCase()===krissyEmail);
+  Store.createTask({
+    title:`🌐 Add to Websites — ${addr}`,
+    description:`Advisor has confirmed this listing is ready to go live on websites.\n\nProperty: ${addr}\nAdvisor: ${deal.advisorName||deal.advisorEmail||''}\nPrice: ${price}\nAcres: ${acres}\nCounty: ${county}\n\n☐ Add to Eshenbaugh website\n☐ Post on LoopNet / CoStar\n☐ Add to any other active listing portals\n☐ Confirm listing details with advisor before publishing`,
+    assignedTo:krissyHit?.[0]||null, assignedToName:krissyHit?.[1]?.name||'Krissy',
+    assignedToEmail:krissyEmail,
+    dealId:deal.id, dealAddress:deal.propertyAddress,
+    dueDate, status:'pending',
+    createdBy:currentUser?.uid||'system', createdByName:'Automation', createdAt:Date.now(),
+  }).then(()=>showToast('🌐 Website task sent to Krissy','success',3000))
+    .catch(e=>console.error('[website task]',e));
+}
+
 function handleListingAutomation(deal){
   const addr = deal.propertyAddress||deal.projectName||'property';
   const dueDate = n=>{ const d=new Date(); d.setDate(d.getDate()+n); return d.toISOString().slice(0,10); };
@@ -3064,6 +3086,8 @@ function appendInlineGateFields(container, stage, data, dealKey){
     if(/buyer.*broker|broker/i.test(L)       && /sf-buyer-broker/.test(sfIds))   return true;
     if(/listing.*term|term.*listing/i.test(L) && /sf-listing-term/.test(sfIds))  return true;
     if(/ownership.*entity|selling.*entity|exact.*entity|entity.*name/i.test(L) && /sf-ownership-entity/.test(sfIds)) return true;
+    if(/buyer.*group|likely.*buyer|property.*group/i.test(L) && sfIds.includes('f-property-groups-picker')) return true;
+    if(/website|web.*listing|list.*web/i.test(L) && sfIds.includes('sf-ready-websites')) return true;
     return false;
   };
 
@@ -3775,7 +3799,15 @@ function renderStageFields(stage, data={}){
           <!-- Co-Broke: visible -->
           ${sel('sf-cobroke','Co-Broke Offered',
             [{v:'yes',l:'Yes'},{v:'no',l:'No'}], data.cobroke||'yes')}
-          <!-- Likely Buyer Groups — only shown at Listing stage -->
+          <!-- Ready to put on websites? -->
+          ${sel('sf-ready-websites','Ready to put on websites?',
+            [{v:'yes',l:'Yes — add to websites'},{v:'no',l:'Not yet'}], data.readyForWebsites||'')}
+          <!-- Auto-fill block -->
+          ${docModeBlock('listing', docMode,
+            fileZone('listing-upload-zone','sf-listing-file','listing-upload-label',
+              'handleListingSelect(event)','handleListingDrop(event)',lfName,'Signed Listing Agreement'),
+            'Listing')}
+          <!-- Likely Buyer Groups — moved to bottom of Listing stage -->
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1.5">🎯 Likely Buyer Groups</label>
             <div id="f-property-groups-picker" class="flex flex-wrap gap-1.5 p-2 border rounded-xl bg-gray-50 min-h-10 items-center">
@@ -3783,11 +3815,6 @@ function renderStageFields(stage, data={}){
             </div>
             <p class="text-xs text-gray-400 mt-1">Groups selected here travel with the deal through all stages.</p>
           </div>
-          <!-- Auto-fill block -->
-          ${docModeBlock('listing', docMode,
-            fileZone('listing-upload-zone','sf-listing-file','listing-upload-label',
-              'handleListingSelect(event)','handleListingDrop(event)',lfName,'Signed Listing Agreement'),
-            'Listing')}
         </div>
       </div>`;
     appendInlineGateFields(container, stage, data, dealKey);
@@ -14912,6 +14939,7 @@ function collectStageFields(){
     commissionAmount:     gf('sf-commission-amount'),
     commissionType:       g('sf-commission-type'),
     cobroke:              g('sf-cobroke'),
+    readyForWebsites:     g('sf-ready-websites'),
     sign:                 g('sf-sign'),
     // LOI
     loiPrice: gf('sf-loi-price'),
@@ -15170,6 +15198,10 @@ window.handleDealSubmit = async ev => {
     if(oldStage!==stage) fireAutomations(existing,oldStage);
     // NOTE: auto-create intentionally removed from edit path — running on every save
     // caused deleted CRM contacts to reappear. Contacts are seeded once at deal creation only.
+    // ── "Ready for websites?" task — fire only when answer newly set to yes ──
+    if(stage==='Listing' && sf.readyForWebsites==='yes' && existDeal?.readyForWebsites!=='yes'){
+      _fireListingWebsiteTask(existing);
+    }
     showToast('Deal updated','success');
     // Trigger gate modal if stage changed and gate has questions (same as drag-and-drop)
     if(oldStage!==stage && !inlineGateData){
@@ -15188,6 +15220,7 @@ window.handleDealSubmit = async ev => {
     const newDeal={...data,id:newId};
     if(!allDeals.find(d=>d.id===newId)) allDeals.push(newDeal);
     fireAutomations(newDeal,null);
+    if(stage==='Listing' && sf.readyForWebsites==='yes') _fireListingWebsiteTask(newDeal);
     // Auto-create/link CRM contacts from the new deal
     _crmAutoCreateContactsFromDeal(newDeal).catch(e=>console.warn('[CRM auto-contact]',e));
     showToast('Deal created','success');
