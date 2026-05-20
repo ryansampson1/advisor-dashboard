@@ -3908,7 +3908,7 @@ const FB = {
   async signInWithGoogle(){
     const {GoogleAuthProvider, signInWithPopup} = _fbFns;
     const _gProvider = new GoogleAuthProvider();
-    _gProvider.addScope('https://www.googleapis.com/auth/calendar.readonly');
+    _gProvider.addScope('https://www.googleapis.com/auth/calendar.events');
     const _signInResult = await signInWithPopup(_fbAuth, _gProvider);
     try {
       const _gcred = GoogleAuthProvider.credentialFromResult(_signInResult);
@@ -4113,7 +4113,7 @@ const FB = {
     _fbUnsubs.push(onSnapshot(hlQ, snap=>{
       allHeadlines = snap.docs.map(d=>({...d.data(), id:d.id}));
       onUpdate('headlines');
-    }));
+    }, err=>{ console.warn('[hrHeadlines listener]', err.code, err.message); allHeadlines=[]; }));
   },
   async createTask(data){
     const {collection, addDoc} = _fbFns;
@@ -6912,39 +6912,284 @@ function viewCommissionForecast(){
    ======================================================= */
 function viewCalendar(){
   if(activeChart){ activeChart.destroy(); activeChart=null; }
-  // Use the logged-in user's email (their company Google account) as the calendar source
   const email = currentUser.email || '';
   const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/New_York';
+  const token = sessionStorage.getItem('gcal_token');
+  const tokenExp = parseInt(sessionStorage.getItem('gcal_token_exp')||'0');
+  const hasWriteToken = token && Date.now() < tokenExp;
   const embedUrl = 'https://calendar.google.com/calendar/embed?' + [
     `src=${encodeURIComponent(email)}`,
     `ctz=${encodeURIComponent(tz)}`,
-    'showNav=1',
-    'showDate=1',
-    'showPrint=0',
-    'showTabs=1',
-    'showCalendars=1',
-    'showTz=1',
-    'mode=WEEK',
-    'bgcolor=%23ffffff',
-    'color=%23e8291c',
+    'showNav=1','showDate=1','showPrint=0','showTabs=1','showCalendars=1','showTz=1','mode=WEEK',
+    'bgcolor=%23ffffff','color=%23e8291c',
   ].join('&');
 
   setContent(`
     <div class="flex items-center justify-between mb-4">
       <h2 class="text-xl font-bold text-gray-800">Calendar</h2>
-      <a href="https://calendar.google.com/calendar/r" target="_blank"
-        class="text-xs text-blue-500 hover:underline">Open in Google Calendar ↗</a>
+      <div class="flex items-center gap-2">
+        ${hasWriteToken
+          ? `<button onclick="window._calShowNewEvent()" class="brand-btn text-sm px-4 py-2 rounded-xl font-semibold flex items-center gap-1.5">
+               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+               New Meeting
+             </button>
+             <button onclick="window._calShowUpcoming()" class="text-sm px-3 py-2 rounded-xl border border-gray-200 hover:bg-gray-50 font-medium text-gray-700">Upcoming</button>`
+          : `<button onclick="window._reauthCalendarReminders()" class="text-sm px-3 py-2 rounded-xl border border-blue-200 text-blue-600 hover:bg-blue-50 font-medium">
+               🔑 Enable Calendar Editing
+             </button>`
+        }
+        <a href="https://calendar.google.com/calendar/r" target="_blank"
+          class="text-xs text-blue-500 hover:underline">Open in Google Calendar ↗</a>
+      </div>
     </div>
-    <div class="bg-white rounded-2xl border overflow-hidden" style="height:calc(100vh - 160px);">
-      <iframe src="${embedUrl}"
+    <div class="bg-white rounded-2xl border overflow-hidden" style="height:calc(100vh - 180px);">
+      <iframe id="gcal-embed" src="${embedUrl}"
         style="border:0;width:100%;height:100%;"
-        frameborder="0"
-        scrolling="no"
-        title="Google Calendar">
+        frameborder="0" scrolling="no" title="Google Calendar">
       </iframe>
     </div>
   `);
 }
+
+// ── Calendar API helpers ─────────────────────────────────────────────────────
+window._calApiReq = async function(method, path, body){
+  const token = sessionStorage.getItem('gcal_token');
+  if(!token) throw new Error('No calendar token — click "Enable Calendar Editing" first');
+  const resp = await fetch('https://www.googleapis.com/calendar/v3'+path, {
+    method, headers: {'Authorization':'Bearer '+token, 'Content-Type':'application/json'},
+    ...(body ? {body:JSON.stringify(body)} : {}),
+  });
+  if(!resp.ok){
+    const err = await resp.json().catch(()=>({}));
+    if(resp.status===401){ sessionStorage.removeItem('gcal_token'); throw new Error('Calendar token expired — please re-enable calendar editing'); }
+    throw new Error(err.error?.message || 'Calendar API error '+resp.status);
+  }
+  return resp.status===204 ? null : resp.json();
+};
+
+window._calShowNewEvent = function(prefill={}){
+  const now = new Date();
+  const roundUp = new Date(Math.ceil(now.getTime()/900000)*900000);
+  const defDate = prefill.date || roundUp.toISOString().slice(0,10);
+  const defStart = prefill.start || roundUp.toTimeString().slice(0,5);
+  const endMs = new Date('1970-01-01T'+defStart).getTime() + 3600000;
+  const defEnd = prefill.end || new Date(endMs).toTimeString().slice(0,5);
+  _calOpenEventModal({
+    mode:'create', title:prefill.title||'', date:defDate,
+    start:defStart, end:defEnd, desc:prefill.desc||'', attendees:prefill.attendees||'',
+  });
+};
+
+window._calShowUpcoming = async function(){
+  const token = sessionStorage.getItem('gcal_token');
+  if(!token){ showToast('Enable calendar editing first','error'); return; }
+  // Remove existing panel
+  document.getElementById('gcal-upcoming-panel')?.remove();
+  const panel = document.createElement('div');
+  panel.id='gcal-upcoming-panel';
+  panel.style.cssText='position:fixed;top:0;right:0;bottom:0;width:360px;max-width:100vw;background:#fff;box-shadow:-4px 0 24px rgba(0,0,0,.15);z-index:4000;display:flex;flex-direction:column;overflow:hidden';
+  panel.innerHTML=`
+    <div style="padding:1.25rem 1.5rem;border-bottom:1px solid #f3f4f6;display:flex;align-items:center;justify-content:space-between">
+      <div style="font-weight:700;font-size:1rem;color:#1f2937">Upcoming Meetings</div>
+      <div class="flex gap-2">
+        <button onclick="window._calShowNewEvent()" style="background:#DA291C;color:#fff;border:none;border-radius:8px;padding:.35rem .75rem;font-size:.75rem;font-weight:600;cursor:pointer">+ New</button>
+        <button onclick="document.getElementById('gcal-upcoming-panel')?.remove()" style="background:none;border:none;font-size:1.2rem;color:#9ca3af;cursor:pointer">✕</button>
+      </div>
+    </div>
+    <div id="gcal-upcoming-list" style="flex:1;overflow-y:auto;padding:1rem">
+      <div style="text-align:center;color:#9ca3af;padding:2rem;font-size:.875rem">Loading…</div>
+    </div>`;
+  document.body.appendChild(panel);
+  try {
+    const now = new Date();
+    const weekOut = new Date(now.getTime()+14*86400000);
+    const params = new URLSearchParams({
+      timeMin:now.toISOString(), timeMax:weekOut.toISOString(),
+      singleEvents:'true', orderBy:'startTime', maxResults:'30',
+    });
+    const data = await window._calApiReq('GET','/calendars/primary/events?'+params);
+    const events = (data.items||[]).filter(e=>e.status!=='cancelled');
+    const list = document.getElementById('gcal-upcoming-list');
+    if(!list) return;
+    if(!events.length){ list.innerHTML='<div style="text-align:center;color:#9ca3af;padding:2rem;font-size:.875rem">No upcoming events in the next 2 weeks</div>'; return; }
+    list.innerHTML = events.map(ev=>{
+      const start = ev.start?.dateTime ? new Date(ev.start.dateTime) : new Date(ev.start?.date);
+      const end   = ev.end?.dateTime   ? new Date(ev.end.dateTime)   : new Date(ev.end?.date);
+      const isAllDay = !!ev.start?.date && !ev.start?.dateTime;
+      const fmtT = d => d.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',hour12:true});
+      const fmtD = d => d.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'});
+      const timeStr = isAllDay ? 'All day' : `${fmtT(start)} – ${fmtT(end)}`;
+      const attendeeCount = (ev.attendees||[]).filter(a=>!a.self).length;
+      return `<div style="border:1px solid #f3f4f6;border-radius:12px;padding:.875rem 1rem;margin-bottom:.6rem">
+        <div style="font-weight:600;font-size:.875rem;color:#1f2937;margin-bottom:.25rem">${(ev.summary||'(no title)').replace(/</g,'&lt;')}</div>
+        <div style="font-size:.75rem;color:#6b7280">${fmtD(start)} · ${timeStr}</div>
+        ${attendeeCount>0?`<div style="font-size:.7rem;color:#9ca3af;margin-top:.2rem">${attendeeCount} attendee${attendeeCount>1?'s':''}</div>`:''}
+        ${!isAllDay?`<div style="display:flex;gap:.5rem;margin-top:.6rem">
+          <button onclick="window._calEditEvent('${ev.id}')" style="flex:1;background:#f3f4f6;border:none;border-radius:7px;padding:.35rem;font-size:.72rem;font-weight:600;color:#374151;cursor:pointer">✏️ Edit</button>
+          <button onclick="window._calRescheduleEvent('${ev.id}','${ev.summary?.replace(/'/g,'\\\'')}')" style="flex:1;background:#eff6ff;border:none;border-radius:7px;padding:.35rem;font-size:.72rem;font-weight:600;color:#2563eb;cursor:pointer">📅 Move</button>
+        </div>`:''}
+      </div>`;
+    }).join('');
+  } catch(e){ showToast(e.message,'error'); }
+};
+
+window._calEditEvent = async function(eventId){
+  try {
+    showToast('Loading event…','info',1500);
+    const ev = await window._calApiReq('GET',`/calendars/primary/events/${eventId}`);
+    const start = new Date(ev.start?.dateTime||ev.start?.date);
+    const end   = new Date(ev.end?.dateTime  ||ev.end?.date);
+    const attendeeEmails = (ev.attendees||[]).filter(a=>!a.self).map(a=>a.email).join(', ');
+    _calOpenEventModal({
+      mode:'edit', eventId,
+      title: ev.summary||'',
+      date:  start.toISOString().slice(0,10),
+      start: start.toTimeString().slice(0,5),
+      end:   end.toTimeString().slice(0,5),
+      desc:  ev.description||'',
+      attendees: attendeeEmails,
+    });
+  } catch(e){ showToast(e.message,'error'); }
+};
+
+window._calRescheduleEvent = function(eventId, title){
+  const now = new Date();
+  const tomorrow = new Date(now.getTime()+86400000);
+  _calOpenEventModal({
+    mode:'move', eventId, title,
+    date: tomorrow.toISOString().slice(0,10),
+    start: '09:00', end: '10:00',
+    desc:'', attendees:'',
+  });
+};
+
+function _calOpenEventModal(opts){
+  document.getElementById('gcal-event-modal')?.remove();
+  const isEdit = opts.mode==='edit', isMove = opts.mode==='move';
+  const m = document.createElement('div');
+  m.id='gcal-event-modal';
+  m.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9500;display:flex;align-items:center;justify-content:center;padding:1rem';
+  m.innerHTML=`
+    <div style="background:#fff;border-radius:18px;padding:1.75rem;width:100%;max-width:480px;box-shadow:0 20px 60px rgba(0,0,0,.25);max-height:90vh;overflow-y:auto">
+      <div style="font-size:1rem;font-weight:700;color:#1f2937;margin-bottom:1.25rem">
+        ${isEdit?'Edit Meeting':isMove?`Move: ${opts.title}`:'New Meeting'}
+      </div>
+      ${!isMove?`
+      <div style="margin-bottom:.85rem">
+        <label style="font-size:.72rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:#6b7280;display:block;margin-bottom:.3rem">Title *</label>
+        <input id="cev-title" type="text" value="${(opts.title||'').replace(/"/g,'&quot;')}" placeholder="Meeting title"
+          style="width:100%;border:1.5px solid #e5e7eb;border-radius:8px;padding:.55rem .75rem;font-size:.875rem;outline:none;box-sizing:border-box"
+          onfocus="this.style.borderColor='#DA291C'" onblur="this.style.borderColor='#e5e7eb'"/>
+      </div>`:''}
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:.75rem;margin-bottom:.85rem">
+        <div style="grid-column:1/-1">
+          <label style="font-size:.72rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:#6b7280;display:block;margin-bottom:.3rem">Date *</label>
+          <input id="cev-date" type="date" value="${opts.date}"
+            style="width:100%;border:1.5px solid #e5e7eb;border-radius:8px;padding:.55rem .75rem;font-size:.875rem;outline:none;box-sizing:border-box"
+            onfocus="this.style.borderColor='#DA291C'" onblur="this.style.borderColor='#e5e7eb'"/>
+        </div>
+        <div>
+          <label style="font-size:.72rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:#6b7280;display:block;margin-bottom:.3rem">Start</label>
+          <input id="cev-start" type="time" value="${opts.start}"
+            style="width:100%;border:1.5px solid #e5e7eb;border-radius:8px;padding:.55rem .75rem;font-size:.875rem;outline:none;box-sizing:border-box"
+            onfocus="this.style.borderColor='#DA291C'" onblur="this.style.borderColor='#e5e7eb'"/>
+        </div>
+        <div>
+          <label style="font-size:.72rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:#6b7280;display:block;margin-bottom:.3rem">End</label>
+          <input id="cev-end" type="time" value="${opts.end}"
+            style="width:100%;border:1.5px solid #e5e7eb;border-radius:8px;padding:.55rem .75rem;font-size:.875rem;outline:none;box-sizing:border-box"
+            onfocus="this.style.borderColor='#DA291C'" onblur="this.style.borderColor='#e5e7eb'"/>
+        </div>
+      </div>
+      ${!isMove?`
+      <div style="margin-bottom:.85rem">
+        <label style="font-size:.72rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:#6b7280;display:block;margin-bottom:.3rem">Attendees <span style="font-weight:400;text-transform:none">(comma-separated emails)</span></label>
+        <input id="cev-attendees" type="text" value="${(opts.attendees||'').replace(/"/g,'&quot;')}" placeholder="colleague@example.com, another@example.com"
+          style="width:100%;border:1.5px solid #e5e7eb;border-radius:8px;padding:.55rem .75rem;font-size:.875rem;outline:none;box-sizing:border-box"
+          onfocus="this.style.borderColor='#DA291C'" onblur="this.style.borderColor='#e5e7eb'"/>
+      </div>
+      <div style="margin-bottom:1.25rem">
+        <label style="font-size:.72rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:#6b7280;display:block;margin-bottom:.3rem">Description</label>
+        <textarea id="cev-desc" rows="3" placeholder="Optional notes…"
+          style="width:100%;border:1.5px solid #e5e7eb;border-radius:8px;padding:.55rem .75rem;font-size:.875rem;outline:none;resize:vertical;box-sizing:border-box;font-family:inherit"
+          onfocus="this.style.borderColor='#DA291C'" onblur="this.style.borderColor='#e5e7eb'">${(opts.desc||'').replace(/</g,'&lt;')}</textarea>
+      </div>`:''}
+      <div style="display:flex;gap:.75rem">
+        <button id="cev-save-btn" onclick="_calSaveEvent('${opts.mode}','${opts.eventId||''}')"
+          style="flex:1;background:#DA291C;color:#fff;border:none;border-radius:9px;padding:.7rem;font-size:.875rem;font-weight:600;cursor:pointer">
+          ${isEdit?'Save Changes':isMove?'Move Meeting':'Create Meeting'}
+        </button>
+        ${isEdit?`<button onclick="_calDeleteEvent('${opts.eventId}')" style="padding:.7rem .9rem;border:1.5px solid #fca5a5;color:#ef4444;background:none;border-radius:9px;font-size:.875rem;cursor:pointer">Delete</button>`:''}
+        <button onclick="document.getElementById('gcal-event-modal')?.remove()" style="padding:.7rem 1rem;border:1.5px solid #e5e7eb;background:none;border-radius:9px;font-size:.875rem;color:#6b7280;cursor:pointer">Cancel</button>
+      </div>
+    </div>`;
+  document.body.appendChild(m);
+  m.addEventListener('click', e=>{ if(e.target===m) m.remove(); });
+  if(!isMove) setTimeout(()=>document.getElementById('cev-title')?.focus(), 50);
+}
+
+window._calSaveEvent = async function(mode, eventId){
+  const date  = document.getElementById('cev-date')?.value;
+  const start = document.getElementById('cev-start')?.value;
+  const end   = document.getElementById('cev-end')?.value;
+  if(!date||!start||!end){ showToast('Date, start, and end time are required','error'); return; }
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/New_York';
+  const startDt = `${date}T${start}:00`;
+  const endDt   = `${date}T${end}:00`;
+  const btn = document.getElementById('cev-save-btn');
+  if(btn){ btn.disabled=true; btn.textContent='Saving…'; }
+  try {
+    if(mode==='move'){
+      // PATCH only the start/end times
+      await window._calApiReq('PATCH', `/calendars/primary/events/${eventId}`, {
+        start:{dateTime:startDt, timeZone:tz},
+        end:  {dateTime:endDt,   timeZone:tz},
+      });
+      showToast('Meeting moved ✓','success');
+    } else {
+      const title     = (document.getElementById('cev-title')?.value||'').trim();
+      const desc      = (document.getElementById('cev-desc')?.value||'').trim();
+      const rawEmails = (document.getElementById('cev-attendees')?.value||'');
+      const attendees = rawEmails.split(',').map(e=>e.trim()).filter(Boolean).map(email=>({email}));
+      if(!title){ showToast('Title is required','error'); if(btn){btn.disabled=false;btn.textContent=mode==='edit'?'Save Changes':'Create Meeting';} return; }
+      const body = {
+        summary: title,
+        description: desc||undefined,
+        start:{dateTime:startDt, timeZone:tz},
+        end:  {dateTime:endDt,   timeZone:tz},
+        ...(attendees.length ? {attendees, guestsCanInviteOthers:false} : {}),
+      };
+      if(mode==='edit'){
+        await window._calApiReq('PATCH', `/calendars/primary/events/${eventId}`, body);
+        showToast('Meeting updated ✓','success');
+      } else {
+        await window._calApiReq('POST', '/calendars/primary/events?sendNotifications=true', body);
+        showToast('Meeting created ✓','success');
+      }
+    }
+    document.getElementById('gcal-event-modal')?.remove();
+    document.getElementById('gcal-upcoming-panel')?.remove();
+    // Reload the embedded calendar iframe to show the change
+    const iframe = document.getElementById('gcal-embed');
+    if(iframe){ const s=iframe.src; iframe.src=''; setTimeout(()=>iframe.src=s,300); }
+  } catch(e){
+    console.error('[_calSaveEvent]',e);
+    showToast(e.message,'error',5000);
+    if(btn){ btn.disabled=false; btn.textContent=mode==='move'?'Move Meeting':mode==='edit'?'Save Changes':'Create Meeting'; }
+  }
+};
+
+window._calDeleteEvent = async function(eventId){
+  if(!confirm('Delete this meeting? This cannot be undone.')) return;
+  try {
+    await window._calApiReq('DELETE',`/calendars/primary/events/${eventId}`);
+    showToast('Meeting deleted','success');
+    document.getElementById('gcal-event-modal')?.remove();
+    document.getElementById('gcal-upcoming-panel')?.remove();
+    const iframe = document.getElementById('gcal-embed');
+    if(iframe){ const s=iframe.src; iframe.src=''; setTimeout(()=>iframe.src=s,300); }
+  } catch(e){ showToast(e.message,'error'); }
+};
 
 /* =======================================================
    VIEW: TASKS
@@ -10036,7 +10281,7 @@ window._crmProcessOutreachRecord = async function(r){
       `Subject: ${r.emailSubject||''}`,
     ].filter(Boolean).join('\n');
     try {
-      await addDoc(collection(_fbDb, `contacts/${contactId}/activities`), {
+      await addDoc(collection(_fbDb, 'contacts', contactId, 'activities'), {
         type:'email',
         subject:`📧 Brochure sent — ${propLabel}`,
         body: actBody,
@@ -15375,31 +15620,33 @@ init();
 
 // Update task count & headline count badges on all tab buttons
 function _updateNavBadges(){
-  const uid = currentUser?.uid;
-  if(!uid) return;
-  // ── Tasks badge ──────────────────────────────────────
-  const isFirmV = (currentUser?.isAdmin||currentUser?.isOfficeManager) && !adminViewAsAdvisor && !staffViewMode;
-  const taskCount = isFirmV
-    ? allTasks.filter(t=>t.status==='pending').length
-    : allTasks.filter(t=>t.assignedTo===uid && t.status==='pending').length;
-  ['nav-badge-tasks','mtab-badge-tasks'].forEach(elId=>{
-    const el=document.getElementById(elId);
-    if(!el) return;
-    el.textContent = taskCount > 99 ? '99+' : taskCount;
-    el.style.display = taskCount > 0 ? '' : 'none';
-  });
-  // ── HR Headlines badge ────────────────────────────────
-  const lastSeen = parseInt(localStorage.getItem('hr_headlines_seen')||'0');
-  const newHl = allHeadlines.filter(h=>{
-    const ts = h.createdAt?.toMillis ? h.createdAt.toMillis() : (h.createdAt||0);
-    return ts > lastSeen;
-  }).length;
-  ['nav-badge-hr','mtab-badge-hr'].forEach(elId=>{
-    const el=document.getElementById(elId);
-    if(!el) return;
-    el.textContent = newHl > 99 ? '99+' : newHl;
-    el.style.display = newHl > 0 ? '' : 'none';
-  });
+  try {
+    const uid = currentUser?.uid;
+    if(!uid) return;
+    // ── Tasks badge ──────────────────────────────────────
+    const isFirmV = (currentUser?.isAdmin||currentUser?.isOfficeManager) && !adminViewAsAdvisor && !staffViewMode;
+    const taskCount = isFirmV
+      ? allTasks.filter(t=>t.status==='pending').length
+      : allTasks.filter(t=>t.assignedTo===uid && t.status==='pending').length;
+    ['nav-badge-tasks','mtab-badge-tasks'].forEach(elId=>{
+      const el=document.getElementById(elId);
+      if(!el) return;
+      el.textContent = taskCount > 99 ? '99+' : taskCount;
+      el.style.display = taskCount > 0 ? '' : 'none';
+    });
+    // ── HR Headlines badge ────────────────────────────────
+    const lastSeen = parseInt(localStorage.getItem('hr_headlines_seen')||'0');
+    const newHl = (allHeadlines||[]).filter(h=>{
+      const ts = h.createdAt?.toMillis ? h.createdAt.toMillis() : (h.createdAt||0);
+      return ts > lastSeen;
+    }).length;
+    ['nav-badge-hr','mtab-badge-hr'].forEach(elId=>{
+      const el=document.getElementById(elId);
+      if(!el) return;
+      el.textContent = newHl > 99 ? '99+' : newHl;
+      el.style.display = newHl > 0 ? '' : 'none';
+    });
+  } catch(e){ console.warn('[_updateNavBadges]', e); }
 }
 
 // Show a brief auto-dismiss notification popup
@@ -15500,7 +15747,7 @@ window._reauthCalendarReminders = async function(){
   if(!_fbFns || !_fbAuth) return;
   const {GoogleAuthProvider, signInWithPopup} = _fbFns;
   const provider = new GoogleAuthProvider();
-  provider.addScope('https://www.googleapis.com/auth/calendar.readonly');
+  provider.addScope('https://www.googleapis.com/auth/calendar.events');
   try {
     const result = await signInWithPopup(_fbAuth, provider);
     const cred = GoogleAuthProvider.credentialFromResult(result);
@@ -15564,20 +15811,28 @@ window._hrSaveHeadline = async function(existingId){
   const title = document.getElementById('hl-title')?.value.trim()||'';
   const body  = document.getElementById('hl-body')?.value.trim()||'';
   if(!title){ showToast('Headline title is required','error'); return; }
-  if(!_fbDb||!_fbFns){ showToast('Not connected','error'); return; }
-  const {collection: _col, addDoc: _add, doc: _d, updateDoc: _upd} = _fbFns;
-  if(existingId){
-    await _upd(_d(_fbDb,'hrHeadlines',existingId), { title, body, updatedAt:Date.now() });
-    showToast('Headline updated ✓','success');
-  } else {
-    await _add(_col(_fbDb,'hrHeadlines'), {
-      title, body, createdAt:Date.now(), updatedAt:Date.now(),
-      createdBy: currentUser?.uid||'', createdByName: currentUser?.name||currentUser?.email||''
-    });
-    showToast('Headline posted ✓','success');
+  if(!_fbDb||!_fbFns){ showToast('Not connected to database','error'); return; }
+  const btn = document.querySelector('#hl-modal button');
+  if(btn){ btn.disabled=true; btn.textContent='Saving…'; }
+  try {
+    const {collection: _col, addDoc: _add, doc: _d, updateDoc: _upd} = _fbFns;
+    if(existingId){
+      await _upd(_d(_fbDb,'hrHeadlines',existingId), { title, body, updatedAt:Date.now() });
+      showToast('Headline updated ✓','success');
+    } else {
+      await _add(_col(_fbDb,'hrHeadlines'), {
+        title, body, createdAt:Date.now(), updatedAt:Date.now(),
+        createdBy: currentUser?.uid||'', createdByName: currentUser?.name||currentUser?.email||''
+      });
+      showToast('Headline posted ✓','success');
+    }
+    document.getElementById('hl-modal')?.remove();
+    if(currentView==='hr') viewHR();
+  } catch(e){
+    console.error('[_hrSaveHeadline]', e);
+    showToast('Save failed: ' + (e?.message||'permission denied — check Firestore rules'), 'error', 6000);
+    if(btn){ btn.disabled=false; btn.textContent=existingId?'Save Changes':'Post Headline'; }
   }
-  document.getElementById('hl-modal')?.remove();
-  if(currentView==='hr') viewHR();
 };
 
 window.mobileTab = function(id){
