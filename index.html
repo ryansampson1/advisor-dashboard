@@ -990,6 +990,20 @@ let SC         = {...BASE_SC};
 // Unified seed used on very first load (no localStorage entry yet)
 const SEED_ALL_STAGES = DEFAULT_STAGES.map(name=>({name, prob:DEFAULT_STAGE_PROB[name]??50}));
 
+// Migrate old stage names → "Lost / Terminated" (runs on both localStorage and Firestore paths)
+function migrateStagesList(list){
+  if(!Array.isArray(list)) return list;
+  const _ltOld = ['Contract Terminated','Lost Listing','Lost Proposal','Lost Listing/Proposal'];
+  const hasOld = _ltOld.some(n => list.some(s => s.name === n));
+  const hasNew = list.some(s => s.name === 'Lost / Terminated');
+  if(!hasOld || hasNew) return list; // nothing to do
+  const indices = _ltOld.map(n => list.findIndex(s => s.name === n)).filter(i => i >= 0);
+  const insertAt = indices.length ? Math.min(...indices) : list.length;
+  const migrated = list.filter(s => !_ltOld.includes(s.name));
+  migrated.splice(insertAt, 0, {name:'Lost / Terminated', prob:0});
+  return migrated;
+}
+
 // Apply a stage list to the runtime arrays (no I/O — pure state update)
 function applyStagesList(list){
   if(!Array.isArray(list)||!list.length){ STAGES=[...DEFAULT_STAGES]; STAGE_PROB={...DEFAULT_STAGE_PROB}; SC={...BASE_SC}; return; }
@@ -1023,14 +1037,9 @@ function loadCustomStages(){
     localStorage.setItem(K('allStages'), JSON.stringify(list));
   }
   // ── One-time migration: merge old lost/terminated stages → "Lost / Terminated" ──
-  const _ltOld = ['Contract Terminated','Lost Listing','Lost Proposal','Lost Listing/Proposal'];
-  const _ltOldInList = _ltOld.filter(n => list.some(s => s.name === n));
-  const _ltNewInList = list.some(s => s.name === 'Lost / Terminated');
-  if(_ltOldInList.length && !_ltNewInList){
-    const indices = _ltOld.map(n => list.findIndex(s => s.name === n)).filter(i => i >= 0);
-    const insertAt = indices.length ? Math.min(...indices) : list.length;
-    list = list.filter(s => !_ltOld.includes(s.name));
-    list.splice(insertAt, 0, {name:'Lost / Terminated', prob:0});
+  const _ltMigrated = migrateStagesList(list);
+  if(_ltMigrated !== list){
+    list = _ltMigrated;
     localStorage.setItem(K('allStages'), JSON.stringify(list));
   }
 
@@ -4718,10 +4727,17 @@ const FB = {
         const docId = d.id;
         const payload = d.data();
         if(docId === 'stageConfig'){
-          // Sync stage config across machines
+          // Sync stage config across machines (run migration in case Firestore has old stage names)
           if(Array.isArray(payload.data) && payload.data.length){
-            localStorage.setItem(K('allStages'), JSON.stringify(payload.data));
-            applyStagesList(payload.data);
+            const _migrated = migrateStagesList(payload.data);
+            localStorage.setItem(K('allStages'), JSON.stringify(_migrated));
+            applyStagesList(_migrated);
+            // If migration changed the list, write it back to Firestore so all machines stay in sync
+            if(_migrated !== payload.data){
+              const {doc, setDoc} = _fbFns;
+              setDoc(doc(_fbDb,'eos','stageConfig'), {data: _migrated}, {merge:false})
+                .catch(e=>console.warn('[stages] migration write-back failed', e));
+            }
           }
         } else if(docId === 'officeManagers'){
           // Sync office managers across machines
