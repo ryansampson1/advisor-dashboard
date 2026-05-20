@@ -1977,14 +1977,24 @@ async function handleProposalTodoAutomation(deal){
       const templateBytes=Uint8Array.from(atob(LISTING_AGREEMENT_TEMPLATE_B64),c=>c.charCodeAt(0));
       const zip=await JSZip.loadAsync(templateBytes);
       let docXml=await zip.file('word/document.xml').async('string');
+      // ── CRM contact lookup — pull seller details from linked contact record ──
+      const _crmHit = (typeof allContacts!=='undefined'?allContacts:[])
+        .filter(c=>(c.linkedDeals||[]).includes(deal.id))[0]||null;
+      const _crmAddr = _crmHit?.mailingAddress||{};
+      const _crmFullName = _crmHit?[_crmHit.firstName,_crmHit.lastName].filter(Boolean).join(' ')||_crmHit.email||'':'';
+      const _crmStreet = [_crmAddr.street,_crmAddr.city,_crmAddr.state].filter(Boolean).join(', ');
+      const _crmZip    = _crmAddr.zip||'';
+      const _crmPhone  = _crmHit?.phone||_crmHit?.officePhone||_crmHit?.phone2||'';
+      const _crmEmail  = _crmHit?.email||'';
+
       const sellerEntity=escXml(deal.clientName||deal.sellerName||clientName||'[Seller Entity]');
-      const sellerContact=escXml(deal.sellerContactName||deal.ownerContactName||deal.clientContact||sellerEntity);
-      const sellerAddr=escXml(deal.sellerAddress||deal.ownerAddress||deal.mailingAddress||'');
+      const sellerContact=escXml(deal.sellerContactName||deal.ownerContactName||deal.clientContact||_crmFullName||sellerEntity);
+      const sellerAddr=escXml(deal.sellerAddress||deal.ownerAddress||deal.mailingAddress||_crmStreet||'');
       const propCity=escXml(deal.city||deal.propertyCity||deal.county||county||'');
       const propState=escXml('FL');
-      const zipCode=escXml(deal.zip||deal.propertyZip||deal.zipCode||'');
-      const sellerPhone=escXml(deal.sellerPhone||deal.ownerPhone||deal.phone||deal.clientPhone||'');
-      const sellerEmail=escXml(deal.sellerEmail||deal.ownerEmail||deal.email||deal.clientEmail||'');
+      const zipCode=escXml(deal.zip||deal.propertyZip||deal.zipCode||_crmZip||'');
+      const sellerPhone=escXml(deal.sellerPhone||deal.ownerPhone||deal.phone||deal.clientPhone||_crmPhone||'');
+      const sellerEmail=escXml(deal.sellerEmail||deal.ownerEmail||deal.email||deal.clientEmail||_crmEmail||'');
       const legalDesc=escXml(deal.legalDescription||deal.legal||'[Legal description to be attached as Exhibit A — see County Property Appraiser]');
       docXml=docXml
         .replace(/\{\{seller_entity\}\}/g,sellerEntity)
