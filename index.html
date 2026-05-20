@@ -3332,9 +3332,40 @@ let   gateContext   = null; // { dealId, newStage, oldStage, gate }
 /* =======================================================
    STAGE-SPECIFIC FIELDS
    ======================================================= */
+// Appends acreage + zoning property detail fields to a stage container.
+// Called from appendInlineGateFields (covers all normal stages) and Sold/fallback directly.
+function _appendSfPropDetails(container, data){
+  if(!container) return;
+  const wrap = document.createElement('div');
+  wrap.className = 'sf-prop-details-section';
+  wrap.innerHTML = `
+    <div class="border-t pt-3 mt-2">
+      <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">Property Details</div>
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Acreage / Sq Ft</label>
+          <input id="sf-acreage" type="number" step="any" min="0" placeholder="e.g. 12.5"
+            value="${data.acreage||data.acres||''}"
+            class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-300"/>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Zoning</label>
+          <input id="sf-zoning" type="text" placeholder="e.g. A-1, C-2, PD"
+            value="${data.zoning||''}"
+            class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-300"/>
+        </div>
+      </div>
+    </div>`;
+  container.appendChild(wrap);
+}
+
 // Appends admin-configured gate fields that are NOT already covered by the
 // built-in stage template (avoids duplicates for price, escrow, dates, etc.)
 function appendInlineGateFields(container, stage, data, dealKey){
+  // Always append acreage/zoning section to every stage that calls this function
+  if(!container.querySelector('.sf-prop-details-section')){
+    _appendSfPropDetails(container, data);
+  }
   const gate = getStageGate(stage);
   if(!gate?.enabled || !gate.fields?.length) return;
   const existingGateData = (data?.gateData?.[stage]) || {};
@@ -4837,6 +4868,7 @@ function renderStageFields(stage, data={}){
             class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-red-300">${data.notes||''}</textarea>
         </div>
       </div>`;
+    _appendSfPropDetails(container, data);
     return;
   }
 
@@ -4937,6 +4969,7 @@ function renderStageFields(stage, data={}){
       }
     });
   }
+  _appendSfPropDetails(container, data);
 }
 
 window.handleStageFileSelect = (ev, type) => {
@@ -16809,6 +16842,9 @@ function collectStageFields(){
     boNotes:      g('sf-bo-notes'),
     // Sold notes override (shown in comprehensive Sold edit view)
     ...(document.getElementById('sf-sold-notes') ? {notes: g('sf-sold-notes')} : {}),
+    // Property details — only override base form values if explicitly filled in the stage section
+    ...(document.getElementById('sf-acreage')?.value ? {acreage: parseFloat(document.getElementById('sf-acreage').value)||''} : {}),
+    ...(document.getElementById('sf-zoning')?.value?.trim() ? {zoning: document.getElementById('sf-zoning').value.trim()} : {}),
   };
 }
 
