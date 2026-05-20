@@ -13558,11 +13558,90 @@ function viewEOS(sub='rocks'){
       </div>
     </div>`;
 
+  // ── Compact personal scorecard row (advisor & staff views, all tabs) ──────
+  let _myScHtml = '';
+  if(!effectiveAdminGlobal){
+    const _n=new Date(),_dow=_n.getDay(),_dtm=_dow===0?6:_dow-1;
+    const _tm=new Date(_n); _tm.setDate(_n.getDate()-_dtm); _tm.setHours(0,0,0,0);
+    const _pws=new Date(_tm); _pws.setDate(_tm.getDate()-7);
+    const _pwe=new Date(_tm); _pwe.setMilliseconds(-1);
+    const _pwS=_pws.getTime(),_pwE=_pwe.getTime();
+    const _wk=_pws.toISOString().split('T')[0];
+    const _fD=d=>d.toLocaleDateString('en-US',{month:'short',day:'numeric'});
+    const _wkLbl=_fD(_pws)+' – '+_pwe.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+    const _qn=Math.floor(_n.getMonth()/3)+1;
+    const _qS=new Date(_n.getFullYear(),(_qn-1)*3,1).getTime();
+    const _qE=new Date(_n.getFullYear(),_qn*3,0,23,59,59).getTime();
+    const _gr=s=>s>=100?{l:'A+',c:'#7c3aed',b:'#f5f3ff'}:s>=90?{l:'A',c:'#059669',b:'#f0fdf4'}:s>=80?{l:'B',c:'#0891b2',b:'#f0f9ff'}:s>=70?{l:'C',c:'#D97706',b:'#fffbeb'}:s>=60?{l:'D',c:'#ea580c',b:'#fff7ed'}:{l:'F',c:'#DA291C',b:'#fef2f2'};
+    const _mc=(lbl,val,good)=>`<div class="bg-gray-50 rounded-xl p-2.5 text-center min-w-0"><div class="text-xs font-bold text-gray-400 uppercase tracking-wide leading-none mb-1" style="font-size:.6rem">${lbl}</div><div class="text-sm font-bold" style="color:${good?'#059669':'var(--text-1)'}">${val}</div></div>`;
+    const _isStaff=isStaffView();
+    let _sc=0,_gObj={l:'F',c:'#DA291C',b:'#fef2f2'},_mHtml='',_ttl='';
+    if(!_isStaff){
+      const _QG=(allProfiles[uid]?.quarterlyUCGoal)||10000000;
+      const _md=allDeals.filter(d=>d.advisorUid===uid||(d.coAdvisors||[]).some(ca=>ca.uid===uid));
+      const _mt=allTasks.filter(t=>t.assignedTo===uid);
+      const _qd=_md.filter(d=>{if(isLostStage(d.stage||''))return false;if(!isContractActiveStage(d.stage)&&!isWonStage(d.stage||''))return false;const ts=getEffectiveDealTs(d);return ts>=_qS&&ts<=_qE;});
+      const _qv=_qd.reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||0),0);
+      const _qp=Math.min(Math.round(_qv/_QG*100),100);
+      const _ot=_mt.filter(t=>t.status==='pending').length;
+      const _dt=_mt.filter(t=>t.status==='complete'&&(t.updatedAt||0)>=_pwS&&(t.updatedAt||0)<=_pwE).length;
+      const _inPW=d=>{const ts=(d.stageEnteredAt||d.createdAt||0);return ts>=_pwS&&ts<=_pwE;};
+      const _sp=(d,b)=>{if(d.advisorUid===uid){const ct=(d.coAdvisors||[]).reduce((s,ca)=>s+(ca.splitPct||0),0);return b*Math.max(0,100-ct)/100;}const ca=(d.coAdvisors||[]).find(c=>c.uid===uid);return ca?b*(ca.splitPct||0)/100:0;};
+      const _pr=_md.filter(d=>d.stage==='Prospect'&&(d.createdAt||0)>=_pwS&&(d.createdAt||0)<=_pwE);
+      const _lo=_md.filter(d=>d.stage==='LOI'&&_inPW(d));
+      const _po=_md.filter(d=>d.stage==='Proposal To Do'&&_inPW(d));
+      const _li=_md.filter(d=>d.stage==='Listing'&&_inPW(d));
+      const _co=_md.filter(d=>/under.?contract/i.test(d.stage||'')&&_inPW(d));
+      const _wi=allProfiles[uid]?.weeklyInputs?.[_wk]||{};
+      const _ne=_wi.networkEvent||''; const _dp=_wi.driveProperties||'';
+      const _pts=[_qp>=10?10:0,Math.max(0,10-_ot*2),_ot===0?10:Math.round(_dt/(_dt+_ot)*10),_pr.reduce((s,d)=>s+_sp(d,1),0),_lo.reduce((s,d)=>s+_sp(d,5),0),_po.reduce((s,d)=>s+_sp(d,5),0),_li.reduce((s,d)=>s+_sp(d,10),0),_co.reduce((s,d)=>s+_sp(d,10),0),_ne==='yes'?10:0,_dp==='yes'?10:0];
+      _sc=Math.round(_pts.reduce((a,b)=>a+b,0)); _gObj=_gr(_sc); _ttl='📊 My Weekly Scorecard';
+      _mHtml=`<div class="grid gap-2 flex-1 min-w-0" style="grid-template-columns:repeat(auto-fill,minmax(64px,1fr))">
+        ${_mc('Q'+_qn+' Goal',_qp+'%',_qp>=10)}${_mc('Open Tasks',_ot,_ot===0)}${_mc('Tasks Done',_dt,_dt>0)}
+        ${_mc('Prospects',_pr.length,_pr.length>0)}${_mc('LOIs',_lo.length,_lo.length>0)}${_mc('Proposals',_po.length,_po.length>0)}
+        ${_mc('Listings',_li.length,_li.length>0)}${_mc('Contracts',_co.length,_co.length>0)}
+        ${_mc('Net. Event',_ne==='yes'?'✓ Yes':_ne==='no'?'✗ No':'—',_ne==='yes')}
+        ${_mc('Prop. Visit',_dp==='yes'?'✓ Yes':_dp==='no'?'✗ No':'—',_dp==='yes')}
+      </div>`;
+    } else {
+      const _st=allTasks.filter(t=>t.assignedTo===uid);
+      const _ot=_st.filter(t=>t.status==='pending').length;
+      const _dt=_st.filter(t=>t.status==='complete'&&(t.updatedAt||0)>=_pwS&&(t.updatedAt||0)<=_pwE).length;
+      const _pp=_st.filter(t=>t.status==='pending'&&(t.createdAt||0)>=_pwS&&(t.createdAt||0)<=_pwE).length;
+      const _pt=_dt+_pp;
+      const _ar=eosGet('myRocks',{}); const _rk=_ar[uid]||[];
+      const _on=_rk.filter(r=>r.status==='complete'||r.status==='inprocess').length;
+      const _tr=_rk.length; const _rp=_tr>0?Math.round(_on/_tr*100):100;
+      _sc=Math.round(_rp*0.33)+(_pt===0?33:Math.round(_dt/_pt*33))+(_ot===0?34:(_dt===0?0:Math.round(_dt/(_dt+_ot)*34)));
+      _gObj=_gr(_sc); _ttl='🏢 My Weekly Scorecard';
+      _mHtml=`<div class="grid gap-2 flex-1 min-w-0" style="grid-template-columns:repeat(3,minmax(80px,1fr))">
+        ${_mc('Open Tasks',_ot,_ot===0)}${_mc('Tasks Done ✓',_dt,_dt>0)}${_mc('Rocks On Track',_rp+'%',_rp>=80)}
+      </div>`;
+    }
+    _myScHtml=`<div class="bg-white rounded-2xl border p-4 mb-5">
+      <div class="flex items-center justify-between mb-3">
+        <div><h3 class="font-bold text-gray-800 text-base">${_ttl}</h3>
+          <p class="text-xs text-gray-400 mt-0.5">Prior week: ${_wkLbl}</p></div>
+        ${sub==='scorecard'?'<span class="text-xs text-gray-400">Full scorecard below ↓</span>':`<button onclick="viewEOS('scorecard')" class="text-xs font-semibold px-3 py-1.5 rounded-lg border border-blue-200 text-blue-600 hover:bg-blue-50 transition">Full Scorecard →</button>`}
+      </div>
+      <div class="flex items-center gap-4">
+        <div style="display:inline-flex;flex-direction:column;align-items:center;gap:3px;flex-shrink:0">
+          <div style="width:52px;height:52px;border-radius:50%;background:${_gObj.b};border:2.5px solid ${_gObj.c};display:flex;align-items:center;justify-content:center">
+            <span style="font-size:${_gObj.l.length>1?'1rem':'1.25rem'};font-weight:800;color:${_gObj.c}">${_gObj.l}</span>
+          </div>
+          <span style="font-size:.7rem;color:${_gObj.c};font-weight:700">${_sc} pts</span>
+        </div>
+        ${_mHtml}
+      </div>
+    </div>`;
+  }
+
   setContent(`
     <div class="flex items-center justify-between mb-5">
       <h2 class="text-xl font-bold text-gray-800">EOS Operating System</h2>
     </div>
     ${companyGoalsHtml}
+    ${_myScHtml}
     <div style="overflow-x:auto;-webkit-overflow-scrolling:touch" class="mb-6"><div class="flex gap-2 bg-gray-100 p-1.5 rounded-xl w-fit min-w-max">${nav}</div></div>
     ${body}
   `);
