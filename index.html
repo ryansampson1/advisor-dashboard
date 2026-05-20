@@ -6737,7 +6737,11 @@ function viewBoardStaff(){
   const deals = allDeals.filter(d => !isLostStage(d.stage||''));
   const byStage = {};
   STAGES.forEach(s => byStage[s] = []);
-  deals.forEach(d => { if(byStage[d.stage]) byStage[d.stage].push(d); });
+  deals.forEach(d => {
+    const es = STAGE_ALIAS[d.stage] || d.stage;
+    if(byStage[es]) byStage[es].push(d);
+    else if(byStage[d.stage]) byStage[d.stage].push(d);
+  });
 
   // ── Staff KPIs ───────────────────────────────────────────────────────────
   const getPrice    = d => d.purchasePrice||d.contractPrice||d.listedPrice||d.loiPrice||0;
@@ -6837,6 +6841,8 @@ function viewBoardStaff(){
       }).join('')}
     </div>
   `);
+  // Render mobile pipeline list (shown on small screens)
+  if(window.renderMobilePipeline) renderMobilePipeline(deals);
 }
 
 function renderStaffCard(deal){
@@ -17286,38 +17292,54 @@ window.renderMobilePipeline = function(deals, stages){
   const container = document.getElementById('pipeline-mobile');
   if(!container) return;
   if(window.innerWidth >= 768){ container.style.display='none'; return; }
-  
-  const allStages = stages || getAllStages().map(s=>s.name);
+
+  // Resolve effective stage for a deal (respects STAGE_ALIAS)
+  const effectiveStage = d => STAGE_ALIAS[d.stage] || d.stage;
+
+  const allStages = stages || STAGES; // use live STAGES array so aliases are already resolved
   let activeStage = container.dataset.stage || 'All';
 
-  const filtered = activeStage==='All' ? deals : deals.filter(d=>d.stage===activeStage);
+  // Filter: use effective stage so aliased deals match their display column
+  const filtered = activeStage==='All' ? deals : deals.filter(d=>effectiveStage(d)===activeStage);
+
+  // Count by effective stage
   const stageCounts = {};
-  allStages.forEach(s=>{ stageCounts[s]=(deals.filter(d=>d.stage===s).length); });
+  allStages.forEach(s=>{ stageCounts[s] = deals.filter(d=>effectiveStage(d)===s).length; });
   const totalAll = deals.length;
+
+  // Helper: format a date string for display
+  const fmtD = s => { if(!s) return ''; try{ return new Date(s+'T00:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'}); }catch(e){ return s; } };
 
   container.innerHTML = `
     <div style="padding:0 1rem .5rem">
       <div class="stage-pills">
         <div class="stage-pill${activeStage==='All'?' active':''}" onclick="mobilePipelineFilter('All')">All (${totalAll})</div>
-        ${allStages.map(s=>`<div class="stage-pill${activeStage===s?' active':''}" onclick="mobilePipelineFilter('${s.replace(/'/g,"\'")}'">${s} (${stageCounts[s]||0})</div>`).join('')}
+        ${allStages.map(s=>`<div class="stage-pill${activeStage===s?' active':''}" onclick="mobilePipelineFilter('${s.replace(/'/g,"\\'")}')">${s} (${stageCounts[s]||0})</div>`).join('')}
       </div>
     </div>
     <div style="padding:0 1rem 1rem">
       ${filtered.length===0
         ? `<div style="text-align:center;color:var(--text-2);padding:3rem 1rem;font-size:.9rem">No deals in this stage</div>`
-        : filtered.map(d => `
-        <div class="mobile-deal-card" onclick="openDealModal('${d.id}')">
-          <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem">
-            <div style="font-weight:700;font-size:.95rem;color:var(--text-1);flex:1">${d.name||'Untitled'}</div>
-            <div style="font-size:.7rem;font-weight:700;padding:.2rem .6rem;border-radius:99px;background:#f3f4f6;color:var(--text-2);white-space:nowrap">${d.stage||''}</div>
-          </div>
-          ${d.price ? `<div style="font-weight:700;color:var(--brand-red);margin-top:.35rem;font-size:1rem">$${Number(d.price).toLocaleString()}</div>` : ''}
-          <div style="display:flex;gap:1rem;margin-top:.5rem;font-size:.75rem;color:var(--text-2)">
-            ${d.advisorName ? `<span>👤 ${d.advisorName}</span>` : ''}
-            ${d.ddExpiry ? `<span>📅 DD ${d.ddExpiry}</span>` : ''}
-            ${d.closing ? `<span>🏁 ${d.closing}</span>` : ''}
-          </div>
-        </div>`).join('')}
+        : filtered.map(d => {
+            const title = d.projectName||d.propertyAddress||'Untitled';
+            const price = d.purchasePrice||d.contractPrice||d.listedPrice||d.loiPrice||0;
+            const dd    = fmtD(d.ddExpirationDate);
+            const cl    = fmtD(d.closeDate);
+            const stg   = effectiveStage(d);
+            return `
+            <div class="mobile-deal-card" onclick="openDealModal('${d.id}')">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem">
+                <div style="font-weight:700;font-size:.95rem;color:var(--text-1);flex:1;line-height:1.3">${title}</div>
+                <div style="font-size:.68rem;font-weight:700;padding:.2rem .55rem;border-radius:99px;background:#f3f4f6;color:var(--text-2);white-space:nowrap;flex-shrink:0">${stg}</div>
+              </div>
+              ${price>0 ? `<div style="font-weight:700;color:var(--brand-red);margin-top:.35rem;font-size:1rem">$${Number(price).toLocaleString()}</div>` : ''}
+              <div style="display:flex;flex-wrap:wrap;gap:.6rem 1rem;margin-top:.45rem;font-size:.75rem;color:var(--text-2)">
+                ${d.advisorName ? `<span>👤 ${d.advisorName}</span>` : ''}
+                ${dd ? `<span>📅 DD ${dd}</span>` : ''}
+                ${cl ? `<span>🏁 Close ${cl}</span>` : ''}
+              </div>
+            </div>`;
+          }).join('')}
     </div>`;
   container.style.display = 'block';
 };
