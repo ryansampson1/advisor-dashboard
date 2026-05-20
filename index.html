@@ -15777,64 +15777,103 @@ window._hrDeleteHeadline = async function(id){
 };
 function _hrOpenHeadlineModal(existing){
   document.getElementById('hl-modal')?.remove();
-  const m = document.createElement('div');
-  m.id = 'hl-modal';
-  m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9000;display:flex;align-items:center;justify-content:center;padding:1rem';
-  m.innerHTML = `
-    <div style="background:#fff;border-radius:16px;padding:1.75rem;width:100%;max-width:460px;box-shadow:0 20px 60px rgba(0,0,0,.3)">
-      <div style="font-size:1rem;font-weight:700;margin-bottom:1.25rem;color:#1e1b4b">${existing?'Edit':'New'} Company Headline</div>
-      <label style="font-size:.72rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:#6b7280;display:block;margin-bottom:.3rem">Headline Title *</label>
-      <input id="hl-title" type="text" value="${(existing?.title||'').replace(/"/g,'&quot;')}" placeholder="e.g. Q2 all-hands meeting — June 15"
-        style="width:100%;border:1.5px solid #e5e7eb;border-radius:8px;padding:.55rem .75rem;font-size:.875rem;margin-bottom:1rem;outline:none;box-sizing:border-box"
-        onfocus="this.style.borderColor='#6366f1'" onblur="this.style.borderColor='#e5e7eb'"/>
-      <label style="font-size:.72rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:#6b7280;display:block;margin-bottom:.3rem">Details (optional)</label>
-      <textarea id="hl-body" rows="4" placeholder="Additional details visible to all staff and advisors…"
-        style="width:100%;border:1.5px solid #e5e7eb;border-radius:8px;padding:.55rem .75rem;font-size:.875rem;resize:vertical;outline:none;box-sizing:border-box;font-family:inherit"
-        onfocus="this.style.borderColor='#6366f1'" onblur="this.style.borderColor='#e5e7eb'">${existing?.body||''}</textarea>
-      <div style="display:flex;gap:.75rem;margin-top:1.25rem">
-        <button id="hl-save-btn"
-          style="flex:1;background:#6366f1;color:#fff;border:none;border-radius:8px;padding:.65rem;font-size:.875rem;font-weight:600;cursor:pointer">
-          ${existing?'Save Changes':'Post Headline'}
-        </button>
-        <button id="hl-cancel-btn"
-          style="padding:.65rem 1.1rem;border:1.5px solid #e5e7eb;background:none;border-radius:8px;font-size:.875rem;cursor:pointer;color:#6b7280">
-          Cancel
-        </button>
-      </div>
-    </div>`;
-  document.body.appendChild(m);
-  // Use addEventListener instead of inline onclick — avoids CSP / scope issues
-  document.getElementById('hl-save-btn').addEventListener('click', () => window._hrSaveHeadline(existing?.id||''));
-  document.getElementById('hl-cancel-btn').addEventListener('click', () => document.getElementById('hl-modal')?.remove());
-  document.getElementById('hl-title').focus();
-}
-window._hrSaveHeadline = async function(existingId){
-  const title = document.getElementById('hl-title')?.value.trim()||'';
-  const body  = document.getElementById('hl-body')?.value.trim()||'';
-  if(!title){ showToast('Headline title is required','error'); return; }
-  if(!_fbDb||!_fbFns){ showToast('Not connected to database','error'); return; }
-  const btn = document.querySelector('#hl-modal button');
-  if(btn){ btn.disabled=true; btn.textContent='Saving…'; }
-  try {
-    const {collection: _col, addDoc: _add, doc: _d, updateDoc: _upd} = _fbFns;
-    if(existingId){
-      await _upd(_d(_fbDb,'hrHeadlines',existingId), { title, body, updatedAt:Date.now() });
-      showToast('Headline updated ✓','success');
-    } else {
-      await _add(_col(_fbDb,'hrHeadlines'), {
-        title, body, createdAt:Date.now(), updatedAt:Date.now(),
-        createdBy: currentUser?.uid||'', createdByName: currentUser?.name||currentUser?.email||''
-      });
-      showToast('Headline posted ✓','success');
+
+  // Build modal entirely via DOM API — no innerHTML, no getElementById race conditions
+  const overlay = document.createElement('div');
+  overlay.id = 'hl-modal';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:10000;display:flex;align-items:center;justify-content:center;padding:1rem';
+
+  const card = document.createElement('div');
+  card.style.cssText = 'background:#fff;border-radius:16px;padding:1.75rem;width:100%;max-width:460px;box-shadow:0 20px 60px rgba(0,0,0,.3)';
+
+  // Title
+  const heading = document.createElement('div');
+  heading.style.cssText = 'font-size:1rem;font-weight:700;margin-bottom:1.25rem;color:#1e1b4b';
+  heading.textContent = (existing ? 'Edit' : 'New') + ' Company Headline';
+  card.appendChild(heading);
+
+  // Headline title label + input
+  const lbl1 = document.createElement('label');
+  lbl1.style.cssText = 'font-size:.72rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:#6b7280;display:block;margin-bottom:.3rem';
+  lbl1.textContent = 'Headline Title *';
+  card.appendChild(lbl1);
+
+  const titleInput = document.createElement('input');
+  titleInput.type = 'text';
+  titleInput.value = existing?.title || '';
+  titleInput.placeholder = 'e.g. Q2 all-hands meeting — June 15';
+  titleInput.style.cssText = 'width:100%;border:1.5px solid #e5e7eb;border-radius:8px;padding:.55rem .75rem;font-size:.875rem;margin-bottom:1rem;outline:none;box-sizing:border-box';
+  titleInput.addEventListener('focus', () => titleInput.style.borderColor = '#6366f1');
+  titleInput.addEventListener('blur',  () => titleInput.style.borderColor = '#e5e7eb');
+  card.appendChild(titleInput);
+
+  // Body label + textarea
+  const lbl2 = document.createElement('label');
+  lbl2.style.cssText = 'font-size:.72rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:#6b7280;display:block;margin-bottom:.3rem';
+  lbl2.textContent = 'Details (optional)';
+  card.appendChild(lbl2);
+
+  const bodyInput = document.createElement('textarea');
+  bodyInput.rows = 4;
+  bodyInput.placeholder = 'Additional details visible to all staff and advisors…';
+  bodyInput.value = existing?.body || '';
+  bodyInput.style.cssText = 'width:100%;border:1.5px solid #e5e7eb;border-radius:8px;padding:.55rem .75rem;font-size:.875rem;resize:vertical;outline:none;box-sizing:border-box;font-family:inherit';
+  bodyInput.addEventListener('focus', () => bodyInput.style.borderColor = '#6366f1');
+  bodyInput.addEventListener('blur',  () => bodyInput.style.borderColor = '#e5e7eb');
+  card.appendChild(bodyInput);
+
+  // Buttons row
+  const btnRow = document.createElement('div');
+  btnRow.style.cssText = 'display:flex;gap:.75rem;margin-top:1.25rem';
+
+  const saveBtn = document.createElement('button');
+  saveBtn.textContent = existing ? 'Save Changes' : 'Post Headline';
+  saveBtn.style.cssText = 'flex:1;background:#6366f1;color:#fff;border:none;border-radius:8px;padding:.65rem;font-size:.875rem;font-weight:600;cursor:pointer';
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.textContent = 'Cancel';
+  cancelBtn.style.cssText = 'padding:.65rem 1.1rem;border:1.5px solid #e5e7eb;background:none;border-radius:8px;font-size:.875rem;cursor:pointer;color:#6b7280';
+
+  cancelBtn.addEventListener('click', () => overlay.remove());
+  overlay.addEventListener('click', e => { if(e.target === overlay) overlay.remove(); });
+
+  // Save logic lives entirely here — no external function dependency
+  saveBtn.addEventListener('click', async () => {
+    const title = titleInput.value.trim();
+    const body  = bodyInput.value.trim();
+    if(!title){ showToast('Headline title is required','error'); return; }
+    if(!_fbDb || !_fbFns){ showToast('Not connected to database','error'); return; }
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving…';
+    try {
+      const {collection, addDoc, doc, updateDoc} = _fbFns;
+      if(existing?.id){
+        await updateDoc(doc(_fbDb,'hrHeadlines',existing.id), {title, body, updatedAt:Date.now()});
+        showToast('Headline updated ✓','success');
+      } else {
+        await addDoc(collection(_fbDb,'hrHeadlines'), {
+          title, body, createdAt:Date.now(), updatedAt:Date.now(),
+          createdBy: currentUser?.uid||'', createdByName: currentUser?.name||currentUser?.email||''
+        });
+        showToast('Headline posted ✓','success');
+      }
+      overlay.remove();
+      if(currentView==='hr') viewHR();
+    } catch(e){
+      console.error('[hrSaveHeadline]', e);
+      showToast('Save failed: '+(e?.code||e?.message||'check Firestore rules'),'error',6000);
+      saveBtn.disabled = false;
+      saveBtn.textContent = existing ? 'Save Changes' : 'Post Headline';
     }
-    document.getElementById('hl-modal')?.remove();
-    if(currentView==='hr') viewHR();
-  } catch(e){
-    console.error('[_hrSaveHeadline]', e);
-    showToast('Save failed: ' + (e?.message||'permission denied — check Firestore rules'), 'error', 6000);
-    if(btn){ btn.disabled=false; btn.textContent=existingId?'Save Changes':'Post Headline'; }
-  }
-};
+  });
+
+  btnRow.appendChild(saveBtn);
+  btnRow.appendChild(cancelBtn);
+  card.appendChild(btnRow);
+  overlay.appendChild(card);
+  document.body.appendChild(overlay);
+  titleInput.focus();
+}
 
 window.mobileTab = function(id){
   document.querySelectorAll('.mtab').forEach(t => t.classList.remove('active'));
