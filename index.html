@@ -958,8 +958,11 @@ const DEFAULT_STAGES = ["Prospect","Listing","LOI","Due Diligence (Under Contrac
 const DEFAULT_STAGE_PROB = {Prospect:10,Listing:25,"LOI":40,"Due Diligence (Under Contract)":65,Closing:90,"Closed Won":100,"Closed Lost":0};
 // Legacy stage names that map to the new consolidated stage (for backward compat with deals in Firestore)
 const STAGE_ALIAS = {
-  "Under Contract": "Due Diligence (Under Contract)",
-  "Due Diligence":  "Due Diligence (Under Contract)",
+  "Under Contract":       "Due Diligence (Under Contract)",
+  "Due Diligence":        "Due Diligence (Under Contract)",
+  "Contract Terminated":  "Lost / Terminated",
+  "Lost Listing":         "Lost / Terminated",
+  "Lost Proposal":        "Lost / Terminated",
 };
 const BASE_SC = {
   Prospect:                        {hdr:"bg-gray-200",   col:"bg-gray-50",   txt:"text-gray-700"},
@@ -969,6 +972,7 @@ const BASE_SC = {
   Closing:                         {hdr:"bg-purple-100", col:"bg-purple-50", txt:"text-purple-700"},
   "Closed Won":                    {hdr:"bg-green-100",  col:"bg-green-50",  txt:"text-green-700"},
   "Closed Lost":                   {hdr:"bg-red-100",    col:"bg-red-50",    txt:"text-red-700"},
+  "Lost / Terminated":             {hdr:"bg-red-200",    col:"bg-red-50",    txt:"text-red-900"},
 };
 const CUSTOM_COLOR_POOL = [
   {hdr:"bg-pink-100",  col:"bg-pink-50",  txt:"text-pink-700"},
@@ -1017,6 +1021,18 @@ function loadCustomStages(){
     list.splice(insertAt >= 0 ? insertAt : list.length, 0, newStage);
     localStorage.setItem(K('allStages'), JSON.stringify(list));
   }
+  // ── One-time migration: merge "Contract Terminated" + "Lost Listing" + "Lost Proposal" → "Lost / Terminated" ──
+  const _ltOld = ['Contract Terminated','Lost Listing','Lost Proposal'];
+  const _ltOldInList = _ltOld.filter(n => list.some(s => s.name === n));
+  const _ltNewInList = list.some(s => s.name === 'Lost / Terminated');
+  if(_ltOldInList.length && !_ltNewInList){
+    const indices = _ltOld.map(n => list.findIndex(s => s.name === n)).filter(i => i >= 0);
+    const insertAt = indices.length ? Math.min(...indices) : list.length;
+    list = list.filter(s => !_ltOld.includes(s.name));
+    list.splice(insertAt, 0, {name:'Lost / Terminated', prob:0});
+    localStorage.setItem(K('allStages'), JSON.stringify(list));
+  }
+
   // Also ensure LOI is in the list (may not be present for existing users)
   const hasLOI = list.some(s => s.name === 'LOI');
   if(!hasLOI){
@@ -2641,13 +2657,16 @@ function handleLostListingAutomation(deal){
   const addr    = deal.propertyAddress||deal.projectName||'property';
   const dueDate = n=>{ const d=new Date(); d.setDate(d.getDate()+n); return d.toISOString().slice(0,10); };
 
-  /* ── If answers were already saved via the modal, fire tasks directly ── */
-  if(deal.stage==='Lost Listing' && (deal.protectionList || deal.signOnProperty)){
+  /* ── If answers were already saved via the modal (or new combined stage), fire tasks directly ── */
+  const _stg = deal.stage||'';
+  const _lt  = deal.lostType||'';
+  if((_stg==='Lost Listing' || (_stg==='Lost / Terminated' && _lt==='lost_listing'))
+      && (deal.protectionList || deal.signOnProperty)){
     _fireLostListingTasks(deal, {protection: deal.protectionList||'no', sign: deal.signOnProperty||'no'}, addr, dueDate);
     return;
   }
   /* ── Lost Proposal: no follow-up tasks needed ── */
-  if(deal.stage==='Lost Proposal'){
+  if(_stg==='Lost Proposal' || (_stg==='Lost / Terminated' && _lt==='lost_proposal')){
     showToast('✅ Lost Proposal logged','info',3000);
     return;
   }
@@ -4288,43 +4307,43 @@ function renderStageFields(stage, data={}){
     return;
   }
 
-  // ── CONTRACT TERMINATED ──────────────────────────────────────────
-  if(stage==='Contract Terminated'){
-    container.innerHTML=`
-      <div class="border-t pt-4 mt-1">
-        <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">Termination Details</div>
-        <div class="space-y-3">
-          ${ta('sf-termination-reason','Reason for Termination','Buyer terminated due to…',data.terminationReason)}
-        </div>
-      </div>`;
-    appendInlineGateFields(container, stage, data, dealKey);
-    return;
-  }
-
-  // ── LOST LISTING ─────────────────────────────────────────────────
-  if(stage==='Lost Listing'){
-    container.innerHTML=`
-      <div class="border-t pt-4 mt-1">
-        <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">Lost Listing Details</div>
-        <div class="space-y-3">
-          ${ta('sf-lost-reason','Reason for Losing Listing','Why was the listing lost?',data.lostReason)}
-          ${sel('sf-protection-list','Protection List Needed?',[{v:'yes',l:'Yes'},{v:'no',l:'No'}],data.protectionList||'no')}
-          ${sel('sf-sign-on-property','Is the Sign Still on the Property?',[{v:'yes',l:'Yes — needs removal'},{v:'no',l:'No'}],data.signOnProperty||'no')}
-        </div>
-      </div>`;
-    appendInlineGateFields(container, stage, data, dealKey);
-    return;
-  }
-
-  // ── LOST PROPOSAL / other lost stages ────────────────────────────
-  if(isLostStage(stage) || stage==='Lost Proposal'){
-    container.innerHTML=`
-      <div class="border-t pt-4 mt-1">
-        <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">Lost Proposal Details</div>
-        <div class="space-y-3">
-          ${ta('sf-lost-reason','Reason for Losing Proposal','Why was the proposal not accepted?',data.lostReason)}
-        </div>
-      </div>`;
+  // ── LOST / TERMINATED (and legacy aliases) ───────────────────────
+  if(stage==='Lost / Terminated' || stage==='Contract Terminated' || stage==='Lost Listing' || stage==='Lost Proposal' || isLostStage(stage)){
+    const lt = data.lostType || (stage==='Contract Terminated' ? 'contract_cancelled' : stage==='Lost Listing' ? 'lost_listing' : 'lost_proposal');
+    if(lt === 'lost_listing'){
+      container.innerHTML=`
+        <div class="border-t pt-4 mt-1">
+          <div class="flex items-center gap-2 mb-3">
+            <span class="text-xs font-bold text-gray-400 uppercase tracking-widest">🏠 Lost Listing</span>
+          </div>
+          <div class="space-y-3">
+            ${ta('sf-lost-reason','Reason for Losing Listing','Why was the listing lost?',data.lostReason)}
+            ${sel('sf-protection-list','Protection List Needed?',[{v:'yes',l:'Yes'},{v:'no',l:'No'}],data.protectionList||'no')}
+            ${sel('sf-sign-on-property','Is the Sign Still on the Property?',[{v:'yes',l:'Yes — needs removal'},{v:'no',l:'No'}],data.signOnProperty||'no')}
+          </div>
+        </div>`;
+    } else if(lt === 'contract_cancelled'){
+      container.innerHTML=`
+        <div class="border-t pt-4 mt-1">
+          <div class="flex items-center gap-2 mb-3">
+            <span class="text-xs font-bold text-gray-400 uppercase tracking-widest">❌ Contract Cancelled</span>
+          </div>
+          <div class="space-y-3">
+            ${ta('sf-termination-reason','Reason for Termination','Why was the contract cancelled?',data.terminationReason)}
+          </div>
+        </div>`;
+    } else {
+      // Lost Proposal (default)
+      container.innerHTML=`
+        <div class="border-t pt-4 mt-1">
+          <div class="flex items-center gap-2 mb-3">
+            <span class="text-xs font-bold text-gray-400 uppercase tracking-widest">📄 Lost Proposal</span>
+          </div>
+          <div class="space-y-3">
+            ${ta('sf-lost-reason','Reason for Losing Proposal','Why was the proposal not accepted?',data.lostReason)}
+          </div>
+        </div>`;
+    }
     appendInlineGateFields(container, stage, data, dealKey);
     return;
   }
@@ -4990,10 +5009,16 @@ function computeAdvisorKPIs(advisorUid){
   //    Lost = in Lost Proposal or Lost Listing stage
   const proposalWon  = advDeals.filter(d=>inCYNY(d) &&
     !['Prospect','Proposal To Do','Proposal Outstanding'].includes(d.stage) &&
-    !isLostStage(d.stage) && d.stage!=='Lost Proposal' && d.stage!=='Lost Listing').length;
-  const proposalLost = advDeals.filter(d=>inCYNY(d) &&
-    (d.stage==='Lost Proposal'||d.stage==='Lost Listing'||
-     (isLostStage(d.stage) && !isWonStage(d.stage)))).length;
+    !isLostStage(d.stage) && d.stage!=='Lost Proposal' && d.stage!=='Lost Listing' &&
+    d.stage!=='Lost / Terminated').length;
+  // Split lost counts by type
+  const _isLostListing = d => d.stage==='Lost Listing' || (d.stage==='Lost / Terminated' && d.lostType==='lost_listing');
+  const _isLostProposal = d => d.stage==='Lost Proposal' || (d.stage==='Lost / Terminated' && d.lostType==='lost_proposal');
+  const _isContractCancelled = d => d.stage==='Contract Terminated' || (d.stage==='Lost / Terminated' && d.lostType==='contract_cancelled');
+  const lostListingCount     = advDeals.filter(d=>inCYNY(d) && _isLostListing(d)).length;
+  const lostProposalCount    = advDeals.filter(d=>inCYNY(d) && _isLostProposal(d)).length;
+  const contractCancelledCount = advDeals.filter(d=>inCYNY(d) && _isContractCancelled(d)).length;
+  const proposalLost = lostListingCount + lostProposalCount;
   const proposalTotal = proposalWon + proposalLost;
   const winPct = proposalTotal>0 ? Math.round(proposalWon/proposalTotal*100) : null;
 
@@ -5015,6 +5040,7 @@ function computeAdvisorKPIs(advisorUid){
   const projectedRevenue = ucComm;
 
   return { ucComm, activeLOI, listingVol, winPct, proposalWon, proposalLost,
+           lostListingCount, lostProposalCount, contractCancelledCount,
            qPct, qVol, qLabel:'Q'+qNum+' '+thisYear, closedComm, projectedRevenue };
 }
 
@@ -5419,9 +5445,10 @@ td:first-child{font-weight:600;width:210px;white-space:nowrap}
 const _firedAutoLog = new Map(); // dealId:ruleId -> timestamp, prevents double-fire within 30s
 // Return true if an automation rule's registered stage matches the deal's current stage.
 // Handles exact matches AND custom stage name variants (e.g. "Due Diligence (Under Contract)").
-function autoStageMatches(ruleStage, dealStage){
+function autoStageMatches(ruleStage, dealStage, dealLostType){
   if(ruleStage===dealStage) return true;
   const ds=dealStage||'';
+  const lt=dealLostType||'';
   switch(ruleStage){
     case 'Due Diligence':
       return ds.includes('Due Diligence');
@@ -5432,18 +5459,26 @@ function autoStageMatches(ruleStage, dealStage){
     case 'Closing':
       return ds.includes('Closing') && !ds.includes('Closed');
     case 'Sold':
-      // "Sold" automations should fire for Closed Won too
       return isWonStage(ds);
     case 'Closed Won':
       return isWonStage(ds);
+    // Legacy stage names — also match the new combined "Lost / Terminated" stage by lostType
+    case 'Contract Terminated':
+      return ds==='Lost / Terminated' && lt==='contract_cancelled';
+    case 'Lost Listing':
+    case 'Lost Listing/Proposal':
+      return ds==='Lost Listing' || ds==='Lost / Terminated';
+    case 'Lost Proposal':
+      return ds==='Lost Proposal' || (ds==='Lost / Terminated' && lt==='lost_proposal');
     default:
       return false;
   }
 }
 
 function fireAutomations(deal, oldStage){
-  console.log('[fireAutomations] deal.stage='+deal.stage+' oldStage='+oldStage+' matching rules:', allAutomations.filter(r=>r.active&&autoStageMatches(r.stage,deal.stage)).map(r=>r.id+':'+r.type));
-  const rules=allAutomations.filter(r=>r.active&&autoStageMatches(r.stage,deal.stage));
+  const _lt = deal.lostType||'';
+  console.log('[fireAutomations] deal.stage='+deal.stage+' lostType='+_lt+' oldStage='+oldStage+' matching rules:', allAutomations.filter(r=>r.active&&autoStageMatches(r.stage,deal.stage,_lt)).map(r=>r.id+':'+r.type));
+  const rules=allAutomations.filter(r=>r.active&&autoStageMatches(r.stage,deal.stage,_lt));
   const now=Date.now();
   for(const rule of rules){
     const _key=deal.id+':'+rule.id;
@@ -6205,17 +6240,44 @@ function viewBoard(){
     ${kpiBar}
     <div id="pipeline-kanban" style="display:flex;gap:0.75rem;align-items:stretch;overflow-x:auto;padding-bottom:0.75rem;">
       ${STAGES.map(stage=>{
-        const sd=byStage[stage]||[];
-        const sc=SC[stage];
+        const allSd=byStage[stage]||[];
+        const isLT = stage==='Lost / Terminated';
+        // For Lost / Terminated: hide cards older than 7 days unless admin toggled
+        const weekAgo = Date.now() - 7*86400000;
+        const sd = isLT && !_showAllLostTerminated
+          ? allSd.filter(d=>(d.stageEnteredAt||d.updatedAt||d.createdAt||0) >= weekAgo)
+          : allSd;
+        const hiddenCount = isLT ? allSd.length - sd.length : 0;
+        const sc=SC[stage]||{hdr:'bg-gray-200',col:'bg-gray-50',txt:'text-gray-700'};
         const total=sd.reduce((s,d)=>s+dealProjected(d),0);
+        // Header right-side controls
+        const addBtn = isLT
+          ? `<span class="${sc.txt} text-xs opacity-50 italic">drag here</span>`
+          : `<button onclick="openDealModal(null,'${stage}')"
+              class="${sc.txt} text-xs opacity-80 hover:opacity-100 font-bold px-1.5 py-0.5 rounded hover:bg-black/10 transition leading-none">+ Add</button>`;
+        // Show All toggle for admin on Lost / Terminated
+        const toggleRow = isLT && currentUser.isAdmin && hiddenCount>0
+          ? `<div class="px-2 pb-1">
+               <button onclick="_showAllLostTerminated=true;viewBoard()"
+                 class="w-full text-xs text-red-700 bg-red-100 hover:bg-red-200 rounded-lg py-1 font-semibold transition">
+                 Show ${hiddenCount} older deal${hiddenCount!==1?'s':''} ↓
+               </button>
+             </div>`
+          : isLT && _showAllLostTerminated && currentUser.isAdmin
+            ? `<div class="px-2 pb-1">
+                 <button onclick="_showAllLostTerminated=false;viewBoard()"
+                   class="w-full text-xs text-gray-500 bg-gray-100 hover:bg-gray-200 rounded-lg py-1 font-semibold transition">
+                   Hide older deals ↑
+                 </button>
+               </div>`
+            : '';
         return `
           <div style="min-width:240px;width:240px;flex-shrink:0;display:flex;flex-direction:column;">
             <div class="${sc.hdr} rounded-t-xl px-3 py-2 flex items-center justify-between">
               <span class="${sc.txt} font-semibold text-xs uppercase tracking-wide">${stage}</span>
               <div class="flex items-center gap-2">
-                <span class="${sc.txt} text-xs opacity-70">${sd.length}</span>
-                <button onclick="openDealModal(null,'${stage}')"
-                  class="${sc.txt} text-xs opacity-80 hover:opacity-100 font-bold px-1.5 py-0.5 rounded hover:bg-black/10 transition leading-none">+ Add</button>
+                <span class="${sc.txt} text-xs opacity-70">${allSd.length}</span>
+                ${addBtn}
               </div>
             </div>
             <div class="kanban-col ${sc.col} rounded-b-xl p-2 space-y-2" style="flex:1;"
@@ -6223,6 +6285,7 @@ function viewBoard(){
               ondragover="event.preventDefault();this.classList.add('drag-over')"
               ondragleave="this.classList.remove('drag-over')"
               ondrop="handleDrop(event,'${stage}')">
+              ${toggleRow}
               ${sd.map(d=>renderCard(d)).join('')}
             </div>
           </div>`;
@@ -6877,9 +6940,14 @@ window.handleDrop = (ev,newStage) => {
     openModalForStage(`Fill in the required details to move to ${newStage}`);
     return;
   }
-  // Contract Terminated and lost stages — open modal to capture reason/follow-up questions
+  // Lost / Terminated column — show the unified 3-path popup
+  if(newStage==='Lost / Terminated'){
+    handleLostTerminatedDrop(id, deal);
+    return;
+  }
+  // Legacy stage names (fallback in case any old data still uses them)
   if(newStage==='Contract Terminated' || newStage==='Lost Listing' || newStage==='Lost Proposal' || isLostStage(newStage)){
-    openModalForStage(`Enter details for moving to ${newStage}`);
+    handleLostTerminatedDrop(id, deal);
     return;
   }
   // For all other stages: check if a custom gate is configured
@@ -6906,6 +6974,227 @@ window.handleDrop = (ev,newStage) => {
     showToast(`Moved to ${newStage}`,'success');
   });
 };
+
+/* =======================================================
+   LOST / TERMINATED — unified 3-path popup + handlers
+   ======================================================= */
+let _showAllLostTerminated = false; // admin toggle for 1-week filter
+
+function handleLostTerminatedDrop(dealId, deal){
+  if(!deal) deal = (Store.allDeals||[]).find(d=>d.id===dealId)||{};
+  const addr = deal.propertyAddress||deal.projectName||'property';
+  const escH = s => (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:2000;display:flex;align-items:center;justify-content:center;font-family:inherit';
+  const card = document.createElement('div');
+  card.style.cssText = 'background:#fff;border-radius:16px;padding:1.75rem;width:460px;max-width:92vw;box-shadow:0 20px 60px rgba(0,0,0,.3);font-family:inherit';
+  overlay.appendChild(card);
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', e=>{ if(e.target===overlay) document.body.removeChild(overlay); });
+
+  function btnBase(extra){ return `flex:1;padding:.5rem;border:2px solid #e5e7eb;border-radius:8px;background:#fff;font-weight:600;font-size:.875rem;cursor:pointer;color:#374151;${extra||''}`; }
+
+  function showStep1(){
+    card.innerHTML = `
+      <h3 style="font-weight:700;color:#1f2937;font-size:1.125rem;margin:0 0 .5rem">What happened with this deal?</h3>
+      <p style="color:#6b7280;font-size:.875rem;margin:0 0 1.5rem;line-height:1.4">${escH(addr)}</p>
+      <div style="display:flex;flex-direction:column;gap:.75rem">
+        <button id="lt-cancelled" style="background:#fef2f2;color:#991b1b;border:2px solid #fecaca;border-radius:10px;padding:.875rem 1rem;font-weight:700;font-size:.95rem;cursor:pointer;text-align:left">
+          ❌ Contract Cancelled
+          <div style="font-weight:400;font-size:.8rem;color:#b91c1c;margin-top:.2rem">Strip contract data → move card back to Listing</div>
+        </button>
+        <button id="lt-listing" style="background:#f0f9ff;color:#0c4a6e;border:2px solid #bae6fd;border-radius:10px;padding:.875rem 1rem;font-weight:700;font-size:.95rem;cursor:pointer;text-align:left">
+          🏠 Lost Listing
+          <div style="font-weight:400;font-size:.8rem;color:#075985;margin-top:.2rem">Client chose not to list or relisted with another firm</div>
+        </button>
+        <button id="lt-proposal" style="background:#f0fdf4;color:#14532d;border:2px solid #bbf7d0;border-radius:10px;padding:.875rem 1rem;font-weight:700;font-size:.95rem;cursor:pointer;text-align:left">
+          📄 Lost Proposal
+          <div style="font-weight:400;font-size:.8rem;color:#166534;margin-top:.2rem">Proposal was not accepted by the client</div>
+        </button>
+      </div>`;
+    card.querySelector('#lt-cancelled').addEventListener('click', showContractCancelledForm);
+    card.querySelector('#lt-listing').addEventListener('click', showLostListingForm);
+    card.querySelector('#lt-proposal').addEventListener('click', showLostProposalForm);
+  }
+
+  function showContractCancelledForm(){
+    card.innerHTML = `
+      <h3 style="font-weight:700;color:#991b1b;font-size:1.125rem;margin:0 0 .25rem">❌ Contract Cancelled</h3>
+      <p style="color:#6b7280;font-size:.875rem;margin:0 0 1rem;line-height:1.4">${escH(addr)}</p>
+      <div style="border:1px solid #fecaca;background:#fef2f2;border-radius:10px;padding:.75rem;margin-bottom:1rem;font-size:.82rem;color:#991b1b;line-height:1.5">
+        <strong>This will:</strong> archive all contract data to the property history, strip contract fields from the card, and move it back to <strong>Listing</strong> stage.
+      </div>
+      <div style="margin-bottom:1.25rem">
+        <label style="display:block;font-weight:600;color:#374151;font-size:.875rem;margin-bottom:.5rem">Reason for termination</label>
+        <textarea id="lt-reason" rows="3" placeholder="Why was the contract cancelled?" style="width:100%;border:1.5px solid #e5e7eb;border-radius:8px;padding:.625rem;font-size:.875rem;font-family:inherit;resize:vertical;box-sizing:border-box"></textarea>
+      </div>
+      <div style="display:flex;gap:.75rem">
+        <button id="lt-confirm" style="flex:1;background:#dc2626;color:#fff;border:none;border-radius:10px;padding:.75rem;font-weight:700;font-size:.95rem;cursor:pointer">Confirm Cancellation</button>
+        <button id="lt-back" style="background:none;border:1px solid #e5e7eb;border-radius:10px;padding:.75rem .9rem;font-size:.875rem;cursor:pointer;color:#6b7280">← Back</button>
+      </div>`;
+    card.querySelector('#lt-back').addEventListener('click', showStep1);
+    card.querySelector('#lt-confirm').addEventListener('click', async ()=>{
+      const reason = card.querySelector('#lt-reason').value.trim();
+      document.body.removeChild(overlay);
+      await _doContractCancelled(dealId, deal, reason);
+    });
+  }
+
+  function showLostListingForm(){
+    card.innerHTML = `
+      <h3 style="font-weight:700;color:#0c4a6e;font-size:1.125rem;margin:0 0 .25rem">🏠 Lost Listing</h3>
+      <p style="color:#6b7280;font-size:.875rem;margin:0 0 1.25rem;line-height:1.4">${escH(addr)}</p>
+      <div style="margin-bottom:1rem">
+        <label style="display:block;font-weight:600;color:#374151;font-size:.875rem;margin-bottom:.5rem">Reason for losing listing</label>
+        <textarea id="lt-reason" rows="3" placeholder="Why was the listing lost?" style="width:100%;border:1.5px solid #e5e7eb;border-radius:8px;padding:.625rem;font-size:.875rem;font-family:inherit;resize:vertical;box-sizing:border-box"></textarea>
+      </div>
+      <div style="border:1px solid #e5e7eb;border-radius:10px;padding:1rem;margin-bottom:.75rem">
+        <p style="font-weight:600;color:#1f2937;font-size:.875rem;margin:0 0 .625rem">Does this listing need a protection list?</p>
+        <div style="display:flex;gap:.5rem">
+          <button data-q="protection" data-v="yes" style="${btnBase()}">Yes</button>
+          <button data-q="protection" data-v="no"  style="${btnBase()}">No</button>
+        </div>
+      </div>
+      <div style="border:1px solid #e5e7eb;border-radius:10px;padding:1rem;margin-bottom:1.25rem">
+        <p style="font-weight:600;color:#1f2937;font-size:.875rem;margin:0 0 .625rem">Is the sign still on the property?</p>
+        <div style="display:flex;gap:.5rem">
+          <button data-q="sign" data-v="yes" style="${btnBase()}">Yes</button>
+          <button data-q="sign" data-v="no"  style="${btnBase()}">No</button>
+        </div>
+      </div>
+      <div style="display:flex;gap:.75rem">
+        <button id="lt-submit" disabled style="flex:1;background:#1a3a5c;color:#fff;border:none;border-radius:10px;padding:.75rem;font-weight:700;font-size:.95rem;cursor:pointer;opacity:.4">Confirm</button>
+        <button id="lt-back" style="background:none;border:1px solid #e5e7eb;border-radius:10px;padding:.75rem .9rem;font-size:.875rem;cursor:pointer;color:#6b7280">← Back</button>
+      </div>`;
+    card.querySelector('#lt-back').addEventListener('click', showStep1);
+    const answers = {};
+    card.querySelectorAll('button[data-q]').forEach(btn=>{
+      btn.addEventListener('click', ()=>{
+        const q=btn.dataset.q, v=btn.dataset.v;
+        answers[q]=v;
+        card.querySelectorAll(`button[data-q="${q}"]`).forEach(b=>{
+          b.style.borderColor='#e5e7eb'; b.style.background='#fff'; b.style.color='#374151';
+        });
+        btn.style.borderColor='#1a3a5c'; btn.style.background='#1a3a5c'; btn.style.color='#fff';
+        if(answers.protection && answers.sign){ const s=card.querySelector('#lt-submit'); s.disabled=false; s.style.opacity='1'; }
+      });
+    });
+    card.querySelector('#lt-submit').addEventListener('click', async ()=>{
+      const reason = card.querySelector('#lt-reason').value.trim();
+      document.body.removeChild(overlay);
+      await _doLostListing(dealId, deal, reason, answers);
+    });
+  }
+
+  function showLostProposalForm(){
+    card.innerHTML = `
+      <h3 style="font-weight:700;color:#14532d;font-size:1.125rem;margin:0 0 .25rem">📄 Lost Proposal</h3>
+      <p style="color:#6b7280;font-size:.875rem;margin:0 0 1.25rem;line-height:1.4">${escH(addr)}</p>
+      <div style="margin-bottom:1.25rem">
+        <label style="display:block;font-weight:600;color:#374151;font-size:.875rem;margin-bottom:.5rem">Reason the proposal was not accepted</label>
+        <textarea id="lt-reason" rows="3" placeholder="Why was the proposal not accepted?" style="width:100%;border:1.5px solid #e5e7eb;border-radius:8px;padding:.625rem;font-size:.875rem;font-family:inherit;resize:vertical;box-sizing:border-box"></textarea>
+      </div>
+      <div style="display:flex;gap:.75rem">
+        <button id="lt-submit" style="flex:1;background:#1a3a5c;color:#fff;border:none;border-radius:10px;padding:.75rem;font-weight:700;font-size:.95rem;cursor:pointer">Confirm</button>
+        <button id="lt-back" style="background:none;border:1px solid #e5e7eb;border-radius:10px;padding:.75rem .9rem;font-size:.875rem;cursor:pointer;color:#6b7280">← Back</button>
+      </div>`;
+    card.querySelector('#lt-back').addEventListener('click', showStep1);
+    card.querySelector('#lt-submit').addEventListener('click', async ()=>{
+      const reason = card.querySelector('#lt-reason').value.trim();
+      document.body.removeChild(overlay);
+      await _doLostProposal(dealId, deal, reason);
+    });
+  }
+
+  showStep1();
+}
+
+/* ── Contract Cancelled handler ── */
+async function _doContractCancelled(dealId, deal, reason){
+  const CONTRACT_FIELDS = ['buyer','buyerBroker','escrowAgent','escrowAgentEmail',
+    'psaEffectiveDate','ddExpirationDate','effectiveDate','earnestMoney',
+    'purchasePrice','contractPrice','loiPrice','closeDate','rezoneExpiration',
+    'loiFileName','psaFileName','contractFileName'];
+  // Archive to propertyHistory
+  const histEntry = {
+    type:'contract_cancelled', cancelledAt:Date.now(),
+    cancelledByUid:currentUser?.uid, cancelledByName:currentUser?.name||currentUser?.email,
+    reason:reason||'',
+    data: Object.fromEntries(CONTRACT_FIELDS.filter(f=>deal[f]!=null).map(f=>[f,deal[f]])),
+  };
+  // Build stage history
+  const _sh=[...(deal.stageHistory||[])];
+  if(!_sh.length && deal.stageEnteredAt) _sh.push({stage:deal.stage,enteredAt:deal.stageEnteredAt});
+  if(_sh.length){const _l=_sh[_sh.length-1];if(!_l.exitedAt){_l.exitedAt=Date.now();_l.durationMs=_l.exitedAt-_l.enteredAt;}}
+  _sh.push({stage:'Listing',enteredAt:Date.now()});
+  // Nullify contract fields + move back to Listing
+  const cleared = Object.fromEntries(CONTRACT_FIELDS.map(f=>[f,null]));
+  const upd = {
+    ...cleared,
+    stage:'Listing',
+    probability: STAGE_PROB['Listing']??25,
+    stageEnteredAt: Date.now(),
+    updatedAt: Date.now(),
+    terminationReason: reason||'',
+    propertyHistory: [...(deal.propertyHistory||[]), histEntry],
+    stageHistory: _sh,
+  };
+  await Store.updateDeal(dealId, upd);
+  Object.assign(deal, upd);
+  // Fire contract terminated automations (pass a synthetic stage so autoStageMatches works)
+  await handleContractTerminatedAutomation({...deal, stage:'Contract Terminated'});
+  viewBoard();
+  showToast('📋 Contract cancelled — card moved back to Listing','info',5000);
+}
+
+/* ── Lost Listing handler ── */
+async function _doLostListing(dealId, deal, reason, answers){
+  const oldStage = deal.stage;
+  const _sh=[...(deal.stageHistory||[])];
+  if(!_sh.length && deal.stageEnteredAt) _sh.push({stage:oldStage,enteredAt:deal.stageEnteredAt});
+  if(_sh.length){const _l=_sh[_sh.length-1];if(!_l.exitedAt){_l.exitedAt=Date.now();_l.durationMs=_l.exitedAt-_l.enteredAt;}}
+  _sh.push({stage:'Lost / Terminated',enteredAt:Date.now()});
+  const upd = {
+    stage:'Lost / Terminated',
+    probability:0,
+    stageEnteredAt:Date.now(),
+    updatedAt:Date.now(),
+    lostType:'lost_listing',
+    lostReason:reason||'',
+    protectionList:answers.protection||'no',
+    signOnProperty:answers.sign||'no',
+    stageHistory:_sh,
+  };
+  await Store.updateDeal(dealId, upd);
+  Object.assign(deal, upd);
+  const addr = deal.propertyAddress||deal.projectName||'property';
+  const dueDate = n=>{ const d=new Date(); d.setDate(d.getDate()+n); return d.toISOString().slice(0,10); };
+  await _fireLostListingTasks(deal, answers, addr, dueDate);
+  viewBoard();
+}
+
+/* ── Lost Proposal handler ── */
+async function _doLostProposal(dealId, deal, reason){
+  const oldStage = deal.stage;
+  const _sh=[...(deal.stageHistory||[])];
+  if(!_sh.length && deal.stageEnteredAt) _sh.push({stage:oldStage,enteredAt:deal.stageEnteredAt});
+  if(_sh.length){const _l=_sh[_sh.length-1];if(!_l.exitedAt){_l.exitedAt=Date.now();_l.durationMs=_l.exitedAt-_l.enteredAt;}}
+  _sh.push({stage:'Lost / Terminated',enteredAt:Date.now()});
+  const upd = {
+    stage:'Lost / Terminated',
+    probability:0,
+    stageEnteredAt:Date.now(),
+    updatedAt:Date.now(),
+    lostType:'lost_proposal',
+    lostReason:reason||'',
+    stageHistory:_sh,
+  };
+  await Store.updateDeal(dealId, upd);
+  Object.assign(deal, upd);
+  viewBoard();
+  showToast('✅ Lost Proposal logged','info',3000);
+}
 
 /* =======================================================
    VIEW: DASHBOARD (admin)
@@ -7112,7 +7401,7 @@ function viewDashboard(){
                 </div>
               </div>`;
               const winTxt = k.winPct!==null
-                ? `<span class="${k.winPct>=50?'text-green-700':'text-red-600'} font-semibold">${k.winPct}%</span><span class="text-gray-400 text-xs ml-1">(${k.proposalWon}W/${k.proposalLost}L)</span>`
+                ? `<span class="${k.winPct>=50?'text-green-700':'text-red-600'} font-semibold">${k.winPct}%</span><span class="text-gray-400 text-xs ml-1">(${k.proposalWon}W / ${k.lostListingCount||0}LL / ${k.lostProposalCount||0}LP)</span>`
                 : '<span class="text-gray-300">—</span>';
               return `<tr class="hover:bg-gray-50">
                 <td class="py-2.5 pr-3 text-center">${rank}</td>
