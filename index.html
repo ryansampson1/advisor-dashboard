@@ -954,8 +954,8 @@ const APP_CONFIG = {
 /* =======================================================
    CONSTANTS
    ======================================================= */
-const DEFAULT_STAGES = ["Prospect","Listing","LOI","Due Diligence (Under Contract)","Closing","Closed Won","Closed Lost"];
-const DEFAULT_STAGE_PROB = {Prospect:10,Listing:25,"LOI":40,"Due Diligence (Under Contract)":65,Closing:90,"Closed Won":100,"Closed Lost":0};
+const DEFAULT_STAGES = ["Prospect","Buyer Opportunities","Listing","LOI","Due Diligence (Under Contract)","Closing","Closed Won","Closed Lost"];
+const DEFAULT_STAGE_PROB = {Prospect:10,"Buyer Opportunities":15,Listing:25,"LOI":40,"Due Diligence (Under Contract)":65,Closing:90,"Closed Won":100,"Closed Lost":0};
 // Legacy stage names that map to the new consolidated stage (for backward compat with deals in Firestore)
 const STAGE_ALIAS = {
   "Under Contract":          "Due Diligence (Under Contract)",
@@ -967,6 +967,7 @@ const STAGE_ALIAS = {
 };
 const BASE_SC = {
   Prospect:                        {hdr:"bg-gray-200",   col:"bg-gray-50",   txt:"text-gray-700"},
+  "Buyer Opportunities":           {hdr:"bg-teal-100",   col:"bg-teal-50",   txt:"text-teal-700"},
   Listing:                         {hdr:"bg-blue-100",   col:"bg-blue-50",   txt:"text-blue-700"},
   LOI:                             {hdr:"bg-sky-100",    col:"bg-sky-50",    txt:"text-sky-700"},
   "Due Diligence (Under Contract)":{hdr:"bg-orange-100", col:"bg-orange-50", txt:"text-orange-700"},
@@ -1049,6 +1050,15 @@ function loadCustomStages(){
     const listingIdx = list.findIndex(s => s.name === 'Listing');
     const insertAt = listingIdx >= 0 ? listingIdx + 1 : 2;
     list.splice(insertAt, 0, {name:'LOI', prob:40});
+    localStorage.setItem(K('allStages'), JSON.stringify(list));
+  }
+
+  // ── Ensure "Buyer Opportunities" is in the list (inserted after Prospect) ──
+  const hasBuyerOpp = list.some(s => s.name === 'Buyer Opportunities');
+  if(!hasBuyerOpp){
+    const prospectIdx = list.findIndex(s => s.name === 'Prospect');
+    const insertAt = prospectIdx >= 0 ? prospectIdx + 1 : 1;
+    list.splice(insertAt, 0, {name:'Buyer Opportunities', prob:15});
     localStorage.setItem(K('allStages'), JSON.stringify(list));
   }
 
@@ -3792,6 +3802,49 @@ async function _sendCriticalDatesTask(vals){
 }
 window._sendCriticalDatesTask = _sendCriticalDatesTask;
 
+// ── CRM typeahead for Buyer Opportunities contact picker ──────────────────
+function boContactSearch(value, dealKey){
+  const dd = document.getElementById('bo-contact-dropdown');
+  const hiddenId = document.getElementById('sf-bo-contact-id');
+  if(!dd) return;
+  const q = (value||'').trim().toLowerCase();
+  const contacts = (typeof allContacts !== 'undefined' ? allContacts : [])
+    .slice().sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+  const matches = q
+    ? contacts.filter(c=>
+        (c.name||'').toLowerCase().includes(q) ||
+        (c.email||'').toLowerCase().includes(q) ||
+        (c.company||'').toLowerCase().includes(q))
+    : contacts.slice(0,30);
+  if(!matches.length){
+    dd.style.display='none';
+    return;
+  }
+  dd.innerHTML = matches.map(c=>`
+    <div data-cid="${c.id}" data-cname="${(c.name||c.email||'').replace(/"/g,'&quot;')}"
+      style="padding:8px 12px;cursor:pointer;border-bottom:1px solid #f3f4f6;font-size:13px"
+      onmousedown="event.preventDefault()"
+      onclick="(function(el){
+        var name=el.dataset.cname;
+        var cid=el.dataset.cid;
+        document.getElementById('sf-bo-contact-search').value=name;
+        document.getElementById('sf-bo-contact-id').value=cid;
+        document.getElementById('bo-contact-dropdown').style.display='none';
+      })(this)">
+      <span class='font-medium'>${c.name||c.email||'Unknown'}</span>
+      ${c.company?`<span class='text-gray-400 ml-1'>— ${c.company}</span>`:''}
+      ${c.email&&c.name?`<div class='text-xs text-gray-400'>${c.email}</div>`:''}
+    </div>`).join('');
+  dd.style.display='block';
+  // Hide when input loses focus
+  const inp = document.getElementById('sf-bo-contact-search');
+  if(inp && !inp._boBlurBound){
+    inp._boBlurBound=true;
+    inp.addEventListener('blur', ()=>{ setTimeout(()=>{ if(dd) dd.style.display='none'; },150); });
+  }
+}
+window.boContactSearch = boContactSearch;
+
 function renderStageFields(stage, data={}){
   const container = document.getElementById('stage-fields');
   if(!container) return;
@@ -3861,6 +3914,54 @@ function renderStageFields(stage, data={}){
   const dealKey = editingDealId||'new';
 
   // ── PROSPECT ─────────────────────────────────────────────────────
+  // ── BUYER OPPORTUNITIES ──────────────────────────────────────────
+  if(stage==='Buyer Opportunities'){
+    const boContacts = (typeof allContacts !== 'undefined' ? allContacts : [])
+      .slice().sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+    const contactOptions = boContacts.map(c=>
+      `<option value="${c.id}" ${data.boContactId===c.id?'selected':''}>${c.name||c.email||'Unknown'}${c.company?' — '+c.company:''}</option>`
+    ).join('');
+    container.innerHTML=`
+      <div class="border-t pt-4 mt-1">
+        <div class="text-xs font-bold text-teal-600 uppercase tracking-widest mb-3">🏢 Buyer Opportunity Details</div>
+        <div class="space-y-3">
+          <div class="grid grid-cols-2 gap-3">
+            ${inp('sf-bo-buyer-name','Buyer / Company Name','text','Acme Developers LLC',data.boBuyerName)}
+            ${inp('sf-bo-submarket','Submarket / Area','text','South Tampa, Wesley Chapel…',data.boSubmarket)}
+          </div>
+          ${inp('sf-bo-use','Intended Use','text','Multifamily, Industrial, Retail…',data.boUse)}
+          <div>
+            <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Contact Person (CRM)</label>
+            <div style="position:relative">
+              <input id="sf-bo-contact-search" type="text" placeholder="Type to search contacts…"
+                value="${data.boContactName||''}"
+                autocomplete="off"
+                class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-teal-300"
+                oninput="boContactSearch(this.value,'${dealKey||''}')"
+                onfocus="boContactSearch(this.value,'${dealKey||''}')" />
+              <input type="hidden" id="sf-bo-contact-id" value="${data.boContactId||''}"/>
+              <div id="bo-contact-dropdown" style="display:none;position:absolute;z-index:500;left:0;right:0;background:#fff;border:1px solid #e5e7eb;border-radius:8px;max-height:180px;overflow-y:auto;box-shadow:0 4px 16px rgba(0,0,0,.12);margin-top:2px"></div>
+            </div>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Buyer Criteria</label>
+            <textarea id="sf-bo-criteria" rows="3"
+              placeholder="e.g. 50–200 acres, multi-family or industrial zoning, within 30 miles of Tampa, price up to $5M…"
+              class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-teal-300">${data.boCriteria||''}</textarea>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Notes</label>
+            <textarea id="sf-bo-notes" rows="3"
+              placeholder="Any additional context about this buyer…"
+              class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-teal-300">${data.boNotes||''}</textarea>
+          </div>
+          ${data.createdAt ? `<div class="text-xs text-gray-400">Created ${new Date(data.createdAt).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}</div>` : ''}
+        </div>
+      </div>`;
+    appendInlineGateFields(container, stage, data, dealKey);
+    return;
+  }
+
   if(stage==='Prospect'){
     // The top section (address, folio, county, contact, notes) covers everything needed.
     container.innerHTML = '';
@@ -4729,11 +4830,18 @@ const FB = {
         if(docId === 'stageConfig'){
           // Sync stage config across machines (run migration in case Firestore has old stage names)
           if(Array.isArray(payload.data) && payload.data.length){
-            const _migrated = migrateStagesList(payload.data);
+            let _migrated = migrateStagesList(payload.data);
+            // Also insert Buyer Opportunities if missing
+            if(!_migrated.some(s=>s.name==='Buyer Opportunities')){
+              const _pi = _migrated.findIndex(s=>s.name==='Prospect');
+              const _ins = _pi>=0?_pi+1:1;
+              _migrated = [..._migrated.slice(0,_ins), {name:'Buyer Opportunities',prob:15}, ..._migrated.slice(_ins)];
+            }
+            const _changed = _migrated !== payload.data;
             localStorage.setItem(K('allStages'), JSON.stringify(_migrated));
             applyStagesList(_migrated);
-            // If migration changed the list, write it back to Firestore so all machines stay in sync
-            if(_migrated !== payload.data){
+            // Write back to Firestore if migration changed the list
+            if(_changed){
               const {doc, setDoc} = _fbFns;
               setDoc(doc(_fbDb,'eos','stageConfig'), {data: _migrated}, {merge:false})
                 .catch(e=>console.warn('[stages] migration write-back failed', e));
@@ -5455,6 +5563,38 @@ td:first-child{font-weight:600;width:210px;white-space:nowrap}
   }).then(()=>showToast('📄 Invoice opened — task created with links','success',5000))
     .catch(e=>console.error('[commission_invoice]',e));
 };
+
+/* =======================================================
+   BUYER OPPORTUNITIES — weekly follow-up task automation
+   ======================================================= */
+function handleBuyerOpportunityAutomation(deal){
+  // Fire first weekly follow-up task when a deal enters Buyer Opportunities.
+  // Subsequent tasks are chained automatically by toggleTask when each completes.
+  const addr   = deal.boBuyerName || deal.propertyAddress || deal.projectName || 'Buyer';
+  const dueDate = n => { const d=new Date(); d.setDate(d.getDate()+n); return d.toISOString().slice(0,10); };
+  Store.createTask({
+    title: `📋 Weekly Follow-Up — ${addr}`,
+    description: `Reach out or connect with buyer: ${addr}.\n\n`
+      + `Buyer: ${deal.boBuyerName||'—'}\n`
+      + `Use: ${deal.boUse||'—'}\n`
+      + `Submarket: ${deal.boSubmarket||'—'}\n`
+      + `Criteria: ${deal.boCriteria||'—'}\n\n`
+      + `□ Send new listings that match buyer criteria\n`
+      + `□ Schedule call / meeting if warranted\n`
+      + `□ Update notes with any feedback`,
+    taskType: 'buyer_opp_followup',
+    dealId: deal.id,
+    dealAddress: deal.propertyAddress || deal.projectName,
+    assignedTo: deal.advisorUid,
+    assignedToName: deal.advisorName || deal.advisorEmail,
+    assignedToEmail: deal.advisorEmail || '',
+    dueDate: dueDate(7),
+    status: 'pending',
+    createdBy: currentUser?.uid || 'system',
+    createdByName: 'Automation',
+    createdAt: Date.now(),
+  }).catch(e => console.warn('[buyerOppTask]', e));
+}
 
 /* =======================================================
    AUTOMATION ENGINE
@@ -6411,6 +6551,15 @@ function renderCard(deal){
       row('Expires', deal.listingExpiration ? fmtDate(deal.listingExpiration) : ''),
     ].join('');
 
+  } else if(st === 'Buyer Opportunities'){
+    // Buyer Opportunities: Buyer name, Use, Submarket, Contact
+    stageRows = [
+      row('Buyer',    deal.boBuyerName||''),
+      row('Use',      deal.boUse||''),
+      row('Submarket',deal.boSubmarket||''),
+      row('Contact',  deal.boContactName||''),
+    ].join('');
+
   } else if(st === 'Proposal Outstanding'){
     // Proposal Outstanding: Price, Contact person + phone
     stageRows = [
@@ -6993,6 +7142,10 @@ window.handleDrop = (ev,newStage) => {
   Store.updateDeal(id,upd).then(()=>{
     Object.assign(deal,upd);
     fireAutomations(deal,oldStage);
+    // ── Buyer Opportunities: fire first follow-up task on drag-to-stage ──
+    if(newStage==='Buyer Opportunities' && oldStage!=='Buyer Opportunities'){
+      handleBuyerOpportunityAutomation(deal);
+    }
     viewBoard();
     showToast(`Moved to ${newStage}`,'success');
   });
@@ -12532,6 +12685,32 @@ window.toggleTask = async (id, newStatus) => {
     await Store.updateTask(id, {status:newStatus, updatedAt:Date.now()});
     const t = allTasks.find(x=>x.id===id);
     if(t){ t.status=newStatus; t.updatedAt=Date.now(); }
+    // ── Rolling Buyer Opportunities follow-up chain ──────────────────
+    if(newStatus === 'completed' && t?.taskType === 'buyer_opp_followup' && t.dealId){
+      const deal = (Store.allDeals||allDeals||[]).find(d=>d.id===t.dealId);
+      const activeStages = ['LOI','Due Diligence (Under Contract)','Closing','Closed Won','Lost / Terminated'];
+      const stillActive = deal && deal.stage === 'Buyer Opportunities';
+      if(stillActive){
+        const dueDate7 = (()=>{ const d=new Date(); d.setDate(d.getDate()+7); return d.toISOString().slice(0,10); })();
+        Store.createTask({
+          title: `📋 Weekly Follow-Up — ${deal.boBuyerName||deal.propertyAddress||deal.projectName||'Buyer'}`,
+          description: `Reach out or connect with buyer: ${deal.boBuyerName||'—'}.\n\n`
+            + `Use: ${deal.boUse||'—'}\nSubmarket: ${deal.boSubmarket||'—'}\nCriteria: ${deal.boCriteria||'—'}\n\n`
+            + `□ Send new listings that match buyer criteria\n□ Schedule call / meeting if warranted\n□ Update notes with any feedback`,
+          taskType: 'buyer_opp_followup',
+          dealId: deal.id,
+          dealAddress: deal.propertyAddress||deal.projectName,
+          assignedTo: deal.advisorUid,
+          assignedToName: deal.advisorName||deal.advisorEmail,
+          assignedToEmail: deal.advisorEmail||'',
+          dueDate: dueDate7,
+          status: 'pending',
+          createdBy: currentUser?.uid||'system',
+          createdByName: 'Automation',
+          createdAt: Date.now(),
+        }).catch(e=>console.warn('[buyerOppChain]',e));
+      }
+    }
     viewTasks();
   } catch(err){ showToast('Could not update task','error'); }
 };
@@ -15742,6 +15921,14 @@ function collectStageFields(){
     lostReason:       g('sf-lost-reason'),
     protectionList:   g('sf-protection-list'),
     signOnProperty:   g('sf-sign-on-property'),
+    // Buyer Opportunities
+    boBuyerName:  g('sf-bo-buyer-name'),
+    boSubmarket:  g('sf-bo-submarket'),
+    boUse:        g('sf-bo-use'),
+    boContactId:  g('sf-bo-contact-id'),
+    boContactName:g('sf-bo-contact-search'),
+    boCriteria:   g('sf-bo-criteria'),
+    boNotes:      g('sf-bo-notes'),
     // Sold notes override (shown in comprehensive Sold edit view)
     ...(document.getElementById('sf-sold-notes') ? {notes: g('sf-sold-notes')} : {}),
   };
@@ -15979,6 +16166,16 @@ window.handleDealSubmit = async ev => {
     if(stage==='Listing' && sf.readyForWebsites==='yes' && existDeal?.readyForWebsites!=='yes'){
       _fireListingWebsiteTask(existing);
     }
+    // ── Buyer Opportunities: fire first follow-up task + log CRM activity on stage entry ──
+    if(stage==='Buyer Opportunities' && oldStage!=='Buyer Opportunities'){
+      handleBuyerOpportunityAutomation(existing);
+      if(existing.boContactId && typeof window._crmLogActivity === 'function'){
+        window._crmLogActivity(existing.boContactId, 'note', {
+          autoLogged: true,
+          body: `🏢 Added to Buyer Opportunities pipeline.\nUse: ${existing.boUse||'—'} | Submarket: ${existing.boSubmarket||'—'}`,
+        }).catch(()=>{});
+      }
+    }
     showToast('Deal updated','success');
     // Trigger gate modal if stage changed and gate has questions (same as drag-and-drop)
     if(oldStage!==stage && !inlineGateData){
@@ -15999,6 +16196,16 @@ window.handleDealSubmit = async ev => {
     if(!allDeals.find(d=>d.id===newId)) allDeals.push(newDeal);
     fireAutomations(newDeal,null);
     if(stage==='Listing' && sf.readyForWebsites==='yes') _fireListingWebsiteTask(newDeal);
+    // ── Buyer Opportunities: fire first follow-up task + log CRM activity on deal create ──
+    if(stage==='Buyer Opportunities'){
+      handleBuyerOpportunityAutomation(newDeal);
+      if(newDeal.boContactId && typeof window._crmLogActivity === 'function'){
+        window._crmLogActivity(newDeal.boContactId, 'note', {
+          autoLogged: true,
+          body: `🏢 Added to Buyer Opportunities pipeline.\nUse: ${newDeal.boUse||'—'} | Submarket: ${newDeal.boSubmarket||'—'}`,
+        }).catch(()=>{});
+      }
+    }
     // Auto-create/link CRM contacts from the new deal
     _crmAutoCreateContactsFromDeal(newDeal).catch(e=>console.warn('[CRM auto-contact]',e));
     showToast('Deal created','success');
