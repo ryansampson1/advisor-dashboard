@@ -14955,6 +14955,14 @@ async function launchApp(){
    VIEW: HR
    ======================================================= */
 function viewHR(){
+  // If headline listener died (permission propagation lag), do a one-shot refresh
+  if(allHeadlines.length === 0 && _fbDb && _fbFns){
+    const {collection: _hc, query: _hq, orderBy: _ho, getDocs: _hd} = _fbFns;
+    _hd(_hq(_hc(_fbDb,'hrHeadlines'), _ho('createdAt','desc'))).then(snap=>{
+      allHeadlines = snap.docs.map(d=>({...d.data(), id:d.id}));
+      if(allHeadlines.length > 0 && currentView==='hr') viewHR();
+    }).catch(e=>console.warn('[viewHR getDocs fallback]', e));
+  }
   // Build headlines HTML — only true admin (not advisor/staff view mode) can add/edit
   const isHlAdmin = (currentUser?.isAdmin || currentUser?.isSuperAdmin) && !adminViewAsAdvisor && !staffViewMode;
   const hlHtml = allHeadlines.length || isHlAdmin ? `
@@ -15815,7 +15823,7 @@ function _hrOpenHeadlineModal(existing){
       return;
     }
     try {
-      const {collection, addDoc, doc, updateDoc} = _fbFns;
+      const {collection, addDoc, doc, updateDoc, query: _rq, orderBy: _ro, getDocs: _rd} = _fbFns;
       if(existing?.id){
         await updateDoc(doc(_fbDb,'hrHeadlines',existing.id), {title, body, updatedAt:Date.now()});
         showToast('Headline updated ✓','success');
@@ -15826,6 +15834,11 @@ function _hrOpenHeadlineModal(existing){
         });
         showToast('Headline posted ✓','success');
       }
+      // Refresh allHeadlines directly in case the real-time listener died (e.g. permission propagation lag)
+      try {
+        const fresh = await _rd(_rq(collection(_fbDb,'hrHeadlines'), _ro('createdAt','desc')));
+        allHeadlines = fresh.docs.map(d=>({...d.data(), id:d.id}));
+      } catch(re){ console.warn('[hrHeadlines refresh after save]', re); }
       overlay.remove();
       if(currentView==='hr') viewHR();
     } catch(e){
