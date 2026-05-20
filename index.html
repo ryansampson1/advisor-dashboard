@@ -783,6 +783,31 @@ body {
           <textarea id="f-notes" rows="3" placeholder="Any details, acreage, zoning, listing price..."
             class="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none resize-none"></textarea>
         </div>
+        <!-- Primary Card Photo -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">🖼️ Primary Card Photo</label>
+          <div id="photo-upload-zone"
+            style="border:2px dashed #d1d5db;border-radius:10px;cursor:pointer;overflow:hidden;position:relative;min-height:80px;display:flex;align-items:center;justify-content:center;background:#f9fafb;transition:border-color .15s"
+            onclick="document.getElementById('f-primary-photo').click()"
+            ondragover="event.preventDefault();this.style.borderColor='#6366f1'"
+            ondragleave="this.style.borderColor='#d1d5db'"
+            ondrop="_handlePhotoDrop(event)">
+            <input id="f-primary-photo" type="file" accept="image/jpeg,image/png,image/webp,image/gif" class="hidden"
+              onchange="_handlePhotoSelect(event)"/>
+            <div id="photo-upload-label" class="text-center text-gray-400 text-sm py-4 px-3 select-none">
+              <div class="text-2xl mb-1">📷</div>
+              <div class="text-xs">Click or drag a photo — JPG, PNG, WebP</div>
+            </div>
+          </div>
+          <div id="photo-preview-row" class="hidden mt-2 flex items-center gap-2">
+            <img id="photo-preview-img" src="" alt="preview" style="width:64px;height:48px;object-fit:cover;border-radius:6px;border:1px solid #e5e7eb;flex-shrink:0"/>
+            <div class="flex-1 min-w-0">
+              <div id="photo-preview-name" class="text-xs font-medium text-gray-700 truncate"></div>
+              <div class="text-xs text-green-600 font-semibold mt-0.5">✓ Marked as primary</div>
+            </div>
+            <button type="button" onclick="_clearPhotoUpload()" class="text-gray-400 hover:text-red-500 text-lg leading-none px-1" title="Remove photo">×</button>
+          </div>
+        </div>
         <div>
           <label class="block text-sm font-medium text-gray-700 mb-1">
             <span class="inline-flex items-center gap-1.5">
@@ -794,6 +819,7 @@ body {
             class="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none"/>
           <p class="text-xs text-gray-400 mt-1">Paste the shared folder link for this property's documents.</p>
         </div>
+        <input type="hidden" id="f-primary-photo-clear" value=""/>
         <!-- Co-Advisors section -->
         <div class="border rounded-xl p-3 bg-blue-50 border-blue-100">
           <div class="flex items-center justify-between mb-1">
@@ -3199,6 +3225,80 @@ const contractFiles = {};  // dealId → { name, size, dataUrl } — session-sco
 const listingFiles  = {};  // dealId → { name, size, dataUrl } — session-scoped
 const gateFiles     = {};  // `${dealId}__${stage}__${fieldId}` → { name }
 const stageFiles    = {};  // `${dealId}__${type}` → { name, size, dataUrl } — LOI / PSA / closing-statement
+const photoFiles    = {};  // dealId → { name, dataUrl } — primary card photo (session-scoped)
+
+// ── Primary photo upload handlers ────────────────────────────────────────
+function _readPhotoFile(file){
+  if(!file || !file.type.startsWith('image/')) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    const dataUrl = e.target.result;
+    const key = editingDealId || 'new';
+    photoFiles[key] = { name: file.name, dataUrl };
+    // Show preview
+    const zone = document.getElementById('photo-upload-zone');
+    const previewRow = document.getElementById('photo-preview-row');
+    const previewImg = document.getElementById('photo-preview-img');
+    const previewName = document.getElementById('photo-preview-name');
+    const label = document.getElementById('photo-upload-label');
+    if(previewImg) previewImg.src = dataUrl;
+    if(previewName) previewName.textContent = file.name;
+    if(previewRow) previewRow.classList.remove('hidden');
+    if(label) label.classList.add('hidden');
+    if(zone) zone.style.minHeight = '0';
+  };
+  reader.readAsDataURL(file);
+}
+window._handlePhotoSelect = ev => _readPhotoFile(ev.target.files[0]);
+window._handlePhotoDrop = ev => {
+  ev.preventDefault();
+  document.getElementById('photo-upload-zone').style.borderColor='#d1d5db';
+  _readPhotoFile(ev.dataTransfer.files[0]);
+};
+window._clearPhotoUpload = () => {
+  const key = editingDealId || 'new';
+  delete photoFiles[key];
+  const zone = document.getElementById('photo-upload-zone');
+  const previewRow = document.getElementById('photo-preview-row');
+  const previewImg = document.getElementById('photo-preview-img');
+  const label = document.getElementById('photo-upload-label');
+  const inp = document.getElementById('f-primary-photo');
+  if(previewRow) previewRow.classList.add('hidden');
+  if(label) label.classList.remove('hidden');
+  if(previewImg) previewImg.src = '';
+  if(zone) zone.style.minHeight = '80px';
+  if(inp) inp.value = '';
+  // Keep existing saved URL — set hidden flag to signal removal
+  const existing = document.getElementById('f-primary-photo-clear');
+  if(existing) existing.value = '1';
+};
+// Reset photo upload zone (called on modal open)
+function _resetPhotoUpload(existingUrl){
+  const zone = document.getElementById('photo-upload-zone');
+  const previewRow = document.getElementById('photo-preview-row');
+  const previewImg = document.getElementById('photo-preview-img');
+  const previewName = document.getElementById('photo-preview-name');
+  const label = document.getElementById('photo-upload-label');
+  const inp = document.getElementById('f-primary-photo');
+  const clearFlag = document.getElementById('f-primary-photo-clear');
+  if(inp) inp.value='';
+  if(clearFlag) clearFlag.value='';
+  if(existingUrl){
+    if(previewImg){ previewImg.src=existingUrl; }
+    if(previewName){ previewName.textContent='Saved photo'; }
+    if(previewRow) previewRow.classList.remove('hidden');
+    if(label) label.classList.add('hidden');
+    if(zone) zone.style.minHeight='0';
+  } else {
+    if(previewRow) previewRow.classList.add('hidden');
+    if(label) label.classList.remove('hidden');
+    if(previewImg) previewImg.src='';
+    if(zone) zone.style.minHeight='80px';
+  }
+  // Clear any session photo for this deal
+  const key = editingDealId || 'new';
+  delete photoFiles[key];
+}
 
 // Strip undefined values recursively before writing to Firestore
 // (Firestore throws if any field value is undefined)
@@ -6608,12 +6708,21 @@ function renderCard(deal){
     ].join('');
   }
 
+  const photoUrl = deal.primaryPhotoUrl || (photoFiles[deal.id]?.dataUrl) || '';
   return `
-    <div class="deal-card bg-white rounded-xl px-3 pt-2.5 pb-2 shadow-sm border border-white/80 hover:shadow-md transition select-none min-w-0"
+    <div class="deal-card bg-white rounded-xl px-3 ${photoUrl?'pt-0':'pt-2.5'} pb-2 shadow-sm border border-white/80 hover:shadow-md transition select-none min-w-0"
       ${canDrag?`draggable="true" ondragstart="handleDragStart(event,'${deal.id}')"`:''}
       onclick="if(!window._cardDragMoved)openPropertyDetail('${deal.id}')"
       onmousedown="window._cardDragMoved=false"
       data-id="${deal.id}">
+
+      ${photoUrl?`
+      <!-- Primary photo banner -->
+      <div style="margin:0 -12px;margin-bottom:8px;border-radius:12px 12px 0 0;overflow:hidden;height:110px;position:relative">
+        <img src="${photoUrl}" alt="" loading="lazy"
+          style="width:100%;height:100%;object-fit:cover;display:block;pointer-events:none"/>
+        <div style="position:absolute;inset:0;background:linear-gradient(to bottom,transparent 50%,rgba(0,0,0,.35) 100%)"></div>
+      </div>`:''}
 
       <!-- Title row -->
       <div class="flex items-start gap-1 mb-2 min-w-0">
@@ -6828,7 +6937,14 @@ window.openPropertyDetail = (dealId) => {
   ].filter(Boolean).join('');
 
   // ── Render ──────────────────────────────────────────────────
+  const primaryPhoto = deal.primaryPhotoUrl || '';
   body.innerHTML = `
+    ${primaryPhoto ? `
+    <!-- Primary Photo -->
+    <div style="margin:-1rem -1rem 1rem -1rem;border-radius:12px 12px 0 0;overflow:hidden;height:180px;position:relative">
+      <img src="${primaryPhoto}" alt="" style="width:100%;height:100%;object-fit:cover;display:block"/>
+      <div style="position:absolute;inset:0;background:linear-gradient(to bottom,transparent 60%,rgba(0,0,0,.3) 100%)"></div>
+    </div>` : ''}
     <!-- Stage -->
     <div class="prop-section">
       <div class="prop-section-title">Stage</div>
@@ -15626,6 +15742,7 @@ window.openDealModal = (id, defaultStage) => {
     document.getElementById('f-contact-email').value=deal.contactEmail||'';
     document.getElementById('f-notes').value=deal.notes||'';
     const driveEl=document.getElementById('f-drive-url'); if(driveEl) driveEl.value=deal.driveUrl||'';
+    _resetPhotoUpload(deal.primaryPhotoUrl||'');
     // Preserve existing hidden financial/stage fields
     document.getElementById('f-stage').value=deal.stage||'Prospect';
     document.getElementById('f-prob').value=deal.probability??STAGE_PROB[deal.stage]??10;
@@ -15677,6 +15794,8 @@ window.openDealModal = (id, defaultStage) => {
       if(sf.innerHTML.trim()){ sf.classList.remove('hidden'); }
       else { sf.classList.add('hidden'); }
     }
+    _resetPhotoUpload('');
+    const driveNewEl=document.getElementById('f-drive-url'); if(driveNewEl) driveNewEl.value='';
   }
   modal.classList.remove('hidden');
   // Render group picker after modal is visible
@@ -16058,6 +16177,8 @@ window.handleDealSubmit = async ev => {
   }
   const lfData = listingFiles[fileKey];
   const cfData = contractFiles[fileKey];
+  const photoData = photoFiles[fileKey];
+  const photoClearFlag = document.getElementById('f-primary-photo-clear')?.value === '1';
   // Upload new files to Firebase Storage and get persistent download URLs
   const _uploadDealFile = async (fileObj, dealId, type) => {
     if (!fileObj?.dataUrl || !_fbStorage) return null;
@@ -16072,12 +16193,24 @@ window.handleDealSubmit = async ev => {
     } catch(e) { console.warn('[uploadDealFile]', e); return null; }
   };
   const _uploadId = id || ('new_'+Date.now());
-  const [lfUrl, cfUrl, loiUploadUrl, psaUploadUrl, csUploadUrl] = await Promise.all([
+  const [lfUrl, cfUrl, loiUploadUrl, psaUploadUrl, csUploadUrl, photoUploadUrl] = await Promise.all([
     _uploadDealFile(lfData, _uploadId, 'listing'),
     _uploadDealFile(cfData, _uploadId, 'contract'),
     _uploadDealFile(stageFiles[`${fileKey}__loi`],               _uploadId, 'loi'),
     _uploadDealFile(stageFiles[`${fileKey}__psa`],               _uploadId, 'psa'),
     _uploadDealFile(stageFiles[`${fileKey}__closing-statement`], _uploadId, 'closing'),
+    (async()=>{
+      if(!photoData?.dataUrl || !_fbStorage) return null;
+      try{
+        const {ref:fbRef,uploadBytes,getDownloadURL}=_fbFns;
+        const ext = (photoData.name||'photo.jpg').split('.').pop().replace(/[^a-z]/gi,'').toLowerCase()||'jpg';
+        const storePath=`dealPhotos/${_uploadId}/primary_${Date.now()}.${ext}`;
+        const resp=await fetch(photoData.dataUrl);
+        const blob=await resp.blob();
+        const snap=await uploadBytes(fbRef(_fbStorage,storePath),blob);
+        return await getDownloadURL(snap.ref);
+      }catch(e){console.warn('[uploadPhoto]',e);return null;}
+    })(),
   ]);
   // Use hidden fields first; fall back to stage-specific fields so price/commission
   // entered in stage sections (e.g. Sold gate, Due Diligence inline) always produce revenue
@@ -16137,6 +16270,10 @@ window.handleDealSubmit = async ev => {
     closeDate:document.getElementById('f-close').value||null,
     notes:document.getElementById('f-notes').value.trim(),
     driveUrl:(document.getElementById('f-drive-url')?.value||'').trim(),
+    // Primary photo: new upload wins; clear flag removes; otherwise preserve existing
+    ...(photoUploadUrl ? {primaryPhotoUrl: photoUploadUrl}
+      : photoClearFlag ? {primaryPhotoUrl: ''}
+      : {}),
     propertyGroups:(()=>{ try{return JSON.parse(document.getElementById('f-property-groups')?.value||'[]');}catch(e){return [];} })(),
     updatedAt:Date.now(),
     ...sf,
