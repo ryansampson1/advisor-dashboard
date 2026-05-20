@@ -3211,13 +3211,8 @@ For calculated dates (DD expiration, closing, etc.) — DO the math and return t
       body: JSON.stringify({
         model: 'claude-sonnet-4-6',
         max_tokens: 1800,
-        // System prompt locks the model into pure JSON output mode
-        system: 'You are a JSON extraction API for real estate contracts. You output ONLY a single valid JSON object — no prose, no explanation, no markdown, no code fences. Start your response with { and end with }. Never write sentences. Never explain your reasoning. Just the JSON.',
-        // Pre-fill the assistant turn with '{' — forces continuation in JSON
-        messages: [
-          {role:'user',      content: msgContent},
-          {role:'assistant', content: '{'}
-        ]
+        system: 'You are a JSON extraction API for real estate contracts. You output ONLY a single valid JSON object. No prose, no explanation, no markdown, no code fences. Your entire response must be valid JSON starting with { and ending with }.',
+        messages: [{role:'user', content: msgContent}]
       })
     });
 
@@ -3229,17 +3224,17 @@ For calculated dates (DD expiration, closing, etc.) — DO the math and return t
     }
 
     const json = await resp.json();
-    // The model continues from our '{' pre-fill, so prepend it back
-    const raw = '{' + (json.content?.[0]?.text || '');
-    // Extract the JSON object — grab from first { to last }
+    const raw = json.content?.[0]?.text || '';
+    // Extract JSON — grab from first { to last } to handle any surrounding prose
     const jsonMatch = raw.match(/\{[\s\S]*\}/);
-    const jsonStr = jsonMatch ? jsonMatch[0] : raw;
+    const jsonStr = jsonMatch ? jsonMatch[0] : '';
     let extracted;
     try {
+      if(!jsonStr) throw new Error('no JSON object found');
       extracted = JSON.parse(jsonStr);
     } catch(e){
       console.error('[autofill] raw AI response:', raw);
-      throw new Error('AI returned unexpected format — check console for details');
+      throw new Error('Could not parse response — check browser console');
     }
 
     overlay?.remove();
