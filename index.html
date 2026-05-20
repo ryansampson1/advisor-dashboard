@@ -6832,7 +6832,7 @@ window.openPropertyDetail = (dealId) => {
 
   // ── Attachments ────────────────────────────────────────────
   const atts = [];
-  const addAtt = (name, url) => { if (name) atts.push({name, url: url || null}); };
+  const addAtt = (name, url, deletable) => { if (name) atts.push({name, url: url || null, deletable: !!deletable}); };
   addAtt(deal.listingAgreementFileName, deal.listingAgreementUrl);
   addAtt(deal.contractFileName,         deal.contractUrl);
   addAtt(deal.loiFileName,              deal.loiUrl);
@@ -6846,13 +6846,20 @@ window.openPropertyDetail = (dealId) => {
     const sf = stageFiles[`${fk}__${t}`];
     if (sf?.name && !atts.find(a=>a.name===sf.name)) addAtt(sf.name, null);
   });
+  // General attachments uploaded from the drawer
+  (deal.dealAttachments || []).forEach((a, i) => {
+    if (a?.name && !atts.find(x => x.url === a.url)) addAtt(a.name, a.url, true);
+  });
 
-  const attHtml = atts.length
-    ? atts.map(a => a.url
-        ? `<a href="${a.url}" target="_blank" rel="noopener" class="att-chip">📎 ${a.name}</a>`
-        : `<span class="att-chip" style="opacity:.7;cursor:default" title="File stored locally in this session">📎 ${a.name}</span>`
-      ).join(' ')
-    : `<span style="font-size:.8rem;color:#9ca3af;font-style:italic">No attachments</span>`;
+  const attChips = atts.length
+    ? atts.map((a, i) => {
+        const deleteBtn = a.deletable
+          ? `<button onclick="event.preventDefault();event.stopPropagation();_pdwDeleteAttachment('${dealId}','${encodeURIComponent(a.url||'')}','${encodeURIComponent(a.name||'')}')" title="Remove" style="margin-left:.25rem;background:none;border:none;color:#9ca3af;cursor:pointer;font-size:.75rem;padding:0;line-height:1" onmouseover="this.style.color='#ef4444'" onmouseout="this.style.color='#9ca3af'">✕</button>` : '';
+        return a.url
+          ? `<span class="att-chip" style="display:inline-flex;align-items:center"><a href="${a.url}" target="_blank" rel="noopener" style="color:inherit;text-decoration:none">📎 ${a.name}</a>${deleteBtn}</span>`
+          : `<span class="att-chip" style="opacity:.7;cursor:default;display:inline-flex;align-items:center" title="File stored locally in this session">📎 ${a.name}${deleteBtn}</span>`;
+      }).join('')
+    : '';
 
   // ── Stage history ───────────────────────────────────────────
   let histHtml = '';
@@ -6940,7 +6947,22 @@ window.openPropertyDetail = (dealId) => {
     <!-- Attachments -->
     <div class="prop-section">
       <div class="prop-section-title">Attachments</div>
-      <div style="display:flex;flex-wrap:wrap;gap:.4rem">${attHtml}</div>
+      ${attChips ? `<div style="display:flex;flex-wrap:wrap;gap:.4rem;margin-bottom:.65rem">${attChips}</div>` : ''}
+      <!-- Drop zone -->
+      <div id="pdw-drop-zone"
+        style="border:2px dashed #e5e7eb;border-radius:.75rem;padding:.85rem 1rem;text-align:center;cursor:pointer;transition:border-color .15s,background .15s"
+        onclick="document.getElementById('pdw-file-input').click()"
+        ondragover="event.preventDefault();this.style.borderColor='#2563eb';this.style.background='#eff6ff'"
+        ondragleave="this.style.borderColor='#e5e7eb';this.style.background=''"
+        ondrop="event.preventDefault();this.style.borderColor='#e5e7eb';this.style.background='';_pdwHandleFiles('${dealId}',event.dataTransfer.files)"
+        onmouseover="this.style.borderColor='#93c5fd'" onmouseout="this.style.borderColor='#e5e7eb'">
+        <div id="pdw-drop-status" style="font-size:.8rem;color:#6b7280">
+          <span style="font-size:1.25rem;display:block;margin-bottom:.2rem">📎</span>
+          Click or drag &amp; drop files to attach
+        </div>
+      </div>
+      <input id="pdw-file-input" type="file" multiple style="display:none"
+        onchange="_pdwHandleFiles('${dealId}',this.files);this.value=''"/>
     </div>
 
     <!-- Stage Journey -->
@@ -7210,6 +7232,61 @@ window._propSaveLog = async (dealId, type) => {
   await window._dealLogActivity(dealId, type, data);
   document.getElementById('prop-log-form-' + dealId)?.classList.add('hidden');
   await window._propLoadActivities(dealId, 'prop-act-feed-' + dealId);
+};
+
+// ── Property Detail Drawer: attachment upload helpers ────────────────────────
+
+window._pdwHandleFiles = async (dealId, fileList) => {
+  if (!fileList || !fileList.length) return;
+  const statusEl = document.getElementById('pdw-drop-status');
+  const files = Array.from(fileList);
+  for (const file of files) {
+    if (statusEl) statusEl.innerHTML = `<span style="color:#2563eb">⏫ Uploading ${file.name}…</span>`;
+    await window._pdwUploadAttachment(dealId, file);
+  }
+  // Refresh the drawer to show new chips
+  openPropertyDetail(dealId);
+};
+
+window._pdwUploadAttachment = async (dealId, file) => {
+  if (!_fbStorage || !_fbFns) {
+    showToast('Storage not connected — cannot upload', 'error');
+    return;
+  }
+  try {
+    const { ref: fbRef, uploadBytes, getDownloadURL } = _fbFns;
+    const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const storePath = `dealDocs/${dealId}/general_${Date.now()}_${safeName}`;
+    const snap = await uploadBytes(fbRef(_fbStorage, storePath), file);
+    const url = await getDownloadURL(snap.ref);
+    // Append to deal.dealAttachments array
+    const deal = allDeals.find(d => d.id === dealId);
+    const existing = deal?.dealAttachments || [];
+    const updated = [...existing, {
+      name: file.name,
+      url,
+      uploadedAt: Date.now(),
+      uploadedBy: currentUser?.displayName || currentUser?.name || currentUser?.email || '',
+    }];
+    await Store.updateDeal(dealId, { dealAttachments: updated, updatedAt: Date.now() });
+    if (deal) deal.dealAttachments = updated;
+    showToast(`✅ ${file.name} attached`, 'success', 3000);
+  } catch (e) {
+    console.warn('[pdwUpload]', e);
+    showToast(`Upload failed: ${e.message}`, 'error');
+  }
+};
+
+window._pdwDeleteAttachment = async (dealId, encodedUrl, encodedName) => {
+  const url  = decodeURIComponent(encodedUrl);
+  const name = decodeURIComponent(encodedName);
+  if (!confirm(`Remove "${name}" from this deal?`)) return;
+  const deal = allDeals.find(d => d.id === dealId);
+  if (!deal) return;
+  const updated = (deal.dealAttachments || []).filter(a => a.url !== url);
+  await Store.updateDeal(dealId, { dealAttachments: updated, updatedAt: Date.now() });
+  if (deal) deal.dealAttachments = updated;
+  openPropertyDetail(dealId);
 };
 
 /* =======================================================
