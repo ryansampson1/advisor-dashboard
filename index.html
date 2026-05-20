@@ -15839,19 +15839,40 @@ function _hrOpenHeadlineModal(existing){
 
   // Save logic lives entirely here — no external function dependency
   saveBtn.addEventListener('click', async () => {
+    // STEP 1: Immediately change button state — this MUST be the first thing that happens.
+    // If the button text doesn't change to "Checking…", the handler isn't firing at all.
+    const origLabel = existing ? 'Save Changes' : 'Post Headline';
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Checking…';
+
     const title = titleInput.value.trim();
     const body  = bodyInput.value.trim();
-    if(!title){ showToast('Headline title is required','error'); return; }
-    if(!_fbDb || !_fbFns){ showToast('Not connected to database','error'); return; }
-    saveBtn.disabled = true;
+    if(!title){
+      saveBtn.disabled = false;
+      saveBtn.textContent = origLabel;
+      showToast('Headline title is required','error');
+      return;
+    }
+
+    // Re-read Firebase refs at click time (in case init finished after modal opened)
+    const db  = _fbDb;
+    const fns = _fbFns;
+    if(!db || !fns){
+      saveBtn.disabled = false;
+      saveBtn.textContent = origLabel;
+      // Use alert so this cannot possibly be missed
+      alert('Not connected to database.\n\nPlease refresh the page and try again.\n\n(If this keeps happening, check the browser console for Firebase errors.)');
+      return;
+    }
+
     saveBtn.textContent = 'Saving…';
     try {
-      const {collection, addDoc, doc, updateDoc} = _fbFns;
+      const {collection, addDoc, doc, updateDoc} = fns;
       if(existing?.id){
-        await updateDoc(doc(_fbDb,'hrHeadlines',existing.id), {title, body, updatedAt:Date.now()});
+        await updateDoc(doc(db,'hrHeadlines',existing.id), {title, body, updatedAt:Date.now()});
         showToast('Headline updated ✓','success');
       } else {
-        await addDoc(collection(_fbDb,'hrHeadlines'), {
+        await addDoc(collection(db,'hrHeadlines'), {
           title, body, createdAt:Date.now(), updatedAt:Date.now(),
           createdBy: currentUser?.uid||'', createdByName: currentUser?.name||currentUser?.email||''
         });
@@ -15863,7 +15884,7 @@ function _hrOpenHeadlineModal(existing){
       console.error('[hrSaveHeadline]', e);
       showToast('Save failed: '+(e?.code||e?.message||'check Firestore rules'),'error',6000);
       saveBtn.disabled = false;
-      saveBtn.textContent = existing ? 'Save Changes' : 'Post Headline';
+      saveBtn.textContent = origLabel;
     }
   });
 
