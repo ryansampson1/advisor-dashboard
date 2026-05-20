@@ -3354,8 +3354,89 @@ function _applyCriticalDates(){
 
   panel.remove();
   showToast('✅ Applied '+filled+' field'+(filled===1?'':'s')+' to the form', 'success');
+
+  // ── Send Critical Dates task to advisor ────────────────────────────
+  _sendCriticalDatesTask(vals);
 }
 window._applyCriticalDates = _applyCriticalDates;
+
+function _sendCriticalDatesTask(vals){
+  try {
+    // Resolve advisor from form
+    const advUid   = document.getElementById('f-advisor-uid')?.value || currentUser?.uid || '';
+    const address  = document.getElementById('f-address')?.value || vals.projectName || 'this deal';
+    const dealId   = editingDealId || null;
+
+    // Look up name/email from allProfiles or allDeals
+    let advName  = currentUser?.name  || '';
+    let advEmail = currentUser?.email || '';
+    if(advUid && typeof allProfiles !== 'undefined' && allProfiles[advUid]){
+      const p = allProfiles[advUid];
+      if(p.name)  advName  = p.name;
+      if(p.email) advEmail = p.email;
+    }
+    if((!advName || !advEmail) && typeof allDeals !== 'undefined'){
+      const match = allDeals.find(d=>d.advisorUid===advUid);
+      if(match){
+        if(!advName  && match.advisorName)  advName  = match.advisorName;
+        if(!advEmail && match.advisorEmail) advEmail = match.advisorEmail;
+      }
+    }
+
+    // Label definitions for the task body
+    const labelMap = {
+      projectName:'Property / Project',seller:'Seller',buyer:'Buyer',loiBuyer:'Buyer (LOI)',
+      buyerBroker:"Buyer's Broker",buyerUse:"Buyer's Intended Use",
+      listingPrice:'Listing Price',loiPrice:'LOI Price',purchasePrice:'Purchase Price',
+      contractPrice:'Contract Price',elcCommissionPct:'Commission %',earnestMoney:'Earnest Money',
+      acreage:'Acreage',county:'County',
+      listingEffectiveDate:'Listing Effective',listingExpiration:'Listing Expiration',
+      effectiveDate:'Contract Effective',psaEffectiveDate:'PSA Effective',
+      ddExpirationDate:'Due Diligence Exp.',financingContingencyDate:'Financing Contingency',
+      titleCommitmentDate:'Title Commitment',closeDate:'Closing Date',
+      escrowAgent:'Escrow / Title Co.',escrowAgentEmail:'Escrow Email',
+      referralPct:'Referral Fee %',referralTo:'Referral Recipient',
+    };
+
+    const fmt$ = v => { const n=parseFloat(v); return !isNaN(n) ? '$'+n.toLocaleString() : v; };
+    const isMoneyKey = k => ['listingPrice','loiPrice','purchasePrice','contractPrice','earnestMoney'].includes(k);
+    const isPctKey   = k => ['elcCommissionPct','referralPct'].includes(k);
+
+    const lines = Object.entries(labelMap)
+      .filter(([k]) => vals[k])
+      .map(([k,lbl]) => {
+        let v = String(vals[k]);
+        if(isMoneyKey(k)) v = fmt$(v);
+        else if(isPctKey(k)) v = v+'%';
+        return `  • ${lbl}: ${v}`;
+      });
+
+    if(!lines.length) return; // nothing to send
+
+    const body =
+      `AI extracted the following critical dates and key terms from the uploaded document for ${address}.\n\n`+
+      `Please review for accuracy before the deal advances to the next stage.\n\n`+
+      `CRITICAL DATES LIST:\n${lines.join('\n')}\n\n`+
+      `If any values are incorrect, open the deal card and update the fields manually.`;
+
+    Store.createTask({
+      title: 'Review Critical Dates — '+address,
+      description: body,
+      assignedTo:      advUid,
+      assignedToName:  advName,
+      assignedToEmail: advEmail,
+      dealId:          dealId,
+      dealAddress:     address,
+      dueDate:         new Date(Date.now()+86400000).toISOString().split('T')[0], // due tomorrow
+      status:          'pending',
+      createdBy:       currentUser?.uid||'system',
+      createdByName:   'AI Auto-Fill',
+      createdAt:       Date.now(),
+    }).catch(e=>console.error('[critical-dates-task]',e));
+
+  } catch(e){ console.error('[_sendCriticalDatesTask]',e); }
+}
+window._sendCriticalDatesTask = _sendCriticalDatesTask;
 
 function renderStageFields(stage, data={}){
   const container = document.getElementById('stage-fields');
