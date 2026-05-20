@@ -623,6 +623,7 @@ body {
       <div id="pdw-sub" style="font-size:.75rem;color:#6b7280;margin-top:.2rem"></div>
     </div>
     <div style="display:flex;align-items:center;gap:.5rem;flex-shrink:0">
+      <button id="pdw-ext-btn" onclick="" style="background:#eff6ff;border:none;border-radius:8px;padding:.4rem .8rem;font-size:.8rem;font-weight:600;color:#2563eb;cursor:pointer;display:none">📋 Extension</button>
       <button id="pdw-edit-btn" onclick="" style="background:#f3f4f6;border:none;border-radius:8px;padding:.4rem .8rem;font-size:.8rem;font-weight:600;color:#374151;cursor:pointer">✏️ Edit</button>
       <button onclick="closePropertyDetail()" style="background:none;border:none;font-size:1.4rem;color:#9ca3af;cursor:pointer;line-height:1;padding:.2rem">&times;</button>
     </div>
@@ -3910,6 +3911,133 @@ async function _applyCriticalDatesToDeal(dealId){
 }
 window._applyCriticalDatesToDeal = _applyCriticalDatesToDeal;
 
+// ── On-demand Listing Extension generator ────────────────────────────────────
+// Shows a pre-fill review panel then generates + downloads the amendment DOCX
+window._pdwGenerateListingExtension = function(dealId){
+  const deal = allDeals.find(d=>d.id===dealId);
+  if(!deal){ showToast('Deal not found','error'); return; }
+
+  // Pre-fill values — mirror the automation's field priority
+  const rawPrice = deal.listedPrice||deal.listPrice||deal.askingPrice||deal.purchasePrice||0;
+  const priceFmt = rawPrice ? Number(rawPrice).toLocaleString('en-US',{style:'currency',currency:'USD',maximumFractionDigits:0}) : '';
+  const sellerEntity = deal.ownershipEntity||deal.clientName||deal.sellerName||deal.contactPerson||'';
+  const listingStart = deal.listingEffectiveDate||'';
+  const legalDesc = deal.legalDescription||deal.legal||'';
+  const addr = deal.propertyAddress||deal.projectName||'property';
+
+  document.getElementById('listing-ext-panel')?.remove();
+
+  const panel = document.createElement('div');
+  panel.id = 'listing-ext-panel';
+  panel.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.5);padding:16px;';
+  panel.innerHTML = `
+    <div style="background:#fff;border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,0.25);width:100%;max-width:520px;max-height:90vh;display:flex;flex-direction:column;overflow:hidden;">
+      <div style="padding:16px 20px 12px;border-bottom:1px solid #f1f5f9;flex-shrink:0;">
+        <div style="display:flex;align-items:center;justify-content:space-between;">
+          <div>
+            <div style="font-size:15px;font-weight:700;color:#111;">📋 Generate Listing Extension</div>
+            <div style="font-size:12px;color:#64748b;margin-top:2px;">${addr}</div>
+          </div>
+          <button onclick="document.getElementById('listing-ext-panel')?.remove()"
+            style="width:28px;height:28px;border-radius:50%;border:1px solid #e2e8f0;background:#f8fafc;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;color:#64748b;">✕</button>
+        </div>
+      </div>
+      <div style="flex:1;overflow-y:auto;padding:14px 20px;display:flex;flex-direction:column;gap:12px;">
+        <div>
+          <label style="display:block;font-size:11px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Selling / Owner Entity</label>
+          <input id="lex-seller-entity" type="text" value="${sellerEntity.replace(/"/g,'&quot;')}" placeholder="e.g. Smith Family LLC"
+            style="width:100%;border:1px solid #e2e8f0;border-radius:8px;padding:8px 12px;font-size:13px;outline:none;box-sizing:border-box"/>
+        </div>
+        <div>
+          <label style="display:block;font-size:11px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Listing Effective Date (original agreement)</label>
+          <input id="lex-listing-date" type="date" value="${listingStart}"
+            style="width:100%;border:1px solid #e2e8f0;border-radius:8px;padding:8px 12px;font-size:13px;outline:none;box-sizing:border-box"/>
+        </div>
+        <div>
+          <label style="display:block;font-size:11px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Updated Listing Price</label>
+          <input id="lex-price" type="text" value="${priceFmt.replace(/"/g,'&quot;')}" placeholder="e.g. $2,500,000"
+            style="width:100%;border:1px solid #e2e8f0;border-radius:8px;padding:8px 12px;font-size:13px;outline:none;box-sizing:border-box"/>
+        </div>
+        <div>
+          <label style="display:block;font-size:11px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Legal Description (Exhibit A)</label>
+          <textarea id="lex-legal" rows="3" placeholder="[Legal description — see County Property Appraiser if unknown]"
+            style="width:100%;border:1px solid #e2e8f0;border-radius:8px;padding:8px 12px;font-size:13px;outline:none;resize:vertical;box-sizing:border-box">${legalDesc.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</textarea>
+        </div>
+        <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:10px 12px;font-size:11.5px;color:#92400e;">
+          ⚠️ The extension grants an additional <strong>365 days</strong> from the amendment's effective date. Review before sending to client.
+        </div>
+      </div>
+      <div style="padding:12px 20px;border-top:1px solid #f1f5f9;display:flex;gap:8px;flex-shrink:0;">
+        <button onclick="_pdwDoGenerateExtension('${dealId}')"
+          style="flex:1;background:#2563eb;color:#fff;font-size:13px;font-weight:600;padding:10px 16px;border-radius:10px;border:none;cursor:pointer;">
+          ⬇️ Download Amendment
+        </button>
+        <button onclick="document.getElementById('listing-ext-panel')?.remove()"
+          style="padding:10px 16px;border-radius:10px;border:1px solid #e2e8f0;background:#f8fafc;font-size:13px;color:#374151;cursor:pointer;">
+          Cancel
+        </button>
+      </div>
+    </div>`;
+  document.body.appendChild(panel);
+  // Focus first field
+  setTimeout(()=> document.getElementById('lex-seller-entity')?.focus(), 50);
+};
+
+window._pdwDoGenerateExtension = async function(dealId){
+  const deal = allDeals.find(d=>d.id===dealId);
+  if(!deal){ showToast('Deal not found','error'); return; }
+  if(typeof JSZip==='undefined'){ showToast('JSZip library not loaded yet — try again','warning'); return; }
+
+  const btn = document.querySelector('#listing-ext-panel button[onclick*="DoGenerate"]');
+  if(btn){ btn.disabled=true; btn.textContent='Generating…'; }
+
+  try {
+    const escXml = s => (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&apos;');
+
+    const sellerEntity  = document.getElementById('lex-seller-entity')?.value.trim() || '[Seller Entity]';
+    const listingDate   = document.getElementById('lex-listing-date')?.value || '';
+    const price         = document.getElementById('lex-price')?.value.trim() || '[Price]';
+    const legalDesc     = document.getElementById('lex-legal')?.value.trim() || '[Legal description to be attached as Exhibit A — see County Property Appraiser]';
+
+    // Format listing date nicely for the document
+    let listingDateFmt = listingDate;
+    if(listingDate){
+      try { listingDateFmt = new Date(listingDate+'T12:00:00').toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'}); } catch(e){}
+    }
+
+    const templateBytes = Uint8Array.from(atob(LISTING_AMENDMENT_TEMPLATE_B64), c=>c.charCodeAt(0));
+    const zip = await JSZip.loadAsync(templateBytes);
+    let docXml = await zip.file('word/document.xml').async('string');
+
+    docXml = docXml
+      .replace(/\{\{seller_entity\}\}/g,   escXml(sellerEntity))
+      .replace(/\{\{selling_entity\}\}/g,  escXml(sellerEntity))
+      .replace(/\{\{listing_start_date\}\}/g, escXml(listingDateFmt||'[Listing Date]'))
+      .replace(/\{\{updated_price\}\}/g,   escXml(price))
+      .replace(/\{\{legal_description\}\}/g,  escXml(legalDesc));
+
+    zip.file('word/document.xml', docXml);
+    const blob = await zip.generateAsync({type:'blob', mimeType:'application/vnd.openxmlformats-officedocument.wordprocessingml.document'});
+
+    // Trigger browser download
+    const addr = deal.propertyAddress||deal.projectName||'property';
+    const safeName = addr.replace(/[\/\\:*?"<>|]/g,'-');
+    const fileName = 'Listing Extension - '+safeName+'.docx';
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = fileName;
+    document.body.appendChild(a); a.click();
+    setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); }, 1000);
+
+    document.getElementById('listing-ext-panel')?.remove();
+    showToast('📋 Listing extension downloaded — review and send to client for signature', 'success', 5000);
+  } catch(err){
+    console.error('[generateListingExtension]', err);
+    showToast('Generation failed: '+err.message, 'error', 6000);
+    if(btn){ btn.disabled=false; btn.textContent='⬇️ Download Amendment'; }
+  }
+};
+
 // Drawer auto-fill handler — validates file type then kicks off extraction
 window._pdwHandleAutoFill = function(dealId, files){
   if(!files || !files.length) return;
@@ -6955,6 +7083,11 @@ window.openPropertyDetail = (dealId) => {
   document.getElementById('pdw-sub').textContent =
     [deal.county, deal.landType, deal.dealType === 'lease' ? '📋 Lease' : null].filter(Boolean).join(' · ');
   document.getElementById('pdw-edit-btn').onclick = () => { closePropertyDetail(); openDealModal(dealId); };
+  // Show Extension button only for Listing stage
+  const extBtn = document.getElementById('pdw-ext-btn');
+  const isListing = /^listing$/i.test(deal.stage||'');
+  extBtn.style.display = isListing ? '' : 'none';
+  extBtn.onclick = () => _pdwGenerateListingExtension(dealId);
 
   // ── Helpers ────────────────────────────────────────────────
   const fmtD  = s => s ? new Date(s+'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) : null;
