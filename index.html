@@ -18767,45 +18767,57 @@ async function _getBulkDriveToken(){
 }
 
 async function _driveFolderPdfs(folderId, token){
-  // Fetch PDFs directly inside the folder
-  const qs = new URLSearchParams({
-    q: `'${folderId}' in parents and mimeType='application/pdf' and trashed=false`,
-    fields: 'files(id,name,size)',
-    pageSize: '50',
-    access_token: token
-  });
-  const r = await fetch(`https://www.googleapis.com/drive/v3/files?${qs}`);
-  if(!r.ok) return [];
-  const data = await r.json();
-  let files = data.files || [];
+  const AUTH = { Authorization: `Bearer ${token}` };
+  const OM_FOLDER_NAMES = ['package', 'marketing', 'offering', ' om', '/om'];
 
-  // If no PDFs directly, search one level of subfolders
-  if(files.length === 0){
-    const qs2 = new URLSearchParams({
-      q: `'${folderId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
-      fields: 'files(id,name)',
-      pageSize: '20',
-      access_token: token
+  async function fetchPdfs(id){
+    const qs = new URLSearchParams({
+      q: `'${id}' in parents and mimeType='application/pdf' and trashed=false`,
+      fields: 'files(id,name,size)', pageSize: '50'
     });
-    const r2 = await fetch(`https://www.googleapis.com/drive/v3/files?${qs2}`);
-    if(r2.ok){
-      const sub = (await r2.json()).files || [];
-      for(const sf of sub){
-        const qs3 = new URLSearchParams({
-          q: `'${sf.id}' in parents and mimeType='application/pdf' and trashed=false`,
-          fields: 'files(id,name,size)',
-          pageSize: '30',
-          access_token: token
-        });
-        const r3 = await fetch(`https://www.googleapis.com/drive/v3/files?${qs3}`);
-        if(r3.ok){
-          const more = (await r3.json()).files || [];
-          files = files.concat(more);
-        }
+    const r = await fetch(`https://www.googleapis.com/drive/v3/files?${qs}`, { headers: AUTH });
+    return r.ok ? ((await r.json()).files || []) : [];
+  }
+
+  async function fetchFolders(id){
+    const qs = new URLSearchParams({
+      q: `'${id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+      fields: 'files(id,name)', pageSize: '30'
+    });
+    const r = await fetch(`https://www.googleapis.com/drive/v3/files?${qs}`, { headers: AUTH });
+    return r.ok ? ((await r.json()).files || []) : [];
+  }
+
+  const isOmFolder = name => OM_FOLDER_NAMES.some(p => name.toLowerCase().includes(p));
+
+  // Step 1: PDFs at root — if good match found, done early
+  let pdfs = await fetchPdfs(folderId);
+  if(_bestOmFile(pdfs) !== null) return pdfs;
+
+  // Step 2: Get all subfolders; search OM-named ones first
+  const subs = await fetchFolders(folderId);
+  const sorted = [
+    ...subs.filter(sf => isOmFolder(sf.name)),
+    ...subs.filter(sf => !isOmFolder(sf.name))
+  ];
+
+  for(const sf of sorted){
+    const sfPdfs = await fetchPdfs(sf.id);
+    pdfs = pdfs.concat(sfPdfs);
+    if(_bestOmFile(pdfs) !== null) return pdfs;
+
+    // For OM-named subfolders, go one level deeper if no PDFs found
+    if(isOmFolder(sf.name) && sfPdfs.length === 0){
+      const subsubs = await fetchFolders(sf.id);
+      for(const ssf of subsubs){
+        const ssfPdfs = await fetchPdfs(ssf.id);
+        pdfs = pdfs.concat(ssfPdfs);
+        if(_bestOmFile(pdfs) !== null) return pdfs;
       }
     }
   }
-  return files;
+
+  return pdfs;
 }
 
 function _scoreOmFile(name){
