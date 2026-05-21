@@ -14005,6 +14005,17 @@ function viewAutomations(){
         })()" class="brand-btn px-4 py-2 text-sm font-semibold rounded-lg">Save Key</button>
       </div>
     </div>
+    <!-- Drive Folder Sync -->
+    ${currentUser.isSuperAdmin?`
+    <div class="bg-white rounded-2xl border p-5 mb-4">
+      <div class="flex items-center gap-2 mb-3">
+        <svg width="18" height="16" viewBox="0 0 87.3 78" xmlns="http://www.w3.org/2000/svg"><path d="m6.6 66.85 3.85 6.65c.8 1.4 1.95 2.5 3.3 3.3l13.75-23.8h-27.5c0 1.55.4 3.1 1.2 4.5z" fill="#0066da"/><path d="m43.65 25-13.75-23.8c-1.35.8-2.5 1.9-3.3 3.3l-25.4 44a9.06 9.06 0 0 0 -1.2 4.5h27.5z" fill="#00ac47"/><path d="m73.55 76.8c1.35-.8 2.5-1.9 3.3-3.3l1.6-2.75 7.65-13.25c.8-1.4 1.2-2.95 1.2-4.5h-27.502l5.852 11.5z" fill="#ea4335"/><path d="m43.65 25 13.75-23.8c-1.35-.8-2.9-1.2-4.5-1.2h-18.5c-1.6 0-3.15.45-4.5 1.2z" fill="#00832d"/><path d="m59.8 53h-32.3l-13.75 23.8c1.35.8 2.9 1.2 4.5 1.2h50.8c1.6 0 3.15-.45 4.5-1.2z" fill="#2684fc"/><path d="m73.4 26.5-12.7-22c-.8-1.4-1.95-2.5-3.3-3.3l-13.75 23.8 16.15 28h27.45c0-1.55-.4-3.1-1.2-4.5z" fill="#ffba00"/></svg>
+        <h3 class="text-sm font-bold text-gray-700">Google Drive Folder Sync</h3>
+        <span class="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full ml-1">Admin Tool</span>
+      </div>
+      <p class="text-xs text-gray-400 mb-3">Match Google Drive project folders to deal cards by name and set the Drive folder link on each deal. Preview matches before applying.</p>
+      <button onclick="window.runDriveFolderSync()" class="brand-btn px-4 py-2 text-sm font-semibold rounded-lg">🔗 Preview & Sync Drive Folders</button>
+    </div>`:''}
     <div class="space-y-3">
       ${allAutomations.length===0
         ?'<div class="bg-white rounded-2xl border p-8 text-center text-gray-400 text-sm">No automation rules yet.</div>'
@@ -18359,6 +18370,357 @@ function _hrOpenHeadlineModal(existing){
   document.body.appendChild(overlay);
   titleInput.focus();
 }
+
+/* =======================================================
+   GOOGLE DRIVE FOLDER SYNC (Admin Only)
+   Fuzzy-matches Drive folders to deals and sets driveUrl
+   ======================================================= */
+const DRIVE_SYNC_FOLDERS = [
+  {t:"Cosme Road-Odessa",u:"https://drive.google.com/drive/folders/16eQUaeOsIwiodEvDDLcUJwQGDWDOEmhJ"},
+  {t:"2478 S Falkenburg Rd-Brandon",u:"https://drive.google.com/drive/folders/1a465IRKdbCTujXdAwZPpeei-bz2AecJz"},
+  {t:"Hernando South II Sale",u:"https://drive.google.com/drive/folders/1Q2M7VC0dN8DI02soFP4RygtbSupqvEgu"},
+  {t:"Crisi Swift",u:"https://drive.google.com/drive/folders/1uueUGTpewAziU9Bxv_G84ILoaaoh-z_e"},
+  {t:"Ashley Lakes Commercial",u:"https://drive.google.com/drive/folders/19VTChtHCG1x7KlOBeWfFOmlLHgUwVu_1"},
+  {t:"US 19 & Sea Pines",u:"https://drive.google.com/drive/folders/1Bo1jQ4K-1_sEtSURz81XRhBn8vOLBWm0"},
+  {t:"Apollo Beach & US 41",u:"https://drive.google.com/drive/folders/16kDV9r_VaQWaMK8ZBHYWyV5HGpSCHOdp"},
+  {t:"Tampa Tank",u:"https://drive.google.com/drive/folders/1j2aX3t8W_RloRflVWTVntVMzpw00WeK8"},
+  {t:"Trailhead Blue Springs",u:"https://drive.google.com/drive/folders/10DeoDA1Ltn7roOVKHeniIoxdnRVc0vQ7"},
+  {t:"Marion Ranch Commercial",u:"https://drive.google.com/drive/folders/1Ayxe_XHBcK_b-ohzUe9IW_i7kwqjaTgI"},
+  {t:"Cherry Road- Baseline Ocala",u:"https://drive.google.com/drive/folders/1MBHNxdWAHE1O_OVOgwIEYJwneg6WsCvw"},
+  {t:"Geraci Dale Mabry & Van Dyke - Retail Land",u:"https://drive.google.com/drive/folders/1sNI4Tbad0j18uKZ2K1At9wNPU1kBwQjX"},
+  {t:"Burnt Store Road - 80 ac",u:"https://drive.google.com/drive/folders/1xvfodkGFuPfzeTpYhLktppleIzeOaixT"},
+  {t:"Fernick 52",u:"https://drive.google.com/drive/folders/1hJTC3Y18I2XkHn3O2apsoMRrNbETWKnk"},
+  {t:"Handcart Oconnor",u:"https://drive.google.com/drive/folders/1Uw5Pq-RP_9xGNsS9qmxoEGR4vy88fTOi"},
+  {t:"Gandy Retail",u:"https://drive.google.com/drive/folders/1FgnDh-2NaE4UpV0fp1sTqfWYe7b3wk1E"},
+  {t:"Forest Oaks Basham",u:"https://drive.google.com/drive/folders/1yx9CfK5bTVBvfGXssue25KrHIs0wT7b0"},
+  {t:"Outlaw Reserve",u:"https://drive.google.com/drive/folders/1Lh6G8XxCzo9AQXzs5iL3GC23aKJ4tvI0"},
+  {t:"Sanctuary Farms Frontage",u:"https://drive.google.com/drive/folders/1UMjUGbjNCgy0PBzFEYkVGbHPd_UXEYm0"},
+  {t:"Moon Lake MF 2024",u:"https://drive.google.com/drive/folders/1HNjP8eM5amDv5L-zPhno_GbEAaqRBD-0"},
+  {t:"Ft. Myers Commercial",u:"https://drive.google.com/drive/folders/1UGg-9wDoxI_W5msvT9sWjS5s5ZM2KnNJ"},
+  {t:"Bowen Industrial",u:"https://drive.google.com/drive/folders/1Q2cwMVOqRnTaxg2koDMn3v13FmlnzCbY"},
+  {t:"19th Ave Mixed Use Site- Williams",u:"https://drive.google.com/drive/folders/1rjwd-xSyR746lDJZf-VMTuCnn-BbmBnJ"},
+  {t:"Thono T",u:"https://drive.google.com/drive/folders/1UCjehCgsiwZHxCnYtqLYyU9jFFxC916l"},
+  {t:"ALF Ocoee",u:"https://drive.google.com/drive/folders/1nxoc5v7UtEsUP98hCDZUx2gM51E-nIMp"},
+  {t:"Lake Alfred Commercial",u:"https://drive.google.com/drive/folders/1b5xvAB8Mic2BGmw3eBUGwxXVxRRtpYR0"},
+  {t:"Saffold Packinghouse",u:"https://drive.google.com/drive/folders/1lsev5kxo-ysUkekt3oSUzeyyCQl5iZl6"},
+  {t:"Kenton Commercial (Sampson Owned)",u:"https://drive.google.com/drive/folders/1lLQPkC_dsSCYVC3Y0TnlAquyp7Z2vYMy"},
+  {t:"McMullen Greystone at Pretty Lake",u:"https://drive.google.com/drive/folders/1gkcAVW51x4cY5tM0jdxzPggdrk7ZsjgF"},
+  {t:"Harbor Sunsets",u:"https://drive.google.com/drive/folders/1jLqqjqnoLRqWiRSg4ilIjRtOw7OgdMH2"},
+  {t:"Burnett Pruett",u:"https://drive.google.com/drive/folders/13nJ1tAkiUbnqlEr37cg3ZGs2IoqZrbly"},
+  {t:"East Shore Drive",u:"https://drive.google.com/drive/folders/1wKatROpsOZDsHCRElorV6Xdi_i8UqJgW"},
+  {t:"Tarpon Springs Rd Nursery",u:"https://drive.google.com/drive/folders/1SHgolgHbAloBPO8a1D6B0DJtzD-Gbauo"},
+  {t:"Outlaw Ridge Lots",u:"https://drive.google.com/drive/folders/1icw63-7eY7HxbYL6tH4RSMgOigAVAtuV"},
+  {t:"Centerwood Residential",u:"https://drive.google.com/drive/folders/1vI2EuZQK00KPsnFzoyT0HTgVzA73etmq"},
+  {t:"Crossbuck Farm",u:"https://drive.google.com/drive/folders/1MAPMbWuYPuOzRn0oznwCz7j3x31QuY70"},
+  {t:"Genesee Multifamily",u:"https://drive.google.com/drive/folders/1tv2qrMfdYUA0fZ8_gYoAidJHwYXJJT5r"},
+  {t:"HFO Wimauma Grove",u:"https://drive.google.com/drive/folders/1MJwPf4D62UIwvGPhj5FPs3a0kpPuWQRs"},
+  {t:"sabal park retail (Sampson Owned)",u:"https://drive.google.com/drive/folders/1Jd9B_U_CNHBvoMPluVXqEv32giC8Zpac"},
+  {t:"Legends Pointe West",u:"https://drive.google.com/drive/folders/1uQeIHTzpUOKpRsf7sr4AXK7H2vnmGA6F"},
+  {t:"Highview Lentz",u:"https://drive.google.com/drive/folders/1RBdf8i7Z5AsjejFMcjhM6nM6ybd_MV6X"},
+  {t:"Northridge Ripa",u:"https://drive.google.com/drive/folders/1I5MQkLLVME-zovPHI7gAUj5b8Ijj34ds"},
+  {t:"1010 Lithia Pinecrest & 1111 Bell Shoals Rd-Brandon",u:"https://drive.google.com/drive/folders/1GZntnvELUBzbeop_8aCcv3Wox_yIsp4L"},
+  {t:"SR 50 & Remington",u:"https://drive.google.com/drive/folders/1UsZmi6XJwFGNw5sV_-GPCO-5LyqSLjmK"},
+  {t:"Alico ITEC Industrial",u:"https://drive.google.com/drive/folders/1ZPYWTEia3UWSRcYNPxoT5YrMJOsQABFJ"},
+  {t:"Hillandale Reserve",u:"https://drive.google.com/drive/folders/1POyBcyPQu9584WLSt4IrW6nXNM9VS31a"},
+  {t:"Amberlea Lot 2",u:"https://drive.google.com/drive/folders/1cT3L1TyFl3rPqDVgxkXa_2kpjxu7FoQF"},
+  {t:"Powell Road - Townhomes",u:"https://drive.google.com/drive/folders/1G_LmkGHlr12CcrR0VVJnqBJgTigzU03G"},
+  {t:"Powe Lake 2024",u:"https://drive.google.com/drive/folders/1dIS5A-Fasu4JmpL-9L4JezKcEmGK4kNt"},
+  {t:"HFO Sun City",u:"https://drive.google.com/drive/folders/1qjZ9QOyD3RyllplqHr-7nr9hpjoJZMd9"},
+  {t:"Commercial Way Andover",u:"https://drive.google.com/drive/folders/11K2NhF3ORuvSZKBLp6BXtiSrwm4dA2Y9"},
+  {t:"Sebring Commercial",u:"https://drive.google.com/drive/folders/1hXkq_gwtQCnoeGz9OozroNYezl2-aff-"},
+  {t:"Bonnie Mine Industrial",u:"https://drive.google.com/drive/folders/12QvXg-MTKosJO45TPHTweI8whsSylEgC"},
+  {t:"Kossik Kennedy ZH",u:"https://drive.google.com/drive/folders/1wP5IPTw-ZYow9F4mdUrhRYuLR5YfjU9y"},
+  {t:"HSW Properties",u:"https://drive.google.com/drive/folders/16R38yvBDz-BLYpYSxC8hTBsou9uScvSn"},
+  {t:"Tower Rd",u:"https://drive.google.com/drive/folders/1a51nCS0Ta4JhgJRmZ9p6EN1TvD4j9PGB"},
+  {t:"McMullen Loop - Riverview",u:"https://drive.google.com/drive/folders/11HGwk_bieuPKQgzd0K6wOLqk6rZp1L4E"},
+  {t:"Twisted Oaks MF Kolter",u:"https://drive.google.com/drive/folders/1EX_yU-UaJYO9a1dx512HgKAoEmEuHYA5"},
+  {t:"Jones Gordon 301",u:"https://drive.google.com/drive/folders/1tuPJzd-qTRhdKWBvxB_p6jn-vBr0bntY"},
+  {t:"Shops at Meres",u:"https://drive.google.com/drive/folders/1sfflrSi6zXfU9lDBQnQ1ZF2C2dhq3EVN"},
+  {t:"Maydell Obba",u:"https://drive.google.com/drive/folders/1zrpegnDgkDnowz982dp84-ZNzvlipzRY"},
+  {t:"Clinton & 301-Dade City",u:"https://drive.google.com/drive/folders/1xXdlqFJJZAZ3phLzOHQdKlhDjXlx5vyk"},
+  {t:"Delong",u:"https://drive.google.com/drive/folders/1Gs6Zh2Ge7dFiG6as4aGVuY9J9D4rQ3Ud"},
+  {t:"SR 52 Hays",u:"https://drive.google.com/drive/folders/1spYJ9uboLsi-NBuPsWtMSXC3lC2outKS"},
+  {t:"HP1",u:"https://drive.google.com/drive/folders/1cgTW2Mj-eV4229FCTAmgwbdLZ2o7C40m"},
+  {t:"Port Manatee Industrial",u:"https://drive.google.com/drive/folders/1-51iv4K8l3wPZO1mRJFLLJx4ob3NbvjS"},
+  {t:"Abbey Crossing- Continental (not listed)",u:"https://drive.google.com/drive/folders/18iLXmsXdoR74KzuLec2pRBUiDy-uyR_Y"},
+  {t:"Belle Aire Farms",u:"https://drive.google.com/drive/folders/1TS0WCd2Q6oONKe7b1ZKV1hLs8uoLWxR5"},
+  {t:"7507 N Glen Ave",u:"https://drive.google.com/drive/folders/1Xvaf9H_p6tHJKq10Vphbb649yPlnzmqy"},
+  {t:"2702 E College Ave",u:"https://drive.google.com/drive/folders/1nQNrxUc0g7XYwWwN67wsBfcIrqRbWf4t"},
+  {t:"Punta Gorda Commercial",u:"https://drive.google.com/drive/folders/1jbKEpFo91y5kjkjg7FyrLa3ZYyLW7q0W"},
+  {t:"Brookridge lots",u:"https://drive.google.com/drive/folders/19IIDQM3snW-HLSzVydjqQJZdPH4zRx6p"},
+  {t:"Ruskin Shell Point",u:"https://drive.google.com/drive/folders/1eCynehO_-qOO6nha8RrpU_SPU7NKC2l7"},
+  {t:"Panacea Apartments",u:"https://drive.google.com/drive/folders/1ei8D4d65Cz_J1ed1-MRcBoRXLDRhXXY0"},
+  {t:"US 301 & Amsterdam - Ellenton",u:"https://drive.google.com/drive/folders/1J0uJMKyW0q40xjjcSpfzEkxM2xH3uhnE"},
+  {t:"Gilbert Dade City",u:"https://drive.google.com/drive/folders/1w0ySfsyxCg-KHQofdMSQf26eSBjx5XAy"},
+  {t:"Urbanek 674",u:"https://drive.google.com/drive/folders/1gJN8m-hqSLdHB_JJqlAZvl6HV2f9IQIt"},
+  {t:"AP - 30th St (Bradenton)",u:"https://drive.google.com/drive/folders/1tpisEIQ5vZ12sBYkUql84qsevmGNpp6_"},
+  {t:"Mercers Ferney",u:"https://drive.google.com/drive/folders/1K5afqYyzzmIYr7snf-iwOS19BD9xCPjU"},
+  {t:"Crisci Hundred Acre Wood 27th St. East",u:"https://drive.google.com/drive/folders/1XPRqPoD4CfsIs17ditsgedh83vzQ5fGE"},
+  {t:"Greystone at Pretty Lake",u:"https://drive.google.com/drive/folders/1P1FCtPjiNUEGVa5149tQRrvfeOqfI8kO"},
+  {t:"CPEV Apts",u:"https://drive.google.com/drive/folders/1UG9c5329W1Rem9z2ZQwxXYvDijHJlhel"},
+  {t:"McMullen Crossbuck",u:"https://drive.google.com/drive/folders/1RpAw1QNTViTgAOmi2YcuKB12gcWbXHV7"},
+  {t:"Bloomingdale Watson",u:"https://drive.google.com/drive/folders/1Q4vr2LnaEpZT5wqRM6xEWOvFwO23T0M4"},
+  {t:"Long Lake - Geraci",u:"https://drive.google.com/drive/folders/1wPzUPi3mJtgrarXf3JGN-RPxAJqhAwjQ"},
+  {t:"Miller FL Homes & Cypress Creek Corp",u:"https://drive.google.com/drive/folders/1Yvg4mEm4wdX58gUb2ZoqJvv5UuU1Uhcs"},
+  {t:"Sunhill Spring Hill",u:"https://drive.google.com/drive/folders/1zX8rOHGNvgGThUHYLLAAU5f406zkMHte"},
+  {t:"Sumner 57",u:"https://drive.google.com/drive/folders/1ES3bf-Vz7jon59BUeC7z0cTWFTnuNexz"},
+  {t:"CR 39 Plant City",u:"https://drive.google.com/drive/folders/1LGds9Inox_CsZ0n9bHLCyfK7YEL5p7M8"},
+  {t:"Kokolakis Tarpon",u:"https://drive.google.com/drive/folders/1a2qR8lMjHbWy_XPDngDvYE2lgRdvzsLI"},
+  {t:"Garrison Woods",u:"https://drive.google.com/drive/folders/1DKFLTVa9S-MwIUnimBZTFLOFtLOYgnN4"},
+  {t:"Ruskin Patel Apartments",u:"https://drive.google.com/drive/folders/1CUuXDN_TmiU62QXXmzEJk0_UqTfMiSBQ"},
+  {t:"61 Ladoga",u:"https://drive.google.com/drive/folders/1j1ZfchbVsCUYc4HbnFokaASg0b1Gf54e"},
+  {t:"College & 6th St SE - Ruskin",u:"https://drive.google.com/drive/folders/1tE0ta3t3-qkE4ygLUfkwo1Dns1jVhtVG"},
+  {t:"HP2 Lake Placid",u:"https://drive.google.com/drive/folders/1nxa5zuQsa7H9FtQbb8k-N1sNdcXWUPFc"},
+  {t:"US 41 & US 19 Interchange",u:"https://drive.google.com/drive/folders/1AO533S0P2Hey_DU5x_ZBl74H97f6AgSx"},
+  {t:"Old Polk City Lake Alfred",u:"https://drive.google.com/drive/folders/1_ACY5bNleQL4Nw5FwASYBRzZkV21UFN5"},
+  {t:"Palmetto Business 41",u:"https://drive.google.com/drive/folders/1eGZ_-3cl4MRnJQpKV-zhIhHsKikty2YP"},
+  {t:"Curley Road Ranch",u:"https://drive.google.com/drive/folders/1IERC8uPBzmXUrolePfkSAWtB2rJGdjrF"},
+  {t:"SR 33 Commercial - Lots 3-10",u:"https://drive.google.com/drive/folders/1p8vtG4QlQGONDiNCJFkh4J5pIB2YczOx"},
+  {t:"Bellamy 52 - SNJ Management",u:"https://drive.google.com/drive/folders/1TO1_obsBSE9hgod758osIceqqARvR_AU"},
+  {t:"Haines City MF",u:"https://drive.google.com/drive/folders/1uvB6yspc29hs09DGm-DDHY0qvVWsev0m"},
+  {t:"Kings Mill 2018",u:"https://drive.google.com/drive/folders/1Wl6BV1wbnNEo85mM5LbNsfCeBRH17BlY"},
+  {t:"Hays & Hudson Retail",u:"https://drive.google.com/drive/folders/1RrJCZBS20gyZcGsmKKKIYpdhg-G_vPyI"},
+  {t:"Majestic Oaks - 425 ac",u:"https://drive.google.com/drive/folders/1UmH7JM-jF_gBSqhORm1uvqiemazMq99-"},
+  {t:"Grade Tract 5",u:"https://drive.google.com/drive/folders/1okEOycy9qawNhLqu0iCoB6yUXMy_ZFe2"},
+  {t:"HFO Boyette",u:"https://drive.google.com/drive/folders/1P93RrkuomFzlpDRocqtDChFA4J7X7GNf"},
+  {t:"Wiregrass Mansfield Blvd - Ashton Grey",u:"https://drive.google.com/drive/folders/102yrvXjZK_dZi5TiVbqhJhcV8uIy-emo"},
+  {t:"Old Florida Ranch",u:"https://drive.google.com/drive/folders/1wMHN0lIfOuB_rFaBR1nmpR3QJ_QfGCjm"},
+  {t:"Little Road Office Property",u:"https://drive.google.com/drive/folders/1LUARopAXfC0HLNLOIYyFyL9cb5u2L9Uv"},
+  {t:"US 41 Lake Thomas",u:"https://drive.google.com/drive/folders/12yqAt4PDZDEcgz2Gw_-ldp26D-V0vHIU"},
+  {t:"Echoes of Wahoo",u:"https://drive.google.com/drive/folders/147GTLbjMo1jkl_in_cAPfTZEW1AF3M4L"},
+  {t:"Silverstein Ranch",u:"https://drive.google.com/drive/folders/15ntUcJ635z0mRulX8iOE-AO9S7nj7Bvu"},
+  {t:"Cortez Crossing Hernando",u:"https://drive.google.com/drive/folders/1u5rSeZADJJKtPP3uq33AS8YhomYVUPMh"},
+  {t:"Crossroads Brandon",u:"https://drive.google.com/drive/folders/1ReBSCPltetx1Z0IUfiCW0HfeYvIAPQvC"},
+  {t:"Balm Riverview & Rhodine Commercial",u:"https://drive.google.com/drive/folders/1IhMbmx1nz9RSMaXLOM-2eoLwO8F7WeQf"},
+  {t:"Twisted Turtle Townhomes",u:"https://drive.google.com/drive/folders/1lGC3mBmNyLObHw8gcfm3rC27YUu5rO3x"},
+  {t:"Wiregrass Ranch - WSC GC DV:Flycatcher",u:"https://drive.google.com/drive/folders/1PQjUN3Pe45q9OagTEh8B8fMUsC8jdfue"},
+  {t:"SR 44 & CR 229",u:"https://drive.google.com/drive/folders/1nJq4PZi7NRB8ons65PjoWUihgME2fEJ-"},
+  {t:"333 3rd Street St. Pete",u:"https://drive.google.com/drive/folders/1JYJlA99ScB6efgE44CvA3moHJe8G3u_r"},
+  {t:"Sebring Apartment Site",u:"https://drive.google.com/drive/folders/1fAOO4Ly4QGk8fKE5FFdYqgmkz2oXLaEW"},
+  {t:"US 301 & Courtney Palms",u:"https://drive.google.com/drive/folders/1Q9A_BDp67c9-6UtIL89sMQi28cIm92HX"},
+  {t:"EPG Powell",u:"https://drive.google.com/drive/folders/14fa9agDLrm2Ji71wohn5TXhxjlViXh09"},
+  {t:"Lakeland Hills Synergy",u:"https://drive.google.com/drive/folders/1gmRfL4pnyAipdDeMXeoxyD83U7ZK8T1W"},
+  {t:"Teco Rd Ruskin",u:"https://drive.google.com/drive/folders/1QJQa0BFnU-OFnvws1n_uZ8V8ICTYeAdr"},
+  {t:"Skyway Marina Townhomes",u:"https://drive.google.com/drive/folders/1fGIs34JF1fGOoDIndATvuJoP23QrN200"},
+  {t:"1955 Palmetto",u:"https://drive.google.com/drive/folders/1PF_4NjEX0miUfbEj1RHsaYMdUYMDmsPU"},
+  {t:"Lorraine Commercial",u:"https://drive.google.com/drive/folders/1p9ZWJjXbE8258P2ycDevzrVEdfQdCI-n"},
+  {t:"SR 50 & Cobb Rd - GBI - 33.2 ac",u:"https://drive.google.com/drive/folders/1BaT5SSqHWbCeZElsUKTXbuHznKk1tYMv"},
+  {t:"Lewis Landfill",u:"https://drive.google.com/drive/folders/16Vru8Wy7_Jiykn_Rz8j2JfohBQqm-iME"},
+  {t:"Barefield Commercial Lot",u:"https://drive.google.com/drive/folders/1QaES-XMnndfLA3H5SnXpQCqaBvJyJPG0"},
+  {t:"Zephyrhills Hotel Site",u:"https://drive.google.com/drive/folders/1HQ1f9Gq_0JDlRBG81Vh02jdK5Gyqqc0z"},
+  {t:"Windsong Commercial",u:"https://drive.google.com/drive/folders/1ccjNRYy3WwIRCeL6tk3bYd2i-0UiQBuY"},
+  {t:"Buckeye 41",u:"https://drive.google.com/drive/folders/1RPOBf4NGeA8XJk7vAklx86x-yJ7jN0pm"},
+  {t:"Wellen Park - ALF",u:"https://drive.google.com/drive/folders/18BZwJWN1yCdG3RVf2cDt0YAdhGN5Y5Rc"},
+  {t:"Crisi 301 retail",u:"https://drive.google.com/drive/folders/1Jn_qyWuhlWy5xEu3IXWg0_GeKkhBMxca"},
+  {t:"Kathleen Rd I-4",u:"https://drive.google.com/drive/folders/1rc_9qk_vf3eaMaIjzipsuIJIH_493nvJ"},
+  {t:"Siesta Sunset",u:"https://drive.google.com/drive/folders/175TUDtjKF6Es_yoAGT36lC5JXhsmG7lk"},
+  {t:"HFO Parsons",u:"https://drive.google.com/drive/folders/1H6_18Z0nEsNSZlfdtyEz8ijK9diYITqJ"},
+  {t:"Bridlewood of Arcadia",u:"https://drive.google.com/drive/folders/1o3uezHwXl4dX9_kSYpov6F_C1cW2DPe5"},
+  {t:"AP SR 52 - Schick",u:"https://drive.google.com/drive/folders/1rMwzM8OeJX0ye8eoYzwPhiyWspYmw3HZ"},
+  {t:"Cooper Road Tract",u:"https://drive.google.com/drive/folders/13HSu-Pe-X_33tfwo9_rFEPnzEvjmsJUp"},
+  {t:"Kokolakis Weekie Wachee",u:"https://drive.google.com/drive/folders/1ouNg6pDHog7INmSZ0Ls1NE0fnfAh7DRt"},
+  {t:"Kokolakis Crystal River",u:"https://drive.google.com/drive/folders/1bkzrlbHIIdhyBFQr-YEr-Lzs3VqffSAD"},
+  {t:"Kokolakis SR 52",u:"https://drive.google.com/drive/folders/1q_r7Xn4f-7ZN8lLDqhFsISZ2XFKC--Pd"},
+  {t:"Kokolakis Hudson",u:"https://drive.google.com/drive/folders/1LOmo8YRZ-VxOx67SNS5zT0D2JBHUmM0K"},
+  {t:"Hampton Lakes - 0.93 ac",u:"https://drive.google.com/drive/folders/1ucyMLPshpEJ3v8ujRR3BL7aUjWyRyVXb"},
+  {t:"Hoover- Buyer Rep",u:"https://drive.google.com/drive/folders/1xtL3M7SZPnmr3TQhLj7tSARXOqi-JlZ4"},
+  {t:"Palm River Leung",u:"https://drive.google.com/drive/folders/1hcSV0N8O5SxOQP3HxlOeMMsSAVh1flQR"},
+  {t:"Academy at the Lakes",u:"https://drive.google.com/drive/folders/1sMNbTQt8IILuKo8l0zALlUtR4cIyWvWh"},
+  {t:"Auburndale Development Site",u:"https://drive.google.com/drive/folders/1ktCGlyoEnz_jSdBI_b_DOsZVidgeTGyn"},
+  {t:"King Lake-Longbranch",u:"https://drive.google.com/drive/folders/1ePBmo1lu3MDZVxh8YLSwy0-fTl61OSnD"},
+  {t:"Ybor MF",u:"https://drive.google.com/drive/folders/1jD5Eb2PHP7H0rEQZrnYbSNKQkOk84mQv"},
+  {t:"Deer Park North Orsi",u:"https://drive.google.com/drive/folders/1CvLwI9MvQCan0wnt2BeqSdhHTvYX53Ny"},
+  {t:"Wire Road",u:"https://drive.google.com/drive/folders/1WZhi8DiU7J45JWlHxLCPxMn9sgxe37kM"},
+  {t:"Wildwood 20 copy",u:"https://drive.google.com/drive/folders/17JBhpYbXpM-2ERsGClc3LEZpWdeo-PI7"},
+  {t:"Jones TECO",u:"https://drive.google.com/drive/folders/1yB64BuGW8cA3e6CRW6r9TYXCYZjTX3zS"},
+  {t:"Oakwood Ranch",u:"https://drive.google.com/drive/folders/1BuvNg-psBU8_ibs7tpOq0lR0iD_Vd35M"},
+  {t:"Abbey Crossing- Kharey Wisdom (not listed)",u:"https://drive.google.com/drive/folders/1HyESV2dOdod04T_ZTqa9zPlgGa6ZYrv0"},
+  {t:"Southcreek Commercial-Orsi:Hills",u:"https://drive.google.com/drive/folders/1LBFPDTC3EgmuauqmZXNYYrEKcupAIcZj"},
+  {t:"St Pete Development Site",u:"https://drive.google.com/drive/folders/1j0TC5YfKaoBGtGOTS6ABkcOfB4HXubVN"},
+  {t:"1701 W Cass (sampson owned)",u:"https://drive.google.com/drive/folders/1H1x0o2WQ6nf3OA4q0g0wQk_fyIVFcW5b"},
+  {t:"4010 East 5th St",u:"https://drive.google.com/drive/folders/1ga28DaEqb5kF5ZkzjMUY9IfYg3V1AYcF"},
+  {t:"Bridlewood of High Springs",u:"https://drive.google.com/drive/folders/139PKIAgS9-Ok9E1DvCGCiCboUlziO7bu"},
+  {t:"HFO Muncy",u:"https://drive.google.com/drive/folders/1DyL59tPgynd_t4ZBq6z3VXA6ZTM4S8AL"},
+  {t:"HFO Alderman",u:"https://drive.google.com/drive/folders/13zIqCQhQH7tIiHN-1Amus5pDeRw0lKU0"},
+  {t:"801 26th Ave",u:"https://drive.google.com/drive/folders/1OPX5DpWtaVHUSoxOs6LWaQFTs1xhre30"},
+  {t:"Dickman Annicca",u:"https://drive.google.com/drive/folders/1HxPZAG7ZU94u6_IyhARRV-tLkOyQzM2V"},
+  {t:"Powell 41 Brooksville",u:"https://drive.google.com/drive/folders/1teMbEQF0s73p7wzyQumoR4WNZ-L39-oo"},
+  {t:"Pine Cabin Road",u:"https://drive.google.com/drive/folders/14VGj3H2AdgE9Syi93gDbR8EQMM923Q8z"},
+  {t:"Beruff Culberson TX Ranch",u:"https://drive.google.com/drive/folders/1OnBN_lK9edL_qmNaDzRlOswxBdb46Ic_"},
+  {t:"AP - Welbilt",u:"https://drive.google.com/drive/folders/1wEL7ua1cQ9wG24SRFEsA340uYi8AChC6"},
+  {t:"Beruff",u:"https://drive.google.com/drive/folders/13vduz2Mf0dlM_kY_IIMa_hFZZ1UlfN-e"},
+  {t:"Lorraine Road",u:"https://drive.google.com/drive/folders/1FPHPqLXhl9svLcPbHhVMetEDlqAH6taQ"},
+  {t:"Ripa 52 Groves (Sandridge)",u:"https://drive.google.com/drive/folders/1upyAOBYlvGgOA7F9ByS_T7jrMLofaqy8"},
+  {t:"Gibsonton Drive Retail Parcel",u:"https://drive.google.com/drive/folders/19FCVHBRRmHkJhmOP7CQFIb6uj_CIIZ03"},
+  {t:"Livingston SNS",u:"https://drive.google.com/drive/folders/1LYBFUDiQiY2kQrSSu3sde9ylyS0YM0aB"},
+  {t:"Livingston MFM",u:"https://drive.google.com/drive/folders/1e29IDIXsRtHviAjZRAFLUvV_TYeoLtxE"},
+  {t:"Livingston Major Estate",u:"https://drive.google.com/drive/folders/1G10vWKtJbmSuY4hh1QStcj7DvcP_6FVR"},
+  {t:"Ripa Sandrige 52 Groves",u:"https://drive.google.com/drive/folders/1sbwxh304WrqdsSrcmurrBFA3wXxpIqbr"},
+  {t:"Bloxham Tallahassee (Sampson Owned)",u:"https://drive.google.com/drive/folders/1ftYx85QYBVTVU5zaZhgMwgWNb0zykQ6R"},
+  {t:"Metro Seaire Apts",u:"https://drive.google.com/drive/folders/1p4vnNQGe6zytIFaI69OeLXRJaHJIRrT_"},
+  {t:"Rood 579 Wimauma - 235 ac",u:"https://drive.google.com/drive/folders/1vYMxa0WYKeSpN7igCp1Xkwx1QJAXM-2N"},
+  {t:"Crisi 2121 14th",u:"https://drive.google.com/drive/folders/1Kw17DPrE93w_IxICnpxh8z3Lf8q7qePK"},
+  {t:"Dickman 33rd",u:"https://drive.google.com/drive/folders/1gh6UZamGjsycJPVD9QOKqhzdnfU2swE1"},
+  {t:"Hudson Porter:Blackwell",u:"https://drive.google.com/drive/folders/17JFnV2x7pF1bL9h2WbMdmU73L3Sx4DyO"},
+  {t:"Moccasin Wallow Holdings",u:"https://drive.google.com/drive/folders/1bFsZKicdUuEGTUnk9UzJLj2eXeENbUBk"},
+  {t:"Woodland Park",u:"https://drive.google.com/drive/folders/1e0MuApODxJCmbKqL5rTr5kLq0RP9zaRy"},
+  {t:"Centralia & US 19",u:"https://drive.google.com/drive/folders/1Ikzw2Ym-6-BedtA9uRxvzFQxxeg-Z0vQ"},
+  {t:"Maydell- George",u:"https://drive.google.com/drive/folders/1gpPZHqy14CkQ9blemrvOByPfdDuObLnF"},
+  {t:"Powe 23rd Ave 2025",u:"https://drive.google.com/drive/folders/1XuHof8u1tl7EHjcchS57e4B4EilSIJDQ"},
+  {t:"The Banyans- 58 Finished Lots",u:"https://drive.google.com/drive/folders/1sHzFsqsHdYBy01vfMb8Qcke7DuZlpJHy"},
+  {t:"McMullen Booth TH Site",u:"https://drive.google.com/drive/folders/1SW0_gNvGcDbZegnr0FKAnUpdcy9LXLLa"},
+  {t:"Abbey Crossing",u:"https://drive.google.com/drive/folders/1vZXh2LH41V6j-OyxK1KpWPCKnPfJr8QG"},
+  {t:"Kenton TH (Michel)",u:"https://drive.google.com/drive/folders/1NET5x7S2Q0MUptcixF1e4ZvjqDPLT5xV"},
+  {t:"Sierra Farms Axiom",u:"https://drive.google.com/drive/folders/17Wpg_YlCx3GYw_gyVS6fr6z06p0IKb-s"},
+  {t:"Greenfield Industrial",u:"https://drive.google.com/drive/folders/1VUq7LKnArbaz-MlgJzsp-9bVNx8t0I3a"},
+  {t:"Bradenton Lots",u:"https://drive.google.com/drive/folders/1LhiwPBU0Awv4HodNUyJGJA6-xfllc9m_"},
+  {t:"DRB Anderson Snow Zimmer",u:"https://drive.google.com/drive/folders/1oUCsuIf2Q41OOyWoOop2oFZYecacGIRk"},
+  {t:"JLM Contracts",u:"https://drive.google.com/drive/folders/17Nc4ju9zAdS3EaBUKbkp09IziFS60MMi"},
+  {t:"Evans 301 Outparcel",u:"https://drive.google.com/drive/folders/1TJqGwGOepKb8QdzCUcKvJunTNdbGE4Dc"},
+  {t:"Softwind Lane Dorsett",u:"https://drive.google.com/drive/folders/1Ypz6nKkVa_mOcSybRXT9Tx4quOXDyO9W"},
+  {t:"Powe Bridgeprep",u:"https://drive.google.com/drive/folders/1E8a221Kt_JUXaxfB6-TdKt8AzsZwlUcp"},
+  {t:"Old Ranch Road Estates Utah",u:"https://drive.google.com/drive/folders/1TnYhYt6Kvf8i7hRlEjmxB29utwI9gFP1"},
+  {t:"Nexmetro Independent Day Schools",u:"https://drive.google.com/drive/folders/1DUfPpF94U7kkBIPs_qfKI-ZfsFW_0pNy"},
+  {t:"DRB Schoeman Foxfire",u:"https://drive.google.com/drive/folders/1Psli3XwXJU7bsEAa-ZBdW4TwTqfz2Aii"},
+  {t:"Harborview DRI 653.11 acres",u:"https://drive.google.com/drive/folders/1wbGF0pxFGkNuj-muX6hXJdSkE5S0nALO"},
+  {t:"Boyette & Carr",u:"https://drive.google.com/drive/folders/1I9aahIL_QPMB1zfbpREyCyp1Qh5jzYfq"},
+  {t:"Hudson Riebau",u:"https://drive.google.com/drive/folders/1i6k3WYSZp18nkff5j1G0daEDqtFF2EcO"},
+  {t:"Pursuit Clearwater",u:"https://drive.google.com/drive/folders/1QRS6Ral0dmY9XMKbpjKMe9nc45qwXFQp"},
+  {t:"DRB GTC Rolling Rock",u:"https://drive.google.com/drive/folders/1YU05ejrqp1jZKC0WPfY6AhmkMQua9G2o"},
+  {t:"DRB Maxx Barclay Towns",u:"https://drive.google.com/drive/folders/12fe-yfPXtR3ADlHRsvmzlEpeG-NNAfPF"},
+  {t:"Bond Ranch Redstone",u:"https://drive.google.com/drive/folders/1o_vEZSNsra3kpYIC2l2JnEDjEJt2adal"},
+  {t:"DRV SAV",u:"https://drive.google.com/drive/folders/16LVR1zOK51YsqfofuimGLr-3ILh3iYhd"},
+  {t:"McCourt Barnes 0.87",u:"https://drive.google.com/drive/folders/1PqceU7I503KyIyW-GDO7oDhhbovbiMQF"},
+  {t:"McCourt Barnes 0.22",u:"https://drive.google.com/drive/folders/12Pl26Yd3nLRhZWDn5GxUhwmtWLAaRQkv"},
+  {t:"Fitz Farms",u:"https://drive.google.com/drive/folders/1t1IOg_7_yfwAR22tfBCOfaVRjbK4l2eN"},
+  {t:"Jordan Creek",u:"https://drive.google.com/drive/folders/1TPPIM0dz6lYIge0QdREankasbC6ApEgE"},
+  {t:"Lewis M Parcel",u:"https://drive.google.com/drive/folders/1Ej7BDZFa9eP5KfXj3PI_E1RogO740eVp"},
+  {t:"Ocala BTR - Highway 200 & I-75 copy",u:"https://drive.google.com/drive/folders/1k1WEAIjTlMrte7jHfkaYovoPRSEOWCHc"},
+  {t:"Finley Shady Hills",u:"https://drive.google.com/drive/folders/10LvKoENVZKzDQ2yA7DlsPS2kIgBAk6h9"},
+  {t:"Wiregrass Mainsfield Blvd Kharey Wisdom",u:"https://drive.google.com/drive/folders/1O5wVwzRf1afQOGjOUN5gSt3hS1GwyndR"},
+  {t:"Hanlex Palmetto",u:"https://drive.google.com/drive/folders/1lP9-eX_KieTimlHzl2OTojG9bz-bKzV-"},
+  {t:"Hanlex North Port",u:"https://drive.google.com/drive/folders/13zd_xwV9CCcubm1gKOx9bjgARrHZRSig"}
+];
+
+function _dsfNorm(s){
+  return (s||'').toLowerCase().replace(/[^a-z0-9 ]/g,' ').replace(/\s+/g,' ').trim();
+}
+function _dsfScore(folderTitle, deal){
+  const fn = _dsfNorm(folderTitle);
+  // Strip common suffixes that appear in folder names but not deal names
+  const fnCore = fn.replace(/ (sampson owned|not listed|copy|\d+ ac|\d+\.\d+ ac|llc|inc)$/g,'').trim();
+  const candidates = [
+    deal.projectName, deal.address, deal.propertyAddress, deal.propertyName
+  ].filter(Boolean).map(_dsfNorm);
+  let best = 0;
+  for(const dn of candidates){
+    if(!dn) continue;
+    if(fn===dn || fnCore===dn) return 100;
+    if(fn.includes(dn) && dn.length>6) return 90;
+    if(dn.includes(fn) && fn.length>6) return 88;
+    if(fnCore.includes(dn) && dn.length>6) return 85;
+    // Word overlap (skip tiny words)
+    const fw = fn.split(' ').filter(w=>w.length>3);
+    const dw = dn.split(' ').filter(w=>w.length>3);
+    if(fw.length===0||dw.length===0) continue;
+    const fset = new Set(fw);
+    const overlap = dw.filter(w=>fset.has(w)).length;
+    if(overlap>0){
+      const sc = Math.round((overlap*2)/(fw.length+dw.length)*70);
+      if(sc>best) best=sc;
+    }
+  }
+  return best;
+}
+
+window.runDriveFolderSync = function(){
+  if(!allDeals||allDeals.length===0){showToast('Deals not loaded yet','warning');return;}
+  // Build matches: for each folder find best deal match (score >= 45)
+  const matches=[];
+  const noMatch=[];
+  for(const folder of DRIVE_SYNC_FOLDERS){
+    let bestScore=0, bestDeal=null;
+    for(const deal of allDeals){
+      if(isWonStage(deal.stage)||isLostStage(deal.stage)) continue; // skip closed deals
+      const sc=_dsfScore(folder.t,deal);
+      if(sc>bestScore){bestScore=sc;bestDeal=deal;}
+    }
+    if(bestScore>=45&&bestDeal){
+      matches.push({folder,deal:bestDeal,score:bestScore,alreadySet:bestDeal.driveUrl===folder.u});
+    } else {
+      noMatch.push(folder.t);
+    }
+  }
+  const newMatches=matches.filter(m=>!m.alreadySet);
+  const alreadySet=matches.filter(m=>m.alreadySet);
+
+  // Build preview modal
+  const ovId='dsf-overlay-'+Date.now();
+  const modalHtml=`
+  <div id="${ovId}" style="position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center;padding:1rem">
+    <div style="background:#fff;border-radius:16px;max-width:820px;width:100%;max-height:88vh;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.3)">
+      <div style="padding:1.25rem 1.5rem;border-bottom:1px solid #e5e7eb;flex-shrink:0;display:flex;justify-content:space-between;align-items:center">
+        <div>
+          <h2 style="font-size:1rem;font-weight:700;margin:0">🔗 Google Drive Folder Sync Preview</h2>
+          <p style="font-size:.75rem;color:#6b7280;margin:.25rem 0 0">${newMatches.length} new matches · ${alreadySet.length} already linked · ${noMatch.length} unmatched folders</p>
+        </div>
+        <button onclick="document.getElementById('${ovId}').remove()" style="background:none;border:none;font-size:1.25rem;cursor:pointer;color:#9ca3af;padding:.25rem">✕</button>
+      </div>
+      <div style="overflow-y:auto;flex:1;padding:1rem 1.5rem">
+        ${newMatches.length===0?'<p style="text-align:center;color:#6b7280;padding:2rem">All matched folders are already linked.</p>':''}
+        ${newMatches.length>0?`
+        <p style="font-size:.8rem;font-weight:600;color:#374151;margin-bottom:.5rem">Will be updated (${newMatches.length}):</p>
+        <div style="border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;margin-bottom:1rem">
+          <table style="width:100%;border-collapse:collapse;font-size:.78rem">
+            <thead style="background:#f9fafb"><tr>
+              <th style="padding:.5rem .75rem;text-align:left;color:#6b7280;font-weight:600;border-bottom:1px solid #e5e7eb">Drive Folder</th>
+              <th style="padding:.5rem .75rem;text-align:left;color:#6b7280;font-weight:600;border-bottom:1px solid #e5e7eb">→ Deal</th>
+              <th style="padding:.5rem .75rem;text-align:left;color:#6b7280;font-weight:600;border-bottom:1px solid #e5e7eb">Stage</th>
+              <th style="padding:.5rem .75rem;text-align:right;color:#6b7280;font-weight:600;border-bottom:1px solid #e5e7eb">Score</th>
+            </tr></thead>
+            <tbody>
+              ${newMatches.map((m,i)=>`<tr style="background:${i%2===0?'#fff':'#f9fafb'};border-bottom:1px solid #f3f4f6">
+                <td style="padding:.4rem .75rem;color:#1d4ed8;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${m.folder.t}">${m.folder.t}</td>
+                <td style="padding:.4rem .75rem;font-weight:500;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${m.deal.projectName||m.deal.address||m.deal.id}">${m.deal.projectName||m.deal.address||m.deal.id}</td>
+                <td style="padding:.4rem .75rem;color:#6b7280">${m.deal.stage||'—'}</td>
+                <td style="padding:.4rem .75rem;text-align:right;color:${m.score>=80?'#16a34a':m.score>=60?'#d97706':'#dc2626'};font-weight:600">${m.score}%</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+        `:''}
+        ${alreadySet.length>0?`<p style="font-size:.75rem;color:#6b7280;margin-bottom:.25rem">Already linked (${alreadySet.length}): ${alreadySet.map(m=>m.deal.projectName||m.deal.address).join(', ')}</p>`:''}
+        ${noMatch.length>0?`
+        <details style="margin-top:.5rem">
+          <summary style="font-size:.75rem;color:#9ca3af;cursor:pointer">Unmatched folders (${noMatch.length}) — no deal found</summary>
+          <p style="font-size:.72rem;color:#9ca3af;margin:.5rem 0 0;line-height:1.6">${noMatch.join(' · ')}</p>
+        </details>`:''}
+      </div>
+      <div style="padding:1rem 1.5rem;border-top:1px solid #e5e7eb;flex-shrink:0;display:flex;justify-content:flex-end;gap:.75rem">
+        <button onclick="document.getElementById('${ovId}').remove()" style="padding:.5rem 1.25rem;border:1px solid #d1d5db;border-radius:8px;background:#fff;font-size:.875rem;cursor:pointer">Cancel</button>
+        ${newMatches.length>0?`<button id="dsf-apply-btn" onclick="window._dsfApply(${JSON.stringify(newMatches.map(m=>({id:m.deal.id,u:m.folder.u}))).replace(/"/g,'&quot;')},'${ovId}')" style="padding:.5rem 1.25rem;border:none;border-radius:8px;background:#1d4ed8;color:#fff;font-size:.875rem;font-weight:600;cursor:pointer">✅ Apply ${newMatches.length} Updates</button>`:''}
+      </div>
+    </div>
+  </div>`;
+  document.body.insertAdjacentHTML('beforeend',modalHtml);
+};
+
+window._dsfApply = async function(pairs, ovId){
+  const btn=document.getElementById('dsf-apply-btn');
+  if(btn){btn.disabled=true;btn.textContent='Saving…';}
+  let ok=0,err=0;
+  for(const {id,u} of pairs){
+    try{
+      await Store.updateDeal(id,{driveUrl:u,updatedAt:Date.now()});
+      const d=allDeals.find(x=>x.id===id);
+      if(d) d.driveUrl=u;
+      ok++;
+    }catch(e){console.warn('[dsfApply]',e);err++;}
+  }
+  document.getElementById(ovId)?.remove();
+  showToast(`✅ Drive folders linked on ${ok} deal${ok!==1?'s':''}${err?` (${err} failed)`:''}`, 'success', 4000);
+  if(typeof renderBoard==='function') renderBoard();
+};
 
 </script>
 
