@@ -12308,17 +12308,37 @@ let _GMAIL_SYNC_DATA = [{"email":"418@dcscontractingllc.com","nameRaw":"","first
 // ── CRM Outreach Import Logic ─────────────────────────────────────────────────
 window._crmOutreachCheckDone = false;
 
+// Persist imported/skipped state across page reloads (localStorage)
+function _crmOutreachLoadState(){
+  try { return JSON.parse(localStorage.getItem('crmOutreachState')||'{}'); } catch(e){ return {}; }
+}
+function _crmOutreachSaveState(id, status){
+  const state = _crmOutreachLoadState();
+  state[id] = status;
+  localStorage.setItem('crmOutreachState', JSON.stringify(state));
+}
+function _crmOutreachApplyState(){
+  if(typeof _CRM_OUTREACH_IMPORTS === 'undefined') return;
+  const state = _crmOutreachLoadState();
+  for(const r of _CRM_OUTREACH_IMPORTS){
+    if(state[r.id] === 'imported') r.imported = true;
+    if(state[r.id] === 'skipped') r.skipped = true;
+  }
+}
+
 window._crmCheckOutreachImports = function(){
   if(typeof _CRM_OUTREACH_IMPORTS === 'undefined') return;
+  // Apply persisted state before checking so already-imported records don't re-appear
+  _crmOutreachApplyState();
   const pending = _CRM_OUTREACH_IMPORTS.filter(r => !r.imported && !r.skipped);
   if(pending.length === 0) return;
-  // Show a non-intrusive toast notification
   showToast(`📥 ${pending.length} new outreach email${pending.length>1?'s':''} to log — click "📥 Outreach" in the CRM toolbar`,'info',8000);
 };
 
 window._crmShowOutreachImports = function(){
-  // Remove any existing modal
   document.getElementById('crm-outreach-modal')?.remove();
+  // Always apply persisted state before rendering so imported/skipped records stay dismissed
+  _crmOutreachApplyState();
 
   const pending = (typeof _CRM_OUTREACH_IMPORTS !== 'undefined' ? _CRM_OUTREACH_IMPORTS : []).filter(r=>!r.skipped);
 
@@ -12414,6 +12434,7 @@ window._crmImportOutreachRow = async function(idx){
   try {
     await window._crmProcessOutreachRecord(r);
     r.imported = true;
+    _crmOutreachSaveState(r.id, 'imported');
     const row = document.getElementById(`oi-row-${idx}`);
     if(row){
       row.classList.add('bg-green-50','opacity-60');
@@ -12429,7 +12450,7 @@ window._crmImportOutreachRow = async function(idx){
 
 window._crmSkipOutreachRow = function(idx){
   const r = _CRM_OUTREACH_IMPORTS[idx];
-  if(r) r.skipped = true;
+  if(r){ r.skipped = true; _crmOutreachSaveState(r.id, 'skipped'); }
   document.getElementById(`oi-row-${idx}`)?.remove();
 };
 
