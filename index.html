@@ -18926,13 +18926,27 @@ window.runBulkOmExtraction = async function(){
         addLog(`  ↳ 📄 Found: ${best.name}`);
         const file = await _downloadDriveFileAsFile(best.id, best.name, token);
 
-        // Extract using autoFillDealFromDoc with silent callback
-        const extracted = await new Promise((resolve, reject) => {
-          const timer = setTimeout(() => reject(new Error('timeout')), 60000);
-          autoFillDealFromDoc(file, deal.stage, {
-            onExtracted: data => { clearTimeout(timer); resolve(data); }
-          }).catch(e => { clearTimeout(timer); reject(e); });
-        });
+        // Extract using autoFillDealFromDoc with silent callback + rate-limit retry
+        let extracted = null;
+        for(let attempt=1; attempt<=3; attempt++){
+          try {
+            extracted = await new Promise((resolve, reject) => {
+              const timer = setTimeout(() => reject(new Error('timeout')), 90000);
+              autoFillDealFromDoc(file, deal.stage, {
+                onExtracted: data => { clearTimeout(timer); resolve(data); }
+              }).catch(e => { clearTimeout(timer); reject(e); });
+            });
+            break; // success
+          } catch(e){
+            if(e.message && e.message.includes('rate limit') && attempt < 3){
+              addLog(`  ↳ ⏳ Rate limit — waiting 65s (attempt ${attempt}/3)…`);
+              await new Promise(r => setTimeout(r, 65000));
+            } else { throw e; }
+          }
+        }
+
+        // Throttle: wait 8s between Claude calls to stay under token/min limit
+        if(i < targets.length - 1) await new Promise(r => setTimeout(r, 8000));
 
         const price   = extracted.listingPrice || extracted.purchasePrice || null;
         const acreage = extracted.acreage || null;
