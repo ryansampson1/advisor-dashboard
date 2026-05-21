@@ -14037,6 +14037,17 @@ function viewAutomations(){
       </div>
       <p class="text-xs text-gray-400 mb-3">For every active deal card that has a Drive folder linked, find the OM or Package PDF and auto-extract Asking Price, Acreage, and Zoning. Reviews all results before saving.</p>
       <button onclick="window.runBulkOmExtraction()" class="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 text-sm font-semibold rounded-lg transition-colors">🚀 Extract from All Drive Folders</button>
+    </div>
+
+    <!-- Bulk Photo Pull -->
+    <div class="bg-white rounded-2xl border p-5 mb-4">
+      <div class="flex items-center gap-2 mb-3">
+        <span class="text-lg">🖼️</span>
+        <h3 class="text-sm font-bold text-gray-700">Bulk Photo Pull</h3>
+        <span class="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full ml-1">Admin Tool</span>
+      </div>
+      <p class="text-xs text-gray-400 mb-3">For every active deal card with a Drive folder linked, find the best photo from the Photos subfolder and set it as the card banner image. Skips deals that already have a photo.</p>
+      <button onclick="window.runBulkPhotoSync()" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 text-sm font-semibold rounded-lg transition-colors">📸 Pull Photos from Drive</button>
     </div>`:''}
     <div class="space-y-3">
       ${allAutomations.length===0
@@ -19073,6 +19084,139 @@ window._applyBulkOm = async function(indices, ovId){
   document.getElementById(ovId)?.remove();
   showToast(`✅ Updated ${ok} deal${ok!==1?'s':''}${skip?' ('+skip+' skipped)':''}${err?' ('+err+' errors)':''}`, 'success', 5000);
   if(typeof renderBoard==='function') renderBoard();
+};
+
+/* ─── Bulk Photo Sync ─────────────────────────────────────────── */
+
+async function _driveFolderImages(folderId, token){
+  const AUTH = { Authorization: `Bearer ${token}` };
+  const PHOTO_FOLDER_NAMES = ['photos', 'photo', 'images', 'image', 'pictures', 'aerials', 'aerial'];
+  const IMAGE_MIME = `(mimeType='image/jpeg' or mimeType='image/png' or mimeType='image/webp' or mimeType='image/heic')`;
+  const SHARED = { supportsAllDrives: 'true', includeItemsFromAllDrives: 'true' };
+
+  async function fetchImages(id){
+    const qs = new URLSearchParams({ q: `'${id}' in parents and ${IMAGE_MIME} and trashed=false`,
+      fields: 'files(id,name,size,mimeType)', pageSize: '50', ...SHARED });
+    const r = await fetch(`https://www.googleapis.com/drive/v3/files?${qs}`, { headers: AUTH });
+    return r.ok ? ((await r.json()).files || []) : [];
+  }
+
+  async function fetchFolders(id){
+    const qs = new URLSearchParams({ q: `'${id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+      fields: 'files(id,name)', pageSize: '30', ...SHARED });
+    const r = await fetch(`https://www.googleapis.com/drive/v3/files?${qs}`, { headers: AUTH });
+    return r.ok ? ((await r.json()).files || []) : [];
+  }
+
+  const isPhotoFolder = name => PHOTO_FOLDER_NAMES.some(p => name.toLowerCase().includes(p));
+  const bestImage = imgs => imgs.length ? imgs.slice().sort((a,b)=>(+b.size||0)-(+a.size||0))[0] : null;
+
+  // Check root images first
+  let imgs = await fetchImages(folderId);
+  if(imgs.length) return bestImage(imgs);
+
+  // Search subfolders — photo-named first
+  const subs = await fetchFolders(folderId);
+  const sorted = [...subs.filter(s=>isPhotoFolder(s.name)), ...subs.filter(s=>!isPhotoFolder(s.name))];
+  for(const sf of sorted){
+    const sfImgs = await fetchImages(sf.id);
+    if(sfImgs.length) return bestImage(sfImgs);
+    // One level deeper for photo-named folders
+    if(isPhotoFolder(sf.name)){
+      const subsubs = await fetchFolders(sf.id);
+      for(const ssf of subsubs){
+        const ssfImgs = await fetchImages(ssf.id);
+        if(ssfImgs.length) return bestImage(ssfImgs);
+      }
+    }
+  }
+  return null;
+}
+
+window.runBulkPhotoSync = async function(){
+  if(!_fbStorage || !_fbFns){ showToast('Firebase Storage not connected','error'); return; }
+  if(!allDeals||allDeals.length===0){ showToast('Deals not loaded yet','warning'); return; }
+
+  const ACTIVE_STAGES = ['Prospect','Proposal','Listing','LOI','Under Contract','Due Diligence','Closing','Buyer Opportunities'];
+  // Only process deals without a photo
+  const targets = allDeals.filter(d => d.driveUrl && ACTIVE_STAGES.includes(d.stage) && !d.primaryPhotoUrl);
+  if(targets.length===0){ showToast('All active deals already have photos 🎉','success'); return; }
+
+  const ovId = 'bulk-photo-ov-'+Date.now();
+  document.body.insertAdjacentHTML('beforeend',`
+  <div id="${ovId}" style="position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:10000;display:flex;align-items:center;justify-content:center;padding:1rem">
+    <div style="background:#fff;border-radius:16px;width:100%;max-width:520px;padding:2rem;text-align:center">
+      <div style="font-size:1.5rem;margin-bottom:.75rem">📸</div>
+      <div id="bph-title" style="font-weight:700;font-size:1rem;margin-bottom:.5rem">Connecting to Google Drive…</div>
+      <div id="bph-sub" style="font-size:.8rem;color:#6b7280;margin-bottom:1.25rem">Requesting read permission</div>
+      <div style="background:#f3f4f6;border-radius:8px;height:8px;overflow:hidden">
+        <div id="bph-bar" style="background:#2563eb;height:100%;width:0%;transition:width .3s"></div>
+      </div>
+      <div id="bph-log" style="margin-top:1rem;font-size:.72rem;color:#9ca3af;max-height:160px;overflow-y:auto;text-align:left"></div>
+      <button onclick="document.getElementById('${ovId}').remove()" style="margin-top:1.25rem;padding:.4rem 1rem;border:1px solid #d1d5db;border-radius:8px;font-size:.8rem;cursor:pointer">Cancel</button>
+    </div>
+  </div>`);
+
+  const setTitle = t => { const el=document.getElementById('bph-title'); if(el) el.textContent=t; };
+  const setSub   = s => { const el=document.getElementById('bph-sub');   if(el) el.textContent=s; };
+  const setBar   = p => { const el=document.getElementById('bph-bar');   if(el) el.style.width=p+'%'; };
+  const addLog   = m => { const el=document.getElementById('bph-log');   if(el){ const d=document.createElement('div'); d.textContent=m; el.appendChild(d); el.scrollTop=el.scrollHeight; }};
+
+  try {
+    const token = await _getBulkDriveToken();
+    setTitle(`Scanning ${targets.length} deals for photos…`);
+    setSub('Searching Drive folders');
+    setBar(5);
+
+    const { ref: fbRef, uploadBytes, getDownloadURL } = _fbFns;
+    let found=0, missing=0, errs=0;
+
+    for(let i=0; i<targets.length; i++){
+      const deal = targets[i];
+      setBar(Math.round(5 + (i/targets.length)*93));
+      setSub(`${i+1} / ${targets.length}: ${deal.projectName || deal.address || 'Unnamed'}`);
+      addLog(`🔍 ${deal.projectName || deal.address}`);
+
+      try {
+        const folderId = _extractFolderIdFromUrl(deal.driveUrl);
+        if(!folderId){ addLog(`  ↳ ⚠️ No folder ID`); missing++; continue; }
+
+        const img = await _driveFolderImages(folderId, token);
+        if(!img){ addLog(`  ↳ ⚠️ No image found`); missing++; continue; }
+
+        addLog(`  ↳ 🖼️ Downloading: ${img.name}`);
+        // Download from Drive
+        const dlRes = await fetch(`https://www.googleapis.com/drive/v3/files/${img.id}?alt=media`, {
+          headers: { Authorization: `Bearer ${token}`, supportsAllDrives: 'true' }
+        });
+        if(!dlRes.ok) throw new Error(`Download failed ${dlRes.status}`);
+        const blob = await dlRes.blob();
+
+        // Upload to Firebase Storage
+        const ext = (img.name.split('.').pop()||'jpg').replace(/[^a-z]/gi,'').toLowerCase()||'jpg';
+        const storePath = `dealPhotos/${deal.id}/primary_${Date.now()}.${ext}`;
+        const snap = await uploadBytes(fbRef(_fbStorage, storePath), blob);
+        const url = await getDownloadURL(snap.ref);
+
+        await Store.updateDeal(deal.id, { primaryPhotoUrl: url, updatedAt: Date.now() });
+        deal.primaryPhotoUrl = url;
+        addLog(`  ↳ ✅ Photo saved`);
+        found++;
+      } catch(e){
+        addLog(`  ↳ ❌ ${e.message}`);
+        errs++;
+      }
+    }
+
+    document.getElementById(ovId)?.remove();
+    if(typeof renderBoard==='function') renderBoard();
+    showToast(`📸 Photos synced: ${found} added, ${missing} not found${errs?' ('+errs+' errors)':''}`, found>0?'success':'warning', 6000);
+
+  } catch(e){
+    document.getElementById(ovId)?.remove();
+    showToast('Photo sync failed: '+e.message,'error',6000);
+    console.error('[bulkPhoto]',e);
+  }
 };
 
 </script>
