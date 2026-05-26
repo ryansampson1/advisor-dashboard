@@ -7697,6 +7697,8 @@ window._pdwUploadAttachment = async (dealId, file) => {
       await Store.updateDeal(dealId, { dealAttachments: updated, updatedAt: Date.now() });
       if (deal) deal.dealAttachments = updated;
       showToast(`✅ ${file.name} attached`, 'success', 3000);
+      // Auto-file to Drive (non-blocking)
+      if (deal?.driveUrl) window._autoFileToDrive(deal, file, file.name).catch(()=>{});
     }
   } catch (e) {
     console.warn('[pdwUpload]', e);
@@ -7998,6 +8000,8 @@ window.handleDrop = (ev,newStage) => {
     if(newStage==='Buyer Opportunities' && oldStage!=='Buyer Opportunities'){
       handleBuyerOpportunityAutomation(deal);
     }
+    // ── Pre-create Drive stage subfolder if token already in session ──
+    window._drivePreCreateStageFolder(deal, newStage);
     viewBoard();
     showToast(`Moved to ${newStage}`,'success');
   });
@@ -14795,7 +14799,7 @@ function renderGateField(f, dealId, stageName){
 
 window.handleGateFileSelect = (ev,fid,dealId,stageName) => {
   const file=ev.target.files[0]; if(!file) return;
-  gateFiles[`${dealId}__${stageName}__${fid}`]={name:file.name,size:file.size};
+  gateFiles[`${dealId}__${stageName}__${fid}`]={name:file.name,size:file.size,file};
   document.getElementById(`gz-${fid}`)?.classList.add('has-file');
   const lbl=document.getElementById(`gl-${fid}`);
   if(lbl) lbl.innerHTML=`✅ ${file.name}`;
@@ -14862,6 +14866,14 @@ window.submitGateModal = async ev => {
   await Store.updateDeal(dealId,stageUpd);
   Object.assign(deal,stageUpd);
   fireAutomations(deal,oldStage);
+
+  // Auto-file gate documents to Drive (non-blocking)
+  for (const f of (gate.fields||[])) {
+    if (f.type==='file') {
+      const gf = gateFiles[`${dealId}__${newStage}__${f.id}`];
+      if (gf?.file) window._autoFileToDrive(deal, gf.file, gf.name).catch(()=>{});
+    }
+  }
 
   // Email notification
   if(gate.notifyEmails?.trim()){
@@ -19058,6 +19070,109 @@ async function _getBulkDriveToken(){
   if(!_bulkDriveToken) throw new Error('Could not get Drive access token');
   return _bulkDriveToken;
 }
+
+/* =======================================================
+   DRIVE AUTO-FILING — write-scope helpers
+   ======================================================= */
+let _driveWriteToken = null;
+if (!window._driveFolderCache) window._driveFolderCache = {};
+
+async function _getDriveWriteToken(){
+  if (_driveWriteToken) return _driveWriteToken;
+  if (!_fbFns || !_fbAuth) throw new Error('Firebase not ready');
+  const {GoogleAuthProvider, signInWithPopup} = _fbFns;
+  const provider = new GoogleAuthProvider();
+  provider.addScope('https://www.googleapis.com/auth/drive');
+  provider.setCustomParameters({ prompt: 'select_account' });
+  const result = await signInWithPopup(_fbAuth, provider);
+  const cred = GoogleAuthProvider.credentialFromResult(result);
+  _driveWriteToken = cred?.accessToken;
+  if (!_driveWriteToken) throw new Error('Could not get Drive write token');
+  return _driveWriteToken;
+}
+
+function _getDriveFolderIdFromUrl(driveUrl){
+  const m = (driveUrl||'').match(/\/folders\/([a-zA-Z0-9_-]+)/);
+  return m ? m[1] : null;
+}
+
+function _stageFolderName(stageName){
+  // Normalize to clean folder name: strip parenthetical suffixes
+  return (stageName||'General').replace(/\s*\(.*?\)/g,'').trim() || 'General';
+}
+
+async function _driveEnsureStageFolder(dealFolderId, stageName, token){
+  const folderName = _stageFolderName(stageName);
+  const cacheKey = `${dealFolderId}::${folderName}`;
+  if (window._driveFolderCache[cacheKey]) return window._driveFolderCache[cacheKey];
+
+  const AUTH = { Authorization: `Bearer ${token}` };
+  // Search for existing subfolder
+  const qs = new URLSearchParams({
+    q: `name='${folderName}' and mimeType='application/vnd.google-apps.folder' and '${dealFolderId}' in parents and trashed=false`,
+    fields: 'files(id,name)',
+    supportsAllDrives: 'true',
+    includeItemsFromAllDrives: 'true',
+  });
+  const searchResp = await fetch(`https://www.googleapis.com/drive/v3/files?${qs}`, { headers: AUTH });
+  const searchData = await searchResp.json();
+  if (searchData.files?.length) {
+    window._driveFolderCache[cacheKey] = searchData.files[0].id;
+    return searchData.files[0].id;
+  }
+  // Create subfolder
+  const createResp = await fetch('https://www.googleapis.com/drive/v3/files?supportsAllDrives=true', {
+    method: 'POST',
+    headers: { ...AUTH, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: folderName, mimeType: 'application/vnd.google-apps.folder', parents: [dealFolderId] }),
+  });
+  const created = await createResp.json();
+  if (!created.id) throw new Error('Failed to create Drive subfolder: ' + JSON.stringify(created));
+  window._driveFolderCache[cacheKey] = created.id;
+  return created.id;
+}
+
+async function _driveUploadFile(folderId, file, fileName, token){
+  const metadata = { name: fileName, parents: [folderId] };
+  const form = new FormData();
+  form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
+  form.append('file', file);
+  const resp = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: form,
+  });
+  const result = await resp.json();
+  if (!result.id) throw new Error('Drive upload failed: ' + JSON.stringify(result));
+  return result;
+}
+
+// Main entry point — auto-file a File object into the deal's Drive stage subfolder.
+// Non-blocking: logs warnings on failure but never throws to the caller.
+window._autoFileToDrive = async (deal, file, fileName) => {
+  if (!deal?.driveUrl) return;
+  const dealFolderId = _getDriveFolderIdFromUrl(deal.driveUrl);
+  if (!dealFolderId) return;
+  try {
+    const token = await _getDriveWriteToken();
+    const stageFolderId = await _driveEnsureStageFolder(dealFolderId, deal.stage || 'General', token);
+    await _driveUploadFile(stageFolderId, file, fileName, token);
+    showToast(`📁 Filed to Drive → ${_stageFolderName(deal.stage)}/${fileName}`, 'success', 4000);
+  } catch(e) {
+    console.warn('[autoFileToDrive]', e);
+    if (/401|invalid.token/i.test(e.message)) _driveWriteToken = null; // clear expired token
+    showToast(`Drive filing skipped — ${e.message}`, 'info', 3000);
+  }
+};
+
+// Pre-create stage subfolder when token is already available (called on stage drag).
+window._drivePreCreateStageFolder = (deal, stageName) => {
+  if (!deal?.driveUrl || !_driveWriteToken) return;
+  const fid = _getDriveFolderIdFromUrl(deal.driveUrl);
+  if (!fid) return;
+  _driveEnsureStageFolder(fid, stageName, _driveWriteToken)
+    .catch(e => console.warn('[drivePreCreate]', e));
+};
 
 async function _driveFolderPdfs(folderId, token){
   const AUTH = { Authorization: `Bearer ${token}` };
