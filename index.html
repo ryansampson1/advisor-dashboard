@@ -19272,18 +19272,32 @@ async function _driveWorkflowListing(deal, token, fileKey){
   const subUpdate = { driveSubfolderIds: { ...(deal.driveSubfolderIds||{}), om: omId, offers: offersId, dueDiligence: ddId } };
   await Store.updateDeal(deal.id, subUpdate);
   Object.assign(deal, subUpdate);
-  // File listing agreement if available — check fileKey, deal.id, and 'new' (for brand-new deals)
+  // File listing agreement — check in-memory listingFiles first, then fall back to Firebase Storage URL
   const lf = listingFiles[fileKey] || listingFiles[deal.id] || listingFiles['new'];
+  const laFolderId = deal.driveSubfolderIds?.listingAgreement || mainId;
+  const propName   = _drivePropName(deal);
+  const effDate    = deal.listingEffectiveDate || '';
   if (lf?.dataUrl) {
-    const laFolderId = deal.driveSubfolderIds?.listingAgreement || mainId;
-    const propName   = _drivePropName(deal);
-    const effDate    = deal.listingEffectiveDate || '';
     const ext        = (lf.name||'pdf').split('.').pop().toLowerCase().replace(/[^a-z0-9]/g,'') || 'pdf';
     const laFileName = effDate
       ? `${propName} - Listing Agreement - Fully Executed ${effDate}.${ext}`
       : `${propName} - Listing Agreement.${ext}`;
     await _driveUploadFile(laFolderId, lf, laFileName, token);
     showToast(`📁 Listing Agreement filed to Drive`, 'success', 3500);
+  } else if (deal.listingAgreementUrl) {
+    // Fallback: file was already saved to Firebase Storage (e.g. uploaded via card drag-drop)
+    try {
+      const ext = (deal.listingAgreementFileName||'pdf').split('.').pop().toLowerCase().replace(/[^a-z0-9]/g,'') || 'pdf';
+      const laFileName = effDate
+        ? `${propName} - Listing Agreement - Fully Executed ${effDate}.${ext}`
+        : `${propName} - Listing Agreement.${ext}`;
+      const fbResp = await fetch(deal.listingAgreementUrl);
+      const blob   = await fbResp.blob();
+      await _driveUploadFile(laFolderId, blob, laFileName, token);
+      showToast(`📁 Listing Agreement filed to Drive`, 'success', 3500);
+    } catch(fetchErr) {
+      console.warn('[driveWorkflowListing] fallback fetch failed', fetchErr);
+    }
   }
   showToast(`📁 Deal folder moved to Active Listings`, 'success', 4000);
 }
@@ -19352,18 +19366,30 @@ window._driveStageWorkflow = async (deal, newStage, opts = {}) => {
   }
 };
 
-// Generic attachment file entry point — routes LOI/PSA/offer files to Offers subfolder when available.
+// Generic attachment file entry point — routes files to the correct Drive subfolder.
 window._autoFileToDrive = async (deal, file, fileName) => {
   if (!deal?.driveUrl && !deal?.driveFolderId) return;
   try {
     const token = await _getDriveWriteToken();
     let targetId = deal.driveFolderId || _getDriveFolderIdFromUrl(deal.driveUrl);
     const stage = deal.stage || '';
-    // Route to Offers subfolder when stage is LOI/DD or file name suggests an offer document
-    if (deal.driveSubfolderIds?.offers &&
+    // Route listing agreement files to Listing Agreement subfolder
+    if (deal.driveSubfolderIds?.listingAgreement &&
+        /listing.?agree|signed.?listing|\bla[\s_\-\.]/i.test(fileName)) {
+      targetId = deal.driveSubfolderIds.listingAgreement;
+    // Route LOI/PSA/offer files to Offers subfolder
+    } else if (deal.driveSubfolderIds?.offers &&
         (/^LOI$/i.test(stage) || /due.?diligence/i.test(stage) || /under.?contract/i.test(stage) ||
          /\bloi\b|\bpsa\b|\boffer/i.test(fileName))) {
       targetId = deal.driveSubfolderIds.offers;
+    // Route due diligence docs to Due Diligence subfolder
+    } else if (deal.driveSubfolderIds?.dueDiligence &&
+        /due.?dili|inspection|survey|env.?report|title.?commit/i.test(fileName)) {
+      targetId = deal.driveSubfolderIds.dueDiligence;
+    // Route OM / marketing packages to OM subfolder
+    } else if (deal.driveSubfolderIds?.om &&
+        /\bom\b|offering.?memo|marketing.?pack/i.test(fileName)) {
+      targetId = deal.driveSubfolderIds.om;
     }
     if (!targetId) return;
     await _driveUploadFile(targetId, file, fileName, token);
