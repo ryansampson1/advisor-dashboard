@@ -2962,6 +2962,38 @@ function _fireListingWebsiteTask(deal){
     .catch(e=>console.error('[website task]',e));
 }
 
+// Draft a client email letting them know marketing materials are being prepared.
+// Fires once when a deal first enters the Listing stage.
+function _fireListingClientEmailTask(deal){
+  const addr        = deal.propertyAddress||deal.projectName||'property';
+  const clientName  = deal.contactPerson||deal.clientName||deal.seller||deal.sellerName||'';
+  const greeting    = clientName ? 'Hi '+clientName+',' : 'Hi,';
+  const advisorName = deal.advisorName||deal.advisorEmail||'';
+  const dueDate     = (()=>{ const d=new Date(); d.setDate(d.getDate()+1); return d.toISOString().slice(0,10); })();
+  const toEmail     = deal.contactEmail||deal.sellerEmail||deal.clientEmail||'';
+
+  const subject = `Marketing Update — ${addr}`;
+  const body    = `${greeting}\n\nThank you for listing your property at ${addr} with Eshenbaugh Land Company. We are currently working on the preparation of your marketing materials and will have a draft to you for review shortly.\n\nPlease don't hesitate to reach out with any questions in the meantime.\n\nBest regards,\n${advisorName}\nEshenbaugh Land Company\n813-417-5928`;
+
+  const gmailUrl = 'https://mail.google.com/mail/?view=cm'
+    + (toEmail ? '&to='+encodeURIComponent(toEmail) : '')
+    + '&su='+encodeURIComponent(subject)
+    + '&body='+encodeURIComponent(body);
+
+  Store.createTask({
+    title: `✉️ Email client — Marketing prep underway — ${addr}`,
+    description: body,
+    gmailUrl,
+    assignedTo:    deal.advisorUid||null,
+    assignedToName:deal.advisorName||deal.advisorEmail||'Advisor',
+    assignedToEmail:deal.advisorEmail||'',
+    dealId:deal.id, dealAddress:deal.propertyAddress,
+    dueDate, status:'pending',
+    createdBy:currentUser?.uid||'system', createdByName:'Automation', createdAt:Date.now(),
+  }).then(()=>showToast('✉️ Client email task created','success',3000))
+    .catch(e=>console.error('[listing-client-email]',e));
+}
+
 function handleListingAutomation(deal){
   const addr = deal.propertyAddress||deal.projectName||'property';
   const dueDate = n=>{ const d=new Date(); d.setDate(d.getDate()+n); return d.toISOString().slice(0,10); };
@@ -6243,6 +6275,8 @@ function fireAutomations(deal, oldStage){
         break;
       }
       case 'dd_research':{
+        // Hard guard: only fire on Due Diligence / Under Contract stages, never on Listing
+        if(!/due.?diligence|under.?contract/i.test(deal.stage)) break;
         handleDDAutomation(deal);
         break;
       }
@@ -17442,6 +17476,10 @@ window.handleDealSubmit = async ev => {
     if(stage==='Listing' && sf.readyForWebsites==='yes' && existDeal?.readyForWebsites!=='yes'){
       _fireListingWebsiteTask(existing);
     }
+    // ── Client marketing prep email — fire once when deal first enters Listing ──
+    if(stage==='Listing' && oldStage!=='Listing'){
+      _fireListingClientEmailTask(existing);
+    }
     // ── Buyer Opportunities: fire first follow-up task + log CRM activity on stage entry ──
     if(stage==='Buyer Opportunities' && oldStage!=='Buyer Opportunities'){
       handleBuyerOpportunityAutomation(existing);
@@ -17474,6 +17512,8 @@ window.handleDealSubmit = async ev => {
     // ── Structured Drive workflow on new deal create ───────────────────────
     window._driveStageWorkflow(newDeal, stage, { fileKey: fileKey==='new'?'new':newId }).catch(()=>{});
     if(stage==='Listing' && sf.readyForWebsites==='yes') _fireListingWebsiteTask(newDeal);
+    // ── Client marketing prep email — fire when new deal created as Listing ──
+    if(stage==='Listing') _fireListingClientEmailTask(newDeal);
     // ── Buyer Opportunities: fire first follow-up task + log CRM activity on deal create ──
     if(stage==='Buyer Opportunities'){
       handleBuyerOpportunityAutomation(newDeal);
