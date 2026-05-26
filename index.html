@@ -3150,6 +3150,18 @@ function handleListingAutomation(deal){
     if(answers.sign==='yes') msgs.push('🪧 sign+Telzio → Marketing');
     if(answers.web==='yes') msgs.push('🌐 websites → Krissy');
     showToast('🏠 Listing setup: '+msgs.join(' · '),'success',7000);
+
+    /* ── Drive folder — fires here so Google auth popup is allowed (direct user gesture) ── */
+    try {
+      showToast('📁 Setting up Google Drive folder…', 'info', 4000);
+      const token = await _getDriveWriteToken();
+      // Use deal.id as fileKey; _driveWorkflowListing also falls back to listingFiles['new']
+      await _driveWorkflowListing(deal, token, deal.id);
+    } catch(e) {
+      console.warn('[listing-drive-folder]', e);
+      if (/401|invalid.token/i.test(e.message||'')) _driveWriteToken = null;
+      showToast('⚠️ Drive folder not created — ' + (e.message||e) + '. Try re-opening the deal and saving again.', 'warning', 8000);
+    }
   });
 }
 
@@ -19260,8 +19272,8 @@ async function _driveWorkflowListing(deal, token, fileKey){
   const subUpdate = { driveSubfolderIds: { ...(deal.driveSubfolderIds||{}), om: omId, offers: offersId, dueDiligence: ddId } };
   await Store.updateDeal(deal.id, subUpdate);
   Object.assign(deal, subUpdate);
-  // File listing agreement if available
-  const lf = listingFiles[fileKey] || listingFiles[deal.id];
+  // File listing agreement if available — check fileKey, deal.id, and 'new' (for brand-new deals)
+  const lf = listingFiles[fileKey] || listingFiles[deal.id] || listingFiles['new'];
   if (lf?.dataUrl) {
     const laFolderId = deal.driveSubfolderIds?.listingAgreement || mainId;
     const propName   = _drivePropName(deal);
@@ -19333,7 +19345,10 @@ window._driveStageWorkflow = async (deal, newStage, opts = {}) => {
   } catch(e) {
     console.warn('[driveStageWorkflow]', e);
     if (/401|invalid.token/i.test(e.message)) _driveWriteToken = null;
-    showToast(`Drive filing skipped — ${e.message}`, 'info', 3000);
+    // Only show a toast for non-popup-blocked errors (popup-blocked is handled in handleListingAutomation)
+    if (!/popup.blocked|popup-blocked/i.test(e.message||'')) {
+      showToast(`⚠️ Drive filing skipped — ${e.message}`, 'warning', 5000);
+    }
   }
 };
 
