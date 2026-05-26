@@ -631,6 +631,24 @@ body {
   <div id="pdw-body" style="flex:1;overflow-y:auto;"></div>
 </div>
 
+<!-- Quick-edit modal: inline date/price editing for DD, Rezoning, Closing cards -->
+<div id="qe-overlay" onclick="closeQuickEdit()" style="display:none;position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.45)"></div>
+<div id="qe-modal" style="display:none;position:fixed;z-index:61;background:#fff;border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,.25);padding:1.5rem;width:340px;max-width:calc(100vw - 2rem);top:50%;left:50%;transform:translate(-50%,-50%)">
+  <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:1rem;gap:.5rem">
+    <div style="min-width:0">
+      <div id="qe-title" style="font-size:.95rem;font-weight:700;color:#111827;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></div>
+      <div id="qe-stage-badge" style="font-size:.72rem;color:#6b7280;margin-top:.2rem"></div>
+    </div>
+    <button onclick="closeQuickEdit()" style="background:none;border:none;font-size:1.4rem;color:#9ca3af;cursor:pointer;line-height:1;flex-shrink:0">&times;</button>
+  </div>
+  <div id="qe-fields" style="display:flex;flex-direction:column;gap:.75rem"></div>
+  <div style="display:flex;gap:.5rem;margin-top:1.25rem">
+    <button id="qe-save-btn" onclick="saveQuickEdit()" style="flex:1;background:#1d4ed8;color:#fff;border:none;border-radius:9px;padding:.6rem;font-size:.87rem;font-weight:700;cursor:pointer">Save Changes</button>
+    <button onclick="closeQuickEdit();openDealModal(window._qeDealId)" style="background:#f3f4f6;color:#374151;border:none;border-radius:9px;padding:.6rem .9rem;font-size:.82rem;font-weight:600;cursor:pointer" title="Open full edit modal">Full Edit</button>
+    <button onclick="closeQuickEdit()" style="background:#f3f4f6;color:#374151;border:none;border-radius:9px;padding:.6rem .75rem;font-size:.82rem;font-weight:600;cursor:pointer">Cancel</button>
+  </div>
+</div>
+
 <div id="deal-modal" class="hidden fixed inset-0 z-40 flex items-center justify-center modal-bg bg-black/40 p-4">
   <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md max-h-[92vh] overflow-y-auto">
     <div class="p-6">
@@ -7091,7 +7109,7 @@ function renderCard(deal){
       <!-- Title row -->
       <div class="flex items-start gap-1 mb-2 min-w-0">
         <div class="flex-1 min-w-0 text-xs font-semibold text-gray-800 leading-snug" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">${title}</div>
-        <button onclick="event.stopPropagation();openDealModal('${deal.id}')" class="text-gray-300 hover:text-blue-500 shrink-0 text-sm leading-none ml-1" title="Edit">✏️</button>
+        <button onclick="event.stopPropagation();${/due.?diligence|under.?contract|rezoning|permitting|^closing$/i.test(st)?`openQuickEdit('${deal.id}')`:`openDealModal('${deal.id}')`}" class="text-gray-300 hover:text-blue-500 shrink-0 text-sm leading-none ml-1" title="Edit">✏️</button>
       </div>
 
       ${currentUser.isAdmin?`<div class="text-xs text-blue-500 mb-1.5 font-medium" style="white-space:normal;line-height:1.4">${
@@ -16676,6 +16694,110 @@ window._setStageBadge = function(stage){
     sel.innerHTML = stages.map(s=>`<option value="${s}">${s}</option>`).join('');
   }
   sel.value = stage||'';
+};
+
+/* =======================================================
+   QUICK-EDIT MODAL — inline date/price for DD / Rezoning / Closing
+   ======================================================= */
+window._qeDealId = null;
+
+window.openQuickEdit = function(dealId) {
+  const deal = allDeals.find(d => d.id === dealId);
+  if (!deal) return;
+  window._qeDealId = dealId;
+  const st = deal.stage || '';
+  const price = deal.contractPrice || deal.purchasePrice || deal.listedPrice || deal.loiPrice || 0;
+
+  document.getElementById('qe-title').textContent = deal.projectName || deal.propertyAddress || 'Deal';
+  document.getElementById('qe-stage-badge').textContent = st;
+
+  const inp = (id, label, type, val) => `
+    <div>
+      <label style="display:block;font-size:.75rem;font-weight:600;color:#374151;margin-bottom:.3rem">${label}</label>
+      <input id="${id}" type="${type}" value="${val||''}"
+        style="width:100%;border:1.5px solid #e5e7eb;border-radius:8px;padding:.45rem .65rem;font-size:.87rem;color:#111827;outline:none;box-sizing:border-box"
+        onfocus="this.style.borderColor='#2563eb'" onblur="this.style.borderColor='#e5e7eb'"/>
+    </div>`;
+
+  const isDDOrUC   = /due.?diligence|under.?contract/i.test(st);
+  const isRezoning = /rezoning|permitting/i.test(st);
+  const isClosing  = /^closing$/i.test(st.trim());
+
+  let fields = inp('qe-price', 'Price ($)', 'number', price > 0 ? price : '');
+
+  if (isDDOrUC) {
+    const ddVal = deal.ddExpirationDate || deal.dueDiligenceDate || '';
+    fields += inp('qe-dd-exp',    'DD Expiration Date', 'date', ddVal);
+    fields += inp('qe-close-date','Projected Close Date', 'date', deal.closeDate || '');
+  } else if (isRezoning) {
+    fields += inp('qe-dd-exp',    'Rezoning Target Date', 'date', deal.dueDiligenceDate || '');
+    fields += inp('qe-close-date','Projected Close Date', 'date', deal.closeDate || '');
+  } else if (isClosing) {
+    fields += inp('qe-close-date','Closing Date', 'date', deal.closeDate || '');
+    fields += inp('qe-escrow',    'Escrow Agent', 'text', deal.escrowAgent || '');
+  }
+
+  document.getElementById('qe-fields').innerHTML = fields;
+  const btn = document.getElementById('qe-save-btn');
+  btn.textContent = 'Save Changes'; btn.disabled = false;
+
+  document.getElementById('qe-overlay').style.display = '';
+  document.getElementById('qe-modal').style.display   = '';
+};
+
+window.closeQuickEdit = function() {
+  document.getElementById('qe-overlay').style.display = 'none';
+  document.getElementById('qe-modal').style.display   = 'none';
+  window._qeDealId = null;
+};
+
+window.saveQuickEdit = async function() {
+  const dealId = window._qeDealId;
+  if (!dealId) return;
+  const deal = allDeals.find(d => d.id === dealId);
+  if (!deal) return;
+
+  const btn = document.getElementById('qe-save-btn');
+  btn.textContent = 'Saving…'; btn.disabled = true;
+
+  try {
+    const st       = deal.stage || '';
+    const priceEl  = document.getElementById('qe-price');
+    const ddEl     = document.getElementById('qe-dd-exp');
+    const closeEl  = document.getElementById('qe-close-date');
+    const escrowEl = document.getElementById('qe-escrow');
+    const upd      = { updatedAt: Date.now() };
+
+    // Price — write to whichever price field is already set, default contractPrice
+    if (priceEl && priceEl.value !== '') {
+      const p = parseFloat(priceEl.value);
+      if (!isNaN(p) && p > 0) {
+        const priceField = deal.contractPrice > 0 ? 'contractPrice'
+          : deal.purchasePrice > 0 ? 'purchasePrice' : 'contractPrice';
+        upd[priceField] = p;
+      }
+    }
+
+    // Date fields
+    if (ddEl) {
+      const isDDOrUC = /due.?diligence|under.?contract/i.test(st);
+      if (isDDOrUC) {
+        upd.ddExpirationDate = ddEl.value || null;
+      } else {
+        upd.dueDiligenceDate = ddEl.value || null;
+      }
+    }
+    if (closeEl)  upd.closeDate   = closeEl.value  || null;
+    if (escrowEl) upd.escrowAgent = escrowEl.value || null;
+
+    await Store.updateDeal(dealId, upd);
+    Object.assign(deal, upd);
+    closeQuickEdit();
+    viewBoard();
+  } catch(e) {
+    btn.textContent = 'Save Changes'; btn.disabled = false;
+    alert('Save failed: ' + e.message);
+  }
 };
 
 window.openDealModal = (id, defaultStage) => {
