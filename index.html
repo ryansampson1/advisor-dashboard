@@ -2841,6 +2841,10 @@ function handleLostListingAutomation(deal){
 async function _fireLostListingTasks(deal, answers, addr, dueDate){
   addr    = addr    || deal.propertyAddress||deal.projectName||'property';
   dueDate = dueDate || (n=>{ const d=new Date(); d.setDate(d.getDate()+n); return d.toISOString().slice(0,10); });
+  // ── Archive deal folder to Lost Listings 2026 ──────────────────────────
+  if (deal.driveFolderId || deal.driveUrl) {
+    _getDriveWriteToken().then(tok => _driveWorkflowLostListing(deal, tok)).catch(e => console.warn('[driveLostListing]', e));
+  }
   const tasks=[];
 
   /* Protection list → task to advisor */
@@ -7698,7 +7702,7 @@ window._pdwUploadAttachment = async (dealId, file) => {
       if (deal) deal.dealAttachments = updated;
       showToast(`✅ ${file.name} attached`, 'success', 3000);
       // Auto-file to Drive (non-blocking)
-      if (deal?.driveUrl) window._autoFileToDrive(deal, file, file.name).catch(()=>{});
+      if (deal?.driveUrl || deal?.driveFolderId) window._autoFileToDrive(deal, file, file.name).catch(()=>{});
     }
   } catch (e) {
     console.warn('[pdwUpload]', e);
@@ -8000,8 +8004,8 @@ window.handleDrop = (ev,newStage) => {
     if(newStage==='Buyer Opportunities' && oldStage!=='Buyer Opportunities'){
       handleBuyerOpportunityAutomation(deal);
     }
-    // ── Pre-create Drive stage subfolder if token already in session ──
-    window._drivePreCreateStageFolder(deal, newStage);
+    // ── Structured Drive workflow on stage drag ───────────────────────────
+    window._driveStageWorkflow(deal, newStage).catch(()=>{});
     viewBoard();
     showToast(`Moved to ${newStage}`,'success');
   });
@@ -17430,6 +17434,8 @@ window.handleDealSubmit = async ev => {
     await Store.updateDeal(id,data);
     Object.assign(existing,data);
     if(oldStage!==stage) fireAutomations(existing,oldStage);
+    // ── Structured Drive workflow on stage change ──────────────────────────
+    if(oldStage!==stage) window._driveStageWorkflow(existing, stage, { fileKey }).catch(()=>{});
     // NOTE: auto-create intentionally removed from edit path — running on every save
     // caused deleted CRM contacts to reappear. Contacts are seeded once at deal creation only.
     // ── "Ready for websites?" task — fire only when answer newly set to yes ──
@@ -17465,6 +17471,8 @@ window.handleDealSubmit = async ev => {
     const newDeal={...data,id:newId};
     if(!allDeals.find(d=>d.id===newId)) allDeals.push(newDeal);
     fireAutomations(newDeal,null);
+    // ── Structured Drive workflow on new deal create ───────────────────────
+    window._driveStageWorkflow(newDeal, stage, { fileKey: fileKey==='new'?'new':newId }).catch(()=>{});
     if(stage==='Listing' && sf.readyForWebsites==='yes') _fireListingWebsiteTask(newDeal);
     // ── Buyer Opportunities: fire first follow-up task + log CRM activity on deal create ──
     if(stage==='Buyer Opportunities'){
@@ -19072,8 +19080,24 @@ async function _getBulkDriveToken(){
 }
 
 /* =======================================================
-   DRIVE AUTO-FILING — write-scope helpers
+   STRUCTURED DRIVE FILING — per-office, per-stage workflow
    ======================================================= */
+
+const DRIVE_FILING_CONFIG = {
+  Tampa: {
+    proposals:    '1Lrnfsua9gmfGvbD2K4DhTi5q6mSv0IxI',
+    listings:     '1fUwuWfcCwJbTrX4OkyOMG-A0glrlxmZQ',
+    closed:       '1ootzpMEC1z3oNiAD-IaGSJ0vWRcFmgVA',
+    lostListings: '1NyjswYi0r2OvDl9CeJ57nPWDi4DiETnj',
+  },
+  Orlando: {
+    proposals:    '1MbF87INF3XNCMDOYqRw1XIlopZTlxRc6',
+    listings:     '18UJNOrKsYiZRVmkGMP18hY4pDkzQTbsX',
+    closed:       '17jvmM_rcGu1HK90kpxALyJTRuSgaVr66',
+    lostListings: '1Mp9dWAdL8KrW4Igql7KIL3rdpWzlMLni',
+  },
+};
+
 let _driveWriteToken = null;
 if (!window._driveFolderCache) window._driveFolderCache = {};
 
@@ -19096,82 +19120,204 @@ function _getDriveFolderIdFromUrl(driveUrl){
   return m ? m[1] : null;
 }
 
-function _stageFolderName(stageName){
-  // Normalize to clean folder name: strip parenthetical suffixes
-  return (stageName||'General').replace(/\s*\(.*?\)/g,'').trim() || 'General';
+function _driveGetOfficeConfig(deal){
+  const office = dealOffice(deal); // 'Tampa' or 'Orlando'
+  return DRIVE_FILING_CONFIG[office] || DRIVE_FILING_CONFIG.Tampa;
 }
 
-async function _driveEnsureStageFolder(dealFolderId, stageName, token){
-  const folderName = _stageFolderName(stageName);
-  const cacheKey = `${dealFolderId}::${folderName}`;
-  if (window._driveFolderCache[cacheKey]) return window._driveFolderCache[cacheKey];
+function _drivePropName(deal){
+  return (deal.propertyAddress || deal.projectName || 'Property').slice(0, 60);
+}
 
+// Find-or-create a folder by name inside a parent. Idempotent & cached.
+async function _driveCreateFolder(name, parentId, token){
+  const cacheKey = `mkd::${parentId}::${name}`;
+  if (window._driveFolderCache[cacheKey]) return window._driveFolderCache[cacheKey];
   const AUTH = { Authorization: `Bearer ${token}` };
-  // Search for existing subfolder
   const qs = new URLSearchParams({
-    q: `name='${folderName}' and mimeType='application/vnd.google-apps.folder' and '${dealFolderId}' in parents and trashed=false`,
-    fields: 'files(id,name)',
-    supportsAllDrives: 'true',
-    includeItemsFromAllDrives: 'true',
+    q: `name='${name.replace(/'/g,"\\'")}' and mimeType='application/vnd.google-apps.folder' and '${parentId}' in parents and trashed=false`,
+    fields: 'files(id,name)', supportsAllDrives: 'true', includeItemsFromAllDrives: 'true',
   });
-  const searchResp = await fetch(`https://www.googleapis.com/drive/v3/files?${qs}`, { headers: AUTH });
-  const searchData = await searchResp.json();
-  if (searchData.files?.length) {
-    window._driveFolderCache[cacheKey] = searchData.files[0].id;
-    return searchData.files[0].id;
-  }
-  // Create subfolder
-  const createResp = await fetch('https://www.googleapis.com/drive/v3/files?supportsAllDrives=true', {
+  const sr = await fetch(`https://www.googleapis.com/drive/v3/files?${qs}`, { headers: AUTH });
+  const sd = await sr.json();
+  if (sd.files?.length) { window._driveFolderCache[cacheKey] = sd.files[0].id; return sd.files[0].id; }
+  const cr = await fetch('https://www.googleapis.com/drive/v3/files?supportsAllDrives=true', {
     method: 'POST',
     headers: { ...AUTH, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name: folderName, mimeType: 'application/vnd.google-apps.folder', parents: [dealFolderId] }),
+    body: JSON.stringify({ name, mimeType: 'application/vnd.google-apps.folder', parents: [parentId] }),
   });
-  const created = await createResp.json();
-  if (!created.id) throw new Error('Failed to create Drive subfolder: ' + JSON.stringify(created));
+  const created = await cr.json();
+  if (!created.id) throw new Error('Failed to create Drive folder: ' + JSON.stringify(created));
   window._driveFolderCache[cacheKey] = created.id;
   return created.id;
 }
 
+// Move a folder to a new parent (removes all old parents).
+async function _driveMoveFolder(folderId, newParentId, token){
+  const r = await fetch(
+    `https://www.googleapis.com/drive/v3/files/${folderId}?fields=parents&supportsAllDrives=true`,
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
+  const d = await r.json();
+  const oldParents = (d.parents || []).join(',');
+  return fetch(
+    `https://www.googleapis.com/drive/v3/files/${folderId}?addParents=${newParentId}&removeParents=${encodeURIComponent(oldParents)}&supportsAllDrives=true&fields=id,name`,
+    { method: 'PATCH', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: '{}' }
+  ).then(r => r.json());
+}
+
+// Upload a file to Drive. Accepts File/Blob or {dataUrl, name} objects.
 async function _driveUploadFile(folderId, file, fileName, token){
+  let blob = file;
+  if (file?.dataUrl) { const resp = await fetch(file.dataUrl); blob = await resp.blob(); }
+  if (!(blob instanceof Blob)) throw new Error('Cannot upload to Drive: not a Blob');
   const metadata = { name: fileName, parents: [folderId] };
   const form = new FormData();
   form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
-  form.append('file', file);
+  form.append('file', blob);
   const resp = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}` },
-    body: form,
+    method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: form,
   });
   const result = await resp.json();
   if (!result.id) throw new Error('Drive upload failed: ' + JSON.stringify(result));
   return result;
 }
 
-// Main entry point — auto-file a File object into the deal's Drive stage subfolder.
-// Non-blocking: logs warnings on failure but never throws to the caller.
-window._autoFileToDrive = async (deal, file, fileName) => {
-  if (!deal?.driveUrl) return;
-  const dealFolderId = _getDriveFolderIdFromUrl(deal.driveUrl);
-  if (!dealFolderId) return;
+/* ---------- Stage-specific workflow functions ---------- */
+
+// Proposal To Do: create {PropName} folder in office Proposals, add 3 subfolders, save IDs to deal.
+async function _driveWorkflowProposalToDo(deal, token){
+  const cfg = _driveGetOfficeConfig(deal);
+  const propName = _drivePropName(deal);
+  const mainId = await _driveCreateFolder(propName, cfg.proposals, token);
+  const [laId, sdId, propId] = await Promise.all([
+    _driveCreateFolder('Listing Agreement', mainId, token),
+    _driveCreateFolder('Seller Docs',       mainId, token),
+    _driveCreateFolder('Proposal',          mainId, token),
+  ]);
+  const driveUrl = `https://drive.google.com/drive/folders/${mainId}`;
+  const update = {
+    driveFolderId: mainId, driveUrl,
+    driveSubfolderIds: { ...(deal.driveSubfolderIds||{}), listingAgreement: laId, sellerDocs: sdId, proposal: propId },
+  };
+  await Store.updateDeal(deal.id, update);
+  Object.assign(deal, update);
+  showToast(`📁 Drive folder created — ${propName}`, 'success', 4000);
+  return mainId;
+}
+
+// Listing: move folder to Active Listings, add OM/Offers/Due Diligence subfolders, file listing agreement.
+async function _driveWorkflowListing(deal, token, fileKey){
+  const cfg = _driveGetOfficeConfig(deal);
+  let mainId = deal.driveFolderId || _getDriveFolderIdFromUrl(deal.driveUrl);
+  if (!mainId) mainId = await _driveWorkflowProposalToDo(deal, token);
+  await _driveMoveFolder(mainId, cfg.listings, token);
+  const [omId, offersId, ddId] = await Promise.all([
+    _driveCreateFolder('OM',            mainId, token),
+    _driveCreateFolder('Offers',        mainId, token),
+    _driveCreateFolder('Due Diligence', mainId, token),
+  ]);
+  const subUpdate = { driveSubfolderIds: { ...(deal.driveSubfolderIds||{}), om: omId, offers: offersId, dueDiligence: ddId } };
+  await Store.updateDeal(deal.id, subUpdate);
+  Object.assign(deal, subUpdate);
+  // File listing agreement if available
+  const lf = listingFiles[fileKey] || listingFiles[deal.id];
+  if (lf?.dataUrl) {
+    const laFolderId = deal.driveSubfolderIds?.listingAgreement || mainId;
+    const propName   = _drivePropName(deal);
+    const effDate    = deal.listingEffectiveDate || '';
+    const ext        = (lf.name||'pdf').split('.').pop().toLowerCase().replace(/[^a-z0-9]/g,'') || 'pdf';
+    const laFileName = effDate
+      ? `${propName} - Listing Agreement - Fully Executed ${effDate}.${ext}`
+      : `${propName} - Listing Agreement.${ext}`;
+    await _driveUploadFile(laFolderId, lf, laFileName, token);
+    showToast(`📁 Listing Agreement filed to Drive`, 'success', 3500);
+  }
+  showToast(`📁 Deal folder moved to Active Listings`, 'success', 4000);
+}
+
+// LOI / Due Diligence: upload LOI and/or PSA to Offers subfolder.
+async function _driveWorkflowOffers(deal, token, fileKey){
+  const offersId = deal.driveSubfolderIds?.offers;
+  if (!offersId) return; // no Offers folder yet — skip silently
+  const fk = fileKey || deal.id;
+  const uploads = [];
+  const loi = stageFiles[`${fk}__loi`];
+  const psa = stageFiles[`${fk}__psa`];
+  if (loi?.dataUrl) uploads.push(_driveUploadFile(offersId, loi, loi.name, token).then(()=>showToast(`📁 LOI filed to Offers`, 'success', 3000)));
+  if (psa?.dataUrl) uploads.push(_driveUploadFile(offersId, psa, psa.name, token).then(()=>showToast(`📁 PSA filed to Offers`, 'success', 3000)));
+  if (uploads.length) await Promise.all(uploads);
+}
+
+// Sold / Closed Won: file closing statement, move folder to Closed 2026.
+async function _driveWorkflowSold(deal, token, fileKey){
+  const cfg = _driveGetOfficeConfig(deal);
+  const mainId = deal.driveFolderId || _getDriveFolderIdFromUrl(deal.driveUrl);
+  if (!mainId) return;
+  const cs = stageFiles[`${fileKey || deal.id}__closing-statement`];
+  if (cs?.dataUrl) {
+    await _driveUploadFile(mainId, cs, cs.name, token);
+    showToast(`📁 Closing statement filed to Drive`, 'success', 3000);
+  }
+  await _driveMoveFolder(mainId, cfg.closed, token);
+  showToast(`📁 Deal folder archived to Closed 2026`, 'success', 4000);
+}
+
+// Lost Listing: move folder to Lost Listings 2026.
+async function _driveWorkflowLostListing(deal, token){
+  const cfg = _driveGetOfficeConfig(deal);
+  const mainId = deal.driveFolderId || _getDriveFolderIdFromUrl(deal.driveUrl);
+  if (!mainId) return;
+  await _driveMoveFolder(mainId, cfg.lostListings, token);
+  showToast(`📁 Deal folder archived to Lost Listings 2026`, 'success', 4000);
+}
+
+/* ---------- Orchestrator ---------- */
+
+// Call after any stage transition. Non-blocking (callers .catch(()=>{})).
+window._driveStageWorkflow = async (deal, newStage, opts = {}) => {
   try {
     const token = await _getDriveWriteToken();
-    const stageFolderId = await _driveEnsureStageFolder(dealFolderId, deal.stage || 'General', token);
-    await _driveUploadFile(stageFolderId, file, fileName, token);
-    showToast(`📁 Filed to Drive → ${_stageFolderName(deal.stage)}/${fileName}`, 'success', 4000);
+    const fk = opts.fileKey || deal.id;
+    if (newStage === 'Proposal To Do') {
+      await _driveWorkflowProposalToDo(deal, token);
+    } else if (newStage === 'Listing') {
+      await _driveWorkflowListing(deal, token, fk);
+    } else if (/^LOI$/i.test(newStage) || /due.?diligence/i.test(newStage) || /under.?contract/i.test(newStage)) {
+      await _driveWorkflowOffers(deal, token, fk);
+    } else if (/^Sold$/i.test(newStage) || /closed.?won/i.test(newStage) || isWonStage(newStage)) {
+      await _driveWorkflowSold(deal, token, fk);
+    } else if (/lost.?listing/i.test(newStage)) {
+      await _driveWorkflowLostListing(deal, token);
+    }
   } catch(e) {
-    console.warn('[autoFileToDrive]', e);
-    if (/401|invalid.token/i.test(e.message)) _driveWriteToken = null; // clear expired token
+    console.warn('[driveStageWorkflow]', e);
+    if (/401|invalid.token/i.test(e.message)) _driveWriteToken = null;
     showToast(`Drive filing skipped — ${e.message}`, 'info', 3000);
   }
 };
 
-// Pre-create stage subfolder when token is already available (called on stage drag).
-window._drivePreCreateStageFolder = (deal, stageName) => {
-  if (!deal?.driveUrl || !_driveWriteToken) return;
-  const fid = _getDriveFolderIdFromUrl(deal.driveUrl);
-  if (!fid) return;
-  _driveEnsureStageFolder(fid, stageName, _driveWriteToken)
-    .catch(e => console.warn('[drivePreCreate]', e));
+// Generic attachment file entry point — routes LOI/PSA/offer files to Offers subfolder when available.
+window._autoFileToDrive = async (deal, file, fileName) => {
+  if (!deal?.driveUrl && !deal?.driveFolderId) return;
+  try {
+    const token = await _getDriveWriteToken();
+    let targetId = deal.driveFolderId || _getDriveFolderIdFromUrl(deal.driveUrl);
+    const stage = deal.stage || '';
+    // Route to Offers subfolder when stage is LOI/DD or file name suggests an offer document
+    if (deal.driveSubfolderIds?.offers &&
+        (/^LOI$/i.test(stage) || /due.?diligence/i.test(stage) || /under.?contract/i.test(stage) ||
+         /\bloi\b|\bpsa\b|\boffer/i.test(fileName))) {
+      targetId = deal.driveSubfolderIds.offers;
+    }
+    if (!targetId) return;
+    await _driveUploadFile(targetId, file, fileName, token);
+    showToast(`📁 Filed to Drive — ${fileName}`, 'success', 4000);
+  } catch(e) {
+    console.warn('[autoFileToDrive]', e);
+    if (/401|invalid.token/i.test(e.message)) _driveWriteToken = null;
+    showToast(`Drive filing skipped — ${e.message}`, 'info', 3000);
+  }
 };
 
 async function _driveFolderPdfs(folderId, token){
