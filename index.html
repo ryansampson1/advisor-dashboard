@@ -1017,6 +1017,15 @@ const APP_CONFIG = {
     enabled: true,
     betaEmails: [],
   },
+  // ── Mailchimp sync ───────────────────────────────────────────────
+  // Credentials loaded from Firestore eos/settings at runtime.
+  // Sync is performed server-side by mailchimp_sync.js (see ~/Documents/advisor-dashboard/).
+  mailchimp: {
+    apiKey:       '',   // loaded at runtime
+    listId:       '',   // Mailchimp Audience ID
+    categoryName: 'CRM Groups', // Mailchimp interest category name
+    lastSync:     null, // timestamp of last successful sync
+  },
 };
 
 /* =======================================================
@@ -5393,6 +5402,10 @@ const FB = {
           }
         } else if(docId === 'settings'){
           if(payload.anthropicKey) APP_CONFIG.ai.anthropicKey = payload.anthropicKey;
+          if(payload.mailchimpApiKey)       APP_CONFIG.mailchimp.apiKey       = payload.mailchimpApiKey;
+          if(payload.mailchimpListId)       APP_CONFIG.mailchimp.listId       = payload.mailchimpListId;
+          if(payload.mailchimpCategoryName) APP_CONFIG.mailchimp.categoryName = payload.mailchimpCategoryName;
+          if(payload.mailchimpLastSync)     APP_CONFIG.mailchimp.lastSync     = payload.mailchimpLastSync;
           eosCache[docId] = payload.data;
         } else {
           eosCache[docId] = payload.data;
@@ -6695,13 +6708,47 @@ function renderShell(){
   `;
 }
 
-// ── Admin utility: save Anthropic key to Firestore (run once in browser console) ──
+// ── Admin utility: save Anthropic key to Firestore ──
 window.setAnthropicKey = async (key) => {
   if(!_fbDb || !_fbFns) { console.error('DB not ready'); return; }
   const {doc, setDoc} = _fbFns;
   await setDoc(doc(_fbDb,'eos','settings'), {anthropicKey: key}, {merge: true});
   APP_CONFIG.ai.anthropicKey = key;
   console.log('%c✅ Anthropic key saved to Firestore', 'color:green;font-weight:bold');
+};
+
+// ── Queue all CRM contacts with email for a full Mailchimp sync ──
+// The nightly sync script will process anything with mailchimpPendingSync: true.
+window._mcQueueFullSync = async () => {
+  if(!_fbDb || !_fbFns) { showToast('DB not ready','error'); return; }
+  if(!APP_CONFIG.mailchimp?.listId) { showToast('Save your Mailchimp config first','warning'); return; }
+  const {doc, writeBatch} = _fbFns;
+  const contacts = allContacts.filter(c => c.email);
+  if(!contacts.length) { showToast('No contacts with email addresses found','info'); return; }
+  showToast(`Queuing ${contacts.length} contacts for Mailchimp sync…`, 'info', 3000);
+  // Batch-write in groups of 500 (Firestore limit)
+  const BATCH = 500;
+  for(let i = 0; i < contacts.length; i += BATCH){
+    const batch = writeBatch(_fbDb);
+    contacts.slice(i, i + BATCH).forEach(c => batch.update(doc(_fbDb,'contacts',c.id), { mailchimpPendingSync: true }));
+    await batch.commit();
+  }
+  showToast(`✅ ${contacts.length} contacts queued — sync will run tonight or click "Run Sync Now" in the scheduled task panel`, 'success', 6000);
+};
+
+// ── Admin utility: save Mailchimp config to Firestore ──
+window.setMailchimpConfig = async ({apiKey, listId, categoryName}) => {
+  if(!_fbDb || !_fbFns) { console.error('DB not ready'); return; }
+  const {doc, setDoc} = _fbFns;
+  const payload = {};
+  if(apiKey       !== undefined) payload.mailchimpApiKey       = apiKey;
+  if(listId       !== undefined) payload.mailchimpListId       = listId;
+  if(categoryName !== undefined) payload.mailchimpCategoryName = categoryName;
+  await setDoc(doc(_fbDb,'eos','settings'), payload, {merge: true});
+  if(apiKey       !== undefined) APP_CONFIG.mailchimp.apiKey       = apiKey;
+  if(listId       !== undefined) APP_CONFIG.mailchimp.listId       = listId;
+  if(categoryName !== undefined) APP_CONFIG.mailchimp.categoryName = categoryName;
+  console.log('%c✅ Mailchimp config saved to Firestore', 'color:green;font-weight:bold');
 };
 
 window.switchView = id => {
@@ -11316,11 +11363,15 @@ window.saveContact = async () => {
   const groups = [...document.querySelectorAll('#cm-groups-wrap input[type=checkbox]:checked')].map(el=>el.value);
   const linkedDeals = window._cmLinkedDeals || [];
 
+  const email = document.getElementById('cm-email')?.value.trim().toLowerCase()||'';
+  // Flag for Mailchimp sync whenever a contact with an email is saved
+  const mcPending = !!(email && APP_CONFIG.mailchimp?.listId);
+
   const data = {
     firstName, lastName,
     title:           document.getElementById('cm-title')?.value.trim()||'',
     company:         document.getElementById('cm-company')?.value.trim()||'',
-    email:           document.getElementById('cm-email')?.value.trim().toLowerCase()||'',
+    email,
     email2:          document.getElementById('cm-email2')?.value.trim().toLowerCase()||'',
     phone:           document.getElementById('cm-phone')?.value.trim()||'',
     officePhone:     document.getElementById('cm-office-phone')?.value.trim()||'',
@@ -11336,6 +11387,7 @@ window.saveContact = async () => {
     assignedAdvisor: document.getElementById('cm-advisor')?.value||'',
     groups, linkedDeals,
     updatedAt: Date.now(),
+    ...(mcPending ? { mailchimpPendingSync: true } : {}),
   };
 
   try {
@@ -14278,6 +14330,53 @@ function viewAutomations(){
           setTimeout(()=>viewAutomations(),1200);
         })()" class="brand-btn px-4 py-2 text-sm font-semibold rounded-lg">Save Key</button>
       </div>
+    </div>
+    <!-- Mailchimp Sync Settings -->
+    <div class="bg-white rounded-2xl border p-5 mb-4">
+      <div class="flex items-center gap-2 mb-1">
+        <span class="text-base">🐵</span>
+        <h3 class="text-sm font-bold text-gray-700">Mailchimp Audience Sync</h3>
+        ${APP_CONFIG.mailchimp?.apiKey
+          ? `<span class="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full ml-1">Connected ✓</span>`
+          : `<span class="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full ml-1">Not configured</span>`}
+      </div>
+      <p class="text-xs text-gray-400 mb-3">When contacts are added to CRM groups, they're automatically synced to a matching interest group inside your Mailchimp audience. Sync runs nightly; use the button below to run it immediately.</p>
+      ${APP_CONFIG.mailchimp?.lastSync ? `<p class="text-xs text-gray-400 mb-3">Last sync: ${new Date(APP_CONFIG.mailchimp.lastSync).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})}</p>` : ''}
+      <div class="grid gap-2 mb-3">
+        <div class="flex gap-2 items-center">
+          <label class="text-xs text-gray-500 w-28 shrink-0">API Key</label>
+          <input id="mc-api-key" type="password" placeholder="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-us1"
+            class="flex-1 border rounded-lg px-3 py-2 text-xs font-mono outline-none focus:ring-2 focus:ring-yellow-200"
+            value="${APP_CONFIG.mailchimp?.apiKey||''}"/>
+        </div>
+        <div class="flex gap-2 items-center">
+          <label class="text-xs text-gray-500 w-28 shrink-0">Audience ID</label>
+          <input id="mc-list-id" type="text" placeholder="e.g. a1b2c3d4e5"
+            class="flex-1 border rounded-lg px-3 py-2 text-xs font-mono outline-none focus:ring-2 focus:ring-yellow-200"
+            value="${APP_CONFIG.mailchimp?.listId||''}"/>
+        </div>
+        <div class="flex gap-2 items-center">
+          <label class="text-xs text-gray-500 w-28 shrink-0">Group Category</label>
+          <input id="mc-category" type="text" placeholder="CRM Groups"
+            class="flex-1 border rounded-lg px-3 py-2 text-xs outline-none focus:ring-2 focus:ring-yellow-200"
+            value="${APP_CONFIG.mailchimp?.categoryName||'CRM Groups'}"/>
+        </div>
+      </div>
+      <div class="flex gap-2 flex-wrap">
+        <button onclick="(async()=>{
+          const k=document.getElementById('mc-api-key').value.trim();
+          const l=document.getElementById('mc-list-id').value.trim();
+          const c=document.getElementById('mc-category').value.trim()||'CRM Groups';
+          if(!k||!l){showToast('API Key and Audience ID are required','warning');return;}
+          const btn=event.target; btn.disabled=true; btn.textContent='Saving…';
+          await window.setMailchimpConfig({apiKey:k,listId:l,categoryName:c});
+          showToast('✅ Mailchimp config saved','success');
+          btn.textContent='Saved!';
+          setTimeout(()=>viewAutomations(),1200);
+        })()" class="brand-btn px-4 py-2 text-sm font-semibold rounded-lg">Save Config</button>
+        <button onclick="window._mcQueueFullSync()" class="bg-yellow-500 hover:bg-yellow-600 text-white px-4 py-2 text-sm font-semibold rounded-lg transition-colors">🔄 Queue Full Sync Now</button>
+      </div>
+      <p class="text-xs text-gray-400 mt-3">📖 <strong>Setup:</strong> In Mailchimp go to <em>Audience → Manage Audience → Settings → Audience name and defaults</em> to find your Audience ID. The sync script at <code>~/Documents/advisor-dashboard/mailchimp_sync.js</code> also needs <code>~/.elc_mc_config.json</code> with your Firebase login — see the script header for details.</p>
     </div>
     <!-- Drive Folder Sync -->
     ${currentUser.isSuperAdmin?`
