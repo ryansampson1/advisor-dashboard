@@ -1002,9 +1002,14 @@ const APP_CONFIG = {
     webhookUrl: '',
   },
   ai: {
-    // Anthropic API key — get one at console.anthropic.com
-    // Note: key is visible in browser source; for production use a server proxy
-    anthropicKey: '', // loaded from Firestore eos/settings at runtime
+    // Anthropic API key — DEPRECATED. Key is no longer used from the browser.
+    // All AI calls now go through the Cloudflare Worker proxy (see anthropic-proxy/worker.js).
+    // After deploying your worker, paste the worker URL below and the key stays server-side.
+    anthropicKey: '', // loaded from Firestore eos/settings (kept for backward compat)
+    // ── Cloudflare Worker proxy URL ────────────────────────────────────────
+    // Deploy anthropic-proxy/worker.js, then replace this URL with your worker URL.
+    // Example: 'https://elc-ai-proxy.YOUR-SUBDOMAIN.workers.dev'
+    proxyUrl: '', // set this after deploying the worker
     // HR context shown to the bot on the HR tab
     hrContext: 'You are a helpful HR assistant for Eshenbaugh Land Company. Answer questions about HR policies, benefits, time off, payroll, onboarding, and general workplace questions professionally and warmly. If you do not know a specific policy detail, say so honestly and suggest they email hr@thedirtdog.com for confirmation.',
     // General assistant context
@@ -1139,11 +1144,13 @@ function loadCustomStages(){
     localStorage.setItem(K('allStages'), JSON.stringify(list));
   }
 
+  _stagesCache = list; // prime the in-memory cache after all migrations
   applyStagesList(list);
 }
 
 function saveCustomStages(list){
   localStorage.setItem(K('allStages'), JSON.stringify(list));
+  _stagesCache = list; // invalidate in-memory cache
   applyStagesList(list);
   // Persist to Firestore so all machines share the same stage config
   if(!DEMO_MODE && _fbDb && _fbFns){
@@ -1153,9 +1160,13 @@ function saveCustomStages(list){
   }
 }
 
+// In-memory cache — avoids repeated localStorage.getItem + JSON.parse on every render
+let _stagesCache = null;
 function getAllStages(){
+  if(_stagesCache) return _stagesCache;
   const raw = localStorage.getItem(K('allStages'));
-  return raw ? JSON.parse(raw) : SEED_ALL_STAGES;
+  _stagesCache = raw ? JSON.parse(raw) : SEED_ALL_STAGES;
+  return _stagesCache;
 }
 
 /* =======================================================
@@ -1665,11 +1676,7 @@ async function handleDDAutomation(deal){
     if(pdfBase64) userContent.push({type:'document',source:{type:'base64',media_type:'application/pdf',data:pdfBase64}});
     userContent.push({type:'text',text:'You are a real estate transaction coordinator for Eshenbaugh Land Company, a Florida land brokerage.\n\n'+(pdfBase64?'The Purchase and Sale Agreement is attached above.':'Deal info — Buyer: '+buyerName+', Price: '+price+', Property: '+addr+'.')+'\n\nProvide three clearly labeled sections:\n\n**CRITICAL DATES**\nList EVERY date-driven deadline from the contract using this exact pipe-delimited format (one per line):\nMilestone | Date (YYYY-MM-DD) | Notes/Amount\n\nInclude at minimum:\n- Effective Date\n- Inspection / Due Diligence Period Ends\n- Initial Deposit Due (with amount and escrow agent)\n- Any Additional Deposits (with amounts and dates)\n- Financing Contingency Ends\n- Title Commitment Due\n- Survey Period Ends\n- Closing Date\n- Any other contractual deadlines or notice periods\n\n**ESCROW AGENT**\nExtract (use N/A if not in contract):\n- Name:\n- Company:\n- Phone:\n- Email:\n- Address:\n\n**DEPOSIT INFO**\n- Initial deposit amount:\n- Due date or days from effective:\n- Additional deposits (amounts and dates):\n- Total earnest money:'});
 
-    const resp=await fetch('https://api.anthropic.com/v1/messages',{
-      method:'POST',
-      headers:{'x-api-key':apiKey,'anthropic-version':'2023-06-01','content-type':'application/json','anthropic-dangerous-direct-browser-access':'true'},
-      body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:3000,messages:[{role:'user',content:userContent}]}),
-    });
+    const resp=await _aiPost({model:'claude-sonnet-4-6',max_tokens:3000,messages:[{role:'user',content:userContent}]});
     if(!resp.ok) throw new Error('Claude API '+resp.status+': '+await resp.text());
     const claudeData=await resp.json();
     const fullText=claudeData.content.filter(b=>b.type==='text').map(b=>b.text).join('\n').trim();
@@ -1924,20 +1931,11 @@ For each key term above, provide a specific counter-offer recommendation for the
 - Other terms: [specific counter for each]
 Base all recommendations on standard Florida land transaction norms and strong seller protections.`});
 
-    const resp=await fetch('https://api.anthropic.com/v1/messages',{
-      method:'POST',
-      headers:{
-        'x-api-key':apiKey,
-        'anthropic-version':'2023-06-01',
-        'content-type':'application/json',
-        'anthropic-dangerous-direct-browser-access':'true',
-      },
-      body:JSON.stringify({
-        model:'claude-sonnet-4-6',
-        max_tokens:2500,
-        tools:[{type:'web_search_20250305',name:'web_search'}],
-        messages:[{role:'user',content:userContent}],
-      }),
+    const resp=await _aiPost({
+      model:'claude-sonnet-4-6',
+      max_tokens:2500,
+      tools:[{type:'web_search_20250305',name:'web_search'}],
+      messages:[{role:'user',content:userContent}],
     });
     if(!resp.ok) throw new Error(`Claude API ${resp.status}: `+await resp.text());
     const claudeData=await resp.json();
@@ -2451,11 +2449,7 @@ Wildlife/Listed Species | IPaC not run — verify manually | Medium]
 ##SECTION 17: Conclusions & Recommended Next Steps##
 [3-4 sentences summarizing the overall diligence picture based on confirmed data, then a bulleted list of 8-10 specific recommended next steps ordered by priority. Be specific to this property type and county. Include: confirm zoning at county portal, pull FIRMette for flood panel ${firmPanel?firmPanel.FIRM_PAN:'[confirm]'}, run IPaC at USFWS, order Phase I ESA, commission boundary/topo survey, order title commitment, etc.]`;
 
-        const resp=await fetch('https://api.anthropic.com/v1/messages',{
-          method:'POST',
-          headers:{'x-api-key':apiKey,'anthropic-version':'2023-06-01','content-type':'application/json','anthropic-dangerous-direct-browser-access':'true'},
-          body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:6000,system:systemPrompt,messages:[{role:'user',content:prompt}]})
-        });
+        const resp=await _aiPost({model:'claude-sonnet-4-6',max_tokens:6000,system:systemPrompt,messages:[{role:'user',content:prompt}]});
         if(resp.ok){const data=await resp.json();reportText=data.content?.[0]?.text||'';}
       }
       // Step 5: Build Word doc
@@ -2599,11 +2593,7 @@ async function handleProposalOutstandingAutomation(deal){
     if(apiKey){
       try{
         const prompt=`Write a professional, warm, and concise follow-up email from a Florida land broker to a property owner/client about a listing proposal that was recently submitted.\n\nThe email should:\n- Reference the proposal and property naturally\n- Check in on any questions without being pushy\n- Express continued enthusiasm for the listing\n- Offer to meet or call at their convenience\n- Be 3 short paragraphs maximum\n- Sign off from the advisor by name\n\nProperty: ${addr}\nClient: ${deal.clientName||deal.seller||'[Client Name]'}\nAdvisor: ${deal.advisorName||'[Advisor Name]'}\nAdvisor Email: ${deal.advisorEmail||'[advisor@thedirtdog.com]'}\nSuggested Price: ${priceFmt}\nListing Period: ${deal.listingPeriod||'[TBD]'}\nNotes: ${deal.notes||'(none)'}\n\nReturn ONLY the email body text. Start with greeting, end with advisor signature.`;
-        const resp=await fetch('https://api.anthropic.com/v1/messages',{
-          method:'POST',
-          headers:{'x-api-key':apiKey,'anthropic-version':'2023-06-01','content-type':'application/json','anthropic-dangerous-direct-browser-access':'true'},
-          body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:600,messages:[{role:'user',content:prompt}]})
-        });
+        const resp=await _aiPost({model:'claude-sonnet-4-6',max_tokens:600,messages:[{role:'user',content:prompt}]});
         if(resp.ok){ const data=await resp.json(); emailBody=data.content?.[0]?.text||''; }
       }catch(ae){console.warn('[proposalOutstanding email AI]',ae);}
     }
@@ -2679,11 +2669,7 @@ async function handleContractTerminatedAutomation(deal){
       if(apiKey){
         try{
           const prompt=`Draft a professional Listing Extension Agreement for a Florida land brokerage. A purchase contract was executed but terminated; the parties wish to extend the listing period.\n\nWrite formal document text for these sections with exact ## markers:\n##RECITALS##\n[2-3 sentences: parties entered original listing agreement, contract executed and terminated, parties desire to extend listing period]\n##EXTENSION TERMS##\n[Extension of listing period, new expiration date placeholder, same commission terms apply]\n##PRICING##\n[Option to confirm or adjust listing price with bracketed placeholder for revised price]\n##MARKETING OBLIGATIONS##\n[Broker re-markets on all platforms within X business days, updates all materials]\n##REPRESENTATIONS##\n[Seller represents property condition unchanged, no new encumbrances]\n##ADDITIONAL TERMS##\n[Governed by original listing agreement, parties agree to cooperate in good faith]\n\nPROPERTY: ${addr}, ${deal.county||'[County]'} County, Florida\nSELLER: ${deal.clientName||deal.seller||'[Seller Name]'}\nBROKER: ${deal.advisorName||'[Advisor]'}, Eshenbaugh Land Company\nORIGINAL PRICE: ${priceFmt}\n\nWrite in formal legal style. Use [FILL IN] for dates and amounts to complete.`;
-          const resp=await fetch('https://api.anthropic.com/v1/messages',{
-            method:'POST',
-            headers:{'x-api-key':apiKey,'anthropic-version':'2023-06-01','content-type':'application/json','anthropic-dangerous-direct-browser-access':'true'},
-            body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:1800,messages:[{role:'user',content:prompt}]})
-          });
+          const resp=await _aiPost({model:'claude-sonnet-4-6',max_tokens:1800,messages:[{role:'user',content:prompt}]});
           if(resp.ok){ const data=await resp.json(); extensionClauses=data.content?.[0]?.text||''; }
         }catch(ae){console.warn('[contractTerminated AI]',ae);}
       }
@@ -3667,20 +3653,11 @@ For calculated dates (DD expiration, closing, etc.) — DO the math and return t
         extractionSchema+'\n\nDocument:\n"""\n'+truncated+'\n"""';
     }
 
-    const resp = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json',
-        'anthropic-dangerous-direct-browser-access': 'true'
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 1800,
-        system: 'You are a JSON extraction API for real estate contracts. You output ONLY a single valid JSON object. No prose, no explanation, no markdown, no code fences. Your entire response must be valid JSON starting with { and ending with }.',
-        messages: [{role:'user', content: msgContent}]
-      })
+    const resp = await _aiPost({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 1800,
+      system: 'You are a JSON extraction API for real estate contracts. You output ONLY a single valid JSON object. No prose, no explanation, no markdown, no code fences. Your entire response must be valid JSON starting with { and ending with }.',
+      messages: [{role:'user', content: msgContent}]
     });
 
     if(!resp.ok){
@@ -5381,6 +5358,7 @@ const FB = {
             }
             const _changed = _migrated !== payload.data;
             localStorage.setItem(K('allStages'), JSON.stringify(_migrated));
+            _stagesCache = _migrated;
             applyStagesList(_migrated);
             // Write back to Firestore if migration changed the list
             if(_changed){
@@ -5608,11 +5586,121 @@ function getEffectiveRevenue(deal){
   }
   return gross;
 }
+
+// ── Canonical price resolver ─────────────────────────────────────────────────
+// Use this everywhere instead of inlining the fallback chain.
+function getDealPrice(deal){
+  return deal.purchasePrice || deal.contractPrice || deal.suggestedPrice || deal.listedPrice || deal.loiPrice || 0;
+}
+
+// ── Canonical co-advisor check ───────────────────────────────────────────────
+// Returns true if uid is the primary advisor OR a co-advisor on this deal.
+function isDealAdvisor(deal, uid){
+  return deal.advisorUid === uid
+    || (deal.coAdvisorUids || []).includes(uid)
+    || (deal.coAdvisors || []).some(ca => ca.uid === uid);
+}
+
 const dealProjected = d => {
   const rev = getEffectiveRevenue(d);
   if (isLostStage(d.stage)) return 0;
   return rev; // no probability weighting — always return full projected revenue
 };
+
+// ── Shared Anthropic AI call helper ─────────────────────────────────────────
+// Routes through the Cloudflare Worker proxy when APP_CONFIG.ai.proxyUrl is set.
+// Falls back to direct API only when proxy isn't configured yet (dev mode).
+async function _aiPost(body) {
+  const proxyUrl = APP_CONFIG.ai?.proxyUrl;
+  const apiKey   = APP_CONFIG.ai?.anthropicKey;
+  if(proxyUrl) {
+    // Production path: key stays on the server
+    const r = await fetch(proxyUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    return r;
+  } else if(apiKey) {
+    // Fallback (dev / pre-proxy): direct browser call — deploy the worker to eliminate this
+    console.warn('[AI] Using direct Anthropic API — set APP_CONFIG.ai.proxyUrl to use the proxy');
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+        'anthropic-dangerous-direct-browser-access': 'true',
+      },
+      body: JSON.stringify(body),
+    });
+    return r;
+  } else {
+    throw new Error('No AI proxy URL or API key configured. Deploy the Cloudflare Worker and set APP_CONFIG.ai.proxyUrl.');
+  }
+}
+
+// ── Shared KPI card HTML builder ─────────────────────────────────────────────
+// opts.names      {string[]} — hover tooltip list (empty = no tooltip)
+// opts.noWrap     {boolean}  — omit the outer .kpi-wrap div (used in viewDashboard)
+// opts.valueColor {boolean}  — apply the card accent color to the value text
+function _kpiCardHtml(label, value, sub, color, iconSvg, opts) {
+  const names      = (opts && opts.names) || [];
+  const valueStyle = (opts && opts.valueColor) ? ' style="color:'+color+'"' : '';
+  const tooltipHtml = names.length
+    ? '<div class="kpi-tooltip"><strong style="display:block;margin-bottom:.3rem;font-size:.7rem;text-transform:uppercase;letter-spacing:.06em;opacity:.7">'+label+'</strong>'
+      + names.map(n=>'<div style="padding:.1rem 0">· '+n+'</div>').join('') + '</div>'
+    : '';
+  const card = '<div class="kpi-card" style="border-bottom:3px solid '+color+'">'
+    +'<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:.75rem">'
+    +'<div class="kpi-label">'+label+'</div>'
+    +'<div class="kpi-icon" style="background:color-mix(in srgb,'+color+' 12%,transparent);color:'+color+'">'+iconSvg+'</div>'
+    +'</div>'
+    +'<div class="kpi-value"'+valueStyle+'>'+value+'</div>'
+    +(sub?'<div class="kpi-sub">'+sub+'</div>':'')
+    +'</div>';
+  if(opts && opts.noWrap) return card;
+  return '<div class="kpi-wrap">'+tooltipHtml+card+'</div>';
+}
+
+// ── Kanban card — delegated click handler ────────────────────────────────────
+// Handles all data-action clicks that bubble up from deal cards.
+// Replaces 425 inline onclick attributes with a single listener per board render.
+function _kanbanClickDelegate(e) {
+  // Ignore drag-initiated clicks
+  if(window._cardDragMoved) return;
+
+  // Walk up from click target to find the nearest element with data-action
+  let el = e.target;
+  while(el && el !== e.currentTarget) {
+    const action  = el.dataset.action;
+    const dealId  = el.dataset.dealId;
+
+    if(action === 'open-detail') {
+      // Ignore if click originated from a link, button, or interactive child
+      if(e.target.closest('a,button,[data-action="edit-deal"],[data-action="open-modal"]')) return;
+      openPropertyDetail(dealId);
+      return;
+    }
+    if(action === 'edit-deal') {
+      e.stopPropagation();
+      const stage = el.dataset.stage || '';
+      if(/due.?diligence|under.?contract|rezoning|permitting|^closing$/i.test(stage)) {
+        openQuickEdit(dealId);
+      } else {
+        openDealModal(dealId);
+      }
+      return;
+    }
+    if(action === 'open-modal') {
+      e.stopPropagation();
+      openDealModal(dealId);
+      return;
+    }
+    el = el.parentElement;
+  }
+}
+
 const summarize = deals => {
   const open = deals.filter(d=>!isWonStage(d.stage)&&!isLostStage(d.stage));
   const won  = deals.filter(d=>isWonStage(d.stage));
@@ -5636,11 +5724,7 @@ function computeAdvisorKPIs(advisorUid){
   const Q_GOAL    = (allProfiles[advisorUid]?.quarterlyUCGoal) || 10000000;
 
   // Include deals where this advisor is primary OR listed as co-advisor
-  const advDeals  = allDeals.filter(d=>
-    d.advisorUid===advisorUid ||
-    (d.coAdvisors||[]).some(ca=>ca.uid===advisorUid) ||
-    (d.coAdvisorUids||[]).includes(advisorUid)
-  );
+  const advDeals  = allDeals.filter(d => isDealAdvisor(d, advisorUid));
 
   // Revenue share for this advisor on a deal (respects co-advisor splits)
   const advRevShare = d => {
@@ -5769,10 +5853,10 @@ function visibleDeals(){
   // Staff-only accounts see all deals (they support all advisors)
   if(currentUser.isStaff) return allDeals;
   // Office managers in advisor mode see only their own deals; manager view is handled by isStaffView()
-  if(currentUser.isOfficeManager && !currentUser.isAdmin) return allDeals.filter(d=>d.advisorUid===currentUser.uid||(d.coAdvisorUids||[]).includes(currentUser.uid)||(d.coAdvisors||[]).some(ca=>ca.uid===currentUser.uid));
+  if(currentUser.isOfficeManager && !currentUser.isAdmin) return allDeals.filter(d => isDealAdvisor(d, currentUser.uid));
   if(currentUser.isOfficeManager && !adminViewAsAdvisor) return allDeals.filter(d=>dealOffice(d)===currentUser.officeManagerOffice);
-  // Advisors see deals they own OR are listed as co-advisors on (check both coAdvisorUids flat array and coAdvisors object array)
-  return allDeals.filter(d=>d.advisorUid===currentUser.uid||(d.coAdvisorUids||[]).includes(currentUser.uid)||(d.coAdvisors||[]).some(ca=>ca.uid===currentUser.uid));
+  // Advisors see deals they own OR are listed as co-advisors on
+  return allDeals.filter(d => isDealAdvisor(d, currentUser.uid));
 }
 
 // Returns true when the current user should see the staff-restricted view
@@ -6373,14 +6457,10 @@ const ADVISOR_BIOS = {
             const closeDt=deal.closeDate?new Date(deal.closeDate).toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'}):new Date().toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'});
             const cityName=deal.city||deal.county||'Tampa Bay';
             let headline='',openPara='',bodyParas='',quote1='',quote2='';
-            if(APP_CONFIG.ai&&APP_CONFIG.ai.anthropicKey){
+            if(APP_CONFIG.ai&&(APP_CONFIG.ai.proxyUrl||APP_CONFIG.ai.anthropicKey)){
               const prompt=`You are writing a professional press release for Eshenbaugh Land Company, a Tampa-based commercial land brokerage. Generate press release content for this transaction.\n\nDEAL DETAILS:\n- Property: ${deal.propertyAddress||deal.projectName||'[Property]'}\n- Acres: ${deal.acres||'[X]'} acres\n- Sale Price: ${priceFmt}\n- Closing Date: ${closeDt}\n- City/County: ${cityName}, Florida\n- Advisor(s): ${advisorStr}\n- Buyer: ${deal.buyer||'[Buyer Name]'}\n- Seller: ${deal.seller||deal.clientName||'[Seller Name]'}\n- Notes: ${deal.notes||deal.description||'Commercial land transaction in Florida'}\n\nWrite ONLY the following sections separated by the exact markers:\n##HEADLINE##\n[One concise line: "${advisorStr} Brokers ${priceFmt} Sale of ${deal.acres||'[X]'} acres in ${cityName}, FL"]\n##OPEN##\n[One paragraph starting with "Tampa, FL, ${closeDt} --" announcing the sale with advisor, seller, and deal total]\n##BODY##\n[2-3 paragraphs: buyer plans, community significance, seller context]\n##QUOTE1##\n[Quote from ${deal.advisorName||'the advisor'} about the deal: "Quote text," said Name.]\n##QUOTE2##\n[Second quote from ${deal.advisorName||'the advisor'} about property or buyer in same format]\n\nBe professional, factual, and match the style of Eshenbaugh Land Company press releases.`;
               try{
-                const resp=await fetch('https://api.anthropic.com/v1/messages',{
-                  method:'POST',
-                  headers:{'x-api-key':APP_CONFIG.ai.anthropicKey,'anthropic-version':'2023-06-01','content-type':'application/json','anthropic-dangerous-direct-browser-access':'true'},
-                  body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:1500,messages:[{role:'user',content:prompt}]})
-                });
+                const resp=await _aiPost({model:'claude-sonnet-4-6',max_tokens:1500,messages:[{role:'user',content:prompt}]});
                 if(resp.ok){
                   const data=await resp.json();
                   const txt=data.content?.[0]?.text||'';
@@ -6811,7 +6891,7 @@ function viewBoard(){
     const uid = currentUser.uid;
     // Admin in firm view → aggregate all visible deals; advisor → own deals only
     const isFirmView = (currentUser.isAdmin || currentUser.isOfficeManager) && !adminViewAsAdvisor;
-    const kpiDeals = isFirmView ? deals : allDeals.filter(d=>d.advisorUid===uid||(d.coAdvisors||[]).some(ca=>ca.uid===uid));
+    const kpiDeals = isFirmView ? deals : allDeals.filter(d => isDealAdvisor(d, uid));
 
     // 1. Under Contract $ — deals currently in DD, Rezoning/Permitting, or Closing
     const isContractActiveStage = s => !isLostStage(s||'') && !isWonStage(s||'')
@@ -6883,25 +6963,8 @@ function viewBoard(){
       calendar: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>',
       pipeline: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>',
     };
-    const kpiCard = function(label, value, sub, color, iconKey, names){
-      iconKey = iconKey||'pipeline';
-      const icon = _kpiIcons[iconKey]||_kpiIcons.pipeline;
-      const tooltipHtml = (names && names.length)
-        ? '<div class="kpi-tooltip"><strong style="display:block;margin-bottom:.3rem;font-size:.7rem;text-transform:uppercase;letter-spacing:.06em;opacity:.7">'+label+'</strong>'
-          + names.map(n=>'<div style="padding:.1rem 0">· '+n+'</div>').join('')+'</div>'
-        : '';
-      return '<div class="kpi-wrap">'
-        + tooltipHtml
-        +'<div class="kpi-card" style="border-bottom:3px solid '+color+'">'
-        +'<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:.75rem">'
-        +'<div class="kpi-label">'+label+'</div>'
-        +'<div class="kpi-icon" style="background:color-mix(in srgb,'+color+' 12%,transparent);color:'+color+'">'+icon+'</div>'
-        +'</div>'
-        +'<div class="kpi-value">'+value+'</div>'
-        +(sub?'<div class="kpi-sub">'+sub+'</div>':'')
-        +'</div>'
-        +'</div>';
-    };
+    const kpiCard = (label, value, sub, color, iconKey, names) =>
+      _kpiCardHtml(label, value, sub, color, _kpiIcons[iconKey||'pipeline']||_kpiIcons.pipeline, {names});
 
     const goalColor  = qPct>=100?'var(--brand-teal)':'var(--brand-red)';
     const barTrack   = '<div class="bar-track" style="margin-top:.5rem"><div class="bar-fill" style="width:'+qPct+'%;background:'+goalColor+'"></div></div>';
@@ -7033,13 +7096,17 @@ function viewBoard(){
   `);
   // Render mobile pipeline list (shown on small screens)
   if(window.renderMobilePipeline) renderMobilePipeline(deals);
+
+  // Attach delegated click handler — one listener for all cards instead of inline onclick
+  const kanban = document.getElementById('pipeline-kanban');
+  if(kanban) kanban.addEventListener('click', _kanbanClickDelegate);
 }
 
 function renderCard(deal){
   const days    = daysInStage(deal);
   const dayCls  = days>45?'text-red-600 bg-red-100':days>21?'text-amber-600 bg-amber-100':'text-gray-400 bg-gray-100';
   const canDrag = currentUser.isAdmin||deal.advisorUid===currentUser.uid;
-  const price   = deal.purchasePrice||deal.contractPrice||deal.listedPrice||deal.loiPrice||0;
+  const price   = getDealPrice(deal);
   const rev     = getEffectiveRevenue(deal);
   // Project name: prefer explicit projectName, fall back to property address
   const title   = (deal.projectName||deal.propertyAddress||'No address');
@@ -7059,7 +7126,7 @@ function renderCard(deal){
 
   const fileRow = docNames.length
     ? `<div class="flex flex-wrap gap-1 mt-1">
-        ${docNames.map(n=>`<span onclick="openDealModal('${deal.id}')"
+        ${docNames.map(n=>`<span data-action="open-modal" data-deal-id="${deal.id}"
           class="inline-flex items-center gap-0.5 text-xs text-blue-500 hover:text-blue-700 bg-blue-50 rounded-full px-1.5 py-0.5 cursor-pointer truncate max-w-full" title="${n}">
           <span class="shrink-0">📎</span><span class="truncate" style="max-width:130px">${n}</span>
         </span>`).join('')}
@@ -7191,8 +7258,9 @@ function renderCard(deal){
   return `
     <div class="deal-card bg-white rounded-xl px-3 ${photoUrl?'pt-0':'pt-2.5'} pb-2 shadow-sm border border-white/80 hover:shadow-md transition select-none min-w-0"
       ${canDrag?`draggable="true" ondragstart="handleDragStart(event,'${deal.id}')"`:''}
-      onclick="if(!window._cardDragMoved)openPropertyDetail('${deal.id}')"
       onmousedown="window._cardDragMoved=false"
+      data-action="open-detail"
+      data-deal-id="${deal.id}"
       data-id="${deal.id}">
 
       ${photoUrl?`
@@ -7206,7 +7274,7 @@ function renderCard(deal){
       <!-- Title row -->
       <div class="flex items-start gap-1 mb-2 min-w-0">
         <div class="flex-1 min-w-0 text-xs font-semibold text-gray-800 leading-snug" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">${title}</div>
-        <button onclick="event.stopPropagation();${/due.?diligence|under.?contract|rezoning|permitting|^closing$/i.test(st)?`openQuickEdit('${deal.id}')`:`openDealModal('${deal.id}')`}" class="text-gray-300 hover:text-blue-500 shrink-0 text-sm leading-none ml-1" title="Edit">✏️</button>
+        <button data-action="edit-deal" data-deal-id="${deal.id}" data-stage="${st.replace(/"/g,'&quot;')}" class="text-gray-300 hover:text-blue-500 shrink-0 text-sm leading-none ml-1" title="Edit">✏️</button>
       </div>
 
       ${currentUser.isAdmin?`<div class="text-xs text-blue-500 mb-1.5 font-medium" style="white-space:normal;line-height:1.4">${
@@ -7917,25 +7985,8 @@ function viewBoardStaff(){
     percent:  '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><line x1="19" y1="5" x2="5" y2="19"/><circle cx="6.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/></svg>',
   };
   const sName = d => d.projectName || d.propertyAddress || d.name || 'Unnamed';
-  const kpiCard = (label, value, sub, color, iconKey, names) => {
-    iconKey = iconKey||'avg';
-    const icon = _sIcons[iconKey]||_sIcons.avg;
-    const tooltipHtml = (names && names.length)
-      ? '<div class="kpi-tooltip"><strong style="display:block;margin-bottom:.3rem;font-size:.7rem;text-transform:uppercase;letter-spacing:.06em;opacity:.7">'+label+'</strong>'
-        + names.map(n=>'<div style="padding:.1rem 0">· '+n+'</div>').join('')+'</div>'
-      : '';
-    return '<div class="kpi-wrap">'
-      + tooltipHtml
-      +'<div class="kpi-card" style="border-bottom:3px solid '+color+'">'
-      +'<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:.75rem">'
-      +'<div class="kpi-label">'+label+'</div>'
-      +'<div class="kpi-icon" style="background:color-mix(in srgb,'+color+' 12%,transparent);color:'+color+'">'+icon+'</div>'
-      +'</div>'
-      +'<div class="kpi-value">'+value+'</div>'
-      +(sub?'<div class="kpi-sub">'+sub+'</div>':'')
-      +'</div>'
-      +'</div>';
-  };
+  const kpiCard = (label, value, sub, color, iconKey, names) =>
+    _kpiCardHtml(label, value, sub, color, _sIcons[iconKey||'avg']||_sIcons.avg, {names});
 
   const staffKpis = `
     <div class="mb-7">
@@ -7980,7 +8031,7 @@ function viewBoardStaff(){
 
 function renderStaffCard(deal){
   const title = deal.projectName || deal.propertyAddress || 'No address';
-  const price  = deal.purchasePrice || deal.contractPrice || deal.listedPrice || deal.suggestedPrice || 0;
+  const price  = getDealPrice(deal);
   const st = deal.stage || '';
 
   const row = (label, val) => val
@@ -8453,16 +8504,9 @@ function viewDashboard(){
     </div>`;
   }
 
-  // ── KPI card helper ───────────────────────────────────────────────
+  // ── KPI card helper (dashboard variant — no outer wrap, colored value text) ─
   const kpiCard = (label, val, sub, color, icon) =>
-    `<div class="kpi-card" style="border-bottom:3px solid ${color}">
-      <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:.75rem">
-        <div class="kpi-label">${label}</div>
-        <div class="kpi-icon" style="background:color-mix(in srgb,${color} 12%,transparent);color:${color}">${icon}</div>
-      </div>
-      <div class="kpi-value" style="color:${color}">${val}</div>
-      <div class="kpi-sub">${sub}</div>
-    </div>`;
+    _kpiCardHtml(label, val, sub, color, icon, {noWrap:true, valueColor:true});
 
   const ico = {
     check: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>',
@@ -8595,7 +8639,7 @@ function viewDashboard(){
           return 'Q'+(Math.floor(d.getMonth()/3)+1)+' '+d.getFullYear();
         });
         const rows = cfAdv.map(adv=>{
-          const myD = allDeals.filter(d=>d.advisorUid===adv.uid||(d.coAdvisors||[]).some(ca=>ca.uid===adv.uid)||(d.coAdvisorUids||[]).includes(adv.uid));
+          const myD = allDeals.filter(d => isDealAdvisor(d, adv.uid));
           const qs  = quarterlyPayouts(myD, adv.uid);
           return {adv, qs, total:qs.reduce((s,q)=>s+q.payout,0)};
         }).sort((a,b)=>b.total-a.total);
@@ -8750,7 +8794,7 @@ function viewProjection(){ viewDashboard(); }
 function viewMyCommissions(){
   if(activeChart){ activeChart.destroy(); activeChart=null; }
   const uid      = currentUser.uid;
-  const myDeals  = allDeals.filter(d=>d.advisorUid===uid||(d.coAdvisors||[]).some(ca=>ca.uid===uid));
+  const myDeals  = allDeals.filter(d => isDealAdvisor(d, uid));
   const profile  = getProfile(uid);
   // legacy vars kept so nothing below breaks if referenced elsewhere
   const quarters = quarterlyPayouts(myDeals, uid);
@@ -9265,11 +9309,7 @@ function viewCommissionForecast(){
   });
 
   const rows=advisors.map(adv=>{
-    const myDeals=allDeals.filter(d=>
-      d.advisorUid===adv.uid ||
-      (d.coAdvisors||[]).some(ca=>ca.uid===adv.uid) ||
-      (d.coAdvisorUids||[]).includes(adv.uid)
-    );
+    const myDeals=allDeals.filter(d => isDealAdvisor(d, adv.uid));
     const quarters=quarterlyPayouts(myDeals,adv.uid);
     const total=quarters.reduce((s,q)=>s+q.payout,0);
     return {adv,quarters,total};
@@ -10223,7 +10263,7 @@ function viewCRM(){
   const contactsHtml = `
     <div class="flex flex-wrap gap-2 mb-4 items-center">
       <input id="crm-contact-search" type="text" placeholder="Search name, company, email…" value="${(window._crmSearchFilter||'').replace(/"/g,'&quot;')}"
-        oninput="window._crmSearchFilter=this.value;window._crmFocusId='crm-contact-search';window.viewCRM()"
+        oninput="window._crmSearchFilter=this.value;window._crmFocusId='crm-contact-search';clearTimeout(window._crmSearchTimer);window._crmSearchTimer=setTimeout(()=>window.viewCRM(),200)"
         class="border rounded-lg px-3 py-1.5 text-sm outline-none flex-1 min-w-48 focus:ring-2 focus:ring-blue-200"/>
       <button type="button" onclick="window._crmNoGroupFilter=!window._crmNoGroupFilter;window._crmGroupFilter='';window.viewCRM()" class="border rounded-lg px-3 py-1.5 text-sm font-semibold whitespace-nowrap transition ${window._crmNoGroupFilter?'bg-amber-50 border-amber-300 text-amber-700':'border-gray-300 text-gray-600 hover:bg-gray-50'}" title="Show only contacts not assigned to any group">⚑ No Groups${window._crmNoGroupFilter?' <span class=\"text-xs font-normal\">(on)</span>':''}</button>
       <button type="button" onclick="window._crmNoEmailFilter=!window._crmNoEmailFilter;window.viewCRM()" class="border rounded-lg px-3 py-1.5 text-sm font-semibold whitespace-nowrap transition ${window._crmNoEmailFilter?'bg-rose-50 border-rose-300 text-rose-700':'border-gray-300 text-gray-600 hover:bg-gray-50'}" title="Show only contacts missing an email address">✉ No Email${window._crmNoEmailFilter?' <span class=\"text-xs font-normal\">(on)</span>':''}</button>
@@ -10350,7 +10390,7 @@ function viewCRM(){
   const companiesHtml = `
     <div class="flex flex-wrap gap-2 mb-4 items-center">
       <input id="crm-company-search" type="text" placeholder="Search companies…" value="${(window._crmCompanySearch||'').replace(/"/g,'&quot;')}"
-        oninput="window._crmCompanySearch=this.value;window._crmFocusId='crm-company-search';window.viewCRM()"
+        oninput="window._crmCompanySearch=this.value;window._crmFocusId='crm-company-search';clearTimeout(window._crmSearchTimer);window._crmSearchTimer=setTimeout(()=>window.viewCRM(),200)"
         class="border rounded-lg px-3 py-1.5 text-sm outline-none flex-1 min-w-48 focus:ring-2 focus:ring-blue-200"/>
       <button onclick="openCompanyModal(null)" class="brand-btn px-4 py-1.5 rounded-lg text-sm font-semibold">+ Add Company</button>
       <span class="text-xs text-gray-400">${coEntries.length} compan${coEntries.length!==1?'ies':'y'}${window._crmAlphaFilterCo?' — starts with '+window._crmAlphaFilterCo:''}</span>
@@ -10533,7 +10573,7 @@ function viewCRM(){
   const propertiesHtml = `
     <div class="flex flex-wrap gap-2 mb-4 items-center">
       <input id="crm-prop-search" type="text" placeholder="Search properties…" value="${(window._crmPropSearch||'').replace(/"/g,'&quot;')}"
-        oninput="window._crmPropSearch=this.value;window._crmFocusId='crm-prop-search';window.viewCRM()"
+        oninput="window._crmPropSearch=this.value;window._crmFocusId='crm-prop-search';clearTimeout(window._crmSearchTimer);window._crmSearchTimer=setTimeout(()=>window.viewCRM(),200)"
         class="border rounded-lg px-3 py-1.5 text-sm outline-none flex-1 min-w-48 focus:ring-2 focus:ring-blue-200"/>
       <select onchange="window._crmPropStageFilter=this.value;window.viewCRM()" class="border rounded-lg px-3 py-1.5 text-sm outline-none">
         <option value="" ${!_propStageF?'selected':''}>All stages</option>
@@ -14671,6 +14711,7 @@ window.moveStage = (i,dir) => {
 window.resetStages = () => {
   if(!confirm('Reset to the default stages? Any custom stages will be removed.')) return;
   localStorage.setItem(K('allStages'), JSON.stringify(SEED_ALL_STAGES));
+  _stagesCache = null; // invalidate cache before reload
   loadCustomStages(); updateStageDropdowns();
   showToast('Stages reset to defaults','info'); viewManageStages();
 };
@@ -14705,11 +14746,7 @@ function viewLeaderboard(){
 
   const rows=advisors.map(adv=>{
     // Include deals where advisor is primary OR co-advisor
-    const ad=allDeals.filter(d=>
-      d.advisorUid===adv.uid ||
-      (d.coAdvisors||[]).some(ca=>ca.uid===adv.uid) ||
-      (d.coAdvisorUids||[]).includes(adv.uid)
-    );
+    const ad=allDeals.filter(d => isDealAdvisor(d, adv.uid));
     const s=summarize(ad);
     const profile=getProfile(adv.uid);
     const goal=profile.quarterlyUCGoal||10000000;
@@ -15550,7 +15587,7 @@ function viewEOS(sub='rocks'){
 
     const advRow = (advUid, advName) => {
       const Q_GOAL   = (allProfiles[advUid]?.quarterlyUCGoal) || 10000000;
-      const advDeals = allDeals.filter(d => d.advisorUid===advUid || (d.coAdvisors||[]).some(ca=>ca.uid===advUid));
+      const advDeals = allDeals.filter(d => isDealAdvisor(d, advUid));
       const advTasks = allTasks.filter(t => t.assignedTo===advUid);
 
       // Q Goal %
@@ -15944,7 +15981,7 @@ function viewEOS(sub='rocks'){
     const buildScorecardHistory = () => {
       if(effectiveAdmin) return '';
       const WEEKS = 12;
-      const myDeals = allDeals.filter(d => d.advisorUid===uid||(d.coAdvisors||[]).some(ca=>ca.uid===uid));
+      const myDeals = allDeals.filter(d => isDealAdvisor(d, uid));
       const myTasks = allTasks.filter(t => t.assignedTo===uid);
       const Q_GOAL  = (allProfiles[uid]?.quarterlyUCGoal) || 10000000;
       const allRocks = eosGet('myRocks',{});
@@ -16303,7 +16340,7 @@ function viewEOS(sub='rocks'){
             const gradeOf = sc => sc>=100?{l:'A+',c:'#7c3aed'}:sc>=90?{l:'A',c:'#059669'}:sc>=80?{l:'B',c:'#0891b2'}:sc>=70?{l:'C',c:'#D97706'}:sc>=60?{l:'D',c:'#ea580c'}:{l:'F',c:'#DA291C'};
             const rows = advs.map(a=>{
               const Q_GOAL = (allProfiles[a.uid]?.quarterlyUCGoal)||10000000;
-              const advDeals = allDeals.filter(d=>d.advisorUid===a.uid||(d.coAdvisors||[]).some(ca=>ca.uid===a.uid));
+              const advDeals = allDeals.filter(d => isDealAdvisor(d, a.uid));
               const advTasks = allTasks.filter(t=>t.assignedTo===a.uid);
               const qVol = advDeals.filter(d=>{
                 if(isLostStage(d.stage||'')) return false;
@@ -16576,7 +16613,7 @@ function viewEOS(sub='rocks'){
     let _sc=0,_gObj={l:'F',c:'#DA291C',b:'#fef2f2'},_mHtml='',_ttl='';
     if(!_isStaff){
       const _QG=(allProfiles[uid]?.quarterlyUCGoal)||10000000;
-      const _md=allDeals.filter(d=>d.advisorUid===uid||(d.coAdvisors||[]).some(ca=>ca.uid===uid));
+      const _md=allDeals.filter(d => isDealAdvisor(d, uid));
       const _mt=allTasks.filter(t=>t.assignedTo===uid);
       const _qd=_md.filter(d=>{if(isLostStage(d.stage||''))return false;if(!isContractActiveStage(d.stage)&&!isWonStage(d.stage||''))return false;const ts=getEffectiveDealTs(d);return ts>=_qS&&ts<=_qE;});
       const _qv=_qd.reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||0),0);
