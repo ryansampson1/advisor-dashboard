@@ -7039,15 +7039,11 @@ function viewBoard(){
         style="font-size:.75rem;padding:.25rem .6rem;border-radius:.4rem;background:#fee2e2;color:#dc2626;border:none;cursor:pointer;font-weight:600">✕ Clear</button>` : ''}
     </div>` : '';
 
-  // DEBUG — remove after confirming filter works
-  console.log('[BoardFilter] isAdmin='+currentUser.isAdmin+' adminViewAsAdvisor='+adminViewAsAdvisor+' _isBoardAdmin='+_isBoardAdmin+' _boardAdvisorFilter='+JSON.stringify(window._boardAdvisorFilter)+' _afUid='+JSON.stringify(_afUid)+' deals.length='+deals.length+'/'+_allVisibleDeals.length);
-
   setContent(`
     <div class="flex items-center justify-between mb-3 flex-wrap gap-3">
       <div>
         <h2 style="font-size:1.35rem;font-weight:700;color:var(--text-1);letter-spacing:-.01em">Deal Pipeline</h2>
         ${currentUser.isAdmin ? `<p class="text-sm text-gray-500 mt-0.5">${deals.length} deal${deals.length!==1?'s':''} ${_filterAdvisorName ? '· '+_filterAdvisorName : 'across all advisors'}</p>` : ''}
-        ${_afUid ? `<p style="font-size:.7rem;color:#7c3aed;font-family:monospace">🔍 filter uid: ${_afUid} → ${deals.length} deals</p>` : ''}
       </div>
       <div style="display:flex;align-items:center;gap:.75rem;flex-wrap:wrap">
         ${_advisorFilterDropdown}
@@ -15703,9 +15699,19 @@ function viewEOS(sub='rocks'){
       const weekScore = Math.round(pts.reduce((a,b)=>a+b,0));
       const grade = weekGrade(weekScore);
 
-      const cell = (val, target) => {
+      const ptsBadge = p => {
+        const rounded = Math.round(p * 10) / 10;
+        const c = p >= 10 ? '#059669' : p >= 5 ? '#D97706' : '#DA291C';
+        return `<span style="font-size:.65rem;font-weight:700;color:${c};line-height:1">${rounded}/10 pts</span>`;
+      };
+      const cell = (val, target, p) => {
         const color = target!=null ? (val>=target?'#059669':'#DA291C') : 'var(--text-1)';
-        return `<td class="px-3 py-4 text-center"><span class="text-sm font-bold" style="color:${color}">${val}</span></td>`;
+        return `<td class="px-3 py-4 text-center">
+          <div style="display:flex;flex-direction:column;align-items:center;gap:2px">
+            <span class="text-sm font-bold" style="color:${color}">${val}</span>
+            ${p!=null ? ptsBadge(p) : ''}
+          </div>
+        </td>`;
       };
 
       // Network Event cell — Yes/No radios + optional note; editable if own row and not locked
@@ -15736,31 +15742,36 @@ function viewEOS(sub='rocks'){
                 placeholder="Details (optional)…"
                 class="border rounded px-2 py-1 text-xs outline-none w-32 text-center focus:border-blue-400 mt-1"
                 onblur="saveAdvWeeklyInput('${advUid}','${weekKey}','networkEventNote',this.value)"/>
+              ${ptsBadge(pts[8])}
             </div>
           </td>`
         : `<td class="px-3 py-4 text-center">
             <div class="flex flex-col items-center gap-1">
               ${netReadOnly}
               ${isLocked ? '<span class="text-xs text-gray-400 mt-0.5" title="Locked after Sunday 9pm">🔒</span>' : ''}
+              ${ptsBadge(pts[8])}
             </div>
           </td>`;
 
       // Property Visit cell — editable if own row and not locked
       const driveCell = isEditable
         ? `<td class="px-3 py-4 text-center">
-            <div class="flex gap-2 justify-center">
-              <label class="flex items-center gap-1 text-xs cursor-pointer">
-                <input type="radio" name="drive-${advUid}" value="yes" ${driveProps==='yes'?'checked':''}
-                  onchange="saveAdvWeeklyInput('${advUid}','${weekKey}','driveProperties','yes')"
-                  class="accent-green-600"/>
-                <span class="font-medium text-green-700">Yes</span>
-              </label>
-              <label class="flex items-center gap-1 text-xs cursor-pointer">
-                <input type="radio" name="drive-${advUid}" value="no" ${driveProps==='no'?'checked':''}
-                  onchange="saveAdvWeeklyInput('${advUid}','${weekKey}','driveProperties','no')"
-                  class="accent-red-500"/>
-                <span class="font-medium text-red-600">No</span>
-              </label>
+            <div class="flex flex-col items-center gap-1">
+              <div class="flex gap-2 justify-center">
+                <label class="flex items-center gap-1 text-xs cursor-pointer">
+                  <input type="radio" name="drive-${advUid}" value="yes" ${driveProps==='yes'?'checked':''}
+                    onchange="saveAdvWeeklyInput('${advUid}','${weekKey}','driveProperties','yes')"
+                    class="accent-green-600"/>
+                  <span class="font-medium text-green-700">Yes</span>
+                </label>
+                <label class="flex items-center gap-1 text-xs cursor-pointer">
+                  <input type="radio" name="drive-${advUid}" value="no" ${driveProps==='no'?'checked':''}
+                    onchange="saveAdvWeeklyInput('${advUid}','${weekKey}','driveProperties','no')"
+                    class="accent-red-500"/>
+                  <span class="font-medium text-red-600">No</span>
+                </label>
+              </div>
+              ${ptsBadge(pts[9])}
             </div>
           </td>`
         : `<td class="px-3 py-4 text-center">
@@ -15769,6 +15780,7 @@ function viewEOS(sub='rocks'){
                 ${driveProps==='yes'?'✓ Yes':driveProps==='no'?'✗ No':'—'}
               </span>
               ${isLocked ? '<span class="text-xs text-gray-400 mt-0.5" title="Locked after Sunday 9pm">🔒</span>' : ''}
+              ${ptsBadge(pts[9])}
             </div>
           </td>`;
 
@@ -15815,16 +15827,16 @@ function viewEOS(sub='rocks'){
             <div style="width:48px;height:4px;background:#e5e7eb;border-radius:9999px;overflow:hidden">
               <div style="width:${qPct}%;height:100%;background:${qColor};border-radius:9999px"></div>
             </div>
-            <span class="text-xs text-gray-400">${pts[0]?'✓':''}</span>
+            ${ptsBadge(pts[0])}
           </div>
         </td>
-        ${cell(openTasks, null)}
-        ${cell(completedTasks, 1)}
-        ${cell(prospects + (prospectPts!==prospects?' ('+Math.round(prospectPts*10)/10+'pts)':''), prospectPts>0?1:null)}
-        ${cell(newLOIs + (loiPts!==newLOIs*5?' ('+Math.round(loiPts*10)/10+'pts)':''), loiPts>0?1:null)}
-        ${cell(newProps + (propPts!==newProps*5?' ('+Math.round(propPts*10)/10+'pts)':''), propPts>0?1:null)}
-        ${cell(newListings + (listingPts!==newListings*10?' ('+Math.round(listingPts*10)/10+'pts)':''), listingPts>0?1:null)}
-        ${cell(newContracts + (contractPts!==newContracts*10?' ('+Math.round(contractPts*10)/10+'pts)':''), contractPts>0?1:null)}
+        ${cell(openTasks, null, pts[1])}
+        ${cell(completedTasks, 1, pts[2])}
+        ${cell(prospects + (prospectPts!==prospects?' ('+Math.round(prospectPts*10)/10+'pts)':''), prospectPts>0?1:null, pts[3])}
+        ${cell(newLOIs + (loiPts!==newLOIs*5?' ('+Math.round(loiPts*10)/10+'pts)':''), loiPts>0?1:null, pts[4])}
+        ${cell(newProps + (propPts!==newProps*5?' ('+Math.round(propPts*10)/10+'pts)':''), propPts>0?1:null, pts[5])}
+        ${cell(newListings + (listingPts!==newListings*10?' ('+Math.round(listingPts*10)/10+'pts)':''), listingPts>0?1:null, pts[6])}
+        ${cell(newContracts + (contractPts!==newContracts*10?' ('+Math.round(contractPts*10)/10+'pts)':''), contractPts>0?1:null, pts[7])}
         ${netEventCell}
         ${driveCell}
       </tr>`;
