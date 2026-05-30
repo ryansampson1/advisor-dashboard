@@ -16453,6 +16453,7 @@ function viewEOS(sub='rocks'){
             const qEnd2 = new Date(now2.getFullYear(),qNum2*3,0,23,59,59).getTime();
             const wk = new Date(pwSts).toISOString().split('T')[0];
             const gradeOf = sc => sc>=100?{l:'A+',c:'#7c3aed'}:sc>=90?{l:'A',c:'#059669'}:sc>=80?{l:'B',c:'#0891b2'}:sc>=70?{l:'C',c:'#D97706'}:sc>=60?{l:'D',c:'#ea580c'}:{l:'F',c:'#DA291C'};
+            const todayStr2 = new Date().toISOString().slice(0,10);
             const rows = advs.map(a=>{
               const Q_GOAL = (allProfiles[a.uid]?.quarterlyUCGoal)||10000000;
               const advDeals = allDeals.filter(d => isDealAdvisor(d, a.uid));
@@ -16464,8 +16465,8 @@ function viewEOS(sub='rocks'){
               }).reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||0),0);
               const qPct = Math.min(Math.round(qVol/Q_GOAL*100),100);
               const qColor = qPct>=100?'#059669':qPct>=60?'#D97706':'#DA291C';
-              const openT = advTasks.filter(t=>t.status==='pending').length;
-              const doneT = advTasks.filter(t=>t.status==='complete'&&(t.updatedAt||0)>=pwSts&&(t.updatedAt||0)<=pwEts).length;
+              // Only past-due tasks penalize the score (matches main scorecard)
+              const overdueT = advTasks.filter(t=>t.status==='pending'&&t.dueDate&&t.dueDate<todayStr2).length;
               const inPW = d=>{const ts=(d.stageEnteredAt||d.createdAt||0);return ts>=pwSts&&ts<=pwEts;};
               const spl = (d,base)=>{
                 if(d.advisorUid===a.uid){const ct=(d.coAdvisors||[]).reduce((s,ca)=>s+(ca.splitPct||0),0);return base*Math.max(0,100-ct)/100;}
@@ -16479,20 +16480,21 @@ function viewEOS(sub='rocks'){
               const wi = allProfiles[a.uid]?.weeklyInputs?.[wk]||{};
               const netPts = wi.networkEvent==='yes'?10:0;
               const drvPts = wi.driveProperties==='yes'?10:0;
-              const score = Math.round(Math.min(100,
-                (qPct>=10?10:0)+Math.max(0,10-openT*2)+(openT===0?10:Math.round(doneT/(doneT+openT)*10))+
+              // Score mirrors advRow: overdue-only task penalty + binary tasks-done
+              const score = Math.round(
+                (qPct>=10?10:0)+Math.max(0,10-overdueT*2)+(overdueT===0?10:0)+
                 prosPts+loiPts+propPts+listPts+conPts+netPts+drvPts
-              ));
+              );
               const g = gradeOf(score);
               const pwMoves = advDeals.filter(d=>inPW(d)&&!isLostStage(d.stage||'')).length;
-              return '<tr class="border-b border-gray-100">'
+              return {score, html: '<tr class="border-b border-gray-100">'
                 +'<td class="py-2 pr-2 text-sm font-semibold text-gray-800" style="min-width:90px">'+a.name+'</td>'
                 +'<td class="py-2 px-2 text-center"><span style="display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;border-radius:50%;background:'+g.c+'22;border:2px solid '+g.c+';font-size:.72rem;font-weight:800;color:'+g.c+'">'+g.l+'</span></td>'
                 +'<td class="py-2 px-2 text-center"><span class="text-xs font-bold" style="color:'+qColor+'">'+qPct+'%</span></td>'
-                +'<td class="py-2 px-2 text-center"><span class="text-xs font-bold '+(openT===0?'text-green-600':'text-red-600')+'">'+openT+' open</span></td>'
+                +'<td class="py-2 px-2 text-center"><span class="text-xs font-bold '+(overdueT===0?'text-green-600':'text-red-600')+'">'+(overdueT===0?'✓ Clear':overdueT+' overdue')+'</span></td>'
                 +'<td class="py-2 pl-2 text-center"><span class="text-xs text-gray-500">'+pwMoves+' moves</span></td>'
-                +'</tr>';
-            }).join('');
+                +'</tr>'};
+            }).sort((a,b)=>b.score-a.score).map(r=>r.html).join('');
             if(advs.length===0) return '<p class="text-sm text-gray-400 italic">No advisors in this view.</p>';
             return '<div class="overflow-x-auto"><table class="w-full" style="min-width:320px">'
               +'<thead><tr class="border-b border-gray-200">'
