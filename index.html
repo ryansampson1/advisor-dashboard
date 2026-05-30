@@ -15548,13 +15548,22 @@ function viewEOS(sub='rocks'){
     const issues=eosGet('issues',[]);
     const effectiveAdmin=isAdmin&&!adminViewAsAdvisor&&!staffViewMode;
     const myIssues=effectiveAdmin?issues:issues.filter(iss=>iss.advisorUid===uid);
+    // Determine which L-10s this user can submit to
+    const _l10Opts = currentUser.isAdmin||currentUser.isSuperAdmin
+      ? [{v:'advisor',l:'Advisor'},{v:'staff',l:'Staff'},{v:'admin',l:'Admin'}]
+      : currentUser.isDualRole
+        ? [{v:'advisor',l:'Advisor'},{v:'staff',l:'Staff'}]
+        : currentUser.isStaff
+          ? [{v:'staff',l:'Staff'}]
+          : [{v:'advisor',l:'Advisor'}];
+    const _multiL10 = _l10Opts.length > 1;
     body=`
       <div class="max-w-2xl">
         <!-- Add issue/headline -->
         <div class="bg-white rounded-2xl border p-5 mb-5">
           <h3 class="font-semibold text-gray-800 mb-3">Add Issue or Headline</h3>
           <div class="space-y-3">
-            <div class="flex gap-3">
+            <div class="flex gap-4 flex-wrap">
               <label class="flex items-center gap-1.5 text-sm cursor-pointer">
                 <input type="radio" name="iss-type" value="issue" checked class="accent-red-500"/> Issue
               </label>
@@ -15562,6 +15571,13 @@ function viewEOS(sub='rocks'){
                 <input type="radio" name="iss-type" value="headline" class="accent-blue-500"/> Headline
               </label>
             </div>
+            ${_multiL10 ? `<div class="flex items-center gap-4 flex-wrap">
+              <span class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Applies to:</span>
+              ${_l10Opts.map((o,i)=>`<label class="flex items-center gap-1.5 text-sm cursor-pointer">
+                <input type="radio" name="iss-l10" value="${o.v}" ${i===0?'checked':''} class="accent-gray-700"/>
+                <span>${o.l} L-10</span>
+              </label>`).join('')}
+            </div>` : `<input type="hidden" name="iss-l10" value="${_l10Opts[0].v}"/>`}
             <textarea id="iss-text" rows="2" placeholder="Describe the issue or headline…"
               class="w-full border rounded-lg px-3 py-2 text-sm outline-none resize-none"></textarea>
             <button onclick="submitIssue()" class="brand-btn px-4 py-2 rounded-lg text-sm font-semibold">Submit</button>
@@ -16402,10 +16418,24 @@ function viewEOS(sub='rocks'){
         ${!isAdminTab ? section('👋','Segue — Good News','5',`
           <p class="text-sm text-gray-500 mb-3">Each person shares one piece of personal or professional good news.</p>
           <div class="grid grid-cols-2 gap-2">
-            ${(roleFilter==='staff'
-              ? Object.entries(allProfiles).filter(([,p])=>(p.roles||[]).some(r=>r==='staff')||STAFF_ONLY_EMAILS.includes((p.email||'').toLowerCase())).map(([uid,p])=>({uid,name:p.name||p.email||uid})).filter(m=>m.name&&m.name.length<60)
-              : getDistinctAdvisors()
-            ).slice(0,8).map(a=>`
+            ${(()=>{
+              if(roleFilter==='staff'){
+                const _adminEmails=(APP_CONFIG.adminEmails||[]).map(e=>e.toLowerCase());
+                const _staffMap={};
+                Object.entries(allProfiles).forEach(([_uid,_p])=>{
+                  const _r=_p.roles||[], _e=(_p.email||'').toLowerCase();
+                  if(_r.includes('staff')||_r.includes('admin')||_r.includes('superAdmin')||STAFF_ONLY_EMAILS.includes(_e)||DUAL_ROLE_EMAILS.includes(_e)||_adminEmails.includes(_e)){
+                    if(!_staffMap[_uid]) _staffMap[_uid]={uid:_uid,name:_p.name||_p.email||_uid};
+                  }
+                });
+                // Always include current user if admin/dual-role
+                if(currentUser && (currentUser.isAdmin||currentUser.isDualRole||currentUser.isStaff) && !_staffMap[currentUser.uid]){
+                  _staffMap[currentUser.uid]={uid:currentUser.uid,name:currentUser.name||currentUser.email};
+                }
+                return Object.values(_staffMap).filter(m=>m.name&&m.name.length<60);
+              }
+              return getDistinctAdvisors();
+            })().map(a=>`
               <div class="flex items-center gap-2 p-2 bg-gray-50 rounded-lg">
                 <div class="w-6 h-6 rounded-full bg-gray-200 flex items-center justify-center text-xs font-bold text-gray-600">${(a.name||'?')[0].toUpperCase()}</div>
                 <span class="text-xs text-gray-700 truncate">${a.name||a.email}</span>
@@ -16851,8 +16881,10 @@ window.submitIssue = () => {
   const text=document.getElementById('iss-text')?.value.trim();
   if(!text){ showToast('Enter a description','error'); return; }
   const type=document.querySelector('input[name="iss-type"]:checked')?.value||'issue';
+  // Read selected L-10 (from radio or hidden input); fall back to role-based default
+  const issRole = document.querySelector('input[name="iss-l10"]:checked')?.value
+    || (currentUser.isAdmin ? 'admin' : currentUser.isStaff ? 'staff' : 'advisor');
   const list=eosGet('issues',[]);
-  const issRole = currentUser.isStaff ? 'staff' : currentUser.isAdmin ? 'admin' : 'advisor';
   list.unshift({id:'iss-'+Date.now(),advisorUid:currentUser.uid,advisorName:currentUser.name,role:issRole,type,text,createdAt:Date.now()});
   eosSave('issues',list); showToast('Submitted!','success'); viewEOS('issues');
 };
