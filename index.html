@@ -6887,11 +6887,10 @@ function viewBoard(){
   if(isStaffView()){ viewBoardStaff(); return; }
 
   const _isBoardAdmin = (currentUser.isAdmin || currentUser.isOfficeManager) && !adminViewAsAdvisor;
-  if(!_isBoardAdmin) window._boardAdvisorFilter = '';   // reset filter when not in admin view
-  if(typeof window._boardAdvisorFilter === 'undefined') window._boardAdvisorFilter = '';
+  // Persist filter in sessionStorage so it survives tab switches and Firestore re-renders
+  const _afUid = _isBoardAdmin ? (sessionStorage.getItem('boardAdvisorFilter') || '') : '';
 
   const _allVisibleDeals = visibleDeals();
-  const _afUid = (_isBoardAdmin && window._boardAdvisorFilter) ? String(window._boardAdvisorFilter).trim() : '';
   const deals = _afUid
     ? _allVisibleDeals.filter(d => String(d.advisorUid||'').trim() === _afUid
         || (d.coAdvisorUids||[]).includes(_afUid)
@@ -7031,12 +7030,12 @@ function viewBoard(){
   const _advisorFilterDropdown = _isBoardAdmin ? `
     <div style="display:flex;align-items:center;gap:.5rem">
       <label style="font-size:.75rem;font-weight:600;color:#6b7280;white-space:nowrap">Filter by Advisor:</label>
-      <select onchange="window._boardAdvisorFilter=this.value.trim();viewBoard()"
+      <select onchange="sessionStorage.setItem('boardAdvisorFilter',this.value.trim());viewBoard()"
         style="font-size:.8rem;padding:.3rem .6rem;border:1px solid #d1d5db;border-radius:.5rem;background:#fff;color:#111;cursor:pointer;outline:none;min-width:140px">
         <option value="">All Advisors</option>
         ${_boardAdvisors.map(a=>`<option value="${a.uid}" ${a.uid===_afUid?'selected':''}>${a.name}</option>`).join('')}
       </select>
-      ${_afUid ? `<button onclick="window._boardAdvisorFilter='';viewBoard()"
+      ${_afUid ? `<button onclick="sessionStorage.removeItem('boardAdvisorFilter');viewBoard()"
         style="font-size:.75rem;padding:.25rem .6rem;border-radius:.4rem;background:#fee2e2;color:#dc2626;border:none;cursor:pointer;font-weight:600">✕ Clear</button>` : ''}
     </div>` : '';
 
@@ -9679,17 +9678,16 @@ window._calDeleteEvent = async function(eventId){
    VIEW: TASKS
    ======================================================= */
 // Filter state stored on window so inline onchange handlers can write to it
-window._taskAdvisorFilter = window._taskAdvisorFilter || '';
-window._taskStatusFilter  = window._taskStatusFilter  || '';
+// Task filters now stored in sessionStorage for persistence across tab switches
 
 function viewTasks(){
   if(activeChart){ activeChart.destroy(); activeChart=null; }
   const isAdmin = currentUser.isAdmin && !adminViewAsAdvisor && !staffViewMode;
   const uid = currentUser.uid;
 
-  // Read from window — survives DOM rebuilds, toggleTask, saveTask, deleteTask calls
-  const advisorFilter = String(window._taskAdvisorFilter || '').trim();
-  const statusFilter  = window._taskStatusFilter  || '';
+  // Read from sessionStorage so filter persists across tab switches and Firestore re-renders
+  const advisorFilter = isAdmin ? (sessionStorage.getItem('taskAdvisorFilter') || '') : '';
+  const statusFilter  = sessionStorage.getItem('taskStatusFilter') || '';
 
   // Full admin mode sees all tasks; everyone else (advisors, staff, advisor/staff view) sees only assigned tasks
   const _allMyTasks = isAdmin ? allTasks : allTasks.filter(t=>t.assignedTo===uid);
@@ -9879,7 +9877,7 @@ function viewTasks(){
     <!-- Filter bar (admin gets person filter too) -->
     <div class="flex gap-2 mb-4 flex-wrap">
       ${isAdmin?`
-      <select onchange="window._taskAdvisorFilter=this.value.trim();viewTasks()" class="border rounded-lg px-3 py-1.5 text-sm outline-none">
+      <select onchange="sessionStorage.setItem('taskAdvisorFilter',this.value.trim());viewTasks()" class="border rounded-lg px-3 py-1.5 text-sm outline-none">
         <option value="" ${!advisorFilter?'selected':''}>All people</option>
         ${(()=>{
           const staffPeople = Object.entries(allProfiles)
@@ -9893,7 +9891,7 @@ function viewTasks(){
           return allPeople.map(p=>`<option value="${p.uid}" ${advisorFilter===p.uid?'selected':''}>${p.name}${p.role==='staff'?' (Staff)':''}</option>`).join('');
         })()}
       </select>`:''}
-      <select onchange="window._taskStatusFilter=this.value;viewTasks()" class="border rounded-lg px-3 py-1.5 text-sm outline-none">
+      <select onchange="sessionStorage.setItem('taskStatusFilter',this.value);viewTasks()" class="border rounded-lg px-3 py-1.5 text-sm outline-none">
         <option value=""      ${!statusFilter?'selected':''}>All statuses</option>
         <option value="pending"  ${statusFilter==='pending'?'selected':''}>Pending</option>
         <option value="complete" ${statusFilter==='complete'?'selected':''}>Completed</option>
