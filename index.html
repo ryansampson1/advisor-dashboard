@@ -5593,6 +5593,16 @@ function getDealPrice(deal){
   return deal.purchasePrice || deal.contractPrice || deal.suggestedPrice || deal.listedPrice || deal.loiPrice || 0;
 }
 
+// ── Next business day (skip weekends) ────────────────────────────────────────
+// If the given date falls on Saturday or Sunday, advance it to the next Monday.
+function nextBusinessDay(date) {
+  const d = new Date(date);
+  const day = d.getDay(); // 0=Sun, 6=Sat
+  if (day === 6) d.setDate(d.getDate() + 2); // Sat → Mon
+  else if (day === 0) d.setDate(d.getDate() + 1); // Sun → Mon
+  return d;
+}
+
 // ── Canonical co-advisor check ───────────────────────────────────────────────
 // Returns true if uid is the primary advisor OR a co-advisor on this deal.
 function isDealAdvisor(deal, uid){
@@ -15604,6 +15614,9 @@ function viewEOS(sub='rocks'){
       // Tasks
       const openTasks      = advTasks.filter(t=>t.status==='pending').length;
       const completedTasks = advTasks.filter(t=>t.status==='complete' && (t.updatedAt||0)>=pwS && (t.updatedAt||0)<=pwE).length;
+      // Only count tasks that are actually past their due date for scoring purposes
+      const todayStr       = new Date().toISOString().slice(0,10);
+      const overdueTaskCount = advTasks.filter(t=>t.status==='pending' && t.dueDate && t.dueDate < todayStr).length;
 
       // Weekly deal activity — point-weighted, split between co-advisors by deal percentage
       const inPW = d => { const ts=(d.stageEnteredAt||d.createdAt||0); return ts>=pwS&&ts<=pwE; };
@@ -15644,8 +15657,8 @@ function viewEOS(sub='rocks'){
       // ── 10-point scoring (10 items × 10 pts = 100) ──────────────────
       const pts = [
         qPct >= 10 ? 10 : 0,                          // 1. Q Goal on pace
-        Math.max(0, 10 - openTasks * 2),               // 2. Open Tasks (10 − 2 per open task)
-        openTasks === 0 ? 10 : Math.round(completedTasks / (completedTasks + openTasks) * 10), // 3. Tasks Completed (% done, or 10 if nothing open)
+        Math.max(0, 10 - overdueTaskCount * 2),        // 2. Overdue Tasks (10 − 2 per overdue task; future/no-due-date tasks not penalized)
+        overdueTaskCount === 0 ? 10 : Math.round(completedTasks / (completedTasks + overdueTaskCount) * 10), // 3. Tasks Completed (% done vs overdue; 10 if none overdue)
         prospectPts,                                   // 4. Prospects (1pt each, split)
         loiPts,                                        // 5. LOIs (5pts each, split)
         propPts,                                       // 6. Proposals (5pts each, split)
@@ -15738,7 +15751,7 @@ function viewEOS(sub='rocks'){
             window[flagKey] = true;
             const exists = allTasks.some(t => t.title === autoTitle && t.assignedTo === advUid && t.status === 'pending');
             if(!exists) {
-              const due = new Date(thisWeekSunday9pm); due.setHours(due.getHours()-3);
+              const due = nextBusinessDay(new Date(thisWeekSunday9pm));
               Store.createTask({
                 title: autoTitle,
                 description: 'Your weekly EOS scorecard is missing: ' + missingItems.join(', ') + '. Please fill it in before Sunday at 9pm for the Monday meeting.',
@@ -15815,6 +15828,9 @@ function viewEOS(sub='rocks'){
         // Prior-week tasks still pending (created last week, not yet done)
         const pwPending = sTasks.filter(t=>t.status==='pending'&&(t.createdAt||0)>=pwS&&(t.createdAt||0)<=pwE).length;
         const pwTotal   = doneTasks + pwPending;
+        // Only overdue tasks (past due date) count against the score
+        const sTodayStr   = new Date().toISOString().slice(0,10);
+        const overdueTasks = sTasks.filter(t=>t.status==='pending' && t.dueDate && t.dueDate < sTodayStr).length;
 
         // Rocks
         const rocks     = allRocks[sUid]||[];
@@ -15828,8 +15844,8 @@ function viewEOS(sub='rocks'){
         const rockScore   = Math.round(rockPct * 0.33);
         // Prior-week tasks (33): full 33 if no tasks due last week or all complete
         const taskScore33 = pwTotal===0 ? 33 : Math.round(doneTasks/pwTotal*33);
-        // Open tasks (34): full 34 if none open; deduct by open/(open+priorWeekDone) if any open
-        const openScore34 = openTasks===0 ? 34 : (doneTasks===0 ? 0 : Math.round(doneTasks/(doneTasks+openTasks)*34));
+        // Open tasks (34): only overdue tasks penalize score; future/no-due-date tasks are not penalized
+        const openScore34 = overdueTasks===0 ? 34 : (doneTasks===0 ? 0 : Math.round(doneTasks/(doneTasks+overdueTasks)*34));
         const weekScore   = rockScore + taskScore33 + openScore34;
         const grade = weekGrade(weekScore);
 
