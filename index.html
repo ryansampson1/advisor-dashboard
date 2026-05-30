@@ -15847,6 +15847,27 @@ function viewEOS(sub='rocks'){
       ? getDistinctAdvisors()
       : [{uid, name: currentUser.name||currentUser.email}];
 
+    // Quick score for sorting (mirrors advRow scoring logic)
+    const scoreAdvisor = _uid => {
+      const _tod = new Date().toISOString().slice(0,10);
+      const _ads = allDeals.filter(d=>isDealAdvisor(d,_uid));
+      const _tsk = allTasks.filter(t=>t.assignedTo===_uid);
+      const _qg  = (allProfiles[_uid]?.quarterlyUCGoal)||10000000;
+      const _qv  = _ads.filter(d=>!isLostStage(d.stage||'')&&(isContractActiveStage(d.stage)||isWonStage(d.stage||''))&&getEffectiveDealTs(d)>=qStart&&getEffectiveDealTs(d)<=qEnd).reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||0),0);
+      const _qp  = Math.min(Math.round(_qv/_qg*100),100);
+      const _od  = _tsk.filter(t=>t.status==='pending'&&t.dueDate&&t.dueDate<_tod).length;
+      const _iPW = d=>{const ts=(d.stageEnteredAt||d.createdAt||0);return ts>=pwS&&ts<=pwE;};
+      const _sp  = (d,b)=>{if(d.advisorUid===_uid){const c=(d.coAdvisors||[]).reduce((s,ca)=>s+(ca.splitPct||0),0);return b*Math.max(0,100-c)/100;}const ca=(d.coAdvisors||[]).find(c=>c.uid===_uid);return ca?b*(ca.splitPct||0)/100:0;};
+      const _wi  = allProfiles[_uid]?.weeklyInputs?.[weekKey]||{};
+      return (_qp>=10?10:0)+Math.max(0,10-_od*2)+(_od===0?10:0)
+        +_ads.filter(d=>d.stage==='Prospect'&&(d.createdAt||0)>=pwS&&(d.createdAt||0)<=pwE).reduce((s,d)=>s+_sp(d,1),0)
+        +_ads.filter(d=>d.stage==='LOI'&&_iPW(d)).reduce((s,d)=>s+_sp(d,5),0)
+        +_ads.filter(d=>d.stage==='Proposal To Do'&&_iPW(d)).reduce((s,d)=>s+_sp(d,5),0)
+        +_ads.filter(d=>d.stage==='Listing'&&_iPW(d)).reduce((s,d)=>s+_sp(d,10),0)
+        +_ads.filter(d=>/under.?contract/i.test(d.stage||'')&&_iPW(d)).reduce((s,d)=>s+_sp(d,10),0)
+        +(_wi.networkEvent==='yes'?10:0)+(_wi.driveProperties==='yes'?10:0);
+    };
+
     const col = lbl => `<th class="px-4 py-3 text-center text-xs font-bold text-gray-500 uppercase tracking-wide whitespace-nowrap">${lbl}</th>`;
 
     // ── Staff Scorecard builder ────────────────────────────────────────
@@ -16021,7 +16042,7 @@ function viewEOS(sub='rocks'){
             <tbody>
               ${advisors.length===0
                 ? '<tr><td colspan="12" class="px-5 py-8 text-center text-gray-400 text-sm">No advisors found.</td></tr>'
-                : advisors.map(a=>advRow(a.uid,a.name)).join('')}
+                : [...advisors].sort((a,b)=>scoreAdvisor(b.uid)-scoreAdvisor(a.uid)).map(a=>advRow(a.uid,a.name)).join('')}
             </tbody>
           </table>
         </div>
@@ -16378,16 +16399,19 @@ function viewEOS(sub='rocks'){
       const cascadeKey = l10Key('cascades');
 
       return `
-        ${section('👋','Segue — Good News','5',`
+        ${!isAdminTab ? section('👋','Segue — Good News','5',`
           <p class="text-sm text-gray-500 mb-3">Each person shares one piece of personal or professional good news.</p>
           <div class="grid grid-cols-2 gap-2">
-            ${getDistinctAdvisors().slice(0,8).map(a=>`
+            ${(roleFilter==='staff'
+              ? Object.entries(allProfiles).filter(([,p])=>(p.roles||[]).some(r=>r==='staff')||STAFF_ONLY_EMAILS.includes((p.email||'').toLowerCase())).map(([uid,p])=>({uid,name:p.name||p.email||uid})).filter(m=>m.name&&m.name.length<60)
+              : getDistinctAdvisors()
+            ).slice(0,8).map(a=>`
               <div class="flex items-center gap-2 p-2 bg-gray-50 rounded-lg">
                 <div class="w-6 h-6 rounded-full bg-gray-200 flex items-center justify-center text-xs font-bold text-gray-600">${(a.name||'?')[0].toUpperCase()}</div>
                 <span class="text-xs text-gray-700 truncate">${a.name||a.email}</span>
               </div>`).join('')}
           </div>
-        `,'#374151')}
+        `,'#374151') : ''}
 
         ${section('📊','Scorecard Review','5',`
           <p class="text-xs font-bold text-gray-400 uppercase tracking-wide mb-3">Prior Week: ${weekLabel2}</p>
@@ -16454,11 +16478,14 @@ function viewEOS(sub='rocks'){
           })()}
         `,'#0891b2')}
 
-        ${section('🪨','Rock Review','5',`
+        ${!isAdminTab ? section('🪨','Rock Review','5',`
           ${(()=>{
             const compRocks = eosGet('compRocks',[]);
             const allMyRocks = eosGet('myRocks',{});
-            const advs = getDistinctAdvisors();
+            const rockMembers = roleFilter==='staff'
+              ? Object.entries(allProfiles).filter(([,p])=>(p.roles||[]).some(r=>r==='staff')||STAFF_ONLY_EMAILS.includes((p.email||'').toLowerCase())).map(([uid,p])=>({uid,name:p.name||p.email||uid})).filter(m=>m.name&&m.name.length<60)
+              : getDistinctAdvisors();
+            const rockLabel = roleFilter==='staff' ? 'Staff Rocks' : 'Advisor Rocks';
             const compHtml = compRocks.length===0
               ? '<p class="text-sm text-gray-400 italic mb-3">No company rocks set.</p>'
               : '<div class="mb-4"><p class="text-xs font-bold text-gray-400 uppercase tracking-wide mb-2">Company Rocks</p><div class="space-y-1.5">'
@@ -16471,9 +16498,9 @@ function viewEOS(sub='rocks'){
                       +'</div>';
                   }).join('')
                 +'</div></div>';
-            const advHtml = advs.length===0 ? '' :
-              '<div><p class="text-xs font-bold text-gray-400 uppercase tracking-wide mb-2">Advisor Rocks</p><div class="space-y-1.5">'
-              + advs.map(a=>{
+            const advHtml = rockMembers.length===0 ? '' :
+              '<div><p class="text-xs font-bold text-gray-400 uppercase tracking-wide mb-2">'+rockLabel+'</p><div class="space-y-1.5">'
+              + rockMembers.map(a=>{
                   const rocks = allMyRocks[a.uid]||[];
                   if(rocks.length===0) return '<div class="flex items-center gap-2">'
                     +'<span class="text-sm font-semibold text-gray-700" style="min-width:85px">'+a.name+'</span>'
@@ -16501,17 +16528,44 @@ function viewEOS(sub='rocks'){
               +'<button onclick="viewEOS(\'rocks\')" class="text-xs text-blue-600 hover:underline font-medium">Manage Rocks →</button>'
               +'</div>';
           })()}
-        `,'#059669')}
+        `,'#059669') : ''}
 
         ${section('📣','Customer / Employee Headlines','5', headlineContent,'#7c3aed')}
 
-        ${section('✅','To-Do List','5',
+        ${!isAdminTab ? section('✅','To-Do List','5',
           checklistHtml(todoKey,'l10AddItem','l10ToggleItem','l10DeleteItem','Add a to-do item…',true),
-        '#D97706')}
+        '#D97706') : ''}
 
         ${section('🔥','IDS — Issues List','60', idsIssues.length===0?emptyMsg:issueList(idsIssues),'#DA291C')}
 
-        ${section('🏁','Conclude — Wrap Up','5',`
+        ${isAdminTab ? section('💰','Company Financials','5',(()=>{
+          const _n=new Date(), _qN=Math.floor(_n.getMonth()/3)+1;
+          const _qS=new Date(_n.getFullYear(),(_qN-1)*3,1).getTime();
+          const _qE=new Date(_n.getFullYear(),_qN*3,0,23,59,59).getTime();
+          const _allAdvs=getDistinctAdvisors();
+          const _totalVol=_allAdvs.reduce((sum,a)=>{
+            return sum+allDeals.filter(d=>isDealAdvisor(d,a.uid)&&!isLostStage(d.stage||'')&&(isContractActiveStage(d.stage)||isWonStage(d.stage||''))&&getEffectiveDealTs(d)>=_qS&&getEffectiveDealTs(d)<=_qE).reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||0),0);
+          },0);
+          const _totalGoal=_allAdvs.reduce((sum,a)=>sum+((allProfiles[a.uid]?.quarterlyUCGoal)||10000000),0);
+          const _pct=_totalGoal>0?Math.min(Math.round(_totalVol/_totalGoal*100),100):0;
+          const _col=_pct>=100?'#059669':_pct>=60?'#D97706':'#DA291C';
+          const _stages=['Prospect','LOI','Proposal To Do','Listing','Under Contract','Closed Won'];
+          const _counts={}; allDeals.filter(d=>!isLostStage(d.stage||'')).forEach(d=>{_counts[d.stage]=(_counts[d.stage]||0)+1;});
+          return '<div class="space-y-4">'
+            +'<div><div class="flex justify-between text-xs text-gray-500 mb-1.5"><span class="font-semibold">Q'+_qN+' '+_n.getFullYear()+' Contract Volume</span><span style="color:'+_col+';font-weight:700">'+_pct+'% of goal</span></div>'
+            +'<div style="height:10px;background:#e5e7eb;border-radius:9999px;overflow:hidden"><div style="width:'+_pct+'%;height:100%;background:'+_col+';border-radius:9999px"></div></div>'
+            +'<div class="flex justify-between text-xs text-gray-400 mt-1"><span>'+fmt$(_totalVol)+'</span><span>Goal: '+fmt$(_totalGoal)+'</span></div></div>'
+            +'<div class="grid grid-cols-3 gap-2">'
+            +_stages.map(s=>{
+              const cnt=Object.entries(_counts).filter(([k])=>s==='Under Contract'?/under.?contract/i.test(k):k===s).reduce((t,[,c])=>t+c,0);
+              return '<div class="bg-gray-50 rounded-xl p-3 text-center"><div class="text-xl font-bold text-gray-800">'+cnt+'</div><div class="text-xs text-gray-400 mt-0.5 leading-tight">'+s+'</div></div>';
+            }).join('')
+            +'</div>'
+            +'<div class="text-right"><button onclick="navigate(\'pipeline\')" class="text-xs text-blue-600 hover:underline font-medium">Full Pipeline →</button></div>'
+            +'</div>';
+        })(),'#059669') : ''}
+
+        ${!isAdminTab ? section('🏁','Conclude — Wrap Up','5',`
           <div class="space-y-5 text-sm">
             <div>
               <p class="font-bold text-gray-800 mb-2">1. To-Do Recap</p>
@@ -16532,7 +16586,7 @@ function viewEOS(sub='rocks'){
               ${rating?`<p class="text-xs text-gray-400 mt-2">Last rating: <strong>${rating}/10</strong></p>`:''}
             </div>
           </div>
-        `,'#374151')}
+        `,'#374151') : ''}
       `;
     };
 
