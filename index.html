@@ -4359,6 +4359,8 @@ function renderStageFields(stage, data={}){
   const container = document.getElementById('stage-fields');
   if(!container) return;
 
+  const dealKey = editingDealId||'new';
+
   // ── helpers ──────────────────────────────────────────────────────
   const inp = (id,label,type,ph,val='',req=false,extra='') => `
     <div>
@@ -4370,16 +4372,10 @@ function renderStageFields(stage, data={}){
     <div>
       <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">${label}</label>
       <select id="${id}" class="w-full border rounded-lg px-3 py-2 text-sm outline-none">
-        ${opts.map(o=>`<option value="${o.v}" ${val===o.v?'selected':''}>${o.l}</option>`).join('')}
+        ${opts.map(o=>`<option value="${o.v||o}" ${(val||'')===(o.v||o)?'selected':''}>${o.l||o}</option>`).join('')}
       </select>
     </div>`;
-  const ta = (id,label,ph,val='') => `
-    <div>
-      <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">${label}</label>
-      <textarea id="${id}" placeholder="${ph}" rows="3"
-        class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-red-300">${val||''}</textarea>
-    </div>`;
-  const fileZone = (zoneId, fileInputId, labelId, onchange, ondrop, existingName='', label='Upload Document') => {
+  const fileZone = (zoneId,fileInputId,labelId,onchange,ondrop,existingName='',label='Upload Document') => {
     const hasFile = !!existingName;
     return `
     <div>
@@ -4396,12 +4392,7 @@ function renderStageFields(stage, data={}){
       </div>
     </div>`;
   };
-
-  // docModeBlock — renders the upload zone + auto-fill button for a stage (upload-only, no manual toggle).
-  // stageKey: short slug ('listing','loi','uc','dd')
-  // uploadZoneHtml: the fileZone() output to embed inside the upload section
-  // aiStage: stage string passed to autoFillDealFromDoc
-  const docModeBlock = (stageKey, docMode, uploadZoneHtml, aiStage) => {
+  const docModeBlock = (stageKey, uploadZoneHtml, aiStage) => {
     const aiId = `ai-doc-input-${stageKey}`;
     return `
     <div class="rounded-xl border border-purple-100 bg-purple-50/60 p-3 space-y-2.5">
@@ -4421,16 +4412,10 @@ function renderStageFields(stage, data={}){
     </div>`;
   };
 
-  const dealKey = editingDealId||'new';
-
-  // ── PROSPECT ─────────────────────────────────────────────────────
-  // ── BUYER OPPORTUNITIES ──────────────────────────────────────────
+  // ── BUYER OPPORTUNITIES — unique form kept as-is ──────────────────
   if(stage==='Buyer Opportunities'){
-    const boContacts = (typeof allContacts !== 'undefined' ? allContacts : [])
-      .slice().sort((a,b)=>(a.name||'').localeCompare(b.name||''));
-    const contactOptions = boContacts.map(c=>
-      `<option value="${c.id}" ${data.boContactId===c.id?'selected':''}>${c.name||c.email||'Unknown'}${c.company?' — '+c.company:''}</option>`
-    ).join('');
+    const boContacts = (typeof allContacts !== 'undefined' ? allContacts : []).slice().sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+    const contactOptions = boContacts.map(c=>`<option value="${c.id}" ${data.boContactId===c.id?'selected':''}>${c.name||c.email||'Unknown'}${c.company?' — '+c.company:''}</option>`).join('');
     container.innerHTML=`
       <div class="border-t pt-4 mt-1">
         <div class="text-xs font-bold text-teal-600 uppercase tracking-widest mb-3">🏢 Buyer Opportunity Details</div>
@@ -4444,614 +4429,236 @@ function renderStageFields(stage, data={}){
             <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Contact Person (CRM)</label>
             <div style="position:relative">
               <input id="sf-bo-contact-search" type="text" placeholder="Type to search contacts…"
-                value="${data.boContactName||''}"
-                autocomplete="off"
+                value="${data.boContactName||''}" autocomplete="off"
                 class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-teal-300"
-                oninput="boContactSearch(this.value,'${dealKey||''}')"
-                onfocus="boContactSearch(this.value,'${dealKey||''}')" />
+                oninput="boContactSearch(this.value,'${dealKey}')"
+                onfocus="boContactSearch(this.value,'${dealKey}')"/>
               <input type="hidden" id="sf-bo-contact-id" value="${data.boContactId||''}"/>
               <div id="bo-contact-dropdown" style="display:none;position:absolute;z-index:500;left:0;right:0;background:#fff;border:1px solid #e5e7eb;border-radius:8px;max-height:180px;overflow-y:auto;box-shadow:0 4px 16px rgba(0,0,0,.12);margin-top:2px"></div>
             </div>
           </div>
-          <div>
-            <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Buyer Criteria</label>
-            <textarea id="sf-bo-criteria" rows="3"
-              placeholder="e.g. 50–200 acres, multi-family or industrial zoning, within 30 miles of Tampa, price up to $5M…"
-              class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-teal-300">${data.boCriteria||''}</textarea>
-          </div>
-          <div>
-            <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Notes</label>
-            <textarea id="sf-bo-notes" rows="3"
-              placeholder="Any additional context about this buyer…"
-              class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-teal-300">${data.boNotes||''}</textarea>
-          </div>
-          ${data.createdAt ? `<div class="text-xs text-gray-400">Created ${new Date(data.createdAt).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}</div>` : ''}
+          <div><label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Buyer Criteria</label>
+            <textarea id="sf-bo-criteria" rows="3" placeholder="e.g. 50–200 acres, multi-family or industrial zoning, within 30 miles of Tampa, price up to $5M…"
+              class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-teal-300">${data.boCriteria||''}</textarea></div>
+          <div><label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Notes</label>
+            <textarea id="sf-bo-notes" rows="3" placeholder="Any additional context about this buyer…"
+              class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-teal-300">${data.boNotes||''}</textarea></div>
         </div>
       </div>`;
     appendInlineGateFields(container, stage, data, dealKey);
     return;
   }
 
-  if(stage==='Prospect'){
-    // The top section (address, folio, county, contact, notes) covers everything needed.
-    container.innerHTML = '';
-    return;
-  }
+  // ── UNIFIED FORM — all stages except Buyer Opportunities ──────────
+  const price = data.purchasePrice||data.contractPrice||data.loiPrice||data.listedPrice||data.proposedPrice||0;
+  const commPct = data.elcCommissionPct||data.dealCommissionPct||data.commissionPct||data.proposedCommission||0;
 
-  // ── PROPOSAL TO DO ───────────────────────────────────────────────
-  if(stage==='Proposal To Do'){
-    container.innerHTML=`
-      <div class="border-t pt-4 mt-1">
-        <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">Proposal Details</div>
-        <div class="space-y-3">
-          ${inp('sf-project-name','Project Name','text','Tract 12 – Live Oak Ranch',data.projectName)}
-          ${inp('sf-ownership-entity','Exact Ownership Entity Name','text','Smith Family Trust',data.ownershipEntity)}
-          <div class="grid grid-cols-2 gap-3">
-            ${inp('sf-proposed-price','Proposed Price ($)','number','1500000',data.proposedPrice)}
-            <div>
-              <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Commission %</label>
-              <div class="flex items-center border rounded-lg overflow-hidden">
-                <input id="sf-proposed-commission" type="number" min="0" max="100" step="0.25"
-                  placeholder="3.0" value="${data.proposedCommission||''}"
-                  class="flex-1 px-3 py-2 text-sm outline-none"/>
-                <span class="px-3 py-2 bg-gray-50 text-gray-500 text-sm font-semibold border-l">%</span>
-              </div>
-            </div>
-          </div>
-          ${inp('sf-listing-term','Proposed Listing Term','text','6 months',data.listingTerm)}
-        </div>
-      </div>`;
-    appendInlineGateFields(container, stage, data, dealKey);
-    return;
-  }
+  // Which document uploads are shown (all shown, most-relevant noted)
+  const loiFile = stageFiles[`${dealKey}__loi`];
+  const psaFile = stageFiles[`${dealKey}__psa`] || contractFiles[dealKey];
+  const csFile  = stageFiles[`${dealKey}__closing-statement`];
+  const loiName = loiFile?.name || data.loiFileName || '';
+  const psaName = psaFile?.name || data.psaFileName || data.contractFileName || '';
+  const csName  = csFile?.name  || data.closingStatementFileName || '';
+  const lfName  = listingFiles[dealKey]?.name || data.listingAgreementFileName || '';
 
-  // ── PROPOSAL OUTSTANDING — read-only reference panel ─────────────
-  if(stage==='Proposal Outstanding'){
-    const fmt$ = v => (v>0) ? '$'+Number(v).toLocaleString() : '—';
-    const row = (label, val) => (val||'').toString().trim() ? `
-      <div class="flex justify-between items-start gap-3 py-2 border-b border-gray-100 last:border-0">
-        <span class="text-xs text-gray-400 uppercase tracking-wide shrink-0 pt-0.5 w-28">${label}</span>
-        <span class="text-sm font-medium text-gray-800 text-right leading-snug">${val}</span>
-      </div>` : '';
-    const coAdvsHtml = (data.coAdvisors||[]).map(ca=>{
-      const p = allProfiles?.[ca.uid] || Object.values(allProfiles||{}).find(x=>x.email===ca.email) || {};
-      const name = p.name || ca.name || ca.email || ca.uid || '—';
-      return `<span class="inline-flex items-center gap-1 text-xs bg-blue-50 text-blue-700 px-2.5 py-1 rounded-full font-medium">${name}${ca.split?` · ${ca.split}%`:''}</span>`;
-    }).join('');
-    container.innerHTML=`
-      <div class="border-t pt-4 mt-1">
-        <div class="flex items-center gap-2 mb-3">
-          <span class="text-xs font-bold text-gray-400 uppercase tracking-widest">Proposal Reference</span>
-          <span class="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full font-semibold">Read Only</span>
-        </div>
-        <div class="bg-gray-50 rounded-xl px-3 pt-1 pb-0.5">
-          ${row('Property', data.propertyAddress)}
-          ${row('Client / Seller', data.clientName||data.seller)}
-          ${row('Project Name', data.projectName)}
-          ${row('Ownership Entity', data.ownershipEntity)}
-          ${row('County', data.county)}
-          ${row('Acreage', data.acreage||data.acres)}
-          ${row('Proposed Price', fmt$(data.proposedPrice||data.suggestedPrice))}
-          ${row('Commission', data.proposedCommission ? data.proposedCommission+'%' : '')}
-          ${row('Listing Term', data.listingTerm)}
-          ${row('Notes', data.notes)}
-        </div>
-        ${coAdvsHtml?`
-        <div class="mt-3">
-          <div class="text-xs text-gray-400 uppercase tracking-wide mb-1.5">Co-Advisors</div>
-          <div class="flex flex-wrap gap-1.5">${coAdvsHtml}</div>
-        </div>`:''}
-        <!-- Hidden inputs preserve all proposal data when modal is saved -->
-        <input type="hidden" id="sf-project-name"        value="${data.projectName||''}"/>
-        <input type="hidden" id="sf-ownership-entity"    value="${data.ownershipEntity||''}"/>
-        <input type="hidden" id="sf-proposed-price"      value="${data.proposedPrice||''}"/>
-        <input type="hidden" id="sf-proposed-commission" value="${data.proposedCommission||''}"/>
-        <input type="hidden" id="sf-listing-term"        value="${data.listingTerm||''}"/>
-      </div>`;
-    return;
-  }
+  container.innerHTML = `
+  <div class="border-t pt-3 mt-1 space-y-4">
 
-  // ── LISTING ──────────────────────────────────────────────────────
-  if(stage==='Listing'){
-    const lf = listingFiles[dealKey];
-    const lfName = lf?.name || data.listingAgreementFileName || '';
-    const docMode = 'upload';
-    const isManual = false;
-    // NOTE: Likely Buyer Groups is intentionally NOT in this innerHTML — it gets
-    // appended AFTER appendInlineGateFields so gate fields always appear above it.
-    container.innerHTML=`
-      <div class="border-t pt-4 mt-1">
-        <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">Listing Details</div>
-        <div class="space-y-3">
-          <!-- Hidden data fields — populated by autofill, saved on submit -->
-          <input type="hidden" id="sf-project-name" value="${data.projectName||''}"/>
-          <input type="hidden" id="sf-listed-price" value="${data.listedPrice||''}"/>
-          <input type="hidden" id="sf-listing-effective" value="${data.listingEffectiveDate||''}"/>
-          <input type="hidden" id="sf-listing-expiration" value="${data.listingExpiration||''}"/>
-          <input type="hidden" id="sf-elc-commission" value="${data.elcCommissionPct||data.commissionPct||data.dealCommissionPct||''}"/>
-          <input type="hidden" id="sf-commission-type" value="${data.commissionType||'fixed'}"/>
-          <input type="hidden" id="sf-sign" value="${data.sign||'yes'}"/>
-          <!-- Co-Broke %: visible -->
-          <div>
-            <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Co-Broke Offered %</label>
-            <div class="flex items-center border rounded-lg overflow-hidden">
-              <input id="sf-cobroke" type="number" min="0" max="100" step="0.5"
-                placeholder="50" value="${data.cobroke||''}"
-                class="flex-1 px-3 py-2 text-sm outline-none"/>
-              <span class="px-3 py-2 bg-gray-50 text-gray-500 text-sm font-semibold border-l">%</span>
-            </div>
-          </div>
-          <!-- Ready to put on websites? -->
-          ${sel('sf-ready-websites','Ready to put on websites?',
-            [{v:'yes',l:'Yes — add to websites'},{v:'no',l:'Not yet'}], data.readyForWebsites||'')}
-          <!-- Auto-fill block -->
-          ${docModeBlock('listing', docMode,
-            fileZone('listing-upload-zone','sf-listing-file','listing-upload-label',
-              'handleListingSelect(event)','handleListingDrop(event)',lfName,'Signed Listing Agreement'),
-            'Listing')}
-          <!-- OM Auto-fill -->
-          <div class="border rounded-xl p-3 bg-purple-50 border-purple-200">
-            <div class="text-xs font-bold text-purple-700 mb-1">📄 Extract from OM</div>
-            <p class="text-xs text-purple-500 mb-2">Upload your Offering Memorandum to auto-fill asking price, acreage &amp; zoning.</p>
-            <label class="cursor-pointer inline-flex items-center gap-1.5 text-xs text-white bg-purple-600 hover:bg-purple-700 font-semibold px-3 py-1.5 rounded-lg transition-colors">
-              <svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
-              Choose OM file
-              <input type="file" accept=".pdf,.docx" style="display:none"
-                onchange="(async(e)=>{ const f=e.target.files[0]; if(f) await autoFillDealFromDoc(f,'Listing'); e.target.value=''; })(event)"/>
-            </label>
-          </div>
-        </div>
-      </div>`;
-    // Gate fields (Additional Requirements) appended here — ABOVE buyer groups
-    appendInlineGateFields(container, stage, data, dealKey);
-    // Likely Buyer Groups always last — appended after gate fields
-    const bgWrap = document.createElement('div');
-    bgWrap.className = 'px-0 pt-3 pb-1';
-    bgWrap.innerHTML = `
-      <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">Likely Buyer Groups</div>
-      <div id="f-property-groups-picker" class="flex flex-wrap gap-1.5 p-2 border rounded-xl bg-gray-50 min-h-10 items-center">
-        <span class="text-xs text-gray-400 italic">No groups — create them in the CRM Groups tab</span>
-      </div>
-      <p class="text-xs text-gray-400 mt-1">Groups selected here travel with the deal through all stages.</p>`;
-    container.appendChild(bgWrap);
-    return;
-  }
-
-  // ── LOI ──────────────────────────────────────────────────────────
-  if(stage==='LOI'){
-    const loiFile = stageFiles[`${dealKey}__loi`];
-    const loiName = loiFile?.name || data.loiFileName || '';
-    const docMode = 'upload';
-    container.innerHTML=`
-      <div class="border-t pt-4 mt-1">
-        <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">LOI Details</div>
-        <div class="space-y-3">
-          <!-- Hidden data fields — populated by autofill -->
-          <input type="hidden" id="sf-project-name" value="${data.projectName||''}"/>
-          <input type="hidden" id="sf-loi-price" value="${data.loiPrice||''}"/>
-          <input type="hidden" id="sf-loi-buyer" value="${data.loiBuyer||''}"/>
-          <input type="hidden" id="sf-close-date" value="${data.closeDate||''}"/>
-          <!-- Auto-fill block -->
-          ${docModeBlock('loi', docMode,
-            fileZone('loi-upload-zone','sf-loi-file','loi-upload-label',
-              "handleStageFileSelect(event,'loi')",
-              "handleStageFileDrop(event,'loi')",
-              loiName,'LOI Document'),
-            'LOI')}
-        </div>
-      </div>`;
-    appendInlineGateFields(container, stage, data, dealKey);
-    return;
-  }
-
-  // ── DUE DILIGENCE (UNDER CONTRACT) — also handles legacy "Under Contract" and "Due Diligence" stages ──
-  if(stage==='Due Diligence (Under Contract)' || stage==='Under Contract' || stage==='Due Diligence' || stage.includes('Due Diligence')){
-    const psaFile = stageFiles[`${dealKey}__psa`] || contractFiles[dealKey];
-    const psaName = psaFile?.name || data.psaFileName || data.contractFileName || '';
-    const docMode = 'upload';
-    const price   = data.purchasePrice||data.contractPrice||data.loiPrice||data.listedPrice||'';
-    container.innerHTML=`
-      <div class="border-t pt-4 mt-1">
-        <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">Due Diligence Details</div>
-        <div class="space-y-3">
-          <!-- Hidden data fields — populated by autofill -->
-          <input type="hidden" id="sf-project-name" value="${data.projectName||''}"/>
-          <input type="hidden" id="sf-purchase-price" value="${price}"/>
-          <input type="hidden" id="sf-contract-price" value="${data.contractPrice||''}"/>
-          <input type="hidden" id="sf-buyer" value="${data.buyer||''}"/>
-          <input type="hidden" id="sf-buyer-broker" value="${data.buyerBroker||''}"/>
-          <input type="hidden" id="sf-escrow-agent" value="${data.escrowAgent||''}"/>
-          <input type="hidden" id="sf-escrow-email" value="${data.escrowAgentEmail||''}"/>
-          <input type="hidden" id="sf-psa-effective-date" value="${data.psaEffectiveDate||''}"/>
-          <input type="hidden" id="sf-dd-date" value="${data.ddExpirationDate||data.dueDiligenceDate||''}"/>
-          <input type="hidden" id="sf-close-date" value="${data.closeDate||''}"/>
-          <input type="hidden" id="sf-elc-commission" value="${data.elcCommissionPct||data.dealCommissionPct||data.commissionPct||''}"/>
-          <!-- Contract Effective Date — visible, required -->
-          ${inp('sf-effective-date','Contract Effective Date','date','',data.effectiveDate||'',true)}
-          <div class="grid grid-cols-2 gap-3">
-            ${inp('sf-elc-commission','ELC Commission %','number','e.g. 6',data.elcCommissionPct||data.commissionPct||'')}
-            <div>
-              <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Commission Paid By</label>
-              <select id="sf-commission-paying-party" class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-red-300">
-                <option value="">— Select —</option>
-                <option value="seller" ${data.commissionPayingParty==='seller'?'selected':''}>Seller</option>
-                <option value="buyer" ${data.commissionPayingParty==='buyer'?'selected':''}>Buyer</option>
-                <option value="split" ${data.commissionPayingParty==='split'?'selected':''}>Split (Buyer & Seller)</option>
-              </select>
-            </div>
-          </div>
-          <!-- Referral Fee — visible -->
-          <div class="rounded-xl border border-amber-200 bg-amber-50 p-3 space-y-2">
-            <div class="text-xs font-bold text-amber-700 uppercase tracking-wide">💸 Referral Fee</div>
-            <div>
-              <label class="block text-xs font-semibold text-gray-600 mb-1">Is a referral fee due?</label>
-              <div class="flex gap-2">
-                <label class="flex items-center gap-1.5 cursor-pointer">
-                  <input type="radio" name="sf-referral-due" id="sf-referral-due-no" value="no" ${(data.referralDue||'no')==='no'?'checked':''} onchange="_onReferralToggle()" class="accent-amber-500"/> <span class="text-sm text-gray-700">No</span>
-                </label>
-                <label class="flex items-center gap-1.5 cursor-pointer">
-                  <input type="radio" name="sf-referral-due" id="sf-referral-due-yes" value="yes" ${data.referralDue==='yes'?'checked':''} onchange="_onReferralToggle()" class="accent-amber-500"/> <span class="text-sm text-gray-700">Yes</span>
-                </label>
-              </div>
-            </div>
-            <div id="sf-referral-fields" class="${data.referralDue==='yes'?'':'hidden'} grid grid-cols-2 gap-3">
-              <div>
-                <label class="block text-xs font-semibold text-gray-600 mb-1">Referral % of Gross Commission</label>
-                <input id="sf-referral-pct" type="number" min="0" max="100" step="0.1" placeholder="e.g. 25"
-                  value="${data.referralPct||''}" oninput="_updateReferralPreview()"
-                  class="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-400 outline-none"/>
-              </div>
-              <div>
-                <label class="block text-xs font-semibold text-gray-600 mb-1">Referral To (Name / Company)</label>
-                <input id="sf-referral-to" type="text" placeholder="e.g. John Smith / ABC Realty"
-                  value="${data.referralTo||''}" oninput="_updateReferralPreview()"
-                  class="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-400 outline-none"/>
-              </div>
-            </div>
-            <div id="sf-referral-preview" class="${data.referralDue==='yes'&&(data.referralPct||0)>0?'':'hidden'} text-xs text-amber-700 font-medium pt-0.5">
-              Net commission = Gross − <span id="sf-referral-calc-pct">${data.referralPct||0}</span>% referral to <span id="sf-referral-calc-to">${data.referralTo||'—'}</span>
-            </div>
-          </div>
-          <!-- Auto-fill block -->
-          ${docModeBlock('dd', docMode,
-            fileZone('psa-upload-zone','sf-psa-file','psa-upload-label',
-              "handleStageFileSelect(event,'psa')",
-              "handleStageFileDrop(event,'psa')",
-              psaName,'PSA / Contract'),
-            'Due Diligence (Under Contract)')}
-        </div>
-      </div>`;
-    appendInlineGateFields(container, stage, data, dealKey);
-    return;
-  }
-
-  // ── REZONING / PERMITTING ────────────────────────────────────────
-  if(stage==='Rezoning/Permitting' || stage==='Rezoning' || stage==='Permitting' || stage.includes('Rezoning') || stage.includes('Permitting')){
-    const rzPrice = data.purchasePrice||data.contractPrice||data.loiPrice||data.listedPrice||'';
-    const fmt$ = v => (v>0) ? '$'+Number(v).toLocaleString() : '—';
-    const fmtDate = iso => iso ? new Date(iso+'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) : '—';
-    const row = (label, val) => (val && val!=='—') ? `
-      <div class="flex justify-between items-start gap-3 py-1.5 border-b border-gray-100 last:border-0">
-        <span class="text-xs text-gray-400 uppercase tracking-wide shrink-0 pt-0.5 w-28">${label}</span>
-        <span class="text-sm font-medium text-gray-800 text-right leading-snug">${val}</span>
-      </div>` : '';
-    container.innerHTML=`
-      <div class="border-t pt-4 mt-1">
-        <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">Rezoning / Permitting</div>
-        <div class="space-y-3">
-          <!-- Hidden inputs — preserve all DD data on save -->
-          <input type="hidden" id="sf-project-name"    value="${data.projectName||''}"/>
-          <input type="hidden" id="sf-purchase-price"  value="${rzPrice}"/>
-          <input type="hidden" id="sf-elc-commission"  value="${data.elcCommissionPct||data.dealCommissionPct||data.commissionPct||''}"/>
-          <input type="hidden" id="sf-buyer"           value="${data.buyer||''}"/>
-          <input type="hidden" id="sf-buyer-broker"    value="${data.buyerBroker||''}"/>
-          <input type="hidden" id="sf-escrow-agent"    value="${data.escrowAgent||''}"/>
-          <input type="hidden" id="sf-escrow-email"    value="${data.escrowAgentEmail||''}"/>
-          <input type="hidden" id="sf-psa-effective-date" value="${data.psaEffectiveDate||data.effectiveDate||''}"/>
-          <input type="hidden" id="sf-dd-date"         value="${data.ddExpirationDate||''}"/>
-          <input type="hidden" id="sf-earnest-money"   value="${data.earnestMoney||''}"/>
-          <!-- Read-only DD reference -->
-          <div>
-            <div class="flex items-center gap-2 mb-2">
-              <span class="text-xs font-bold text-gray-400 uppercase tracking-widest">Due Diligence Reference</span>
-              <span class="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full font-semibold">Read Only</span>
-            </div>
-            <div class="bg-gray-50 rounded-xl px-3 pt-1 pb-0.5">
-              ${row('Project', data.projectName)}
-              ${row('Purchase Price', fmt$(rzPrice))}
-              ${row('Commission', (data.elcCommissionPct||data.dealCommissionPct||data.commissionPct) ? (data.elcCommissionPct||data.dealCommissionPct||data.commissionPct)+'%' : '')}
-              ${row('Buyer', data.buyer)}
-              ${row('Buyer Broker', data.buyerBroker)}
-              ${row('Escrow Agent', data.escrowAgent)}
-              ${row('Escrow Email', data.escrowAgentEmail)}
-              ${row('PSA Effective', fmtDate(data.psaEffectiveDate||data.effectiveDate))}
-              ${row('DD Expiration', fmtDate(data.ddExpirationDate))}
-              ${row('Earnest Money', data.earnestMoney>0 ? fmt$(data.earnestMoney) : '')}
-            </div>
-          </div>
-          <!-- Editable: rezoning-specific fields -->
-          ${inp('sf-effective-date','Rezoning Effective Date','date','',data.effectiveDate,true)}
-          ${inp('sf-rezone-expiration','Rezoning / Permitting Period Expiration','date','',data.rezoneExpiration)}
-          ${inp('sf-close-date','Projected Closing Date','date','',data.closeDate)}
-        </div>
-      </div>`;
-    appendInlineGateFields(container, stage, data, dealKey);
-    return;
-  }
-
-  // ── CLOSING ──────────────────────────────────────────────────────
-  if(stage==='Closing' || (stage.includes('Closing') && !stage.includes('Closed'))){
-    const clPrice = data.purchasePrice||data.contractPrice||data.loiPrice||'';
-    const clComm  = data.elcCommissionPct||data.dealCommissionPct||data.commissionPct||'';
-    window._closingDeal = data;
-    const fmt$ = v => (v>0) ? '$'+Number(v).toLocaleString() : '—';
-    const fmtDate = iso => iso ? new Date(iso+'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) : '—';
-    const row = (label, val) => (val && val!=='—') ? `
-      <div class="flex justify-between items-start gap-3 py-1.5 border-b border-gray-100 last:border-0">
-        <span class="text-xs text-gray-400 uppercase tracking-wide shrink-0 pt-0.5 w-32">${label}</span>
-        <span class="text-sm font-medium text-gray-800 text-right leading-snug">${val}</span>
-      </div>` : '';
-    container.innerHTML=`
-      <div class="border-t pt-4 mt-1">
-        <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">Closing Details</div>
-        <div class="space-y-3">
-          <!-- Hidden inputs — preserve all contract data; also read by commission invoice generator -->
-          <input type="hidden" id="sf-project-name"       value="${data.projectName||''}"/>
-          <input type="hidden" id="sf-purchase-price"     value="${clPrice}"/>
-          <input type="hidden" id="sf-elc-commission"     value="${clComm}"/>
-          <input type="hidden" id="sf-buyer"              value="${data.buyer||''}"/>
-          <input type="hidden" id="sf-buyer-broker"       value="${data.buyerBroker||''}"/>
-          <input type="hidden" id="sf-escrow-agent"       value="${data.escrowAgent||''}"/>
-          <input type="hidden" id="sf-escrow-email"       value="${data.escrowAgentEmail||''}"/>
-          <input type="hidden" id="sf-psa-effective-date" value="${data.psaEffectiveDate||data.effectiveDate||''}"/>
-          <input type="hidden" id="sf-effective-date"     value="${data.effectiveDate||''}"/>
-          <input type="hidden" id="sf-dd-date"            value="${data.ddExpirationDate||''}"/>
-          <input type="hidden" id="sf-earnest-money"      value="${data.earnestMoney||''}"/>
-          <input type="hidden" id="sf-rezone-expiration"  value="${data.rezoneExpiration||''}"/>
-          <input type="hidden" id="sf-close-date"         value="${data.closeDate||''}"/>
-
-          <!-- Read-only reference panel (carried from DD / Rezoning) -->
-          <div>
-            <div class="flex items-center gap-2 mb-2">
-              <span class="text-xs font-bold text-gray-400 uppercase tracking-widest">Contract Reference</span>
-              <span class="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full font-semibold">Read Only</span>
-            </div>
-            <div class="bg-gray-50 rounded-xl px-3 pt-1 pb-0.5">
-              ${row('Project',         data.projectName)}
-              ${row('Purchase Price',  fmt$(clPrice))}
-              ${row('Commission',      clComm ? clComm+'%' : '')}
-              ${row('Buyer',           data.buyer)}
-              ${row('Buyer Broker',    data.buyerBroker)}
-              ${row('Escrow Agent',    data.escrowAgent)}
-              ${row('Escrow Email',    data.escrowAgentEmail)}
-              ${row('PSA Effective',   fmtDate(data.psaEffectiveDate||data.effectiveDate))}
-              ${row('DD Expiration',   fmtDate(data.ddExpirationDate))}
-              ${row('Earnest Money',   data.earnestMoney>0 ? fmt$(data.earnestMoney) : '')}
-              ${data.rezoneExpiration ? row('Rezoning Expiration', fmtDate(data.rezoneExpiration)) : ''}
-              ${row('Projected Close', fmtDate(data.closeDate))}
-            </div>
-          </div>
-
-          <!-- Proposed Use -->
-          ${inp('sf-buyer-use','Proposed Use for the Property','text','e.g. Multifamily Development',data.buyerUse)}
-
-          <!-- Commission Invoice -->
-          <button type="button"
-            onclick="(()=>{ const _d=window._closingDeal||{}; const d={..._d, purchasePrice:parseFloat(document.getElementById('sf-purchase-price')?.value)||_d.purchasePrice||0, elcCommissionPct:parseFloat(document.getElementById('sf-elc-commission')?.value)||_d.elcCommissionPct||0, closeDate:document.getElementById('sf-close-date')?.value||_d.closeDate||'', escrowAgent:document.getElementById('sf-escrow-agent')?.value||_d.escrowAgent||'', escrowAgentEmail:document.getElementById('sf-escrow-email')?.value||_d.escrowAgentEmail||'', buyer:document.getElementById('sf-buyer')?.value||_d.buyer||'', projectName:document.getElementById('sf-project-name')?.value||_d.projectName||''}; window.generateCommissionInvoice(d); })()"
-            class="w-full flex items-center justify-center gap-2 bg-red-700 hover:bg-red-800 text-white font-semibold rounded-xl px-4 py-3 text-sm transition-colors mt-2">
-            &#128196; Generate Commission Invoice &amp; Draft Email
-          </button>
-        </div>
-      </div>`;
-    appendInlineGateFields(container, stage, data, dealKey);
-    return;
-  }
-
-  // ── SOLD / CLOSED WON ─────────────────────────────────────────────
-  if(stage==='Sold' || stage==='Closed Won' || isWonStage(stage)){
-    const csFile = stageFiles[`${dealKey}__closing-statement`];
-    const csName = csFile?.name || data.closingStatementFileName || '';
-    const loiName = stageFiles[`${dealKey}__loi`]?.name || data.loiFileName || '';
-    const psaName = stageFiles[`${dealKey}__psa`]?.name || data.psaFileName || '';
-    const lfName  = listingFiles[dealKey]?.name || data.listingAgreementFileName || '';
-    const cfName  = contractFiles[dealKey]?.name || data.contractFileName || '';
-    const clPrice = data.purchasePrice||data.contractPrice||data.loiPrice||data.listedPrice||'';
-    window._closingDeal = data;
-
-    const infoRow = (label, val) => val ? `
-      <div class="flex items-baseline justify-between gap-2 py-1 border-b border-gray-50 last:border-0">
-        <span class="text-xs text-gray-400 shrink-0">${label}</span>
-        <span class="text-xs font-medium text-gray-700 text-right">${val}</span>
-      </div>` : '';
-
-    const section = (title, rows) => {
-      const content = rows.filter(Boolean).join('');
-      return content ? `
-        <div class="border rounded-xl p-3 bg-gray-50 mb-3">
-          <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">${title}</div>
-          ${content}
-        </div>` : '';
-    };
-
-    const fileChip = (name, url) => {
-      if (!name) return '';
-      const cls = 'inline-flex items-center gap-1 text-xs bg-blue-50 text-blue-600 border border-blue-100 rounded-full px-2 py-0.5 mr-1 mb-1';
-      return url
-        ? `<a href="${url}" target="_blank" rel="noopener" class="${cls} hover:bg-blue-100 cursor-pointer">📎 ${name} <span class="opacity-60">↗</span></a>`
-        : `<span class="${cls}">📎 ${name}</span>`;
-    };
-
-    container.innerHTML=`
-      <div class="border-t pt-4 mt-1">
-        <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">Closing Details</div>
-
-        <!-- Core closing fields — hidden data + visible buyer use + autofill -->
-        <div class="space-y-3 mb-4">
-          <!-- Hidden data fields — preserved from prior stages / autofill -->
-          <input type="hidden" id="sf-project-name" value="${data.projectName||''}"/>
-          <input type="hidden" id="sf-close-date" value="${data.closeDate||''}"/>
-          <input type="hidden" id="sf-purchase-price" value="${clPrice}"/>
-          <input type="hidden" id="sf-elc-commission" value="${data.elcCommissionPct||data.dealCommissionPct||data.commissionPct||''}"/>
-          <input type="hidden" id="sf-buyer" value="${data.buyer||''}"/>
-          <input type="hidden" id="sf-buyer-broker" value="${data.buyerBroker||''}"/>
-          <input type="hidden" id="sf-escrow-agent" value="${data.escrowAgent||''}"/>
-          <input type="hidden" id="sf-escrow-email" value="${data.escrowAgentEmail||''}"/>
-          <input type="hidden" id="sf-press-release" value="${data.pressRelease||'no'}"/>
-          <!-- Visible: Buyer Use + yes/no questions -->
-          ${inp('sf-buyer-use','Buyer Proposed Use','text','Residential Development',data.buyerUse)}
-          ${sel('sf-client-gift','Send a Client Gift?',[{v:'yes',l:'Yes'},{v:'no',l:'No'}],data.clientGift||'no')}
-          ${sel('sf-remove-sign','Remove Sign?',[{v:'yes',l:'Yes'},{v:'no',l:'No'}],data.removeSign||'no')}
-        </div>
-
-        <!-- Prior-stage summary reference (only visible for deals that moved through earlier stages) -->
-        ${section('Property & Contact',[
-          infoRow('Address', data.propertyAddress||''),
-          infoRow('Folio / APN', data.folioNumber||''),
-          infoRow('County', data.county||''),
-          infoRow('Contact', data.contactPerson||''),
-          infoRow('Phone', data.contactPhone||''),
-          infoRow('Email', data.contactEmail||''),
-          infoRow('Acres', data.acreage||data.acres||''),
-          infoRow('Zoning', data.zoning||''),
-        ])}
-
-        ${section('Proposal / Listing',[
-          infoRow('Project Name', data.projectName||''),
-          infoRow('Ownership Entity', data.ownershipEntity||''),
-          infoRow('Listed Price', data.listedPrice>0 ? fmt$(data.listedPrice) : ''),
-          infoRow('Listing Effective', data.listingEffectiveDate ? fmtDate(data.listingEffectiveDate) : ''),
-          infoRow('Listing Expiration', data.listingExpiration ? fmtDate(data.listingExpiration) : ''),
-          infoRow('Commission', (()=>{ const pct=data.elcCommissionPct||data.commissionPct||data.dealCommissionPct; if(pct>0) return pct+'%'; const amt=data.commissionAmount; const price=data.listedPrice||data.purchasePrice||0; if(amt>0&&price>0) return +((amt/price)*100).toFixed(2)+'%'; return amt>0?fmt$(amt):''; })()),
-          infoRow('Co-Advisor', data.coAdvisorName ? `${data.coAdvisorName} (${data.coAdvisorSplit||0}% split)` : ''),
-        ])}
-
-        ${section('Contract / Due Diligence',[
-          infoRow('Contract Price', data.contractPrice>0 ? fmt$(data.contractPrice) : ''),
-          infoRow('PSA Effective', data.psaEffectiveDate ? fmtDate(data.psaEffectiveDate) : ''),
-          infoRow('DD Expiration', data.ddExpirationDate||data.dueDiligenceDate ? fmtDate(data.ddExpirationDate||data.dueDiligenceDate) : ''),
-        ])}
-
-        <!-- Documents -->
-        <div class="border rounded-xl p-3 bg-gray-50 mb-3">
-          <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">Documents</div>
-          <div class="flex flex-wrap gap-1 mb-2">
-            ${fileChip(lfName, listingFiles[dealKey]?.dataUrl||data.listingAgreementUrl||null)}${fileChip(cfName, contractFiles[dealKey]?.dataUrl||data.contractUrl||null)}${fileChip(loiName, stageFiles[`${dealKey}__loi`]?.dataUrl||data.loiUrl||null)}${fileChip(psaName, stageFiles[`${dealKey}__psa`]?.dataUrl||data.psaUrl||null)}${fileChip(csName, stageFiles[`${dealKey}__closing-statement`]?.dataUrl||data.closingStatementUrl||null)}
-          </div>
+    <!-- ① DOCUMENTS & AUTO-FILL ─────────────────────────────────── -->
+    <div>
+      <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">Documents & Auto-fill</div>
+      ${docModeBlock('unified',
+        `<div class="grid grid-cols-2 gap-3 mt-2">
+          ${fileZone('listing-upload-zone','sf-listing-file','listing-upload-label',
+            "handleListingSelect(event)",
+            "handleListingDrop(event)",
+            lfName,'Listing Agreement')}
+          ${fileZone('loi-upload-zone','sf-loi-file','loi-upload-label',
+            "handleStageFileSelect(event,'loi')",
+            "handleStageFileDrop(event,'loi')",
+            loiName,'LOI')}
+          ${fileZone('psa-upload-zone','sf-psa-file','psa-upload-label',
+            "handleStageFileSelect(event,'psa')",
+            "handleStageFileDrop(event,'psa')",
+            psaName,'PSA / Contract')}
           ${fileZone('cs-upload-zone','sf-cs-file','cs-upload-label',
             "handleStageFileSelect(event,'closing-statement')",
             "handleStageFileDrop(event,'closing-statement')",
-            csName,'Upload / Replace Closing Statement')}
-        </div>
+            csName,'Closing Statement')}
+        </div>`, stage)}
+    </div>
 
-        <div>
-          <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Notes</label>
-          <textarea id="sf-sold-notes" rows="3" placeholder="Any additional notes…"
-            class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-red-300">${data.notes||''}</textarea>
-        </div>
-      </div>`;
-    _appendSfPropDetails(container, data);
-    return;
-  }
-
-  // ── LOST / TERMINATED (and legacy aliases) ───────────────────────
-  if(stage==='Lost / Terminated' || stage==='Contract Terminated' || stage==='Lost Listing' || stage==='Lost Proposal' || isLostStage(stage)){
-    const lt = data.lostType || (stage==='Contract Terminated' ? 'contract_cancelled' : stage==='Lost Listing' ? 'lost_listing' : 'lost_proposal');
-    if(lt === 'lost_listing'){
-      container.innerHTML=`
-        <div class="border-t pt-4 mt-1">
-          <div class="flex items-center gap-2 mb-3">
-            <span class="text-xs font-bold text-gray-400 uppercase tracking-widest">🏠 Lost Listing</span>
-          </div>
-          <div class="space-y-3">
-            ${ta('sf-lost-reason','Reason for Losing Listing','Why was the listing lost?',data.lostReason)}
-            ${sel('sf-protection-list','Protection List Needed?',[{v:'yes',l:'Yes'},{v:'no',l:'No'}],data.protectionList||'no')}
-            ${sel('sf-sign-on-property','Is the Sign Still on the Property?',[{v:'yes',l:'Yes — needs removal'},{v:'no',l:'No'}],data.signOnProperty||'no')}
-          </div>
-        </div>`;
-    } else if(lt === 'contract_cancelled'){
-      container.innerHTML=`
-        <div class="border-t pt-4 mt-1">
-          <div class="flex items-center gap-2 mb-3">
-            <span class="text-xs font-bold text-gray-400 uppercase tracking-widest">❌ Contract Cancelled</span>
-          </div>
-          <div class="space-y-3">
-            ${ta('sf-termination-reason','Reason for Termination','Why was the contract cancelled?',data.terminationReason)}
-          </div>
-        </div>`;
-    } else {
-      // Lost Proposal (default)
-      container.innerHTML=`
-        <div class="border-t pt-4 mt-1">
-          <div class="flex items-center gap-2 mb-3">
-            <span class="text-xs font-bold text-gray-400 uppercase tracking-widest">📄 Lost Proposal</span>
-          </div>
-          <div class="space-y-3">
-            ${ta('sf-lost-reason','Reason for Losing Proposal','Why was the proposal not accepted?',data.lostReason)}
-          </div>
-        </div>`;
-    }
-    appendInlineGateFields(container, stage, data, dealKey);
-    return;
-  }
-
-  // ── FALLBACK (any unrecognised stage) ────────────────────────────
-  const price   = data.purchasePrice||data.contractPrice||0;
-  const commPct = data.elcCommissionPct||data.dealCommissionPct||data.commissionPct||0;
-  const gate = getStageGate(stage);
-  const existingGateData = data.gateData?.[stage]||{};
-  let gateSection = '';
-  if(gate?.enabled && gate.fields?.length){
-    gateSection = `
-      <div class="border-t pt-4 mt-3">
-        <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">${gate.title||'Stage Requirements'}</div>
-        ${gate.instructions?`<p class="text-xs text-gray-500 mb-3">${gate.instructions}</p>`:''}
-        <div class="space-y-3">
-          ${gate.fields.map(f=>renderGateField(f,dealKey,stage)).join('')}
-        </div>
-      </div>`;
-  }
-  container.innerHTML=`
-    <div class="border-t pt-4 mt-1">
-      <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">Deal Details</div>
+    <!-- ② PROJECT & PROPERTY ────────────────────────────────────── -->
+    <div>
+      <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">Project & Property</div>
       <div class="space-y-3">
         <div class="grid grid-cols-2 gap-3">
-          ${inp('sf-purchase-price','Purchase Price ($)','number','0',price)}
+          ${inp('sf-project-name','Project Name','text','e.g. Live Oak Ranch Tract 12',data.projectName)}
+          ${inp('sf-ownership-entity','Ownership Entity','text','e.g. Smith Family Trust',data.ownershipEntity)}
+        </div>
+      </div>
+    </div>
+
+    <!-- ③ PRICING ───────────────────────────────────────────────── -->
+    <div>
+      <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">Pricing</div>
+      <div class="grid grid-cols-2 gap-3">
+        ${inp('sf-purchase-price','Purchase / Contract Price ($)','number','0',price||'')}
+        ${inp('sf-listed-price','Listed / Asking Price ($)','number','0',data.listedPrice||'')}
+        ${inp('sf-loi-price','LOI Offer Price ($)','number','0',data.loiPrice||'')}
+        ${inp('sf-earnest-money','Earnest Money Deposit ($)','number','0',data.earnestMoney||'')}
+      </div>
+    </div>
+
+    <!-- ④ COMMISSION ────────────────────────────────────────────── -->
+    <div>
+      <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">Commission</div>
+      <div class="space-y-3">
+        <div class="grid grid-cols-3 gap-3">
           <div>
-            <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Commission %</label>
+            <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">ELC Commission %</label>
             <div class="flex items-center border rounded-lg overflow-hidden">
-              <input id="sf-elc-commission" type="number" min="0" max="100" step="0.25" placeholder="3.0"
+              <input id="sf-elc-commission" type="number" min="0" max="100" step="0.25" placeholder="6.0"
                 value="${commPct||''}"
                 class="flex-1 px-3 py-2 text-sm outline-none"/>
               <span class="px-3 py-2 bg-gray-50 text-gray-500 text-sm font-semibold border-l">%</span>
             </div>
           </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Commission Paid By</label>
+            <select id="sf-commission-paying-party" class="w-full border rounded-lg px-3 py-2 text-sm outline-none">
+              <option value="">— Select —</option>
+              <option value="seller" ${data.commissionPayingParty==='seller'?'selected':''}>Seller</option>
+              <option value="buyer" ${data.commissionPayingParty==='buyer'?'selected':''}>Buyer</option>
+              <option value="split" ${data.commissionPayingParty==='split'?'selected':''}>Split (Buyer &amp; Seller)</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Co-Broke %</label>
+            <div class="flex items-center border rounded-lg overflow-hidden">
+              <input id="sf-cobroke" type="number" min="0" max="100" step="0.5" placeholder="0"
+                value="${data.cobroke||''}"
+                class="flex-1 px-3 py-2 text-sm outline-none"/>
+              <span class="px-3 py-2 bg-gray-50 text-gray-500 text-sm font-semibold border-l">%</span>
+            </div>
+          </div>
         </div>
-        <div class="grid grid-cols-2 gap-3">
-          ${inp('sf-escrow-agent','Escrow Agent','text','First Title Co.',data.escrowAgent)}
-          ${inp('sf-buyer-broker','Buyer Broker','text','ABC Realty',data.buyerBroker)}
-        </div>
-        <div class="grid grid-cols-2 gap-3">
-          ${inp('sf-dd-date','Due Diligence Date','date','',data.dueDiligenceDate)}
-          ${inp('sf-close-date','Est. Closing Date','date','',data.closeDate)}
+        <!-- Referral Fee -->
+        <div class="rounded-xl border border-amber-200 bg-amber-50 p-3 space-y-2">
+          <div class="text-xs font-bold text-amber-700 uppercase tracking-wide">💸 Referral Fee</div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Is a referral fee due?</label>
+            <div class="flex gap-2">
+              <label class="flex items-center gap-1.5 cursor-pointer">
+                <input type="radio" name="sf-referral-due" id="sf-referral-due-no" value="no" ${(data.referralDue||'no')==='no'?'checked':''} onchange="_onReferralToggle()" class="accent-amber-500"/>
+                <span class="text-sm text-gray-700">No</span>
+              </label>
+              <label class="flex items-center gap-1.5 cursor-pointer">
+                <input type="radio" name="sf-referral-due" id="sf-referral-due-yes" value="yes" ${data.referralDue==='yes'?'checked':''} onchange="_onReferralToggle()" class="accent-amber-500"/>
+                <span class="text-sm text-gray-700">Yes</span>
+              </label>
+            </div>
+          </div>
+          <div id="sf-referral-fields" class="${data.referralDue==='yes'?'':'hidden'} grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-semibold text-gray-600 mb-1">Referral % of Gross Commission</label>
+              <input id="sf-referral-pct" type="number" min="0" max="100" step="0.1" placeholder="e.g. 25"
+                value="${data.referralPct||''}" oninput="_updateReferralPreview()"
+                class="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-400 outline-none"/>
+            </div>
+            <div>
+              <label class="block text-xs font-semibold text-gray-600 mb-1">Referral To (Name / Company)</label>
+              <input id="sf-referral-to" type="text" placeholder="e.g. John Smith / ABC Realty"
+                value="${data.referralTo||''}" oninput="_updateReferralPreview()"
+                class="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-400 outline-none"/>
+            </div>
+          </div>
+          <div id="sf-referral-preview" class="${data.referralDue==='yes'&&(data.referralPct||0)>0?'':'hidden'} text-xs text-amber-700 font-medium pt-0.5">
+            Net commission = Gross − <span id="sf-referral-calc-pct">${data.referralPct||0}</span>% referral to <span id="sf-referral-calc-to">${data.referralTo||'—'}</span>
+          </div>
         </div>
       </div>
     </div>
-    ${gateSection}`;
-  if(gate?.enabled){
-    gate.fields.forEach(f=>{
-      const saved = existingGateData[f.id];
-      if(saved == null) return;
-      const el = document.getElementById(`gf-${f.id}`);
-      if(el) el.value = saved;
-      if(f.type==='file' && saved){
-        document.getElementById(`gz-${f.id}`)?.classList.add('has-file');
-        const lbl=document.getElementById(`gl-${f.id}`);
-        if(lbl) lbl.innerHTML=`✅ ${saved}`;
-      }
-    });
-  }
+
+    <!-- ⑤ PARTIES ───────────────────────────────────────────────── -->
+    <div>
+      <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">Parties</div>
+      <div class="grid grid-cols-2 gap-3">
+        ${inp('sf-buyer','Buyer / Company','text','e.g. Pulte Group',data.buyer||data.loiBuyer||'')}
+        ${inp('sf-buyer-broker','Buyer\'s Broker','text','e.g. ABC Realty',data.buyerBroker)}
+        ${inp('sf-escrow-agent','Escrow / Title Agent','text','e.g. First American Title',data.escrowAgent)}
+        ${inp('sf-escrow-email','Escrow Agent Email','email','agent@titleco.com',data.escrowAgentEmail)}
+        ${inp('sf-loi-buyer','LOI Buyer (if different)','text','',data.loiBuyer||'')}
+      </div>
+    </div>
+
+    <!-- ⑥ KEY DATES ──────────────────────────────────────────────── -->
+    <div>
+      <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">Key Dates</div>
+      <div class="grid grid-cols-2 gap-3">
+        ${inp('sf-listing-effective','Listing Effective Date','date','',data.listingEffectiveDate||'')}
+        ${inp('sf-listing-expiration','Listing Expiration Date','date','',data.listingExpiration||'')}
+        ${inp('sf-effective-date','Contract Effective Date','date','',data.effectiveDate||'')}
+        ${inp('sf-psa-effective-date','PSA Effective Date','date','',data.psaEffectiveDate||'')}
+        ${inp('sf-dd-date','DD / Inspection Expiration','date','',data.ddExpirationDate||data.dueDiligenceDate||'')}
+        ${inp('sf-rezone-expiration','Rezoning / Permitting Expiration','date','',data.rezoneExpiration||'')}
+        ${inp('sf-close-date','Closing Date','date','',data.closeDate||'')}
+      </div>
+    </div>
+
+    <!-- ⑦ LISTING DETAILS ───────────────────────────────────────── -->
+    <div>
+      <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">Listing Details</div>
+      <div class="grid grid-cols-2 gap-3">
+        ${inp('sf-listing-term','Listing Term','text','e.g. 12 months',data.listingTerm||'')}
+        ${inp('sf-proposed-price','Proposed Price ($)','number','',data.proposedPrice||'')}
+        ${sel('sf-ready-websites','Ready for Websites?',[{v:'',l:'— Select —'},{v:'yes',l:'Yes'},{v:'no',l:'Not Yet'}],data.readyForWebsites||'')}
+        ${sel('sf-sign','Order Sign?',[{v:'yes',l:'Yes — Order Sign'},{v:'no',l:'No Sign Needed'}],data.sign||'yes')}
+      </div>
+    </div>
+
+    <!-- ⑧ CLOSING & POST-CLOSE ──────────────────────────────────── -->
+    <div>
+      <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">Closing & Post-Close</div>
+      <div class="space-y-3">
+        <div class="grid grid-cols-2 gap-3">
+          ${inp('sf-buyer-use','Buyer\'s Proposed Use','text','e.g. Multifamily Development',data.buyerUse||'')}
+          ${sel('sf-press-release','Issue Press Release?',[{v:'no',l:'No'},{v:'yes',l:'Yes'}],data.pressRelease||'no')}
+          ${sel('sf-client-gift','Send Client Gift?',[{v:'no',l:'No'},{v:'yes',l:'Yes'}],data.clientGift||'no')}
+          ${sel('sf-remove-sign','Remove Sign?',[{v:'no',l:'No'},{v:'yes',l:'Yes'}],data.removeSign||'no')}
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Closing Notes</label>
+          <textarea id="sf-sold-notes" rows="2" placeholder="Any additional notes for closing…"
+            class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-red-300">${data.notes||''}</textarea>
+        </div>
+      </div>
+    </div>
+
+    <!-- ⑨ LOST / TERMINATED ─────────────────────────────────────── -->
+    <div>
+      <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">Lost / Terminated</div>
+      <div class="grid grid-cols-2 gap-3">
+        ${inp('sf-lost-reason','Lost / Termination Reason','text','e.g. Price disagreement',data.lostReason||data.terminationReason||'')}
+        ${inp('sf-termination-reason','Termination Reason (if different)','text','',data.terminationReason||'')}
+        ${sel('sf-protection-list','Protection List Needed?',[{v:'no',l:'No'},{v:'yes',l:'Yes — Create List'}],data.protectionList||'no')}
+        ${sel('sf-sign-on-property','Sign Still on Property?',[{v:'no',l:'No'},{v:'yes',l:'Yes — Needs Removal'}],data.signOnProperty||'no')}
+      </div>
+    </div>
+
+    <!-- hidden passthrough fields for collectStageFields compat -->
+    <input type="hidden" id="sf-commission-type" value="${data.commissionType||'fixed'}"/>
+    <input type="hidden" id="sf-commission-amount" value="${data.commissionAmount||''}"/>
+    <input type="hidden" id="sf-proposed-commission" value="${data.proposedCommission||''}"/>
+    <input type="hidden" id="sf-contract-price" value="${data.contractPrice||''}"/>
+
+  </div>`;
+
+  appendInlineGateFields(container, stage, data, dealKey);
   _appendSfPropDetails(container, data);
 }
+
 
 window.handleStageFileSelect = (ev, type) => {
   const file = ev.target.files[0]; if(!file) return;
@@ -18267,6 +17874,8 @@ function collectStageFields(){
     purchasePrice:         gf('sf-purchase-price'),
     elcCommissionPct:      gf('sf-elc-commission'),
     commissionPayingParty: g('sf-commission-paying-party'),
+    earnestMoney:          gf('sf-earnest-money'),
+    cobroke:               gf('sf-cobroke'),
     // Sold
     buyerUse:      g('sf-buyer-use'),
     pressRelease:  g('sf-press-release'),
