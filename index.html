@@ -4356,8 +4356,8 @@ function boContactSearch(value, dealKey){
 window.boContactSearch = boContactSearch;
 
 // ── Required fields per stage ─────────────────────────────────────────────
-// Keys map to sf-* element IDs (without the 'sf-' prefix for readability).
-// Matched via includes() so 'Due Diligence' covers 'Due Diligence (Under Contract)' etc.
+// Fields marked carryForward:true are only required if NOT already present in
+// the deal data — they should carry over from earlier stages (DD → Rezoning → Closing → Sold).
 const STAGE_REQUIRED_FIELDS = {
   'Listing': [
     {id:'sf-listed-price',       label:'Listed / Asking Price'},
@@ -4380,23 +4380,24 @@ const STAGE_REQUIRED_FIELDS = {
     {id:'sf-escrow-agent',              label:'Escrow / Title Agent'},
     {id:'sf-buyer',                     label:'Buyer / Company'},
   ],
+  // Rezoning/Closing/Sold: all fields carry forward from DD — only required if missing
   'Rezoning': [
-    {id:'sf-effective-date',       label:'Contract Effective Date'},
-    {id:'sf-rezone-expiration',    label:'Rezoning / Permitting Expiration'},
-    {id:'sf-close-date',           label:'Closing Date'},
+    {id:'sf-effective-date',    label:'Contract Effective Date',  carryForward:true},
+    {id:'sf-rezone-expiration', label:'Rezoning / Permitting Expiration'},  // always new
+    {id:'sf-close-date',        label:'Closing Date',             carryForward:true},
   ],
   'Closing': [
-    {id:'sf-purchase-price',          label:'Purchase Price'},
-    {id:'sf-elc-commission',          label:'ELC Commission %'},
-    {id:'sf-commission-paying-party', label:'Commission Paid By'},
-    {id:'sf-close-date',              label:'Closing Date'},
-    {id:'sf-escrow-agent',            label:'Escrow / Title Agent'},
+    {id:'sf-purchase-price',          label:'Purchase Price',       carryForward:true},
+    {id:'sf-elc-commission',          label:'ELC Commission %',     carryForward:true},
+    {id:'sf-commission-paying-party', label:'Commission Paid By',   carryForward:true},
+    {id:'sf-close-date',              label:'Closing Date',         carryForward:true},
+    {id:'sf-escrow-agent',            label:'Escrow / Title Agent', carryForward:true},
   ],
   'Sold': [
-    {id:'sf-purchase-price',          label:'Purchase Price'},
-    {id:'sf-elc-commission',          label:'ELC Commission %'},
-    {id:'sf-commission-paying-party', label:'Commission Paid By'},
-    {id:'sf-close-date',              label:'Closing Date'},
+    {id:'sf-purchase-price',          label:'Purchase Price',       carryForward:true},
+    {id:'sf-elc-commission',          label:'ELC Commission %',     carryForward:true},
+    {id:'sf-commission-paying-party', label:'Commission Paid By',   carryForward:true},
+    {id:'sf-close-date',              label:'Closing Date',         carryForward:true},
   ],
   'Lost': [
     {id:'sf-lost-reason', label:'Lost / Termination Reason'},
@@ -4406,13 +4407,34 @@ const STAGE_REQUIRED_FIELDS = {
   ],
 };
 
-// Returns required fields for a given stage string (fuzzy-matched)
-function getStageRequiredFields(stage){
+// Maps sf-* field IDs to the deal data keys that carry their value forward
+const FIELD_DATA_VALUES = {
+  'sf-effective-date':          d => d.effectiveDate||d.psaEffectiveDate||'',
+  'sf-purchase-price':          d => d.purchasePrice||d.contractPrice||0,
+  'sf-elc-commission':          d => d.elcCommissionPct||d.dealCommissionPct||d.commissionPct||0,
+  'sf-commission-paying-party': d => d.commissionPayingParty||'',
+  'sf-close-date':              d => d.closeDate||'',
+  'sf-escrow-agent':            d => d.escrowAgent||'',
+  'sf-buyer':                   d => d.buyer||d.loiBuyer||'',
+  'sf-dd-date':                 d => d.ddExpirationDate||d.dueDiligenceDate||'',
+};
+
+// Returns the list of fields that are still required for this stage+data combo.
+// carryForward fields are excluded if they already have a value in deal data.
+function getStageRequiredFields(stage, data={}){
   const s = stage||'';
-  for(const [key, fields] of Object.entries(STAGE_REQUIRED_FIELDS)){
-    if(s.toLowerCase().includes(key.toLowerCase())) return fields;
+  let fields = [];
+  for(const [key, flds] of Object.entries(STAGE_REQUIRED_FIELDS)){
+    if(s.toLowerCase().includes(key.toLowerCase())){ fields = flds; break; }
   }
-  return [];
+  return fields.filter(f => {
+    if(!f.carryForward) return true; // always required regardless of data
+    const getter = FIELD_DATA_VALUES[f.id];
+    if(!getter) return true;
+    const existing = getter(data);
+    // Only required if the existing value is empty/zero
+    return !existing || existing === 0 || existing === '';
+  });
 }
 
 function renderStageFields(stage, data={}){
@@ -4420,7 +4442,7 @@ function renderStageFields(stage, data={}){
   if(!container) return;
 
   const dealKey = editingDealId||'new';
-  const reqFields = new Set(getStageRequiredFields(stage).map(f=>f.id));
+  const reqFields = new Set(getStageRequiredFields(stage, data).map(f=>f.id));
 
   // ── helpers ──────────────────────────────────────────────────────
   // req=true forces required; req omitted → auto-detect from reqFields set
@@ -17989,7 +18011,9 @@ window.handleDealSubmit = async ev => {
   const sf = collectStageFields();
 
   // ── Unified required-field validation (driven by STAGE_REQUIRED_FIELDS) ──
-  const _reqFields = getStageRequiredFields(stage);
+  // Pass existing deal data so carryForward fields aren't re-required if already set
+  const _existingForReq = allDeals.find(d=>d.id===id) || {};
+  const _reqFields = getStageRequiredFields(stage, _existingForReq);
   for(const {id, label} of _reqFields){
     const el = document.getElementById(id);
     if(!el) continue;
