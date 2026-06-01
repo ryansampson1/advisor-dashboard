@@ -14259,6 +14259,7 @@ function viewSplits(){
                 ${(p.tiers||[]).map(t=>`<span class="text-xs bg-blue-100 text-blue-700 rounded-full px-2 py-0.5">${t.rate}% @ ${fmt$(t.threshold)}+</span>`).join('')}
               </div>
               <button onclick="togglePendingEditor('${eid}')" class="text-blue-500 hover:underline text-xs font-semibold">Edit</button>
+              <button onclick="finalizePendingAdvisor('${p.email}')" class="text-xs font-semibold px-2 py-0.5 rounded-full bg-green-100 text-green-700 hover:bg-green-200" title="Push all settings to real profile now and remove pending entry">⚡ Finalize</button>
               <button onclick="removePendingAdvisor('${p.email}')" class="text-red-400 hover:text-red-600 text-xs font-bold">✕</button>
             </div>
             <!-- Inline pending advisor editor -->
@@ -14481,8 +14482,44 @@ window.removePendingAdvisor = email => {
   const pending = JSON.parse(localStorage.getItem(K('pendingProfiles'))||'{}');
   delete pending[email.toLowerCase()];
   localStorage.setItem(K('pendingProfiles'), JSON.stringify(pending));
-  eosSave('pendingProfiles', pending);  // sync to Firestore
+  eosSave('pendingProfiles', pending);
   showToast('Removed','info'); viewSplits();
+};
+
+// Push all pending profile data → real profile, then remove pending entry
+window.finalizePendingAdvisor = async email => {
+  const e = email.toLowerCase();
+  const pending = JSON.parse(localStorage.getItem(K('pendingProfiles'))||'{}');
+  const entry = pending[e];
+  if(!entry){ showToast('Pending entry not found','error'); return; }
+  if(!_fbDb || !_fbFns){ showToast('Not connected to Firestore','error'); return; }
+  showToast(`Finalizing ${entry.name||e}…`, 'info', 10000);
+  try {
+    const {collection, getDocs, query, where, doc: fbD, setDoc} = _fbFns;
+    // Find real profile by email
+    const snap = await getDocs(query(collection(_fbDb,'advisorProfiles'), where('email','==',e)));
+    const realDoc = snap.docs.find(d => !d.id.startsWith('pending_'));
+    if(!realDoc){
+      showToast(`${entry.name||e} hasn't logged in yet — nothing to finalize. Splits will apply automatically on first login.`, 'warning', 6000);
+      return;
+    }
+    // Push all fields from pending entry to real profile
+    const pushData = {};
+    ['tiers','behavior','quarterlyUCGoal','mentorUid','mentorPct','mentorships','office']
+      .forEach(k => { if(entry[k] !== undefined) pushData[k] = entry[k]; });
+    pushData.updatedAt = Date.now();
+    await setDoc(fbD(_fbDb,'advisorProfiles',realDoc.id), pushData, {merge:true});
+    // Update in-memory allProfiles
+    if(allProfiles[realDoc.id]) Object.assign(allProfiles[realDoc.id], pushData);
+    // Remove pending entry
+    delete pending[e];
+    localStorage.setItem(K('pendingProfiles'), JSON.stringify(pending));
+    eosSave('pendingProfiles', pending);
+    showToast(`✅ ${entry.name||e} finalized — splits applied to real profile, pending entry removed`, 'success', 6000);
+    viewSplits();
+  } catch(err){
+    showToast('Finalize failed: '+err.message, 'error');
+  }
 };
 // Helper: encode email to a safe DOM id suffix
 function emailToId(email){ return email.replace(/[@.]/g,c=>c==='@'?'_at_':'_dot_'); }
@@ -14516,7 +14553,7 @@ window.addPendingTierRow = eid => {
 window.removePendingTierRow = (eid, i) => {
   document.getElementById(`ptr-${eid}-${i}`)?.remove();
 };
-window.savePendingAdvisor = (eid, email) => {
+window.savePendingAdvisor = async (eid, email) => {
   const pending = JSON.parse(localStorage.getItem(K('pendingProfiles'))||'{}');
   const existing = pending[email.toLowerCase()] || {};
   const name  = document.getElementById(`pe-name-${eid}`)?.value.trim() || existing.name;
@@ -14526,10 +14563,28 @@ window.savePendingAdvisor = (eid, email) => {
   const thresholds = [...document.querySelectorAll(`.pe-tier-threshold[data-eid="${eid}"]`)].map(el=>parseFloat(el.value)||0);
   const rates      = [...document.querySelectorAll(`.pe-tier-rate[data-eid="${eid}"]`)].map(el=>parseFloat(el.value)||50);
   const tiers = thresholds.map((t,i)=>({threshold:t,rate:rates[i]})).sort((a,b)=>a.threshold-b.threshold);
-  pending[email.toLowerCase()] = {...existing, name, email:email.toLowerCase(), office:off, behavior:beh, tiers, quarterlyUCGoal:ucGoal};
+  const entry = {...existing, name, email:email.toLowerCase(), office:off, behavior:beh, tiers, quarterlyUCGoal:ucGoal};
+  pending[email.toLowerCase()] = entry;
   localStorage.setItem(K('pendingProfiles'), JSON.stringify(pending));
-  eosSave('pendingProfiles', pending);  // sync to Firestore so advisors get their config on any machine
-  showToast(`${name}'s splits saved — will apply on first login ✓`,'success');
+  eosSave('pendingProfiles', pending);  // sync to Firestore
+
+  // ── Also push tiers to the advisor's real profile if they've already logged in ──
+  if(!DEMO_MODE && _fbDb && _fbFns){
+    try {
+      const {collection, getDocs, query, where, doc: fbD, setDoc} = _fbFns;
+      const snap = await getDocs(query(collection(_fbDb,'advisorProfiles'), where('email','==',email.toLowerCase())));
+      const realDoc = snap.docs.find(d => !d.id.startsWith('pending_'));
+      if(realDoc){
+        await setDoc(fbD(_fbDb,'advisorProfiles',realDoc.id),
+          {tiers, behavior:beh, quarterlyUCGoal:ucGoal, updatedAt:Date.now()}, {merge:true});
+        showToast(`${name}'s splits saved and applied ✓`, 'success');
+      } else {
+        showToast(`${name}'s splits saved — will apply on first login ✓`, 'success');
+      }
+    } catch(e){ showToast(`${name}'s splits saved ✓`, 'success'); }
+  } else {
+    showToast(`${name}'s splits saved — will apply on first login ✓`, 'success');
+  }
   viewSplits();
 };
 
@@ -14597,16 +14652,14 @@ async function applyPendingProfile(uid, email){
       if(realSnap.exists()){
         const existing = realSnap.data();
         const advisorName = existing.name || pendingEntry.name || e;
-        // Merge splits if not already set
-        if(!existing.tiers?.length){
-          const mergeData = {};
-          ['tiers','behavior','quarterlyUCGoal','mentorUid','mentorPct','mentorships','office']
-            .forEach(k => { if(pendingEntry[k] !== undefined) mergeData[k] = pendingEntry[k]; });
-          if(Object.keys(mergeData).length){
-            await Store.saveProfile(uid, mergeData);
-            if(allProfiles[uid]) Object.assign(allProfiles[uid], mergeData);
-            showToast('✓ Your pre-configured splits have been applied!', 'success');
-          }
+        // Always push all splits config from pending → real profile (admin may have updated it)
+        const mergeData = {};
+        ['tiers','behavior','quarterlyUCGoal','mentorUid','mentorPct','mentorships','office','name']
+          .forEach(k => { if(pendingEntry[k] !== undefined) mergeData[k] = pendingEntry[k]; });
+        if(Object.keys(mergeData).length){
+          await Store.saveProfile(uid, mergeData);
+          if(allProfiles[uid]) Object.assign(allProfiles[uid], mergeData);
+          showToast('✓ Your pre-configured splits have been applied!', 'success');
         }
         // Always migrate deals — profile may exist but deals still use pending key
         await _runDealMigration(uid, pendingKey, advisorName, e);
