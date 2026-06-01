@@ -14530,34 +14530,65 @@ window.savePendingAdvisor = (eid, email) => {
 // migrate it to their real UID automatically.
 async function applyPendingProfile(uid, email){
   const e = (email||'').toLowerCase();
-  // Read pending profiles from localStorage (which is synced from Firestore via onSnapshot)
-  const pending = JSON.parse(localStorage.getItem(K('pendingProfiles'))||'{}');
-  if(!pending[e]) return; // nothing to apply
+  if(!e) return;
 
-  // In live mode: check Firestore directly to see if advisor already has a profile.
-  // (allProfiles may not be populated yet when launchApp fires on first load)
+  // ── Read pendingProfiles DIRECTLY from Firestore ──────────────────────────
+  // Cannot use localStorage here: on first login on a new device the onSnapshot
+  // listener hasn't fired yet, so localStorage is empty even though Firestore has data.
+  let pending = {};
   if(!DEMO_MODE && _fbDb && _fbFns){
     try {
-      const {doc, getDoc} = _fbFns;
-      const snap = await getDoc(doc(_fbDb, 'advisorProfiles', uid));
-      if(snap.exists()) return; // Already has a Firestore profile — skip
-    } catch(err){ /* if read fails, try to apply anyway */ }
-  } else if(allProfiles[uid]?.tiers?.length){ return; } // demo: already has profile
+      const {doc: fbDoc2, getDoc} = _fbFns;
+      const pSnap = await getDoc(fbDoc2(_fbDb, 'eos', 'pendingProfiles'));
+      if(pSnap.exists()) pending = pSnap.data().data || {};
+    } catch(err){
+      // Fall back to localStorage cache if Firestore read fails
+      try { pending = JSON.parse(localStorage.getItem(K('pendingProfiles'))||'{}'); } catch{}
+    }
+  } else {
+    try { pending = JSON.parse(localStorage.getItem(K('pendingProfiles'))||'{}'); } catch{}
+  }
 
-  const profile = {...pending[e]};
+  // Also try email-normalised variants in case the key was stored with different casing
+  const pendingEntry = pending[e] || pending[email] || null;
+  if(!pendingEntry) return; // no pre-configured profile for this email
+
+  if(!DEMO_MODE && _fbDb && _fbFns){
+    try {
+      const {doc: fbDoc3, getDoc} = _fbFns;
+      const realSnap = await getDoc(fbDoc3(_fbDb, 'advisorProfiles', uid));
+      if(realSnap.exists()){
+        // Profile exists (e.g. created by migratePendingProfile from invite system).
+        // Only merge splits/tiers config if it isn't already set.
+        const existing = realSnap.data();
+        if(existing.tiers?.length) return; // splits already configured — done
+        // Merge in the splits config from pending profile
+        const mergeData = {};
+        ['tiers','behavior','quarterlyUCGoal','mentorUid','mentorPct','mentorships','office']
+          .forEach(k => { if(pendingEntry[k] !== undefined) mergeData[k] = pendingEntry[k]; });
+        if(Object.keys(mergeData).length){
+          await Store.saveProfile(uid, mergeData);
+          if(allProfiles[uid]) Object.assign(allProfiles[uid], mergeData);
+          showToast('✓ Your pre-configured splits have been applied!', 'success');
+        }
+        return;
+      }
+    } catch(err){ /* read failed — fall through to full create */ }
+  } else if(allProfiles[uid]?.tiers?.length){ return; }
+
+  // No profile at all — create one from the pending entry
+  const profile = {...pendingEntry};
   try {
     await Store.saveProfile(uid, profile);
     allProfiles[uid] = profile;
-    // Mark as applied in pending (remove entry); admin can also clean up manually
-    delete pending[e];
-    localStorage.setItem(K('pendingProfiles'), JSON.stringify(pending));
-    // Note: in live mode the advisor can't write to eos/pendingProfiles (admin-only),
-    // so we just update localStorage. The entry will remain in Firestore but be
-    // ignored on subsequent logins because the advisor now has a Firestore profile.
-    showToast(`✓ Your pre-configured splits have been applied!`, 'success');
+    showToast('✓ Your pre-configured splits have been applied!', 'success');
+    // Update localStorage so UI reflects the removal
+    const fresh = {...pending};
+    delete fresh[e]; delete fresh[email];
+    localStorage.setItem(K('pendingProfiles'), JSON.stringify(fresh));
   } catch(err){
     console.warn('[applyPendingProfile] Failed to save profile:', err);
-    showToast(`Splits profile ready — ask your admin to save your splits`, 'info', 6000);
+    showToast('Splits profile ready — ask your admin to save your splits', 'info', 6000);
   }
 }
 
