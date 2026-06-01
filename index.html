@@ -4668,6 +4668,18 @@ function renderStageFields(stage, data={}){
           <input type="hidden" id="sf-elc-commission" value="${data.elcCommissionPct||data.dealCommissionPct||data.commissionPct||''}"/>
           <!-- Contract Effective Date — visible, required -->
           ${inp('sf-effective-date','Contract Effective Date','date','',data.effectiveDate||'',true)}
+          <div class="grid grid-cols-2 gap-3">
+            ${inp('sf-elc-commission','ELC Commission %','number','e.g. 6',data.elcCommissionPct||data.commissionPct||'')}
+            <div>
+              <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Commission Paid By</label>
+              <select id="sf-commission-paying-party" class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-red-300">
+                <option value="">— Select —</option>
+                <option value="seller" ${data.commissionPayingParty==='seller'?'selected':''}>Seller</option>
+                <option value="buyer" ${data.commissionPayingParty==='buyer'?'selected':''}>Buyer</option>
+                <option value="split" ${data.commissionPayingParty==='split'?'selected':''}>Split (Buyer & Seller)</option>
+              </select>
+            </div>
+          </div>
           <!-- Referral Fee — visible -->
           <div class="rounded-xl border border-amber-200 bg-amber-50 p-3 space-y-2">
             <div class="text-xs font-bold text-amber-700 uppercase tracking-wide">💸 Referral Fee</div>
@@ -18252,8 +18264,9 @@ function collectStageFields(){
     // Rezoning/Permitting
     rezoneExpiration: g('sf-rezone-expiration'),
     // Closing / generic
-    purchasePrice:    gf('sf-purchase-price'),
-    elcCommissionPct: gf('sf-elc-commission'),
+    purchasePrice:         gf('sf-purchase-price'),
+    elcCommissionPct:      gf('sf-elc-commission'),
+    commissionPayingParty: g('sf-commission-paying-party'),
     // Sold
     buyerUse:      g('sf-buyer-use'),
     pressRelease:  g('sf-press-release'),
@@ -18973,7 +18986,118 @@ async function launchApp(){
   renderCurrentView();
   renderPendingPanel();
   initGlobalAIWidget();
+  // Show commission completion prompt for active contract deals missing commission info
+  if(currentUser && !currentUser.isAdmin && !currentUser.isStaff){
+    setTimeout(() => _checkCommissionRequirements(), 800);
+  }
 }
+
+// ── Commission Requirements Prompt ────────────────────────────────────────
+// Blocks the UI until advisors fill in commission % and paying party for all
+// active Due Diligence / Rezoning / Closing deals that are missing this info.
+function _checkCommissionRequirements(){
+  const uid = currentUser?.uid;
+  if(!uid) return;
+  const STAGES = /due.?diligence|rezoning|permitting|closing/i;
+  const incomplete = allDeals.filter(d => {
+    if(!isDealAdvisor(d, uid)) return false;
+    if(!STAGES.test(d.stage||'')) return false;
+    if(isLostStage(d.stage||'') || isWonStage(d.stage||'')) return false;
+    const hasComm = (d.elcCommissionPct||d.dealCommissionPct||d.commissionPct||0) > 0;
+    const hasParty = !!d.commissionPayingParty;
+    return !hasComm || !hasParty;
+  });
+  if(!incomplete.length) return;
+
+  // Build modal
+  const modal = document.createElement('div');
+  modal.id = 'commission-req-modal';
+  modal.style.cssText = 'position:fixed;inset:0;z-index:99999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.65);padding:16px';
+  modal.innerHTML = `
+    <div style="background:#fff;border-radius:20px;box-shadow:0 24px 80px rgba(0,0,0,.35);width:100%;max-width:580px;max-height:90vh;display:flex;flex-direction:column;overflow:hidden">
+      <div style="padding:20px 24px 14px;border-bottom:1px solid #f1f5f9">
+        <div style="font-size:1rem;font-weight:800;color:#111;margin-bottom:4px">📋 Commission Info Required</div>
+        <div style="font-size:.8rem;color:#64748b">The following active deals are missing commission details. Please complete before continuing.</div>
+      </div>
+      <div style="flex:1;overflow-y:auto;padding:16px 24px;display:flex;flex-direction:column;gap:14px">
+        ${incomplete.map((d,i) => {
+          const title = d.projectName || d.propertyAddress || 'Unnamed Deal';
+          const currPct = d.elcCommissionPct||d.dealCommissionPct||d.commissionPct||'';
+          const currParty = d.commissionPayingParty||'';
+          return `
+          <div style="border:1px solid #e2e8f0;border-radius:12px;padding:14px 16px;background:#f8fafc">
+            <div style="font-weight:700;color:#111;margin-bottom:2px">${title}</div>
+            <div style="font-size:.75rem;color:#64748b;margin-bottom:10px">${d.stage||''}</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+              <div>
+                <label style="display:block;font-size:.7rem;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">ELC Commission %</label>
+                <input id="crq-pct-${i}" type="number" min="0" max="100" step="0.1" placeholder="e.g. 6" value="${currPct}"
+                  style="width:100%;border:1px solid #d1d5db;border-radius:8px;padding:8px 10px;font-size:.875rem;outline:none;box-sizing:border-box"
+                  onfocus="this.style.border='1px solid #2563eb'" onblur="this.style.border='1px solid #d1d5db'"/>
+              </div>
+              <div>
+                <label style="display:block;font-size:.7rem;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Commission Paid By</label>
+                <select id="crq-party-${i}"
+                  style="width:100%;border:1px solid #d1d5db;border-radius:8px;padding:8px 10px;font-size:.875rem;outline:none;background:#fff;cursor:pointer;box-sizing:border-box">
+                  <option value="">— Select —</option>
+                  <option value="seller" ${currParty==='seller'?'selected':''}>Seller</option>
+                  <option value="buyer" ${currParty==='buyer'?'selected':''}>Buyer</option>
+                  <option value="split" ${currParty==='split'?'selected':''}>Split (Buyer & Seller)</option>
+                </select>
+              </div>
+            </div>
+          </div>`;
+        }).join('')}
+      </div>
+      <div style="padding:14px 24px;border-top:1px solid #f1f5f9;display:flex;gap:10px">
+        <button onclick="window._saveCommissionRequirements()"
+          style="flex:1;background:var(--brand-black,#111);color:#fff;font-size:.875rem;font-weight:700;padding:11px 16px;border-radius:10px;border:none;cursor:pointer">
+          Save & Continue →
+        </button>
+      </div>
+    </div>`;
+
+  window._commissionRequiredDeals = incomplete;
+  document.getElementById('commission-req-modal')?.remove();
+  document.body.appendChild(modal);
+}
+
+window._saveCommissionRequirements = async () => {
+  const deals = window._commissionRequiredDeals || [];
+  const errors = [];
+  const saves = [];
+
+  deals.forEach((d, i) => {
+    const pct   = parseFloat(document.getElementById(`crq-pct-${i}`)?.value||'0');
+    const party = document.getElementById(`crq-party-${i}`)?.value||'';
+    if(!pct || pct <= 0){ errors.push(`"${d.projectName||d.propertyAddress}" — enter a commission %`); return; }
+    if(!party){ errors.push(`"${d.projectName||d.propertyAddress}" — select who pays the commission`); return; }
+    saves.push({id:d.id, pct, party});
+  });
+
+  if(errors.length){
+    showToast('Please complete all fields:\n'+errors.join('\n'),'warning',6000);
+    return;
+  }
+
+  const btn = document.querySelector('#commission-req-modal button');
+  if(btn){ btn.textContent='Saving…'; btn.disabled=true; }
+
+  for(const s of saves){
+    const deal = allDeals.find(x=>x.id===s.id);
+    const upd = {
+      elcCommissionPct: s.pct,
+      commissionPayingParty: s.party,
+      updatedAt: Date.now(),
+    };
+    await Store.updateDeal(s.id, upd);
+    if(deal) Object.assign(deal, upd);
+  }
+
+  document.getElementById('commission-req-modal')?.remove();
+  showToast(`✅ Commission details saved for ${saves.length} deal${saves.length!==1?'s':''}`, 'success', 4000);
+  renderCurrentView();
+};
 
 /* =======================================================
    VIEW: HR
