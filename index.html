@@ -5883,7 +5883,7 @@ function isStaffView(){
 window.toggleStaffView = () => {
   staffViewMode = !staffViewMode;
   if(staffViewMode) adminViewAsAdvisor = false; // staff view overrides advisor view
-  const staffTabs = ['board','tasks','eos'];
+  const staffTabs = ['board','tasks','eos','comps'];
   if(staffViewMode && !staffTabs.includes(currentView)) currentView='board';
   renderShell();
   renderCurrentView();
@@ -6716,14 +6716,15 @@ function renderShell(){
     {id:'manageStages',  label:'🗂 Stages',         admin:true},
     {id:'officeManagers',label:'🏢 Offices',        admin:true},
     {id:'eos',           label:'🧭 EOS',            always:true},
-    {id:'comps',         label:'🗺 Comps',          advisor:true},
+    {id:'comps',         label:'🗺 Comps',          advisor:true, staff:true},
     {id:'drive',         label:'📁 Drive',          always:true},
     {id:'documents',     label:'📄 Documents',      admin:true},
     {id:'hr',            label:'👥 HR',             always:true},
     {id:'crm',           label:'🤝 CRM',            crm:true},
   ].filter(n=>{
-    if(sv){ // staff view: always tabs + CRM if enabled
+    if(sv){ // staff view: always tabs + staff-flagged tabs + CRM if enabled
       if(n.always) return true;
+      if(n.staff) return true;
       if(n.crm){ const cfg=APP_CONFIG.crm||{}; return cfg.enabled||((cfg.betaEmails||[]).includes(currentUser?.email)); }
       return false;
     }
@@ -7978,7 +7979,11 @@ window._pdwRefileToDrive = async (dealId) => {
    STAFF BOARD — read-only kanban, no commissions
    ======================================================= */
 function viewBoardStaff(){
-  const deals = allDeals.filter(d => !isLostStage(d.stage||''));
+  const _staffAfUid = sessionStorage.getItem('staffBoardAdvisorFilter') || '';
+  const allActiveDeals = allDeals.filter(d => !isLostStage(d.stage||''));
+  const deals = _staffAfUid
+    ? allActiveDeals.filter(d => String(d.advisorUid||'').trim() === _staffAfUid)
+    : allActiveDeals;
   const byStage = {};
   STAGES.forEach(s => byStage[s] = []);
   deals.forEach(d => {
@@ -8043,20 +8048,44 @@ function viewBoardStaff(){
       </div>
     </div>`;
 
+  // ── Advisor filter ───────────────────────────────────────────────────
+  const _staffAdvisors = getDistinctAdvisors().filter(a=>a.uid).sort((a,b)=>a.name.localeCompare(b.name));
+  const _staffFilterName = _staffAfUid ? (_staffAdvisors.find(a=>a.uid===_staffAfUid)?.name||'Unknown') : '';
+  const _staffAdvisorFilter = `
+    <div style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap">
+      <label style="font-size:.75rem;font-weight:600;color:#6b7280;white-space:nowrap">Filter by Advisor:</label>
+      <select onchange="sessionStorage.setItem('staffBoardAdvisorFilter',this.value.trim());viewBoardStaff()"
+        style="font-size:.8rem;padding:.3rem .6rem;border:1px solid #d1d5db;border-radius:.5rem;background:#fff;color:#111;cursor:pointer;outline:none;min-width:140px">
+        <option value="">All Advisors</option>
+        ${_staffAdvisors.map(a=>`<option value="${a.uid}" ${a.uid===_staffAfUid?'selected':''}>${a.name}</option>`).join('')}
+      </select>
+      ${_staffAfUid ? `<button onclick="sessionStorage.removeItem('staffBoardAdvisorFilter');viewBoardStaff()"
+        style="font-size:.75rem;padding:.25rem .6rem;border-radius:.4rem;background:#fee2e2;color:#dc2626;border:none;cursor:pointer;font-weight:600">✕ Clear</button>` : ''}
+    </div>`;
+  // ── Responsive column sizing ─────────────────────────────────────────
+  const _largeScreen = window.innerWidth >= 1400;
+  const _boardStyle = _largeScreen
+    ? 'display:flex;gap:0.75rem;align-items:stretch;flex-wrap:nowrap;padding-bottom:0.75rem;'
+    : 'display:flex;gap:0.75rem;align-items:stretch;overflow-x:auto;padding-bottom:0.75rem;';
+  const _colStyle = _largeScreen
+    ? 'flex:1;min-width:160px;display:flex;flex-direction:column;'
+    : 'min-width:220px;width:220px;flex-shrink:0;display:flex;flex-direction:column;';
+
   setContent(`
-    <div class="flex items-center justify-between mb-5">
+    <div class="flex items-center justify-between mb-5 flex-wrap gap-3">
       <div>
         <h2 style="font-size:1.35rem;font-weight:700;color:var(--text-1);letter-spacing:-.01em">Deal Pipeline</h2>
-        <p class="text-sm text-gray-500 mt-0.5">${deals.length} active deals</p>
+        <p class="text-sm text-gray-500 mt-0.5">${deals.length} active deal${deals.length!==1?'s':''}${_staffFilterName?' · '+_staffFilterName:''}</p>
       </div>
+      ${_staffAdvisorFilter}
     </div>
     ${staffKpis}
-    <div style="display:flex;gap:0.75rem;align-items:stretch;overflow-x:auto;padding-bottom:0.75rem;">
+    <div style="${_boardStyle}">
       ${STAGES.map(stage => {
         const sd = byStage[stage] || [];
         const sc = SC[stage];
         return `
-          <div style="min-width:220px;width:220px;flex-shrink:0;display:flex;flex-direction:column;">
+          <div style="${_colStyle}">
             <div class="${sc.hdr} rounded-t-xl px-3 py-2 flex items-center justify-between">
               <span class="${sc.txt} font-semibold text-xs uppercase tracking-wide">${stage}</span>
               <span class="${sc.txt} text-xs opacity-70">${sd.length}</span>
@@ -10520,6 +10549,7 @@ function viewCRM(){
     <div class="${_hasDupeGroups?'bg-amber-50 border border-amber-200':'bg-gray-50 border border-gray-200'} rounded-xl px-4 py-3 mb-4 flex items-center justify-between gap-3">
       <span class="text-xs ${_hasDupeGroups?'text-amber-700':'text-gray-500'} font-medium">${_hasDupeGroups?'⚠ Duplicate or similar group names detected — click to review and merge.':'🔍 Merge similar groups or manually select any two to combine.'}</span>
       <div class="flex gap-2 shrink-0">
+        <button onclick="window.exportGroupsCSV()" class="text-xs border border-gray-300 text-gray-600 hover:bg-white px-3 py-1.5 rounded-lg font-semibold whitespace-nowrap">⬇ Export CSV</button>
         <button onclick="window.crmSmartMergeGroups()" class="text-xs ${_hasDupeGroups?'brand-btn':'border border-gray-300 text-gray-600 hover:bg-white'} px-3 py-1.5 rounded-lg font-semibold whitespace-nowrap">Find &amp; Merge Similar</button>
         <button onclick="window.crmManualMergeGroups()" class="text-xs border border-gray-300 text-gray-600 hover:bg-white px-3 py-1.5 rounded-lg font-semibold whitespace-nowrap">Merge Two…</button>
       </div>
@@ -11643,6 +11673,8 @@ const _isGroupVisible = g => {
   if(!g.visibility || g.visibility === 'public') return true;
   // Admin view: see all private groups
   if(currentUser?.isAdmin && !adminViewAsAdvisor) return true;
+  // Staff view: see all private groups
+  if(isStaffView()) return true;
   // Advisor view (or non-admin): private groups only visible if explicitly in allowedUsers
   return (g.allowedUsers||[]).includes(currentUser?.uid);
 };
@@ -18029,6 +18061,23 @@ window.exportJSON = () => {
   const blob=new Blob([JSON.stringify(allDeals,null,2)],{type:'application/json'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='deals.json'; a.click();
 };
+window.exportGroupsCSV = () => {
+  const groups = (allCRMGroups||[]).filter(_isGroupVisible).sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+  const hdr = ['Group Name','Visibility','Member Count','Members (Name — Email)'];
+  const rows = groups.map(g => {
+    const members = (allContacts||[]).filter(c=>(c.groups||[]).includes(g.id));
+    const memberStr = members.map(c=>`${c.name||''}${c.email?' — '+c.email:''}`).join('; ');
+    return [g.name||'', g.visibility||'public', members.length, memberStr]
+      .map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',');
+  });
+  const csv = [hdr.join(','), ...rows].join('\n');
+  const blob = new Blob([csv], {type:'text/csv'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'groups.csv';
+  a.click();
+};
+
 window.exportCSV = () => {
   const hdr=['Address','Advisor','Stage','Probability','Purchase Price','Expected Revenue','Close Date','DD Date','Days In Stage'];
   const rows=allDeals.map(d=>[
