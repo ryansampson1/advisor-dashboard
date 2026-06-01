@@ -14627,24 +14627,53 @@ async function applyPendingProfile(uid, email){
 }
 
 // Admin: manually re-run deal migration for a user whose deals still reference a pending key
-window._adminFixAdvisorDeals = async (realUid, advisorName, advisorEmail) => {
-  if(!realUid || !advisorEmail){ showToast('Missing UID or email','error'); return; }
-  const pendingKey = 'pending_' + advisorEmail.toLowerCase().replace(/[^a-z0-9]/gi,'_');
-  showToast('Scanning deals for '+advisorName+'…','info',10000);
+window._adminFixAdvisorDeals = async (passedUid, advisorName, advisorEmail) => {
+  if(!advisorEmail){ showToast('Missing email','error'); return; }
+  const emailLow = advisorEmail.toLowerCase();
+  const pendingKey = 'pending_' + emailLow.replace(/[^a-z0-9]/gi,'_');
+
+  // If the UID passed IS the pending key, find the real Firebase Auth UID from advisorProfiles
+  let realUid = passedUid;
+  if(!realUid || realUid === pendingKey || realUid.startsWith('pending_')){
+    // Scan allProfiles for a non-pending profile with this email
+    const realEntry = Object.entries(allProfiles).find(([id, p]) =>
+      !id.startsWith('pending_') && !p.removed &&
+      (p.email||'').toLowerCase() === emailLow
+    );
+    if(realEntry){
+      realUid = realEntry[0];
+      advisorName = realEntry[1].name || advisorName;
+    } else {
+      // Try to find via Firestore directly — they may have logged in but allProfiles hasn't synced yet
+      try {
+        const {collection, getDocs: gD2, query: q2, where: w2} = _fbFns;
+        const snap = await gD2(q2(collection(_fbDb,'advisorProfiles'), w2('email','==',advisorEmail)));
+        const snap2 = !snap.docs.length ? await gD2(q2(collection(_fbDb,'advisorProfiles'), w2('email','==',emailLow))) : snap;
+        const realDoc = (snap2.docs||[]).find(d => !d.id.startsWith('pending_'));
+        if(realDoc){ realUid = realDoc.id; advisorName = realDoc.data().name || advisorName; }
+      } catch(fe){ console.warn('[fixDeals] Firestore email lookup failed', fe); }
+    }
+  }
+
+  if(!realUid || realUid.startsWith('pending_')){
+    showToast(`Can't find a real login UID for ${advisorName} — they may not have logged in yet. Ask them to log in once and try again.`, 'warning', 8000);
+    return;
+  }
+
+  showToast(`Scanning deals for ${advisorName} (${realUid.slice(0,8)}…)`, 'info', 15000);
   let count = 0;
   try {
     const {collection, getDocs, updateDoc, doc: fbDocFix} = _fbFns;
     const dealsSnap = await getDocs(collection(_fbDb,'deals'));
     for(const d of dealsSnap.docs){
       const dd = d.data(); const patch = {};
-      if(dd.advisorUid===pendingKey){ patch.advisorUid=realUid; patch.advisorName=advisorName; patch.advisorEmail=advisorEmail; }
-      const newCo=(dd.coAdvisors||[]).map(ca=>ca.uid===pendingKey?{...ca,uid:realUid,email:advisorEmail,name:advisorName}:ca);
+      if(dd.advisorUid===pendingKey){ patch.advisorUid=realUid; patch.advisorName=advisorName; patch.advisorEmail=emailLow; }
+      const newCo=(dd.coAdvisors||[]).map(ca=>ca.uid===pendingKey?{...ca,uid:realUid,email:emailLow,name:advisorName}:ca);
       if(newCo.some((ca,i)=>ca.uid!==(dd.coAdvisors||[])[i]?.uid)) patch.coAdvisors=newCo;
       const newCoUids=(dd.coAdvisorUids||[]).map(u=>u===pendingKey?realUid:u);
       if(newCoUids.some((u,i)=>u!==(dd.coAdvisorUids||[])[i])) patch.coAdvisorUids=newCoUids;
       if(Object.keys(patch).length){
         await updateDoc(fbDocFix(_fbDb,'deals',d.id),patch).catch(()=>{});
-        // Update in-memory allDeals too
         const memDeal = allDeals.find(x=>x.id===d.id);
         if(memDeal) Object.assign(memDeal, patch);
         count++;
@@ -14652,6 +14681,7 @@ window._adminFixAdvisorDeals = async (realUid, advisorName, advisorEmail) => {
     }
     showToast(`✅ Fixed ${count} deal${count!==1?'s':''} for ${advisorName}`, 'success', 6000);
     if(currentView==='users') viewUsers();
+    renderCurrentView();
   } catch(e){
     showToast('Fix failed: '+e.message,'error');
   }
