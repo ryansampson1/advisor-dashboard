@@ -9969,9 +9969,48 @@ let allCRMGroups = [];     // live-synced array
 let allCRMCompanies = [];  // live-synced standalone company records
 window._crmReady = false;
 
+// ── Dismissed merge pairs (persisted to Firestore) ─────────────────
+window._dismissedPairs = { contacts: new Set(), groups: new Set() };
+
+window._dismissPairKey = (id1, id2) => [id1, id2].sort().join('|');
+
+window._saveDismissedPairs = async () => {
+  if(!_fbDb || !_fbFns) return;
+  const {doc, setDoc} = _fbFns;
+  try {
+    await setDoc(doc(_fbDb, 'settings', 'crmDismissedPairs'), {
+      contacts: [...window._dismissedPairs.contacts],
+      groups:   [...window._dismissedPairs.groups],
+      updatedAt: Date.now(),
+    }, { merge: true });
+  } catch(e) { console.warn('[dismissedPairs save]', e); }
+};
+
+window._loadDismissedPairs = async () => {
+  if(!_fbDb || !_fbFns) return;
+  const {doc, getDoc} = _fbFns;
+  try {
+    const snap = await getDoc(doc(_fbDb, 'settings', 'crmDismissedPairs'));
+    if(snap.exists()){
+      const d = snap.data();
+      window._dismissedPairs.contacts = new Set(d.contacts || []);
+      window._dismissedPairs.groups   = new Set(d.groups   || []);
+    }
+  } catch(e) { console.warn('[dismissedPairs load]', e); }
+};
+
+window._dismissMergePair = async (type, id1, id2, rowEl) => {
+  const key = window._dismissPairKey(id1, id2);
+  window._dismissedPairs[type].add(key);
+  await window._saveDismissedPairs();
+  if(rowEl) rowEl.remove();
+  showToast('Pair dismissed — won\'t appear again', 'success', 2500);
+};
+
 function bootCRM(){
   if(window._crmReady) return;
   window._crmReady = true;
+  window._loadDismissedPairs(); // load dismissed pairs on CRM boot
   const {collection, onSnapshot, query, orderBy} = _fbFns;
   // Debounce: collapse burst of 3 independent snapshot fires into a single render
   let _crmRenderTimer = null;
@@ -11759,6 +11798,7 @@ window.crmSmartMergeGroups = async () => {
     for(let j=i+1;j<groups.length;j++){
       const b=groups[j], nb=_normGrp(b.name);
       if(na===nb) continue; // already handled by auto-merge
+      if(window._dismissedPairs.groups.has(window._dismissPairKey(a.id,b.id))) continue;
       const maxLen=Math.max(na.length,nb.length);
       const threshold = maxLen<=5?1:maxLen<=10?2:3;
       if(_lev(na,nb)<=threshold){
@@ -11779,9 +11819,9 @@ window.crmSmartMergeGroups = async () => {
     const keepA = p.ca>=p.cb;
     return `<tr class="border-b last:border-0" id="sgm-row-${i}">
       <td class="py-2 px-3 align-top">
-        <label class="flex items-center gap-2 cursor-pointer">
-          <input type="checkbox" id="sgm-chk-${i}" checked class="accent-blue-600 mt-0.5">
-          <div>
+        <div class="flex items-start gap-2">
+          <input type="checkbox" id="sgm-chk-${i}" checked class="accent-blue-600 mt-1 shrink-0">
+          <div class="flex-1 min-w-0">
             <div class="flex items-center gap-2 flex-wrap">
               <span class="font-medium text-sm text-gray-800">${p.a.name}</span>
               <span class="text-xs text-gray-400">${p.ca} contact${p.ca!==1?'s':''}</span>
@@ -11797,9 +11837,14 @@ window.crmSmartMergeGroups = async () => {
               <label class="flex items-center gap-1 cursor-pointer">
                 <input type="radio" name="sgm-keep-${i}" value="b" ${!keepA?'checked':''} class="accent-blue-600"> ${p.b.name}
               </label>
+              <button onclick="window._dismissMergePair('groups','${p.a.id}','${p.b.id}',document.getElementById('sgm-row-${i}'))"
+                style="margin-left:.5rem;padding:.15rem .55rem;font-size:.7rem;border-radius:6px;border:1px solid #e2e8f0;background:#f8fafc;color:#64748b;cursor:pointer;white-space:nowrap"
+                title="These are different groups — never suggest merging them again">
+                ✕ Not duplicates
+              </button>
             </div>
           </div>
-        </label>
+        </div>
       </td>
     </tr>`;
   }).join('');
@@ -11884,7 +11929,7 @@ window.crmSmartMergeContacts = async () => {
   for(const [email, grp] of Object.entries(emailMap)){
     for(let i=0;i<grp.length;i++) for(let j=i+1;j<grp.length;j++){
       const key=[grp[i].id,grp[j].id].sort().join('|');
-      if(!seen.has(key)){ seen.add(key); pairs.push({a:grp[i],b:grp[j],reason:'same email: '+email}); }
+      if(!seen.has(key) && !window._dismissedPairs.contacts.has(key)){ seen.add(key); pairs.push({a:grp[i],b:grp[j],reason:'same email: '+email}); }
     }
   }
 
@@ -11904,7 +11949,7 @@ window.crmSmartMergeContacts = async () => {
       if(!fa||!fb||fa.slice(0,2)!==fb.slice(0,2)) continue;
       if(_lev(fa,fb)>2) continue;
       const key=[a.id,b.id].sort().join('|');
-      if(!seen.has(key)){ seen.add(key); pairs.push({a,b,reason:'same last name "'+a.lastName+'", similar first name'}); }
+      if(!seen.has(key) && !window._dismissedPairs.contacts.has(key)){ seen.add(key); pairs.push({a,b,reason:'same last name "'+a.lastName+'", similar first name'}); }
     }
   }
 
@@ -11948,6 +11993,11 @@ window._smctOpenPage = (allPairData, offset) => {
               Keep:
               <label class="flex items-center gap-1 cursor-pointer"><input type="radio" name="scm-keep-${i}" value="a" ${keepA?'checked':''} class="accent-blue-600"> ${nameA}</label>
               <label class="flex items-center gap-1 cursor-pointer"><input type="radio" name="scm-keep-${i}" value="b" ${!keepA?'checked':''} class="accent-blue-600"> ${nameB}</label>
+              <button onclick="window._dismissMergePair('contacts','${p.a.id}','${p.b.id}',this.closest('tr'))"
+                style="margin-left:.5rem;padding:.15rem .55rem;font-size:.7rem;border-radius:6px;border:1px solid #e2e8f0;background:#f8fafc;color:#64748b;cursor:pointer;white-space:nowrap"
+                title="These are different people — never suggest merging them again">
+                ✕ Not duplicates
+              </button>
             </div>
           </div>
         </label>
@@ -16226,8 +16276,9 @@ function viewEOS(sub='rocks'){
         const wQPct  = Math.min(Math.round(wQVol/Q_GOAL*100),100);
         const qColor = wQPct>=100?'#059669':wQPct>=60?'#D97706':'#DA291C';
 
-        // Tasks
-        const openTasks = myTasks.filter(t=>t.status==='pending').length;
+        // Tasks — use same overdue-based formula as main scorecard for consistency
+        const wEndStr = wEnd.toISOString().slice(0,10);
+        const overdueInWk = myTasks.filter(t=>t.status==='pending'&&t.dueDate&&t.dueDate<=wEndStr).length;
         const doneTasks = myTasks.filter(t=>t.status==='complete'&&(t.updatedAt||0)>=wS&&(t.updatedAt||0)<=wE).length;
 
         // Deal activity
@@ -16249,16 +16300,16 @@ function viewEOS(sub='rocks'){
         const wi    = allProfiles[uid]?.weeklyInputs?.[wKey]||{};
         const netEv = wi.networkEvent||'', drPr=wi.driveProperties||'';
 
-        // Score
-        const pts_w=[wQPct>=10?10:0, Math.max(0,10-openTasks*2),
-          openTasks===0?10:Math.round(doneTasks/(doneTasks+openTasks)*10),
+        // Score — matches main scorecard: overdue-based task penalty
+        const pts_w=[wQPct>=10?10:0, Math.max(0,10-overdueInWk*2),
+          overdueInWk===0?10:0,
           pPts,lPts,prPts,lstPts,cPts, netEv==='yes'?10:0, drPr==='yes'?10:0];
         const score = Math.round(pts_w.reduce((a,b)=>a+b,0));
         const grade = weekGrade(score);
         const isCurr= wKey===weekKey;
 
         return `<tr class="border-b border-gray-100 ${isCurr?'bg-blue-50/40':'hover:bg-gray-50'} transition-colors">
-          <td class="px-4 py-3 text-sm text-gray-600 whitespace-nowrap">${wLabel}${isCurr?' <span class="text-xs font-semibold ml-1" style="color:#2563eb">← current</span>':''}</td>
+          <td class="px-4 py-3 text-sm text-gray-600 whitespace-nowrap">${wLabel}${isCurr?' <span class="text-xs font-semibold ml-1" style="color:#6b7280">← last week</span>':''}</td>
           <td class="px-3 py-3 text-center">
             <div style="display:inline-flex;flex-direction:column;align-items:center;gap:2px">
               <div style="width:34px;height:34px;border-radius:50%;background:${grade.bg};border:2px solid ${grade.color};display:flex;align-items:center;justify-content:center">
