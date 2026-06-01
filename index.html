@@ -4355,26 +4355,94 @@ function boContactSearch(value, dealKey){
 }
 window.boContactSearch = boContactSearch;
 
+// ── Required fields per stage ─────────────────────────────────────────────
+// Keys map to sf-* element IDs (without the 'sf-' prefix for readability).
+// Matched via includes() so 'Due Diligence' covers 'Due Diligence (Under Contract)' etc.
+const STAGE_REQUIRED_FIELDS = {
+  'Listing': [
+    {id:'sf-listed-price',       label:'Listed / Asking Price'},
+    {id:'sf-listing-effective',  label:'Listing Effective Date'},
+    {id:'sf-listing-expiration', label:'Listing Expiration Date'},
+    {id:'sf-elc-commission',     label:'ELC Commission %'},
+  ],
+  'LOI': [
+    {id:'sf-loi-price',   label:'LOI Offer Price'},
+    {id:'sf-buyer',       label:'Buyer / Company'},
+    {id:'sf-close-date',  label:'Closing Date'},
+  ],
+  'Due Diligence': [
+    {id:'sf-purchase-price',            label:'Purchase / Contract Price'},
+    {id:'sf-effective-date',            label:'Contract Effective Date'},
+    {id:'sf-elc-commission',            label:'ELC Commission %'},
+    {id:'sf-commission-paying-party',   label:'Commission Paid By'},
+    {id:'sf-dd-date',                   label:'DD / Inspection Expiration'},
+    {id:'sf-close-date',                label:'Closing Date'},
+    {id:'sf-escrow-agent',              label:'Escrow / Title Agent'},
+    {id:'sf-buyer',                     label:'Buyer / Company'},
+  ],
+  'Rezoning': [
+    {id:'sf-effective-date',       label:'Contract Effective Date'},
+    {id:'sf-rezone-expiration',    label:'Rezoning / Permitting Expiration'},
+    {id:'sf-close-date',           label:'Closing Date'},
+  ],
+  'Closing': [
+    {id:'sf-purchase-price',          label:'Purchase Price'},
+    {id:'sf-elc-commission',          label:'ELC Commission %'},
+    {id:'sf-commission-paying-party', label:'Commission Paid By'},
+    {id:'sf-close-date',              label:'Closing Date'},
+    {id:'sf-escrow-agent',            label:'Escrow / Title Agent'},
+  ],
+  'Sold': [
+    {id:'sf-purchase-price',          label:'Purchase Price'},
+    {id:'sf-elc-commission',          label:'ELC Commission %'},
+    {id:'sf-commission-paying-party', label:'Commission Paid By'},
+    {id:'sf-close-date',              label:'Closing Date'},
+  ],
+  'Lost': [
+    {id:'sf-lost-reason', label:'Lost / Termination Reason'},
+  ],
+  'Contract Terminated': [
+    {id:'sf-termination-reason', label:'Termination Reason'},
+  ],
+};
+
+// Returns required fields for a given stage string (fuzzy-matched)
+function getStageRequiredFields(stage){
+  const s = stage||'';
+  for(const [key, fields] of Object.entries(STAGE_REQUIRED_FIELDS)){
+    if(s.toLowerCase().includes(key.toLowerCase())) return fields;
+  }
+  return [];
+}
+
 function renderStageFields(stage, data={}){
   const container = document.getElementById('stage-fields');
   if(!container) return;
 
   const dealKey = editingDealId||'new';
+  const reqFields = new Set(getStageRequiredFields(stage).map(f=>f.id));
 
   // ── helpers ──────────────────────────────────────────────────────
-  const inp = (id,label,type,ph,val='',req=false,extra='') => `
+  // req=true forces required; req omitted → auto-detect from reqFields set
+  const inp = (id,label,type,ph,val='',req,extra='') => {
+    const isReq = req===true || (req!==false && reqFields.has(id));
+    return `
     <div>
-      <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">${label}${req?' <span class="text-red-500">*</span>':''}</label>
-      <input id="${id}" type="${type}" placeholder="${ph}" value="${val||''}" ${req?'required':''} ${extra}
-        class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-red-300"/>
+      <label class="block text-xs font-semibold ${isReq?'text-red-600':'text-gray-500'} uppercase tracking-wide mb-1">${label}${isReq?' <span class="text-red-500">*</span>':''}</label>
+      <input id="${id}" type="${type}" placeholder="${ph}" value="${val||''}" ${isReq?'required':''}
+        class="w-full border ${isReq?'border-red-200 bg-red-50/30':'border-gray-300'} rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-red-300" ${extra}/>
     </div>`;
-  const sel = (id,label,opts,val='') => `
+  };
+  const sel = (id,label,opts,val='') => {
+    const isReq = reqFields.has(id);
+    return `
     <div>
-      <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">${label}</label>
-      <select id="${id}" class="w-full border rounded-lg px-3 py-2 text-sm outline-none">
+      <label class="block text-xs font-semibold ${isReq?'text-red-600':'text-gray-500'} uppercase tracking-wide mb-1">${label}${isReq?' <span class="text-red-500">*</span>':''}</label>
+      <select id="${id}" class="w-full border ${isReq?'border-red-200 bg-red-50/30':'border-gray-300'} rounded-lg px-3 py-2 text-sm outline-none">
         ${opts.map(o=>`<option value="${o.v||o}" ${(val||'')===(o.v||o)?'selected':''}>${o.l||o}</option>`).join('')}
       </select>
     </div>`;
+  };
   const fileZone = (zoneId,fileInputId,labelId,onchange,ondrop,existingName='',label='Upload Document') => {
     const hasFile = !!existingName;
     return `
@@ -4517,17 +4585,17 @@ function renderStageFields(stage, data={}){
       <div class="space-y-3">
         <div class="grid grid-cols-3 gap-3">
           <div>
-            <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">ELC Commission %</label>
-            <div class="flex items-center border rounded-lg overflow-hidden">
+            <label class="block text-xs font-semibold ${reqFields.has('sf-elc-commission')?'text-red-600':'text-gray-500'} uppercase tracking-wide mb-1">ELC Commission %${reqFields.has('sf-elc-commission')?' <span class="text-red-500">*</span>':''}</label>
+            <div class="flex items-center border ${reqFields.has('sf-elc-commission')?'border-red-200 bg-red-50/30':'border-gray-300'} rounded-lg overflow-hidden">
               <input id="sf-elc-commission" type="number" min="0" max="100" step="0.25" placeholder="6.0"
                 value="${commPct||''}"
-                class="flex-1 px-3 py-2 text-sm outline-none"/>
+                class="flex-1 px-3 py-2 text-sm outline-none bg-transparent"/>
               <span class="px-3 py-2 bg-gray-50 text-gray-500 text-sm font-semibold border-l">%</span>
             </div>
           </div>
           <div>
-            <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Commission Paid By</label>
-            <select id="sf-commission-paying-party" class="w-full border rounded-lg px-3 py-2 text-sm outline-none">
+            <label class="block text-xs font-semibold ${reqFields.has('sf-commission-paying-party')?'text-red-600':'text-gray-500'} uppercase tracking-wide mb-1">Commission Paid By${reqFields.has('sf-commission-paying-party')?' <span class="text-red-500">*</span>':''}</label>
+            <select id="sf-commission-paying-party" class="w-full border ${reqFields.has('sf-commission-paying-party')?'border-red-200 bg-red-50/30':'border-gray-300'} rounded-lg px-3 py-2 text-sm outline-none">
               <option value="">— Select —</option>
               <option value="seller" ${data.commissionPayingParty==='seller'?'selected':''}>Seller</option>
               <option value="buyer" ${data.commissionPayingParty==='buyer'?'selected':''}>Buyer</option>
@@ -17919,17 +17987,24 @@ window.handleDealSubmit = async ev => {
   // Collect stage fields first so we can fall back to them during gate validation
   // (built-in stage templates use sf-* IDs, not gf-* IDs, so gf- elements won't exist)
   const sf = collectStageFields();
-  // Require Effective Date for contract-active stages (including custom stages containing these keywords)
-  const needsEffDate = ['Due Diligence','Due Diligence (Under Contract)','Rezoning/Permitting'].includes(stage)
-    || stage.includes('Due Diligence') || stage.includes('Rezoning') || stage.includes('Permitting');
-  if(needsEffDate && !sf.effectiveDate){
-    const el=document.getElementById('sf-effective-date');
-    if(el){ el.focus(); el.style.outline='2px solid #DC2626'; }
-    showToast('Please enter an Effective Date before saving','warning');
-    return;
+
+  // ── Unified required-field validation (driven by STAGE_REQUIRED_FIELDS) ──
+  const _reqFields = getStageRequiredFields(stage);
+  for(const {id, label} of _reqFields){
+    const el = document.getElementById(id);
+    if(!el) continue;
+    const val = el.value?.trim?.() ?? '';
+    if(!val || val === '0'){
+      el.focus();
+      el.style.outline = '2px solid #DC2626';
+      el.style.borderColor = '#DC2626';
+      setTimeout(()=>{ el.style.outline=''; el.style.borderColor=''; }, 3000);
+      showToast(`"${label}" is required for ${stage} deals`, 'warning');
+      return;
+    }
   }
 
-  // Manual mode validation — enforce required fields when advisor chose "Enter Manually"
+  // Legacy manual-mode validation (kept for custom gate stages)
   if(sf.docMode === 'manual'){
     const manualRequired = {
       'Listing':         [{id:'sf-listed-price',label:'Listing Price'},{id:'sf-listing-effective',label:'Effective Date'},{id:'sf-listing-expiration',label:'Expiration Date'},{id:'sf-elc-commission',label:'Commission %'}],
