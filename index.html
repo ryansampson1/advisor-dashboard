@@ -13376,31 +13376,56 @@ async function _fetchGmailContacts(token, afterTs){
     pageToken = data.nextPageToken;
   } while(pageToken && ids.length < 500);
 
-  // Step 2: fetch From/To headers in batches of 25
+  // Step 2: fetch From/To/Subject headers in batches of 25
   const contacts = new Map();
+  const messages = []; // individual messages with subjects for property matching
   for(let i=0; i<ids.length; i+=25){
     await Promise.all(ids.slice(i,i+25).map(async id => {
       try {
-        const r = await fetch(`https://www.googleapis.com/gmail/v1/users/me/messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=To`, {headers:AUTH});
+        // Use full format to get body text + attachment filenames for better property matching
+        const r = await fetch(`https://www.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`, {headers:AUTH});
         if(!r.ok) return;
         const msg = await r.json();
-        for(const h of (msg.payload?.headers||[])){
-          if(h.name!=='From' && h.name!=='To') continue;
-          for(const {email, nameRaw} of _parseEmailHeader(h.value)){
+        const hMap = {};
+        for(const h of (msg.payload?.headers||[])) hMap[h.name] = h.value;
+        const subject = hMap['Subject']||'';
+        const dateMs  = parseInt(msg.internalDate||'0');
+        const dateStr = dateMs ? new Date(dateMs).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) : '';
+        // Extract plain text body + attachment filenames for richer property matching
+        const _extractParts = parts => {
+          let text='', atts=[];
+          for(const p of (parts||[])){
+            if(p.mimeType==='text/plain' && p.body?.data) try { text += atob(p.body.data.replace(/-/g,'+').replace(/_/g,'/')); } catch{}
+            if(p.filename) atts.push(p.filename);
+            if(p.parts) { const sub=_extractParts(p.parts); text+=sub.text; atts.push(...sub.atts); }
+          }
+          return {text, atts};
+        };
+        const {text: bodyText, atts: attNames} = _extractParts([msg.payload]);
+        const richText = (subject+' '+(msg.snippet||'')+' '+bodyText.slice(0,2000)+' '+attNames.join(' ')).slice(0,3000);
+        // Parse contacts from From/To
+        for(const field of ['From','To']){
+          if(!hMap[field]) continue;
+          for(const {email, nameRaw} of _parseEmailHeader(hMap[field])){
             if(contacts.has(email)) continue;
             if(SKIP.some(s=>email.includes(s))) continue;
             const parts = nameRaw.split(/\s+/);
             const firstName = parts[0]||'';
-            const lastName = parts.slice(1).join(' ')||'';
-            const domPart = email.split('@')[1]?.split('.')[0]||'';
+            const lastName  = parts.slice(1).join(' ')||'';
+            const domPart   = email.split('@')[1]?.split('.')[0]||'';
             const companyHint = domPart ? domPart.charAt(0).toUpperCase()+domPart.slice(1) : '';
             contacts.set(email, {email, nameRaw, firstName, lastName, companyHint, phone:''});
           }
         }
+        // Store individual message for property matching (include rich text for matching)
+        if(subject && hMap['From'] && !SKIP.some(s=>(hMap['From']||'').includes(s))){
+          messages.push({id, subject, from:hMap['From'], snippet:(msg.snippet||''), richText, dateMs, dateStr});
+        }
       } catch(e){/* skip */}
     }));
   }
-  return Array.from(contacts.values());
+  messages.sort((a,b)=>b.dateMs-a.dateMs);
+  return {contacts: Array.from(contacts.values()), messages};
 }
 
 window.crmGmailSync = async () => {
@@ -13427,12 +13452,16 @@ window.crmGmailSync = async () => {
     const afterLabel = new Date(afterTs).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
     setSub(`Fetching emails since ${afterLabel}…`);
 
-    const fresh = await _fetchGmailContacts(token, afterTs);
+    const {contacts: fresh, messages: freshMsgs} = await _fetchGmailContacts(token, afterTs);
 
-    // Merge new emails into global sync data
+    // Merge new contacts into global sync data
     const seen = new Set(_GMAIL_SYNC_DATA.map(g=>g.email.toLowerCase()));
     const added = fresh.filter(c=>!seen.has(c.email.toLowerCase()));
     _GMAIL_SYNC_DATA = [..._GMAIL_SYNC_DATA, ...added];
+    // Store individual messages for property matching
+    if(!window._GMAIL_SYNC_MESSAGES) window._GMAIL_SYNC_MESSAGES = [];
+    const seenMsgIds = new Set(window._GMAIL_SYNC_MESSAGES.map(m=>m.id));
+    window._GMAIL_SYNC_MESSAGES = [...(freshMsgs||[]).filter(m=>!seenMsgIds.has(m.id)), ...window._GMAIL_SYNC_MESSAGES].slice(0,500);
     _GMAIL_SYNC_DATE = new Date().toISOString().slice(0,10);
     localStorage.setItem(SYNC_KEY, String(Date.now()));
 
@@ -13497,12 +13526,13 @@ window.crmGmailSync = async () => {
         <button onclick="window._gssSetTab('all')" id="gss-tab-all" class="px-3 py-1 rounded text-xs font-semibold bg-gray-800 text-white">All (${rows.length})</button>
         <button onclick="window._gssSetTab('new')" id="gss-tab-new" class="px-3 py-1 rounded text-xs font-semibold text-gray-600 hover:bg-gray-100">New (${newCount})</button>
         <button onclick="window._gssSetTab('update')" id="gss-tab-update" class="px-3 py-1 rounded text-xs font-semibold text-gray-600 hover:bg-gray-100">Updates (${updateCount})</button>
+        <button onclick="window._gssSetTab('property')" id="gss-tab-property" class="px-3 py-1 rounded text-xs font-semibold text-gray-600 hover:bg-gray-100">📬 Email → Property (${(window._GMAIL_SYNC_MESSAGES||[]).length})</button>
       </div>
 
     </div>
 
-    <!-- Table -->
-    <div class="flex-1 overflow-y-auto">
+    <!-- Contacts Table -->
+    <div id="gss-panel-contacts" class="flex-1 overflow-y-auto">
       <table class="w-full text-sm">
         <thead class="sticky top-0 bg-gray-50 border-b z-10">
           <tr class="text-left text-xs text-gray-500 uppercase tracking-wide">
@@ -13547,11 +13577,63 @@ window.crmGmailSync = async () => {
       </table>
     </div>
 
+    <!-- Email → Property Panel (hidden until tab clicked) -->
+    <div id="gss-panel-property" class="flex-1 overflow-y-auto hidden">
+      <div style="padding:.6rem 1.25rem;background:#eff6ff;border-bottom:1px solid #bfdbfe;font-size:.75rem;color:#1d4ed8">
+        Each email is matched to a property by scanning the subject, body, and attachments for address, project name, acreage, etc. Confirm or change the match, then click "Log to Properties."
+      </div>
+      <table class="w-full text-sm">
+        <thead class="sticky top-0 bg-gray-50 border-b z-10">
+          <tr class="text-left text-xs text-gray-500 uppercase tracking-wide">
+            <th class="px-4 py-2.5 w-8"><input type="checkbox" id="gsp-select-all" checked onchange="document.querySelectorAll('.gsp-chk').forEach(c=>c.checked=this.checked)"/></th>
+            <th class="px-3 py-2.5">Date</th>
+            <th class="px-3 py-2.5">From</th>
+            <th class="px-3 py-2.5">Subject</th>
+            <th class="px-3 py-2.5" style="min-width:240px">Property Match</th>
+          </tr>
+        </thead>
+        <tbody id="gsp-tbody" class="divide-y divide-gray-100">
+          ${(()=>{
+            const msgs = window._GMAIL_SYNC_MESSAGES || [];
+            if(!msgs.length) return '<tr><td colspan="5" class="px-5 py-8 text-center text-sm text-gray-400">No emails yet — run Gmail Sync to load messages first.</td></tr>';
+            const activDeals = allDeals.filter(d=>!isLostStage(d.stage||'') && !isWonStage(d.stage||'')).sort((a,b)=>(a.propertyAddress||a.projectName||'').localeCompare(b.propertyAddress||b.projectName||''));
+            return msgs.map((m,i)=>{
+              // Score each deal against subject + snippet
+              const text = (m.richText||m.subject+' '+m.snippet).toLowerCase().replace(/[^a-z0-9\s]/g,' ');
+              let bestId='', bestScore=0;
+              for(const d of activDeals){
+                const keywords = (d.propertyAddress+' '+d.projectName+' '+(d.county||'')+' '+(d.acreage||d.acres||'')).split(/[\s,\/\-–]+/).map(w=>w.replace(/[^a-z0-9]/gi,'').toLowerCase()).filter(w=>w.length>3&&!/^(road|street|drive|blvd|avenue|lane|court|florida|county|the|and|for|llc|inc|acres|acre)$/i.test(w));
+                const score = keywords.reduce((s,w)=>s+(text.includes(w)?1:0),0);
+                if(score>bestScore){bestScore=score;bestId=d.id;}
+              }
+              const fromName=(m.from.replace(/<.*>/,'').replace(/"/g,'').trim()||m.from).slice(0,30);
+              const matched = bestScore>0;
+              return `<tr class="hover:bg-gray-50">
+                <td class="px-4 py-2"><input type="checkbox" class="gsp-chk accent-blue-600" data-mid="${m.id}" ${matched?'checked':'checked'}/></td>
+                <td class="px-3 py-2 text-xs text-gray-500 whitespace-nowrap">${m.dateStr}</td>
+                <td class="px-3 py-2 text-xs text-gray-700 max-w-[130px] overflow-hidden" style="text-overflow:ellipsis;white-space:nowrap" title="${m.from}">${fromName}</td>
+                <td class="px-3 py-2 font-medium text-gray-900 max-w-[200px] overflow-hidden" style="text-overflow:ellipsis;white-space:nowrap" title="${m.subject}">${m.subject}</td>
+                <td class="px-3 py-2">
+                  <div style="display:flex;align-items:center;gap:6px">
+                    <select class="gsp-deal border rounded px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-blue-300" style="min-width:180px" data-mid="${m.id}">
+                      <option value="">— No property —</option>
+                      ${activDeals.map(d=>`<option value="${d.id}" ${d.id===bestId&&matched?'selected':''}>${(d.projectName||d.propertyAddress||'Unnamed').slice(0,40)} — ${d.stage||''}</option>`).join('')}
+                    </select>
+                    ${matched?`<span style="font-size:.7rem;color:#16a34a;white-space:nowrap">✓ matched</span>`:`<span style="font-size:.7rem;color:#9ca3af;white-space:nowrap">— no match</span>`}
+                  </div>
+                </td>
+              </tr>`;
+            }).join('');
+          })()}
+        </tbody>
+      </table>
+    </div>
+
     <!-- Footer -->
     <div class="px-6 py-4 border-t flex items-center justify-between gap-3 shrink-0 bg-white">
       <span id="gss-count-label" class="text-xs text-gray-500">${rows.length} selected</span>
       <div class="flex gap-3">
-        <button onclick="window._execGmailSync()" class="brand-btn px-6 py-2.5 rounded-xl text-sm font-semibold">Import Selected</button>
+        <button id="gss-import-btn" onclick="window._execGmailSync()" class="brand-btn px-6 py-2.5 rounded-xl text-sm font-semibold">Import Selected</button>
         <button onclick="document.getElementById('crm-gmail-sync-modal')?.remove()" class="px-4 border rounded-xl py-2.5 text-sm text-gray-600">Cancel</button>
       </div>
     </div>
@@ -13573,12 +13655,53 @@ window.crmGmailSync = async () => {
 
 window._gssSetTab = (tab) => {
   window._gsTab = tab;
-  ['all','new','update'].forEach(t => {
+  ['all','new','update','property'].forEach(t => {
     const btn = document.getElementById(`gss-tab-${t}`);
     if(btn){ btn.className = btn.className.replace(/bg-gray-800 text-white|text-gray-600 hover:bg-gray-100/g,'');
       btn.className += t===tab?' bg-gray-800 text-white':' text-gray-600 hover:bg-gray-100'; }
   });
-  window._gssFilter();
+  // Toggle panels
+  const contactsPanel  = document.getElementById('gss-panel-contacts');
+  const propertyPanel  = document.getElementById('gss-panel-property');
+  const importBtn      = document.getElementById('gss-import-btn');
+  const searchBar      = document.getElementById('gss-search');
+  if(tab === 'property'){
+    contactsPanel?.classList.add('hidden');
+    propertyPanel?.classList.remove('hidden');
+    if(importBtn){ importBtn.textContent='📬 Log to Properties'; importBtn.onclick=window._execPropertyLog; }
+    if(searchBar) searchBar.style.display='none';
+  } else {
+    contactsPanel?.classList.remove('hidden');
+    propertyPanel?.classList.add('hidden');
+    if(importBtn){ importBtn.textContent='Import Selected'; importBtn.onclick=window._execGmailSync; }
+    if(searchBar) searchBar.style.display='';
+    window._gssFilter();
+  }
+};
+
+// Log checked emails to their matched properties as activity notes
+window._execPropertyLog = async () => {
+  const msgs = window._GMAIL_SYNC_MESSAGES || [];
+  const checked = [...document.querySelectorAll('.gsp-chk:checked')].map(c=>c.dataset.mid);
+  if(!checked.length){ showToast('No emails selected','warning'); return; }
+  const dealMap = {};
+  document.querySelectorAll('.gsp-deal').forEach(sel => {
+    if(checked.includes(sel.dataset.mid) && sel.value) dealMap[sel.dataset.mid] = sel.value;
+  });
+  const toLog = checked.filter(mid => dealMap[mid]);
+  if(!toLog.length){ showToast('No properties selected for the checked emails','warning'); return; }
+  document.getElementById('crm-gmail-sync-modal')?.remove();
+  showToast(`Logging ${toLog.length} email${toLog.length!==1?'s':''} to properties…`,'info',10000);
+  let count=0;
+  for(const mid of toLog){
+    const m = msgs.find(x=>x.id===mid);
+    const dealId = dealMap[mid];
+    if(!m||!dealId) continue;
+    const body = `📧 **${m.subject}**\nFrom: ${m.from}\nDate: ${m.dateStr}\n\n${m.snippet}`;
+    await window._dealLogActivity(dealId,'email',{body, gmailId:m.id, gmailSubject:m.subject, gmailFrom:m.from, gmailDate:m.dateStr});
+    count++;
+  }
+  showToast(`✅ Logged ${count} email${count!==1?'s':''} across properties`,'success',5000);
 };
 
 window._gssFilter = () => {
