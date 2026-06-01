@@ -9231,7 +9231,10 @@ function viewUsers(){
     '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.5rem">'
       +'<div><h2 style="font-size:1.25rem;font-weight:700;color:#1f2937">Users</h2>'
       +'<p style="font-size:.875rem;color:#6b7280;margin-top:.125rem">'+users.length+' user'+(users.length!==1?'s':'')+' &middot; Manage access and roles</p></div>'
+      +'<div style="display:flex;gap:.5rem">'
+      +'<button onclick="showMergeUsersModal()" style="background:#f0f9ff;color:#0369a1;border:1px solid #bae6fd;border-radius:8px;padding:.55rem 1.1rem;font-weight:700;font-size:.875rem;cursor:pointer">⚡ Merge Duplicates</button>'
       +'<button onclick="showInviteForm()" style="background:var(--brand-red);color:#fff;border:none;border-radius:8px;padding:.55rem 1.1rem;font-weight:700;font-size:.875rem;cursor:pointer">+ Invite User</button>'
+      +'</div>'
     +'</div>'
 
     // Invite form (hidden)
@@ -9322,6 +9325,136 @@ window._editUser = function(uid){
   m.style.display = 'flex';
 };
 
+window.showMergeUsersModal = function(){
+  document.getElementById('merge-users-modal')?.remove();
+  const allActive = Object.entries(allProfiles)
+    .filter(([,p])=>!p.removed)
+    .map(([id,p])=>({uid:id, name:p.name||p.email||id, email:p.email||''}))
+    .sort((a,b)=>a.name.localeCompare(b.name));
+
+  const opts = allActive.map(u=>`<option value="${u.uid}">${u.name}${u.email?' ('+u.email+')':''}</option>`).join('');
+
+  const modal = document.createElement('div');
+  modal.id = 'merge-users-modal';
+  modal.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.5);padding:16px';
+  modal.innerHTML = `
+    <div style="background:#fff;border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,.25);width:100%;max-width:480px;overflow:hidden">
+      <div style="padding:18px 20px 14px;border-bottom:1px solid #f1f5f9;display:flex;justify-content:space-between;align-items:center">
+        <div>
+          <div style="font-size:15px;font-weight:700;color:#111">⚡ Merge Duplicate Users</div>
+          <div style="font-size:12px;color:#64748b;margin-top:2px">All deals, tasks and co-advisor credits move to the kept account. The duplicate is removed.</div>
+        </div>
+        <button onclick="document.getElementById('merge-users-modal')?.remove()"
+          style="width:28px;height:28px;border-radius:50%;border:1px solid #e2e8f0;background:#f8fafc;font-size:14px;cursor:pointer;color:#64748b">✕</button>
+      </div>
+      <div style="padding:16px 20px;display:flex;flex-direction:column;gap:14px">
+        <div>
+          <label style="font-size:.75rem;font-weight:700;color:#374151;text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:6px">✅ Keep this account</label>
+          <select id="mu-keep" style="width:100%;border:1px solid #d1d5db;border-radius:8px;padding:.5rem .75rem;font-size:.875rem;outline:none">${opts}</select>
+        </div>
+        <div>
+          <label style="font-size:.75rem;font-weight:700;color:#dc2626;text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:6px">🗑 Remove this duplicate</label>
+          <select id="mu-remove" style="width:100%;border:1px solid #fca5a5;border-radius:8px;padding:.5rem .75rem;font-size:.875rem;outline:none">${opts}</select>
+        </div>
+        <div style="background:#fef9c3;border:1px solid #fde047;border-radius:8px;padding:10px 12px;font-size:.8rem;color:#854d0e">
+          ⚠️ This cannot be undone. The "Remove" account will be permanently deactivated and all its data will transfer to the "Keep" account.
+        </div>
+      </div>
+      <div style="padding:12px 20px;border-top:1px solid #f1f5f9;display:flex;gap:8px">
+        <button onclick="window._doMergeUsers()" style="flex:1;background:#dc2626;color:#fff;font-size:.875rem;font-weight:700;padding:10px 16px;border-radius:10px;border:none;cursor:pointer">Merge Users</button>
+        <button onclick="document.getElementById('merge-users-modal')?.remove()" style="padding:10px 16px;border-radius:10px;border:1px solid #e2e8f0;background:#f8fafc;font-size:.875rem;color:#374151;cursor:pointer">Cancel</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  modal.addEventListener('click', e=>{ if(e.target===modal) modal.remove(); });
+};
+
+window._doMergeUsers = async function(){
+  const keepUid   = document.getElementById('mu-keep')?.value;
+  const removeUid = document.getElementById('mu-remove')?.value;
+  if(!keepUid || !removeUid){ showToast('Please select both accounts','error'); return; }
+  if(keepUid === removeUid){ showToast('Keep and Remove must be different users','error'); return; }
+
+  const keepProfile   = allProfiles[keepUid];
+  const removeProfile = allProfiles[removeUid];
+  const keepName  = keepProfile?.name  || keepProfile?.email  || keepUid;
+  const removeName= removeProfile?.name|| removeProfile?.email|| removeUid;
+
+  if(!confirm(`Merge "${removeName}" INTO "${keepName}"?\n\nAll deals, tasks and co-advisor credits from "${removeName}" will transfer to "${keepName}". This cannot be undone.`)) return;
+
+  document.getElementById('merge-users-modal')?.remove();
+  showToast('Merging users…','info',15000);
+
+  try {
+    const {doc, writeBatch} = _fbFns;
+    const BATCH_SIZE = 400;
+
+    // ── 1. Re-home deals ────────────────────────────────────────────
+    const affectedDeals = allDeals.filter(d =>
+      d.advisorUid === removeUid ||
+      (d.coAdvisors||[]).some(ca=>ca.uid===removeUid)
+    );
+    for(let i=0; i<affectedDeals.length; i+=BATCH_SIZE){
+      const b = writeBatch(_fbDb);
+      for(const deal of affectedDeals.slice(i, i+BATCH_SIZE)){
+        const upd = {};
+        if(deal.advisorUid === removeUid){
+          upd.advisorUid   = keepUid;
+          upd.advisorName  = keepProfile?.name  || deal.advisorName;
+          upd.advisorEmail = keepProfile?.email || deal.advisorEmail;
+        }
+        const newCo = (deal.coAdvisors||[]).map(ca =>
+          ca.uid === removeUid ? {...ca, uid:keepUid, name:keepProfile?.name||ca.name, email:keepProfile?.email||ca.email} : ca
+        );
+        if(newCo.length) upd.coAdvisors = newCo;
+        if(Object.keys(upd).length) b.update(doc(_fbDb,'deals',deal.id), upd);
+      }
+      await b.commit();
+    }
+
+    // ── 2. Re-home tasks ────────────────────────────────────────────
+    const affectedTasks = allTasks.filter(t =>
+      t.assignedTo === removeUid || t.createdBy === removeUid
+    );
+    for(let i=0; i<affectedTasks.length; i+=BATCH_SIZE){
+      const b = writeBatch(_fbDb);
+      for(const task of affectedTasks.slice(i, i+BATCH_SIZE)){
+        const upd = {};
+        if(task.assignedTo === removeUid){
+          upd.assignedTo     = keepUid;
+          upd.assignedToName = keepProfile?.name  || task.assignedToName;
+          upd.assignedToEmail= keepProfile?.email || task.assignedToEmail;
+        }
+        if(task.createdBy === removeUid) upd.createdBy = keepUid;
+        if(Object.keys(upd).length) b.update(doc(_fbDb,'tasks',task.id), upd);
+      }
+      await b.commit();
+    }
+
+    // ── 3. Flag duplicate profile as removed ────────────────────────
+    await Store.saveProfile(removeUid, {
+      removed: true, removedAt: Date.now(), removedBy: currentUser.uid,
+      mergedInto: keepUid, mergedIntoName: keepName,
+    });
+
+    // ── 4. Refresh local state ───────────────────────────────────────
+    allDeals.forEach(d=>{
+      if(d.advisorUid===removeUid){ d.advisorUid=keepUid; d.advisorName=keepProfile?.name||d.advisorName; d.advisorEmail=keepProfile?.email||d.advisorEmail; }
+      if(d.coAdvisors) d.coAdvisors = d.coAdvisors.map(ca=>ca.uid===removeUid?{...ca,uid:keepUid,name:keepProfile?.name||ca.name}:ca);
+    });
+    allTasks.forEach(t=>{
+      if(t.assignedTo===removeUid){ t.assignedTo=keepUid; t.assignedToName=keepProfile?.name||t.assignedToName; }
+    });
+    if(allProfiles[removeUid]) allProfiles[removeUid].removed = true;
+
+    showToast(`✅ Merged "${removeName}" into "${keepName}" — ${affectedDeals.length} deal${affectedDeals.length!==1?'s':''} and ${affectedTasks.length} task${affectedTasks.length!==1?'s':''} transferred`, 'success', 7000);
+    viewUsers();
+  } catch(e){
+    console.error('[mergeUsers]', e);
+    showToast('Merge failed: '+e.message, 'error');
+  }
+};
+
 window._removeUser = async function(uid){
   const u = _usersData[uid];
   const label = u ? (u.name||u.email||uid) : uid;
@@ -9348,6 +9481,9 @@ window.sendInvite = async function(){
   });
   if(!roles.length) roles.push('advisor');
   if(!email){ showToast('Please enter an email address','error'); return; }
+  // Email uniqueness check
+  const _invDupe = Object.values(allProfiles).find(p=>!p.removed && (p.email||'').toLowerCase()===email.toLowerCase());
+  if(_invDupe){ showToast('A user with that email already exists: '+((_invDupe.name)||email),'error'); return; }
   try {
     await Store.saveProfile('pending_'+email.replace(/[^a-z0-9]/gi,'_'),
       {name, email, office, roles, pending:true, invitedAt:Date.now()});
@@ -9376,6 +9512,11 @@ window.saveUserEdit = async function(){
   });
   if(!roles.length) roles.push('advisor');
   if(!uid){ showToast('No user selected','error'); return; }
+  // Email uniqueness check — ensure no other active user has this email
+  if(email){
+    const _editDupe = Object.entries(allProfiles).find(([id,p])=>id!==uid && !p.removed && (p.email||'').toLowerCase()===email.toLowerCase());
+    if(_editDupe){ showToast('Email already in use by: '+((_editDupe[1].name)||email),'error'); return; }
+  }
   try {
     await Store.saveProfile(uid, {name, email, office, roles, updatedAt:Date.now()});
     allDeals.forEach(d=>{ if(d.advisorUid===uid){ d.advisorName=name; d.advisorEmail=email; } });
