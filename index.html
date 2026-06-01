@@ -1205,6 +1205,10 @@ const DRIVE_FOLDERS = {
 
 // Staff-only: no commissions, read-only pipeline
 const STAFF_ONLY_EMAILS = ['krissy@thedirtdog.com','nick@thedirtdog.com','intern@thedirtdog.com'];
+// Redirect task assignments from one email to another (e.g. role changes)
+const EMAIL_REMAP = {
+  'nick@thedirtdog.com': 'marketing@thedirtdog.com',
+};
 // Dual-role: advisor by default, can toggle into Staff view
 const DUAL_ROLE_EMAILS  = ['pat@thedirtdog.com','andrew@thedirtdog.com'];
 
@@ -6363,10 +6367,11 @@ function fireAutomations(deal, oldStage){
         // Support assignToEmail — look up profile by email to get UID/name
         let assignUid = deal.advisorUid, assignName = deal.advisorName||deal.advisorEmail, assignEmail = '';
         if(cfg.assignToEmail){
-          const targetEmail = cfg.assignToEmail.toLowerCase();
+          const rawEmail = cfg.assignToEmail.toLowerCase();
+          const targetEmail = EMAIL_REMAP[rawEmail] || rawEmail;
           const match = Object.entries(allProfiles).find(([,p])=>(p.email||'').toLowerCase()===targetEmail);
           if(match){ assignUid=match[0]; assignName=match[1].name||match[1].email||targetEmail; }
-          assignEmail = cfg.assignToEmail;
+          assignEmail = EMAIL_REMAP[rawEmail] || cfg.assignToEmail;
         }
         const task={
           title: taskTitle, description: taskDesc,
@@ -17839,7 +17844,15 @@ window.handleDealSubmit = async ev => {
     Object.assign(existing,data);
     if(oldStage!==stage) fireAutomations(existing,oldStage);
     // ── Structured Drive workflow on stage change ──────────────────────────
-    if(oldStage!==stage) window._driveStageWorkflow(existing, stage, { fileKey }).catch(()=>{});
+    // Capture files synchronously NOW before async cleanup runs later
+    const _driveSnap = {
+      loi: stageFiles[`${fileKey}__loi`],
+      psa: stageFiles[`${fileKey}__psa`],
+      'closing-statement': stageFiles[`${fileKey}__closing-statement`],
+      listing: listingFiles[fileKey],
+      contract: contractFiles[fileKey],
+    };
+    if(oldStage!==stage) window._driveStageWorkflow(existing, stage, { fileKey, files: _driveSnap }).catch(()=>{});
     // NOTE: auto-create intentionally removed from edit path — running on every save
     // caused deleted CRM contacts to reappear. Contacts are seeded once at deal creation only.
     // ── "Ready for websites?" task — fire only when answer newly set to yes ──
@@ -17885,7 +17898,14 @@ window.handleDealSubmit = async ev => {
     if(!allDeals.find(d=>d.id===newId)) allDeals.push(newDeal);
     fireAutomations(newDeal,null);
     // ── Structured Drive workflow on new deal create ───────────────────────
-    window._driveStageWorkflow(newDeal, stage, { fileKey: fileKey==='new'?'new':newId }).catch(()=>{});
+    const _driveSnapNew = {
+      loi: stageFiles[`${fileKey}__loi`] || stageFiles[`new__loi`],
+      psa: stageFiles[`${fileKey}__psa`] || stageFiles[`new__psa`],
+      'closing-statement': stageFiles[`${fileKey}__closing-statement`] || stageFiles[`new__closing-statement`],
+      listing: listingFiles[fileKey] || listingFiles['new'],
+      contract: contractFiles[fileKey] || contractFiles['new'],
+    };
+    window._driveStageWorkflow(newDeal, stage, { fileKey: fileKey==='new'?'new':newId, files: _driveSnapNew }).catch(()=>{});
     if(stage==='Listing' && sf.readyForWebsites==='yes') _fireListingWebsiteTask(newDeal);
     // ── Client marketing prep email — fire when new deal created as Listing ──
     if(stage==='Listing') _fireListingClientEmailTask(newDeal);
@@ -19680,7 +19700,7 @@ async function _driveWorkflowProposalToDo(deal, token){
 }
 
 // Listing: move folder to Active Listings, add OM/Offers/Due Diligence subfolders, file listing agreement.
-async function _driveWorkflowListing(deal, token, fileKey){
+async function _driveWorkflowListing(deal, token, fileKey, files={}){
   const cfg = _driveGetOfficeConfig(deal);
   let mainId = deal.driveFolderId || _getDriveFolderIdFromUrl(deal.driveUrl);
   if (!mainId) mainId = await _driveWorkflowProposalToDo(deal, token);
@@ -19693,8 +19713,8 @@ async function _driveWorkflowListing(deal, token, fileKey){
   const subUpdate = { driveSubfolderIds: { ...(deal.driveSubfolderIds||{}), om: omId, offers: offersId, dueDiligence: ddId } };
   await Store.updateDeal(deal.id, subUpdate);
   Object.assign(deal, subUpdate);
-  // File listing agreement — check in-memory listingFiles first, then fall back to Firebase Storage URL
-  const lf = listingFiles[fileKey] || listingFiles[deal.id] || listingFiles['new'];
+  // File listing agreement — use pre-captured snapshot first, then fall back to in-memory or Firebase Storage URL
+  const lf = files.listing || listingFiles[fileKey] || listingFiles[deal.id] || listingFiles['new'];
   const laFolderId = deal.driveSubfolderIds?.listingAgreement || mainId;
   const propName   = _drivePropName(deal);
   const effDate    = deal.listingEffectiveDate || '';
@@ -19724,24 +19744,24 @@ async function _driveWorkflowListing(deal, token, fileKey){
 }
 
 // LOI / Due Diligence: upload LOI and/or PSA to Offers subfolder.
-async function _driveWorkflowOffers(deal, token, fileKey){
+async function _driveWorkflowOffers(deal, token, fileKey, files={}){
   const offersId = deal.driveSubfolderIds?.offers;
   if (!offersId) return; // no Offers folder yet — skip silently
   const fk = fileKey || deal.id;
   const uploads = [];
-  const loi = stageFiles[`${fk}__loi`];
-  const psa = stageFiles[`${fk}__psa`];
+  const loi = files.loi || stageFiles[`${fk}__loi`];
+  const psa = files.psa || stageFiles[`${fk}__psa`];
   if (loi?.dataUrl) uploads.push(_driveUploadFile(offersId, loi, loi.name, token).then(()=>showToast(`📁 LOI filed to Offers`, 'success', 3000)));
   if (psa?.dataUrl) uploads.push(_driveUploadFile(offersId, psa, psa.name, token).then(()=>showToast(`📁 PSA filed to Offers`, 'success', 3000)));
   if (uploads.length) await Promise.all(uploads);
 }
 
 // Sold / Closed Won: file closing statement, move folder to Closed 2026.
-async function _driveWorkflowSold(deal, token, fileKey){
+async function _driveWorkflowSold(deal, token, fileKey, files={}){
   const cfg = _driveGetOfficeConfig(deal);
   const mainId = deal.driveFolderId || _getDriveFolderIdFromUrl(deal.driveUrl);
   if (!mainId) return;
-  const cs = stageFiles[`${fileKey || deal.id}__closing-statement`];
+  const cs = files['closing-statement'] || stageFiles[`${fileKey || deal.id}__closing-statement`];
   if (cs?.dataUrl) {
     await _driveUploadFile(mainId, cs, cs.name, token);
     showToast(`📁 Closing statement filed to Drive`, 'success', 3000);
@@ -19766,14 +19786,15 @@ window._driveStageWorkflow = async (deal, newStage, opts = {}) => {
   try {
     const token = await _getDriveWriteToken();
     const fk = opts.fileKey || deal.id;
+    const files = opts.files || {}; // pre-captured file snapshot — avoids cleanup race condition
     if (newStage === 'Proposal To Do') {
       await _driveWorkflowProposalToDo(deal, token);
     } else if (newStage === 'Listing') {
-      await _driveWorkflowListing(deal, token, fk);
+      await _driveWorkflowListing(deal, token, fk, files);
     } else if (/^LOI$/i.test(newStage) || /due.?diligence/i.test(newStage) || /under.?contract/i.test(newStage)) {
-      await _driveWorkflowOffers(deal, token, fk);
+      await _driveWorkflowOffers(deal, token, fk, files);
     } else if (/^Sold$/i.test(newStage) || /closed.?won/i.test(newStage) || isWonStage(newStage)) {
-      await _driveWorkflowSold(deal, token, fk);
+      await _driveWorkflowSold(deal, token, fk, files);
     } else if (/lost.?listing/i.test(newStage)) {
       await _driveWorkflowLostListing(deal, token);
     }
