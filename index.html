@@ -14589,6 +14589,38 @@ async function applyPendingProfile(uid, email){
   } catch(err){
     console.warn('[applyPendingProfile] Failed to save profile:', err);
     showToast('Splits profile ready — ask your admin to save your splits', 'info', 6000);
+    return; // don't try deal migration if profile save failed
+  }
+
+  // ── Migrate deals: replace pending key with real UID ──────────────────────
+  // Deals may have coAdvisors[].uid set to the pending key (e.g. 'pending_bill_thedirtdog_com')
+  // because the admin assigned splits before the advisor had a real auth UID.
+  if(!DEMO_MODE && _fbDb && _fbFns){
+    try {
+      const pendingKey = 'pending_' + e.replace(/[^a-z0-9]/gi, '_');
+      const {collection, getDocs, updateDoc, doc: fbDocD} = _fbFns;
+      const dealsSnap = await getDocs(collection(_fbDb, 'deals'));
+      const advisorName = profile.name || e;
+      for(const d of dealsSnap.docs){
+        const dd = d.data();
+        const patch = {};
+        if(dd.advisorUid === pendingKey){
+          patch.advisorUid   = uid;
+          patch.advisorName  = advisorName;
+          patch.advisorEmail = e;
+        }
+        const newCo = (dd.coAdvisors||[]).map(ca =>
+          ca.uid === pendingKey ? {...ca, uid, email: e, name: advisorName} : ca
+        );
+        if(newCo.some((ca,i) => ca.uid !== (dd.coAdvisors||[])[i]?.uid)) patch.coAdvisors = newCo;
+        const newCoUids = (dd.coAdvisorUids||[]).map(u => u === pendingKey ? uid : u);
+        if(newCoUids.some((u,i) => u !== (dd.coAdvisorUids||[])[i])) patch.coAdvisorUids = newCoUids;
+        if(Object.keys(patch).length){
+          await updateDoc(fbDocD(_fbDb,'deals',d.id), patch).catch(e=>console.warn('[applyPending-deal]',e));
+        }
+      }
+      console.log('[applyPendingProfile] Deals migrated from', pendingKey, '→', uid);
+    } catch(mErr){ console.warn('[applyPendingProfile] Deal migration failed:', mErr); }
   }
 }
 
