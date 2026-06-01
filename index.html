@@ -5919,9 +5919,24 @@ function defaultProfile(){
 function getProfile(uid){
   const p = allProfiles[uid];
   if(!p) return defaultProfile();
-  // If profile exists but has no tiers, merge with default so pay tab doesn't crash
-  if(!p.tiers?.length) return {...defaultProfile(), ...p};
-  return p;
+  if(p.tiers?.length) return p;
+  // No tiers — check if a pending profile for this same email has tiers configured
+  const email = (p.email||'').toLowerCase();
+  if(email){
+    const pendingKey = 'pending_' + email.replace(/[^a-z0-9]/gi,'_');
+    const pending = allProfiles[pendingKey];
+    if(pending?.tiers?.length){
+      // Also schedule a background write to persist pending tiers → real profile
+      if(!DEMO_MODE && _fbDb && _fbFns && uid !== pendingKey){
+        const {doc: _fd, setDoc: _sd} = _fbFns;
+        _sd(_fd(_fbDb,'advisorProfiles',uid),
+          {tiers:pending.tiers, behavior:pending.behavior||'marginal', updatedAt:Date.now()},
+          {merge:true}).catch(()=>{});
+      }
+      return {...p, tiers:pending.tiers, behavior:pending.behavior||p.behavior||'marginal'};
+    }
+  }
+  return {...defaultProfile(), ...p};
 }
 
 function payoutForGross(gross, ytdBefore, profile){
