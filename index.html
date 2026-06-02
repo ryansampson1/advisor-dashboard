@@ -7927,39 +7927,49 @@ window._pgaNextPage = async (logSelected) => {
   const rows     = window._pgaAllRows || [];
   const pageSize = window._pgaPageSize || 20;
   const page     = window._pgaPage || 0;
-  const start    = page * pageSize;
 
   if(logSelected){
-    // Capture dropdown values and checked state before any DOM changes
+    // Capture dropdown values and checked state BEFORE any DOM changes
     const dealSelections = {};
     document.querySelectorAll('.pga-deal-sel').forEach(sel => {
       dealSelections[parseInt(sel.dataset.idx)] = sel.value;
     });
     const checked = [...document.querySelectorAll('.pga-chk:checked')].map(c => parseInt(c.dataset.idx));
 
+    // Disable button to prevent double-click
+    const btn = document.querySelector('[onclick="window._pgaNextPage(true)"]');
+    if(btn){ btn.disabled = true; btn.textContent = 'Logging…'; }
+
     const senderMap = window._pgaGetSenderMap();
-    let count = 0;
+    let count = 0, errors = 0;
     for(const i of checked){
       const e = rows[i];
       if(!e) continue;
       const dealId = dealSelections[i] || e.dealId;
       if(!dealId) continue;
-      const body = `📧 **${e.subject}**\nFrom: ${e.from}\nDate: ${e.dateStr}\n\n${e.snippet}`;
-      await window._dealLogActivity(dealId, 'email', {
-        body, gmailId: e.id, gmailSubject: e.subject, gmailFrom: e.from, gmailDate: e.dateStr,
-      });
-      const senderEmail = window._pgaExtractEmail(e.from);
-      if(senderEmail) senderMap[senderEmail] = dealId;
-      count++;
+      try {
+        const body = `📧 **${e.subject}**\nFrom: ${e.from}\nDate: ${e.dateStr}\n\n${e.snippet}`;
+        await window._dealLogActivity(dealId, 'email', {
+          body, gmailId: e.id, gmailSubject: e.subject, gmailFrom: e.from, gmailDate: e.dateStr,
+        });
+        const senderEmail = window._pgaExtractEmail(e.from);
+        if(senderEmail) senderMap[senderEmail] = dealId;
+        count++;
+      } catch(err){
+        console.error('[pgaNextPage] log failed for', e.id, err);
+        errors++;
+      }
     }
     window._pgaSetSenderMap(senderMap);
-    if(count) showToast(`✅ Logged ${count} email${count!==1?'s':''}`, 'success', 2500);
+    if(count)  showToast(`✅ Logged ${count} email${count!==1?'s':''}`, 'success', 2500);
+    if(errors) showToast(`⚠️ ${errors} email${errors!==1?'s':''} failed to log — check console`, 'warning', 4000);
   }
 
+  // Always advance regardless of logging outcome
   const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
   if(page + 1 >= totalPages){
     document.getElementById('prop-gmail-all-modal')?.remove();
-    showToast(logSelected ? 'All done — inbox fully reviewed ✓' : 'Closed — unlogged emails will appear next sync', 'success', 3500);
+    showToast(logSelected ? 'All pages reviewed ✓' : 'Closed — unreviewed emails will appear next sync', 'info', 3000);
     return;
   }
   window._pgaRenderPage(page + 1);
