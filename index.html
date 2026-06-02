@@ -972,6 +972,33 @@ body {
   </div>
 </div>
 
+<!-- ===== ADVISOR UC DEALS MODAL ===== -->
+<div id="advisor-uc-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center modal-bg bg-black/40 p-4">
+  <div class="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[88vh] flex flex-col">
+    <div class="p-5 border-b flex items-center justify-between flex-shrink-0">
+      <div>
+        <h2 id="advisor-uc-modal-title" class="text-lg font-bold text-gray-800"></h2>
+        <p class="text-xs text-gray-400 mt-0.5">Active under contract deals contributing to projected revenue</p>
+      </div>
+      <button onclick="document.getElementById('advisor-uc-modal').classList.add('hidden')" class="text-gray-400 hover:text-gray-700 text-2xl leading-none ml-4">&times;</button>
+    </div>
+    <div class="overflow-y-auto flex-1">
+      <table class="w-full text-sm">
+        <thead class="sticky top-0 bg-gray-50 border-b z-10">
+          <tr class="text-xs text-gray-500 uppercase tracking-wide">
+            <th class="px-5 py-2.5 text-left">Property</th>
+            <th class="px-4 py-2.5 text-left">Stage</th>
+            <th class="px-4 py-2.5 text-right">Price</th>
+            <th class="px-4 py-2.5 text-right">Proj. Commission</th>
+          </tr>
+        </thead>
+        <tbody id="advisor-uc-modal-body" class="divide-y divide-gray-100"></tbody>
+      </table>
+    </div>
+    <div id="advisor-uc-modal-footer" class="p-4 border-t bg-gray-50 rounded-b-2xl flex-shrink-0 text-sm text-gray-600"></div>
+  </div>
+</div>
+
 <!-- ===== PENDING PANEL ===== -->
 <div id="pending-panel" class="hidden fixed bottom-4 right-4 z-30 w-96 bg-white rounded-2xl shadow-2xl border overflow-hidden">
   <div class="bg-gray-800 text-white px-4 py-3 flex items-center justify-between">
@@ -7664,28 +7691,48 @@ window._propGmailSyncAll = async () => {
 
     document.getElementById(loadId)?.remove();
 
-    // Build rows — prefer saved sender mapping over keyword match; skip permanently-skipped emails
+    // Build rows — ONE row per unique email (no duplicates)
+    // Priority: 1) saved sender map  2) subject/snippet keyword score  3) unmatched (user picks)
     const rows = [];
     for(const email of allEmailsByMsgId.values()){
       if(skipped.has(email.id)) continue;
 
+      // Skip if already logged to any of its matched deals
+      const alreadyLogged = email.deals.some(d => (loggedByDeal.get(d.id)||new Set()).has(email.id));
+      if(alreadyLogged) continue;
+
+      // 1. Sender memory takes priority
       const senderEmail = window._pgaExtractEmail(email.from);
       const savedDealId = senderMap[senderEmail];
       const savedDeal   = savedDealId ? deals.find(d => d.id === savedDealId) : null;
-
       if(savedDeal){
-        // Sender has a known property — show once with that property pre-selected
-        const logged = loggedByDeal.get(savedDealId) || new Set();
-        if(!logged.has(email.id))
-          rows.push({...email, dealId: savedDealId, dealName: savedDeal.projectName||savedDeal.propertyAddress, fromSavedMap: true});
-      } else {
-        // Fall back to keyword-matched deals
-        for(const d of email.deals){
-          const logged = loggedByDeal.get(d.id) || new Set();
-          if(!logged.has(email.id))
-            rows.push({...email, dealId: d.id, dealName: d.name});
-        }
+        rows.push({...email, dealId: savedDealId, dealName: savedDeal.projectName||savedDeal.propertyAddress, fromSavedMap: true});
+        continue;
       }
+
+      // 2. Score each candidate deal by keyword hits in subject + snippet only
+      //    (body-only matches are too broad — newsletters hit everything)
+      const haystack = (email.subject + ' ' + email.snippet).toLowerCase();
+      let bestDeal = null, bestScore = 0;
+      for(const d of email.deals){
+        const deal = deals.find(x => x.id === d.id);
+        if(!deal) continue;
+        const kwParts = [...new Set([deal.propertyAddress||'', deal.projectName||''].join(' ')
+          .split(/[\s,\/\-–]+/)
+          .map(w => w.replace(/[^a-zA-Z0-9]/g,''))
+          .filter(w => w.length > 3 && !/^(road|street|drive|blvd|ave|lane|court|pkwy|hwy|florida|fl|the|and|for)$/i.test(w))
+        )].slice(0, 5);
+        const score = kwParts.reduce((s, kw) => s + (haystack.includes(kw.toLowerCase()) ? 1 : 0), 0);
+        if(score > bestScore){ bestScore = score; bestDeal = deal; }
+      }
+
+      // Only pre-select if a keyword actually appears in subject/snippet; otherwise leave blank for user
+      rows.push({
+        ...email,
+        dealId:   bestScore > 0 && bestDeal ? bestDeal.id   : '',
+        dealName: bestScore > 0 && bestDeal ? (bestDeal.projectName||bestDeal.propertyAddress) : '',
+        matchScore: bestScore,
+      });
     }
 
     if(!rows.length){
@@ -15678,7 +15725,7 @@ function viewLeaderboard(){
           return `<tr class="hover:bg-gray-50 transition">
             <td class="px-4 py-3 text-center font-bold text-gray-400">${medals[i]||`#${i+1}`}</td>
             <td class="px-4 py-3">
-              <div class="font-semibold text-gray-800">${r.adv.name}</div>
+              <div class="font-semibold text-gray-800 cursor-pointer hover:text-blue-600 hover:underline" onclick="showAdvisorUCDeals('${r.adv.uid}','${r.adv.name.replace(/'/g,"\\'").replace(/"/g,'&quot;')}',${r.s.projected})">${r.adv.name}</div>
               <div class="text-xs text-gray-400">${r.adv.office||''}</div>
               <div class="mt-1.5 bg-gray-100 rounded-full h-1.5 w-28">
                 <div class="h-1.5 rounded-full" style="width:${pct}%;background:var(--brand-black)"></div>
@@ -15712,6 +15759,78 @@ function viewLeaderboard(){
     </div>
   `);
 }
+
+/* =======================================================
+   ADVISOR UC DEALS MODAL
+   ======================================================= */
+window.showAdvisorUCDeals = function(uid, name, totalProjected) {
+  const ucStageTest = s => /under.?contract|due.?diligence|rezoning|permitting|closing|in.?contract/i.test(s||'');
+  const deals = allDeals.filter(d =>
+    isDealAdvisor(d, uid) &&
+    !isLostStage(d.stage||'') &&
+    !isWonStage(d.stage||'') &&
+    ucStageTest(d.stage||'')
+  );
+
+  const modal = document.getElementById('advisor-uc-modal');
+  document.getElementById('advisor-uc-modal-title').textContent = `📋 Under Contract — ${name}`;
+
+  if (!deals.length) {
+    document.getElementById('advisor-uc-modal-body').innerHTML =
+      `<tr><td colspan="4" class="px-5 py-8 text-center text-gray-400 text-sm">No active under-contract deals found.</td></tr>`;
+    document.getElementById('advisor-uc-modal-footer').innerHTML =
+      `<span class="text-gray-400">Total Projected Revenue (all stages): <strong class="text-gray-700">${fmt$(totalProjected)}</strong></span>`;
+    modal.classList.remove('hidden');
+    return;
+  }
+
+  // Sort: Closing first, then DD, then the rest
+  const stageOrder = s => {
+    if (/closing/i.test(s)) return 0;
+    if (/due.?diligence/i.test(s)) return 1;
+    if (/under.?contract|in.?contract/i.test(s)) return 2;
+    return 3;
+  };
+  deals.sort((a,b) => stageOrder(a.stage||'') - stageOrder(b.stage||''));
+
+  const stageColors = s => {
+    if (/closing/i.test(s)) return 'background:#d1fae5;color:#065f46';
+    if (/due.?diligence/i.test(s)) return 'background:#fed7aa;color:#92400e';
+    return 'background:#dbeafe;color:#1e40af';
+  };
+
+  let ucProjected = 0;
+  const rows = deals.map(d => {
+    const proj = dealProjected(d);
+    ucProjected += proj;
+    const price = getDealPrice(d) || d.purchasePrice || d.contractPrice || 0;
+    const addr = d.propertyAddress || d.projectName || 'Unnamed Property';
+    return `<tr class="hover:bg-gray-50 transition-colors">
+      <td class="px-5 py-3">
+        <div class="font-medium text-gray-800">${addr}</div>
+        ${d.clientName ? `<div class="text-xs text-gray-400">${d.clientName}</div>` : ''}
+      </td>
+      <td class="px-4 py-3">
+        <span class="text-xs font-semibold px-2 py-0.5 rounded-full" style="${stageColors(d.stage||'')}">${d.stage||'—'}</span>
+      </td>
+      <td class="px-4 py-3 text-right text-gray-700">${price ? fmt$(price) : '—'}</td>
+      <td class="px-4 py-3 text-right font-bold" style="color:var(--brand-black)">${proj ? fmt$(proj) : '—'}</td>
+    </tr>`;
+  }).join('');
+
+  document.getElementById('advisor-uc-modal-body').innerHTML = rows;
+  document.getElementById('advisor-uc-modal-footer').innerHTML =
+    `<div class="flex flex-wrap items-center justify-between gap-2">
+      <span class="text-gray-500">${deals.length} deal${deals.length!==1?'s':''} under contract</span>
+      <div class="flex items-center gap-6">
+        <span>UC Commission: <strong class="text-gray-800">${fmt$(ucProjected)}</strong></span>
+        <span class="text-gray-400">|</span>
+        <span>Total Projected Rev: <strong style="color:var(--brand-black)">${fmt$(totalProjected)}</strong></span>
+      </div>
+    </div>`;
+
+  modal.classList.remove('hidden');
+};
 
 /* =======================================================
    STAGE GATE ENGINE
