@@ -7538,6 +7538,25 @@ window._pdwGmailLog = async (dealId) => {
 
 // ── Bulk Property Gmail Sync — scan all active properties at once ──────────
 // Called from the Gmail Sync button on the Deal Pipeline toolbar.
+// ── Property Gmail sync — persistence helpers ──────────────────────────────
+window._pgaGetSkipped   = () => { try{ return new Set(JSON.parse(localStorage.getItem('propGmailSkipped')||'[]')); }catch(e){ return new Set(); } };
+window._pgaSetSkipped   = s  => localStorage.setItem('propGmailSkipped', JSON.stringify([...s]));
+window._pgaGetSenderMap = () => { try{ return JSON.parse(localStorage.getItem('propGmailSenderMap')||'{}'); }catch(e){ return {}; } };
+window._pgaSetSenderMap = m  => localStorage.setItem('propGmailSenderMap', JSON.stringify(m));
+window._pgaExtractEmail = from => { const m = from.match(/<([^>]+)>/); return (m?m[1]:from).toLowerCase().trim(); };
+
+// Skip a single row forever (saved immediately so Cancel still persists the skip)
+window._pgaSkipRow = (idx, gmailId) => {
+  const row = document.getElementById('pga-row-'+idx);
+  if(row){ row.style.opacity='.3'; row.style.pointerEvents='none'; }
+  const chk = document.querySelector(`.pga-chk[data-idx="${idx}"]`);
+  if(chk) chk.checked = false;
+  const skipped = window._pgaGetSkipped();
+  skipped.add(gmailId);
+  window._pgaSetSkipped(skipped);
+  window._pgaUpdateCount();
+};
+
 window._propGmailSyncAll = async () => {
   const thirtyAgo = Date.now() - 30*24*60*60*1000;
   const deals = visibleDeals().filter(d => {
@@ -7547,6 +7566,9 @@ window._propGmailSyncAll = async () => {
   });
 
   if(!deals.length){ showToast('No active properties to sync','info'); return; }
+
+  const skipped   = window._pgaGetSkipped();
+  const senderMap = window._pgaGetSenderMap();
 
   const loadId = 'pga-load-' + Date.now();
   document.body.insertAdjacentHTML('beforeend', `
@@ -7612,7 +7634,6 @@ window._propGmailSyncAll = async () => {
           const msgIds = (data.messages||[]).map(m=>m.id);
           await Promise.all(msgIds.map(async id => {
             if(allEmailsByMsgId.has(id)){
-              // Already fetched — just associate this deal too
               const ex = allEmailsByMsgId.get(id);
               if(!ex.deals.find(d=>d.id===deal.id))
                 ex.deals.push({id:deal.id, name:deal.projectName||deal.propertyAddress});
@@ -7643,12 +7664,27 @@ window._propGmailSyncAll = async () => {
 
     document.getElementById(loadId)?.remove();
 
-    // Build row list — one row per (email × deal), excluding already-logged
+    // Build rows — prefer saved sender mapping over keyword match; skip permanently-skipped emails
     const rows = [];
     for(const email of allEmailsByMsgId.values()){
-      for(const d of email.deals){
-        if(!(loggedByDeal.get(d.id)||new Set()).has(email.id))
-          rows.push({...email, dealId:d.id, dealName:d.name});
+      if(skipped.has(email.id)) continue;
+
+      const senderEmail = window._pgaExtractEmail(email.from);
+      const savedDealId = senderMap[senderEmail];
+      const savedDeal   = savedDealId ? deals.find(d => d.id === savedDealId) : null;
+
+      if(savedDeal){
+        // Sender has a known property — show once with that property pre-selected
+        const logged = loggedByDeal.get(savedDealId) || new Set();
+        if(!logged.has(email.id))
+          rows.push({...email, dealId: savedDealId, dealName: savedDeal.projectName||savedDeal.propertyAddress, fromSavedMap: true});
+      } else {
+        // Fall back to keyword-matched deals
+        for(const d of email.deals){
+          const logged = loggedByDeal.get(d.id) || new Set();
+          if(!logged.has(email.id))
+            rows.push({...email, dealId: d.id, dealName: d.name});
+        }
       }
     }
 
@@ -7658,43 +7694,56 @@ window._propGmailSyncAll = async () => {
     }
     rows.sort((a,b) => b.dateMs - a.dateMs);
 
+    // Build deal options for dropdowns (sorted A-Z)
+    const sortedDeals = deals.slice().sort((a,b) =>
+      (a.projectName||a.propertyAddress||'').localeCompare(b.projectName||b.propertyAddress||''));
+    const dealOptsHtml = `<option value="">— Select property —</option>` +
+      sortedDeals.map(d => `<option value="${d.id}">${(d.projectName||d.propertyAddress||'').replace(/"/g,'&quot;')}</option>`).join('');
+
     // Show review modal
     const modal = document.createElement('div');
     modal.id = 'prop-gmail-all-modal';
     modal.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.5);padding:16px';
     modal.innerHTML = `
-      <div style="background:#fff;border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,.25);width:100%;max-width:880px;max-height:88vh;display:flex;flex-direction:column;overflow:hidden">
+      <div style="background:#fff;border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,.25);width:100%;max-width:960px;max-height:88vh;display:flex;flex-direction:column;overflow:hidden">
         <div style="padding:16px 20px 12px;border-bottom:1px solid #f1f5f9;flex-shrink:0">
           <div style="font-size:15px;font-weight:700;color:#111">📧 Gmail Sync — All Properties</div>
-          <div style="font-size:12px;color:#64748b;margin-top:2px">${rows.length} unlogged email${rows.length!==1?'s':''} found across ${deals.length} properties · Check the ones to log</div>
+          <div style="font-size:12px;color:#64748b;margin-top:2px">${rows.length} unlogged email${rows.length!==1?'s':''} found · Adjust the property dropdown if needed · 🚫 to skip forever</div>
         </div>
         <div style="flex:1;overflow-y:auto">
           <table style="width:100%;border-collapse:collapse;font-size:.8rem">
             <thead style="position:sticky;top:0;background:#f8fafc;z-index:1">
               <tr style="border-bottom:1px solid #e2e8f0">
-                <th style="padding:8px 12px;text-align:left;width:32px"><input type="checkbox" id="pga-chk-all" checked onchange="document.querySelectorAll('.pga-chk').forEach(c=>c.checked=this.checked);window._pgaUpdateCount()"/></th>
-                <th style="padding:8px 12px;text-align:left;color:#6b7280;font-weight:600;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em">Property</th>
-                <th style="padding:8px 12px;text-align:left;color:#6b7280;font-weight:600;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em">Date</th>
-                <th style="padding:8px 12px;text-align:left;color:#6b7280;font-weight:600;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em">From</th>
-                <th style="padding:8px 12px;text-align:left;color:#6b7280;font-weight:600;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em">Subject</th>
-                <th style="padding:8px 12px;text-align:left;color:#6b7280;font-weight:600;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em">Preview</th>
+                <th style="padding:8px 10px;text-align:left;width:28px"><input type="checkbox" id="pga-chk-all" checked onchange="document.querySelectorAll('.pga-chk:not([disabled])').forEach(c=>c.checked=this.checked);window._pgaUpdateCount()"/></th>
+                <th style="padding:8px 10px;text-align:left;color:#6b7280;font-weight:600;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em;min-width:180px">Property</th>
+                <th style="padding:8px 10px;text-align:left;color:#6b7280;font-weight:600;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em">Date</th>
+                <th style="padding:8px 10px;text-align:left;color:#6b7280;font-weight:600;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em">From</th>
+                <th style="padding:8px 10px;text-align:left;color:#6b7280;font-weight:600;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em">Subject</th>
+                <th style="padding:8px 10px;text-align:left;color:#6b7280;font-weight:600;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em">Preview</th>
+                <th style="padding:8px 10px;width:32px"></th>
               </tr>
             </thead>
             <tbody>
               ${rows.map((e,i) => `
-                <tr style="border-bottom:1px solid #f1f5f9;cursor:pointer" onclick="this.querySelector('.pga-chk').click();window._pgaUpdateCount()">
-                  <td style="padding:8px 12px"><input type="checkbox" class="pga-chk" data-idx="${i}" checked onclick="event.stopPropagation();window._pgaUpdateCount()"/></td>
-                  <td style="padding:8px 12px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;color:#374151" title="${e.dealName}">${e.dealName}</td>
-                  <td style="padding:8px 12px;white-space:nowrap;color:#64748b">${e.dateStr}</td>
-                  <td style="padding:8px 12px;max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${e.from}">${e.from.replace(/<.*>/,'').trim()||e.from}</td>
-                  <td style="padding:8px 12px;font-weight:600;color:#111;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${e.subject}">${e.subject}</td>
-                  <td style="padding:8px 12px;color:#64748b;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${e.snippet}">${e.snippet}</td>
+                <tr id="pga-row-${i}" style="border-bottom:1px solid #f1f5f9">
+                  <td style="padding:8px 10px"><input type="checkbox" class="pga-chk" data-idx="${i}" checked onclick="window._pgaUpdateCount()"/></td>
+                  <td style="padding:5px 8px">
+                    <select class="pga-deal-sel" data-idx="${i}" style="width:100%;font-size:.78rem;border:1px solid #e2e8f0;border-radius:6px;padding:3px 6px;outline:none;background:#fff;color:#111;cursor:pointer" title="${e.fromSavedMap?'Pre-matched from saved sender history':'Keyword-matched'}">
+                      ${dealOptsHtml.replace(`value="${e.dealId}"`,`value="${e.dealId}" selected`)}
+                    </select>
+                    ${e.fromSavedMap?'<div style="font-size:.65rem;color:#6366f1;margin-top:2px">★ saved match</div>':''}
+                  </td>
+                  <td style="padding:8px 10px;white-space:nowrap;color:#64748b">${e.dateStr}</td>
+                  <td style="padding:8px 10px;max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${e.from}">${e.from.replace(/<.*>/,'').trim()||e.from}</td>
+                  <td style="padding:8px 10px;font-weight:600;color:#111;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${e.subject}">${e.subject}</td>
+                  <td style="padding:8px 10px;color:#64748b;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${e.snippet}">${e.snippet}</td>
+                  <td style="padding:8px 10px;text-align:center"><button onclick="window._pgaSkipRow(${i},'${e.id}')" title="Skip forever — won't appear in future syncs" style="background:none;border:none;cursor:pointer;font-size:.9rem;color:#d1d5db;padding:2px 4px;border-radius:4px;line-height:1" onmouseenter="this.style.color='#ef4444'" onmouseleave="this.style.color='#d1d5db'">🚫</button></td>
                 </tr>`).join('')}
             </tbody>
           </table>
         </div>
         <div style="padding:12px 20px;border-top:1px solid #f1f5f9;display:flex;gap:8px;align-items:center;flex-shrink:0">
-          <span id="pga-count-label" style="font-size:.75rem;color:#6b7280;flex:1">${rows.length} email${rows.length!==1?'s':''} selected</span>
+          <span id="pga-count-label" style="font-size:.75rem;color:#6b7280;flex:1">${rows.length} email${rows.length!==1?'s':''} selected · Property dropdown saves sender for next time</span>
           <button onclick="window._propGmailLogAll()" style="background:#111;color:#fff;font-size:.875rem;font-weight:700;padding:10px 20px;border-radius:10px;border:none;cursor:pointer">✅ Log Selected to Properties</button>
           <button onclick="document.getElementById('prop-gmail-all-modal')?.remove()" style="padding:10px 16px;border-radius:10px;border:1px solid #e2e8f0;background:#f8fafc;font-size:.875rem;color:#374151;cursor:pointer">Cancel</button>
         </div>
@@ -7704,13 +7753,12 @@ window._propGmailSyncAll = async () => {
     window._pgaUpdateCount = () => {
       const n = document.querySelectorAll('.pga-chk:checked').length;
       const lbl = document.getElementById('pga-count-label');
-      if(lbl) lbl.textContent = `${n} email${n!==1?'s':''} selected`;
+      if(lbl) lbl.textContent = `${n} email${n!==1?'s':''} selected · Property dropdown saves sender for next time`;
     };
     modal.addEventListener('click', ev => { if(ev.target===modal) modal.remove(); });
     document.getElementById('prop-gmail-all-modal')?.remove();
     document.body.appendChild(modal);
 
-    // Save last sync timestamp + update button label
     localStorage.setItem('propGmailSyncAllLastTs', String(Date.now()));
     window._PROP_GMAIL_SYNC_DATE = new Date().toLocaleDateString('en-US',{month:'short',day:'numeric'});
 
@@ -7723,20 +7771,40 @@ window._propGmailSyncAll = async () => {
 
 window._propGmailLogAll = async () => {
   const rows = window._pgaAllRows || [];
+
+  // Read dropdown selections BEFORE removing modal
+  const dealSelections = {};
+  document.querySelectorAll('.pga-deal-sel').forEach(sel => {
+    dealSelections[parseInt(sel.dataset.idx)] = sel.value;
+  });
+
   const checked = [...document.querySelectorAll('.pga-chk:checked')].map(c => parseInt(c.dataset.idx));
   if(!checked.length){ showToast('No emails selected','warning'); return; }
   document.getElementById('prop-gmail-all-modal')?.remove();
   showToast(`Logging ${checked.length} email${checked.length!==1?'s':''}…`,'info',8000);
+
+  const senderMap = window._pgaGetSenderMap();
   let count = 0;
+
   for(const i of checked){
     const e = rows[i];
     if(!e) continue;
+    const dealId = dealSelections[i] || e.dealId;
+    if(!dealId) continue; // no property selected — skip
+
     const body = `📧 **${e.subject}**\nFrom: ${e.from}\nDate: ${e.dateStr}\n\n${e.snippet}`;
-    await window._dealLogActivity(e.dealId, 'email', {
+    await window._dealLogActivity(dealId, 'email', {
       body, gmailId: e.id, gmailSubject: e.subject, gmailFrom: e.from, gmailDate: e.dateStr,
     });
+
+    // Save sender → property for next time
+    const senderEmail = window._pgaExtractEmail(e.from);
+    if(senderEmail) senderMap[senderEmail] = dealId;
+
     count++;
   }
+
+  window._pgaSetSenderMap(senderMap);
   showToast(`✅ Logged ${count} email${count!==1?'s':''} across properties`,'success',5000);
 };
 
