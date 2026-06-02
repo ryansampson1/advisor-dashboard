@@ -18777,10 +18777,14 @@ function _checkCommissionRequirements(){
       </div>
       <div style="padding:14px 24px;border-top:1px solid #f1f5f9;flex-shrink:0">
         <div id="crq-error" style="display:none;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:8px 12px;margin-bottom:10px;color:#dc2626;font-size:.8rem;font-weight:600;line-height:1.5"></div>
-        <div style="display:flex;gap:10px">
-          <button onclick="window._saveCommissionRequirements()"
+        <div style="display:flex;gap:10px;align-items:center">
+          <button data-crq-save onclick="window._saveCommissionRequirements()"
             style="flex:1;background:var(--brand-black,#111);color:#fff;font-size:.875rem;font-weight:700;padding:11px 16px;border-radius:10px;border:none;cursor:pointer">
             Save & Continue →
+          </button>
+          <button onclick="document.getElementById('commission-req-modal')?.remove()"
+            style="background:none;border:1px solid #e2e8f0;color:#6b7280;font-size:.8rem;padding:11px 14px;border-radius:10px;cursor:pointer;white-space:nowrap">
+            Skip for now
           </button>
         </div>
       </div>
@@ -18813,23 +18817,32 @@ window._saveCommissionRequirements = async () => {
   const errDiv = document.getElementById('crq-error');
   if(errDiv) errDiv.style.display='none';
 
-  const btn = document.querySelector('#commission-req-modal button');
+  const btn = document.querySelector('#commission-req-modal button[data-crq-save]');
   if(btn){ btn.textContent='Saving…'; btn.disabled=true; }
 
-  for(const s of saves){
-    const deal = allDeals.find(x=>x.id===s.id);
-    const upd = {
-      elcCommissionPct: s.pct,
-      commissionPayingParty: s.party,
-      updatedAt: Date.now(),
-    };
-    await Store.updateDeal(s.id, upd);
-    if(deal) Object.assign(deal, upd);
+  try {
+    for(const s of saves){
+      const deal = allDeals.find(x=>x.id===s.id);
+      const upd = {
+        elcCommissionPct: s.pct,
+        commissionPayingParty: s.party,
+        updatedAt: Date.now(),
+      };
+      await Store.updateDeal(s.id, upd);
+      if(deal) Object.assign(deal, upd);
+    }
+    document.getElementById('commission-req-modal')?.remove();
+    showToast(`✅ Commission details saved for ${saves.length} deal${saves.length!==1?'s':''}`, 'success', 4000);
+    renderCurrentView();
+  } catch(e) {
+    console.error('[_saveCommissionRequirements]', e);
+    const errDiv = document.getElementById('crq-error');
+    const msg = e?.code === 'permission-denied'
+      ? 'Permission denied — please contact your admin to update commission info.'
+      : 'Save failed: ' + (e?.message || e?.code || 'unknown error');
+    if(errDiv){ errDiv.innerHTML = msg; errDiv.style.display='block'; }
+    if(btn){ btn.textContent='Save & Continue →'; btn.disabled=false; }
   }
-
-  document.getElementById('commission-req-modal')?.remove();
-  showToast(`✅ Commission details saved for ${saves.length} deal${saves.length!==1?'s':''}`, 'success', 4000);
-  renderCurrentView();
 };
 
 /* =======================================================
