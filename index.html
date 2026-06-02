@@ -7803,68 +7803,64 @@ window._propGmailSyncAll = async () => {
     const dealOptsHtml = `<option value="">— Select property —</option>` +
       sortedDeals.map(d => `<option value="${d.id}">${(d.projectName||d.propertyAddress||'').replace(/"/g,'&quot;')}</option>`).join('');
 
-    // Show review modal
+    // Show paginated review modal — static shell, tbody populated by _pgaRenderPage()
     const modal = document.createElement('div');
     modal.id = 'prop-gmail-all-modal';
     modal.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.5);padding:16px';
     modal.innerHTML = `
       <div style="background:#fff;border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,.25);width:100%;max-width:960px;max-height:88vh;display:flex;flex-direction:column;overflow:hidden">
-        <div style="padding:16px 20px 12px;border-bottom:1px solid #f1f5f9;flex-shrink:0">
-          <div style="font-size:15px;font-weight:700;color:#111">📧 Gmail Sync — All Properties</div>
-          <div style="font-size:12px;color:#64748b;margin-top:2px">${rows.length} unlogged email${rows.length!==1?'s':''} found · Adjust the property dropdown if needed · 🚫 to skip forever</div>
+        <div style="padding:14px 20px 10px;border-bottom:1px solid #f1f5f9;flex-shrink:0;display:flex;align-items:center;gap:12px">
+          <div style="flex:1">
+            <div style="font-size:15px;font-weight:700;color:#111">📧 Gmail Sync — All Properties</div>
+            <div id="pga-header-sub" style="font-size:12px;color:#64748b;margin-top:2px">${rows.length} email${rows.length!==1?'s':''} found · adjust dropdown to assign · 🚫 skip forever</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
+            <span style="font-size:.75rem;color:#6b7280">Per page:</span>
+            <select id="pga-page-size" onchange="window._pgaPageSize=parseInt(this.value);window._pgaRenderPage(0)" style="font-size:.78rem;border:1px solid #e2e8f0;border-radius:6px;padding:3px 8px;outline:none;background:#fff;cursor:pointer">
+              <option value="20" selected>20</option>
+              <option value="50">50</option>
+            </select>
+          </div>
         </div>
-        <div style="flex:1;overflow-y:auto">
+        <div id="pga-scroll" style="flex:1;overflow-y:auto">
           <table style="width:100%;border-collapse:collapse;font-size:.8rem">
             <thead style="position:sticky;top:0;background:#f8fafc;z-index:1">
               <tr style="border-bottom:1px solid #e2e8f0">
-                <th style="padding:8px 10px;text-align:left;width:28px"><input type="checkbox" id="pga-chk-all" checked onchange="document.querySelectorAll('.pga-chk:not([disabled])').forEach(c=>c.checked=this.checked);window._pgaUpdateCount()"/></th>
+                <th style="padding:8px 10px;text-align:left;width:28px"><input type="checkbox" id="pga-chk-all" onchange="document.querySelectorAll('.pga-chk').forEach(c=>c.checked=this.checked);window._pgaUpdateCount()"/></th>
                 <th style="padding:8px 10px;text-align:left;color:#6b7280;font-weight:600;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em;min-width:180px">Property</th>
                 <th style="padding:8px 10px;text-align:left;color:#6b7280;font-weight:600;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em">Date</th>
                 <th style="padding:8px 10px;text-align:left;color:#6b7280;font-weight:600;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em">From</th>
                 <th style="padding:8px 10px;text-align:left;color:#6b7280;font-weight:600;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em">Subject</th>
                 <th style="padding:8px 10px;text-align:left;color:#6b7280;font-weight:600;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em">Preview</th>
-                <th style="padding:8px 10px;width:70px"></th>
+                <th style="padding:8px 10px;width:100px"></th>
               </tr>
             </thead>
-            <tbody>
-              ${rows.map((e,i) => `
-                <tr id="pga-row-${i}" style="border-bottom:1px solid #f1f5f9">
-                  <td style="padding:8px 10px"><input type="checkbox" class="pga-chk" data-idx="${i}" checked onclick="window._pgaUpdateCount()"/></td>
-                  <td style="padding:5px 8px">
-                    <select class="pga-deal-sel" data-idx="${i}" style="width:100%;font-size:.78rem;border:1px solid #e2e8f0;border-radius:6px;padding:3px 6px;outline:none;background:#fff;color:#111;cursor:pointer" title="${e.fromSavedMap?'Pre-matched from saved sender history':'Keyword-matched'}">
-                      ${dealOptsHtml.replace(`value="${e.dealId}"`,`value="${e.dealId}" selected`)}
-                    </select>
-                    ${e.fromSavedMap?'<div style="font-size:.65rem;color:#6366f1;margin-top:2px">★ saved match</div>':''}
-                  </td>
-                  <td style="padding:8px 10px;white-space:nowrap;color:#64748b">${e.dateStr}</td>
-                  <td style="padding:8px 10px;max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${e.from}">${e.from.replace(/<.*>/,'').trim()||e.from}</td>
-                  <td style="padding:8px 10px;font-weight:600;color:#111;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${e.subject}">${e.subject}</td>
-                  <td style="padding:8px 10px;color:#64748b;max-width:180px">
-                    <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${e.snippet}">${e.snippet}</div>
-                  </td>
-                  <td style="padding:6px 10px;white-space:nowrap;text-align:right">
-                    <button id="pga-expand-btn-${i}" onclick="event.stopPropagation();window._pgaToggleExpand(${i})" title="View full email body" style="background:#f1f5f9;border:1px solid #e2e8f0;cursor:pointer;font-size:.7rem;padding:3px 7px;border-radius:5px;color:#374151;font-weight:600;margin-right:4px">⤢ View</button><button onclick="window._pgaSkipRow(${i},'${e.id}')" title="Skip forever" style="background:none;border:none;cursor:pointer;font-size:.9rem;color:#d1d5db;padding:2px 3px;border-radius:4px;line-height:1" onmouseenter="this.style.color='#ef4444'" onmouseleave="this.style.color='#d1d5db'">🚫</button>
-                  </td>
-                </tr>`).join('')}
-            </tbody>
+            <tbody id="pga-tbody"></tbody>
           </table>
         </div>
-        <div style="padding:12px 20px;border-top:1px solid #f1f5f9;display:flex;gap:8px;align-items:center;flex-shrink:0">
-          <span id="pga-count-label" style="font-size:.75rem;color:#6b7280;flex:1">${rows.length} email${rows.length!==1?'s':''} selected · Property dropdown saves sender for next time</span>
-          <button onclick="window._propGmailLogAll()" style="background:#111;color:#fff;font-size:.875rem;font-weight:700;padding:10px 20px;border-radius:10px;border:none;cursor:pointer">✅ Log Selected to Properties</button>
-          <button onclick="document.getElementById('prop-gmail-all-modal')?.remove()" style="padding:10px 16px;border-radius:10px;border:1px solid #e2e8f0;background:#f8fafc;font-size:.875rem;color:#374151;cursor:pointer">Cancel</button>
+        <div style="padding:10px 16px;border-top:1px solid #f1f5f9;display:flex;gap:8px;align-items:center;flex-shrink:0;background:#fafafa">
+          <button id="pga-prev-btn" onclick="window._pgaRenderPage(window._pgaPage-1)" style="display:none;padding:8px 14px;border-radius:8px;border:1px solid #e2e8f0;background:#fff;font-size:.8rem;color:#374151;cursor:pointer;font-weight:600">← Back</button>
+          <span id="pga-page-label" style="font-size:.75rem;color:#6b7280;white-space:nowrap"></span>
+          <span id="pga-count-label" style="font-size:.75rem;color:#9ca3af;flex:1"></span>
+          <button onclick="document.getElementById('prop-gmail-all-modal')?.remove()" style="padding:8px 14px;border-radius:8px;border:1px solid #e2e8f0;background:#fff;font-size:.8rem;color:#6b7280;cursor:pointer">Done</button>
+          <button onclick="window._pgaNextPage(false)" style="padding:8px 14px;border-radius:8px;border:1px solid #e2e8f0;background:#fff;font-size:.8rem;color:#374151;cursor:pointer;font-weight:600">Skip Page →</button>
+          <button onclick="window._pgaNextPage(true)" style="padding:8px 18px;border-radius:8px;background:#111;color:#fff;font-size:.82rem;font-weight:700;border:none;cursor:pointer">✅ Log Selected &amp; Next →</button>
         </div>
       </div>`;
 
     window._pgaAllRows = rows;
+    window._pgaDealOptsHtml = dealOptsHtml;
+    window._pgaPageSize = 20;
+    window._pgaPage = 0;
     window._pgaUpdateCount = () => {
       const n = document.querySelectorAll('.pga-chk:checked').length;
       const lbl = document.getElementById('pga-count-label');
-      if(lbl) lbl.textContent = `${n} email${n!==1?'s':''} selected · Property dropdown saves sender for next time`;
+      if(lbl) lbl.textContent = `${n} selected`;
     };
     modal.addEventListener('click', ev => { if(ev.target===modal) modal.remove(); });
     document.getElementById('prop-gmail-all-modal')?.remove();
     document.body.appendChild(modal);
+    window._pgaRenderPage(0);
 
     localStorage.setItem('propGmailSyncAllLastTs', String(Date.now()));
     window._PROP_GMAIL_SYNC_DATE = new Date().toLocaleDateString('en-US',{month:'short',day:'numeric'});
@@ -7876,43 +7872,97 @@ window._propGmailSyncAll = async () => {
   }
 };
 
-window._propGmailLogAll = async () => {
+// Render a page of rows into #pga-tbody
+window._pgaRenderPage = (n) => {
   const rows = window._pgaAllRows || [];
+  const pageSize = window._pgaPageSize || 20;
+  const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+  const page = Math.max(0, Math.min(n, totalPages - 1));
+  window._pgaPage = page;
+  const start = page * pageSize;
+  const pageRows = rows.slice(start, start + pageSize);
+  const dopts = window._pgaDealOptsHtml || '';
 
-  // Read dropdown selections BEFORE removing modal
-  const dealSelections = {};
-  document.querySelectorAll('.pga-deal-sel').forEach(sel => {
-    dealSelections[parseInt(sel.dataset.idx)] = sel.value;
-  });
+  const tbody = document.getElementById('pga-tbody');
+  if(!tbody) return;
 
-  const checked = [...document.querySelectorAll('.pga-chk:checked')].map(c => parseInt(c.dataset.idx));
-  if(!checked.length){ showToast('No emails selected','warning'); return; }
-  document.getElementById('prop-gmail-all-modal')?.remove();
-  showToast(`Logging ${checked.length} email${checked.length!==1?'s':''}…`,'info',8000);
+  tbody.innerHTML = pageRows.map((e, li) => {
+    const i = start + li;
+    const fromName = e.from.replace(/<[^>]*>/g,'').trim() || e.from;
+    const optsHtml = dopts.replace(`value="${e.dealId}"`, `value="${e.dealId}" selected`);
+    return `
+      <tr id="pga-row-${i}" style="border-bottom:1px solid #f1f5f9">
+        <td style="padding:8px 10px"><input type="checkbox" class="pga-chk" data-idx="${i}" checked onclick="window._pgaUpdateCount()"/></td>
+        <td style="padding:5px 8px">
+          <select class="pga-deal-sel" data-idx="${i}" style="width:100%;font-size:.78rem;border:1px solid #e2e8f0;border-radius:6px;padding:3px 6px;outline:none;background:#fff;color:#111;cursor:pointer">
+            ${optsHtml}
+          </select>
+          ${e.fromSavedMap ? '<div style="font-size:.65rem;color:#6366f1;margin-top:2px">★ saved match</div>' : ''}
+        </td>
+        <td style="padding:8px 10px;white-space:nowrap;color:#64748b;font-size:.75rem">${e.dateStr}</td>
+        <td style="padding:8px 10px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${e.from.replace(/"/g,'&quot;')}">${fromName}</td>
+        <td style="padding:8px 10px;font-weight:600;color:#111;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${e.subject.replace(/"/g,'&quot;')}">${e.subject}</td>
+        <td style="padding:8px 10px;color:#64748b;max-width:160px">
+          <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.76rem" title="${e.snippet.replace(/"/g,'&quot;')}">${e.snippet}</div>
+        </td>
+        <td style="padding:6px 8px;white-space:nowrap;text-align:right">
+          <button id="pga-expand-btn-${i}" onclick="event.stopPropagation();window._pgaToggleExpand(${i})" style="background:#f1f5f9;border:1px solid #e2e8f0;cursor:pointer;font-size:.68rem;padding:3px 6px;border-radius:5px;color:#374151;font-weight:600;margin-right:3px">⤢</button><button onclick="window._pgaSkipRow(${i},'${e.id}')" title="Skip forever" style="background:none;border:none;cursor:pointer;font-size:.85rem;color:#d1d5db;padding:2px;line-height:1" onmouseenter="this.style.color='#ef4444'" onmouseleave="this.style.color='#d1d5db'">🚫</button>
+        </td>
+      </tr>`;
+  }).join('');
 
-  const senderMap = window._pgaGetSenderMap();
-  let count = 0;
+  // Update pagination controls
+  const prevBtn  = document.getElementById('pga-prev-btn');
+  const pageLabel = document.getElementById('pga-page-label');
+  const chkAll   = document.getElementById('pga-chk-all');
+  if(prevBtn)   prevBtn.style.display = page === 0 ? 'none' : '';
+  if(pageLabel) pageLabel.textContent = `Page ${page+1} of ${totalPages}`;
+  if(chkAll)    chkAll.checked = true;
+  document.getElementById('pga-scroll')?.scrollTo(0, 0);
+  window._pgaUpdateCount();
+};
 
-  for(const i of checked){
-    const e = rows[i];
-    if(!e) continue;
-    const dealId = dealSelections[i] || e.dealId;
-    if(!dealId) continue; // no property selected — skip
+// Log selected on current page and advance (or just advance if logSelected=false)
+window._pgaNextPage = async (logSelected) => {
+  const rows     = window._pgaAllRows || [];
+  const pageSize = window._pgaPageSize || 20;
+  const page     = window._pgaPage || 0;
+  const start    = page * pageSize;
 
-    const body = `📧 **${e.subject}**\nFrom: ${e.from}\nDate: ${e.dateStr}\n\n${e.snippet}`;
-    await window._dealLogActivity(dealId, 'email', {
-      body, gmailId: e.id, gmailSubject: e.subject, gmailFrom: e.from, gmailDate: e.dateStr,
+  if(logSelected){
+    // Capture dropdown values and checked state before any DOM changes
+    const dealSelections = {};
+    document.querySelectorAll('.pga-deal-sel').forEach(sel => {
+      dealSelections[parseInt(sel.dataset.idx)] = sel.value;
     });
+    const checked = [...document.querySelectorAll('.pga-chk:checked')].map(c => parseInt(c.dataset.idx));
 
-    // Save sender → property for next time
-    const senderEmail = window._pgaExtractEmail(e.from);
-    if(senderEmail) senderMap[senderEmail] = dealId;
-
-    count++;
+    const senderMap = window._pgaGetSenderMap();
+    let count = 0;
+    for(const i of checked){
+      const e = rows[i];
+      if(!e) continue;
+      const dealId = dealSelections[i] || e.dealId;
+      if(!dealId) continue;
+      const body = `📧 **${e.subject}**\nFrom: ${e.from}\nDate: ${e.dateStr}\n\n${e.snippet}`;
+      await window._dealLogActivity(dealId, 'email', {
+        body, gmailId: e.id, gmailSubject: e.subject, gmailFrom: e.from, gmailDate: e.dateStr,
+      });
+      const senderEmail = window._pgaExtractEmail(e.from);
+      if(senderEmail) senderMap[senderEmail] = dealId;
+      count++;
+    }
+    window._pgaSetSenderMap(senderMap);
+    if(count) showToast(`✅ Logged ${count} email${count!==1?'s':''}`, 'success', 2500);
   }
 
-  window._pgaSetSenderMap(senderMap);
-  showToast(`✅ Logged ${count} email${count!==1?'s':''} across properties`,'success',5000);
+  const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+  if(page + 1 >= totalPages){
+    document.getElementById('prop-gmail-all-modal')?.remove();
+    showToast(logSelected ? 'All done — inbox fully reviewed ✓' : 'Closed — unlogged emails will appear next sync', 'success', 3500);
+    return;
+  }
+  window._pgaRenderPage(page + 1);
 };
 
 // ── Deal activity logger: writes to deals/{dealId}/activities + cross-logs to linked contacts ──
