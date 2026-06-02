@@ -6587,53 +6587,43 @@ window.setAnthropicKey = async (key) => {
   console.log('%c✅ Anthropic key saved to Firestore', 'color:green;font-weight:bold');
 };
 
-// ── Admin helper: find + reconnect all Bill Eshenbaugh deals ──
+// ── Admin helper: reconnect pending Bill deals via delete+recreate ──
+// Firestore rules block updateDoc on pending-owned deals, so we delete+recreate with real UID.
 window.__fixBillDeals = async () => {
   if(!_fbDb || !_fbFns){ console.error('Firebase not ready'); return; }
-  const {collection, getDocs, updateDoc, doc: fbDocFn} = _fbFns;
+  const {collection, getDocs} = _fbFns;
 
-  // 1. Find Bill's real UID from allProfiles (could be pending or real)
-  const billEntries = Object.entries(allProfiles).filter(([id, p]) =>
-    (p.email||'').toLowerCase() === 'bill@thedirtdog.com'
+  // Find Bill's real Firebase UID
+  const realEntry = Object.entries(allProfiles).find(([id, p]) =>
+    !id.startsWith('pending_') && (p.email||'').toLowerCase() === 'bill@thedirtdog.com'
   );
-  console.log('Bill profile entries:', billEntries.map(([id,p])=>({id, name:p.name, email:p.email})));
+  if(!realEntry){ console.error('No real UID found for bill@thedirtdog.com'); return; }
+  const [targetUid, targetProfile] = realEntry;
+  const targetName = targetProfile.name || 'Bill Eshenbaugh';
+  console.log(`Bill real UID: ${targetUid}`);
 
-  // 2. Scan ALL deals for anything referencing bill@thedirtdog.com, Bill Eshenbaugh, or any bill UID
-  const billUids = new Set(['pending_bill_thedirtdog_com', ...billEntries.map(([id])=>id)]);
-  const allDealsSnap = await getDocs(collection(_fbDb,'deals'));
-  const billDeals = [];
-  allDealsSnap.docs.forEach(d => {
-    const dd = d.data();
-    const isBillPrimary = billUids.has(dd.advisorUid) || (dd.advisorEmail||'').toLowerCase()==='bill@thedirtdog.com';
-    const isBillCo = (dd.coAdvisors||[]).some(ca => billUids.has(ca.uid) || (ca.email||'').toLowerCase()==='bill@thedirtdog.com');
-    const isBillCoUid = (dd.coAdvisorUids||[]).some(u => billUids.has(u));
-    if(isBillPrimary || isBillCo || isBillCoUid){
-      billDeals.push({id: d.id, advisorUid: dd.advisorUid, advisorName: dd.advisorName, advisorEmail: dd.advisorEmail, project: dd.projectName||dd.propertyAddress, stage: dd.stage, isBillPrimary, isBillCo});
-    }
-  });
-  console.log(`Found ${billDeals.length} deals connected to Bill:`);
-  billDeals.forEach(d => console.log(` - ${d.project} | primary:${d.isBillPrimary} co:${d.isBillCo} | advisorUid:${d.advisorUid}`));
+  // Find all primary deals still owned by the pending key
+  const snap = await getDocs(collection(_fbDb,'deals'));
+  const pending = snap.docs
+    .filter(d => d.data().advisorUid === 'pending_bill_thedirtdog_com')
+    .map(d => ({id: d.id, data: d.data()}));
+  console.log(`Found ${pending.length} pending-owned deals to migrate`);
 
-  // 3. Determine target UID — prefer real (non-pending) UID if available
-  let targetUid = 'pending_bill_thedirtdog_com';
-  let targetName = 'Bill Eshenbaugh';
-  const realEntry = billEntries.find(([id]) => !id.startsWith('pending_'));
-  if(realEntry){ targetUid = realEntry[0]; targetName = realEntry[1].name || targetName; }
-  console.log(`Target UID for repairs: ${targetUid}`);
-
-  // 4. Fix any primary deals not using targetUid
-  let fixed = 0;
-  for(const deal of billDeals.filter(d => d.isBillPrimary && d.advisorUid !== targetUid)){
+  let ok=0, fail=0;
+  for(const {id, data} of pending){
+    const project = data.projectName || data.propertyAddress || id;
     try{
-      await updateDoc(fbDocFn(_fbDb,'deals',deal.id), {advisorUid: targetUid, advisorName: targetName, advisorEmail: 'bill@thedirtdog.com'});
-      console.log(`✅ Fixed primary UID on: ${deal.project} (${deal.advisorUid} → ${targetUid})`);
-      fixed++;
-    } catch(e){ console.error(`❌ Failed: ${deal.project}`, e.message); }
-    await new Promise(r=>setTimeout(r,200));
+      // Delete the pending-owned copy, then recreate with real UID
+      await Store.deleteDeal(id);
+      const newData = {...data, advisorUid: targetUid, advisorName: targetName, advisorEmail: 'bill@thedirtdog.com'};
+      delete newData.id;
+      await Store.createDeal(newData);
+      console.log(`✅ Migrated: ${project}`);
+      ok++;
+    } catch(e){ console.error(`❌ Failed: ${project}`, e.message); fail++; }
+    await new Promise(r=>setTimeout(r,400));
   }
-
-  console.log(`\nDone. Found ${billDeals.length} Bill deals total, fixed ${fixed}. Target UID: ${targetUid}`);
-  return {billDeals, targetUid, fixed};
+  console.log(`\nDone: ${ok} migrated, ${fail} failed. Bill's deals now use UID: ${targetUid}`);
 };
 
 // ── Queue all CRM contacts with email for a full Mailchimp sync ──
