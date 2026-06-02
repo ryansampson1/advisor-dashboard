@@ -7572,6 +7572,37 @@ window._pgaGetSenderMap = () => { try{ return JSON.parse(localStorage.getItem('p
 window._pgaSetSenderMap = m  => localStorage.setItem('propGmailSenderMap', JSON.stringify(m));
 window._pgaExtractEmail = from => { const m = from.match(/<([^>]+)>/); return (m?m[1]:from).toLowerCase().trim(); };
 
+// Expand a row inline to show full email body + attachment names
+window._pgaToggleExpand = (i) => {
+  const existing = document.getElementById('pga-expand-'+i);
+  const btn = document.getElementById('pga-expand-btn-'+i);
+  if(existing){
+    existing.remove();
+    if(btn) btn.textContent = '⤢ View';
+    return;
+  }
+  const email = (window._pgaAllRows||[])[i];
+  if(!email) return;
+  const bodyHtml = (email.body||email.snippet||'(no body available)')
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const attHtml = (email.attachments||[]).filter(Boolean).length
+    ? `<div style="font-size:.72rem;font-weight:600;color:#6366f1;margin-bottom:.5rem">📎 ${email.attachments.join(' · ')}</div>`
+    : '';
+  const tr = document.createElement('tr');
+  tr.id = 'pga-expand-'+i;
+  tr.style.background = '#f8fafc';
+  tr.innerHTML = `
+    <td colspan="7" style="padding:4px 16px 14px 44px;border-bottom:2px solid #dbeafe">
+      <div style="font-size:.72rem;color:#94a3b8;margin-bottom:.4rem">
+        <strong style="color:#374151">${email.subject}</strong> · ${email.from} · ${email.dateStr}
+      </div>
+      ${attHtml}
+      <div style="font-size:.78rem;color:#374151;white-space:pre-wrap;line-height:1.6;max-height:260px;overflow-y:auto;background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:.75rem 1rem;font-family:inherit">${bodyHtml}</div>
+    </td>`;
+  document.getElementById('pga-row-'+i)?.insertAdjacentElement('afterend', tr);
+  if(btn) btn.textContent = '⌃ Hide';
+};
+
 // Skip a single row forever (saved immediately so Cancel still persists the skip)
 window._pgaSkipRow = (idx, gmailId) => {
   const row = document.getElementById('pga-row-'+idx);
@@ -7667,18 +7698,31 @@ window._propGmailSyncAll = async () => {
               return;
             }
             try {
-              const mr = await fetch(`https://www.googleapis.com/gmail/v1/users/me/messages/${id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Date`, {headers:AUTH});
+              const mr = await fetch(`https://www.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`, {headers:AUTH});
               if(!mr.ok) return;
               const msg = await mr.json();
               const hMap = {};
               (msg.payload?.headers||[]).forEach(h => { hMap[h.name] = h.value; });
               const dateMs = parseInt(msg.internalDate||'0');
+              // Extract plain-text body + attachment filenames for richer matching
+              const _xParts = parts => {
+                let text='', atts=[];
+                for(const p of (parts||[])){
+                  if(p.mimeType==='text/plain' && p.body?.data) try{ text+=atob(p.body.data.replace(/-/g,'+').replace(/_/g,'/')); }catch{}
+                  if(p.filename) atts.push(p.filename);
+                  if(p.parts){ const s=_xParts(p.parts); text+=s.text; atts.push(...s.atts); }
+                }
+                return {text, atts};
+              };
+              const {text: bodyText, atts: attNames} = _xParts([msg.payload]);
               allEmailsByMsgId.set(id, {
                 id, snippet: msg.snippet||'',
                 subject: hMap['Subject']||'(no subject)',
                 from: hMap['From']||'', to: hMap['To']||'',
                 dateMs,
                 dateStr: dateMs ? new Date(dateMs).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'}) : '',
+                body: bodyText.slice(0, 3000),
+                attachments: attNames,
                 deals: [{id:deal.id, name:deal.projectName||deal.propertyAddress}]
               });
             } catch(e){ /* skip */ }
@@ -7710,10 +7754,14 @@ window._propGmailSyncAll = async () => {
         continue;
       }
 
-      // 2. Score each candidate deal by keyword hits in subject + snippet only
-      //    (body-only matches are too broad — newsletters hit everything)
-      const haystack = (email.subject + ' ' + email.snippet).toLowerCase();
-      let bestDeal = null, bestScore = 0;
+      // 2. Weighted scoring across all content layers:
+      //    subject (4pt) · attachment names (3pt) · snippet (2pt) · body (1pt)
+      //    Only auto-select if a keyword hit subject or attachment — body-only is too noisy
+      const sub_  = email.subject.toLowerCase();
+      const snip_ = email.snippet.toLowerCase();
+      const body_ = (email.body||'').toLowerCase();
+      const atts_ = (email.attachments||[]).join(' ').toLowerCase();
+      let bestDeal = null, bestScore = 0, bestHighConf = false;
       for(const d of email.deals){
         const deal = deals.find(x => x.id === d.id);
         if(!deal) continue;
@@ -7722,15 +7770,22 @@ window._propGmailSyncAll = async () => {
           .map(w => w.replace(/[^a-zA-Z0-9]/g,''))
           .filter(w => w.length > 3 && !/^(road|street|drive|blvd|ave|lane|court|pkwy|hwy|florida|fl|the|and|for)$/i.test(w))
         )].slice(0, 5);
-        const score = kwParts.reduce((s, kw) => s + (haystack.includes(kw.toLowerCase()) ? 1 : 0), 0);
-        if(score > bestScore){ bestScore = score; bestDeal = deal; }
+        let score = 0, highConf = false;
+        for(const kw of kwParts){
+          const k = kw.toLowerCase();
+          if(sub_.includes(k))  { score += 4; highConf = true; }
+          if(atts_.includes(k)) { score += 3; highConf = true; }
+          if(snip_.includes(k)) score += 2;
+          if(body_.includes(k)) score += 1;
+        }
+        if(score > bestScore){ bestScore = score; bestDeal = deal; bestHighConf = highConf; }
       }
 
-      // Only pre-select if a keyword actually appears in subject/snippet; otherwise leave blank for user
+      // Auto-select only when a keyword hit the subject or an attachment filename
       rows.push({
         ...email,
-        dealId:   bestScore > 0 && bestDeal ? bestDeal.id   : '',
-        dealName: bestScore > 0 && bestDeal ? (bestDeal.projectName||bestDeal.propertyAddress) : '',
+        dealId:   bestHighConf && bestDeal ? bestDeal.id   : '',
+        dealName: bestHighConf && bestDeal ? (bestDeal.projectName||bestDeal.propertyAddress) : '',
         matchScore: bestScore,
       });
     }
@@ -7767,7 +7822,7 @@ window._propGmailSyncAll = async () => {
                 <th style="padding:8px 10px;text-align:left;color:#6b7280;font-weight:600;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em">From</th>
                 <th style="padding:8px 10px;text-align:left;color:#6b7280;font-weight:600;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em">Subject</th>
                 <th style="padding:8px 10px;text-align:left;color:#6b7280;font-weight:600;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em">Preview</th>
-                <th style="padding:8px 10px;width:32px"></th>
+                <th style="padding:8px 10px;width:70px"></th>
               </tr>
             </thead>
             <tbody>
@@ -7783,8 +7838,12 @@ window._propGmailSyncAll = async () => {
                   <td style="padding:8px 10px;white-space:nowrap;color:#64748b">${e.dateStr}</td>
                   <td style="padding:8px 10px;max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${e.from}">${e.from.replace(/<.*>/,'').trim()||e.from}</td>
                   <td style="padding:8px 10px;font-weight:600;color:#111;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${e.subject}">${e.subject}</td>
-                  <td style="padding:8px 10px;color:#64748b;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${e.snippet}">${e.snippet}</td>
-                  <td style="padding:8px 10px;text-align:center"><button onclick="window._pgaSkipRow(${i},'${e.id}')" title="Skip forever — won't appear in future syncs" style="background:none;border:none;cursor:pointer;font-size:.9rem;color:#d1d5db;padding:2px 4px;border-radius:4px;line-height:1" onmouseenter="this.style.color='#ef4444'" onmouseleave="this.style.color='#d1d5db'">🚫</button></td>
+                  <td style="padding:8px 10px;color:#64748b;max-width:180px">
+                    <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${e.snippet}">${e.snippet}</div>
+                  </td>
+                  <td style="padding:6px 10px;white-space:nowrap;text-align:right">
+                    <button id="pga-expand-btn-${i}" onclick="event.stopPropagation();window._pgaToggleExpand(${i})" title="View full email body" style="background:#f1f5f9;border:1px solid #e2e8f0;cursor:pointer;font-size:.7rem;padding:3px 7px;border-radius:5px;color:#374151;font-weight:600;margin-right:4px">⤢ View</button><button onclick="window._pgaSkipRow(${i},'${e.id}')" title="Skip forever" style="background:none;border:none;cursor:pointer;font-size:.9rem;color:#d1d5db;padding:2px 3px;border-radius:4px;line-height:1" onmouseenter="this.style.color='#ef4444'" onmouseleave="this.style.color='#d1d5db'">🚫</button>
+                  </td>
                 </tr>`).join('')}
             </tbody>
           </table>
