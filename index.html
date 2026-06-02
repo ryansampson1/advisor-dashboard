@@ -6587,45 +6587,6 @@ window.setAnthropicKey = async (key) => {
   console.log('%c✅ Anthropic key saved to Firestore', 'color:green;font-weight:bold');
 };
 
-// ── Admin helper: reconnect pending Bill deals via delete+recreate ──
-// Firestore rules block updateDoc on pending-owned deals, so we delete+recreate with real UID.
-window.__fixBillDeals = async () => {
-  if(!_fbDb || !_fbFns){ console.error('Firebase not ready'); return; }
-  const {collection, getDocs} = _fbFns;
-
-  // Find Bill's real Firebase UID
-  const realEntry = Object.entries(allProfiles).find(([id, p]) =>
-    !id.startsWith('pending_') && (p.email||'').toLowerCase() === 'bill@thedirtdog.com'
-  );
-  if(!realEntry){ console.error('No real UID found for bill@thedirtdog.com'); return; }
-  const [targetUid, targetProfile] = realEntry;
-  const targetName = targetProfile.name || 'Bill Eshenbaugh';
-  console.log(`Bill real UID: ${targetUid}`);
-
-  // Find all primary deals still owned by the pending key
-  const snap = await getDocs(collection(_fbDb,'deals'));
-  const pending = snap.docs
-    .filter(d => d.data().advisorUid === 'pending_bill_thedirtdog_com')
-    .map(d => ({id: d.id, data: d.data()}));
-  console.log(`Found ${pending.length} pending-owned deals to migrate`);
-
-  let ok=0, fail=0;
-  for(const {id, data} of pending){
-    const project = data.projectName || data.propertyAddress || id;
-    try{
-      // Delete the pending-owned copy, then recreate with real UID
-      await Store.deleteDeal(id);
-      const newData = {...data, advisorUid: targetUid, advisorName: targetName, advisorEmail: 'bill@thedirtdog.com'};
-      delete newData.id;
-      await Store.createDeal(newData);
-      console.log(`✅ Migrated: ${project}`);
-      ok++;
-    } catch(e){ console.error(`❌ Failed: ${project}`, e.message); fail++; }
-    await new Promise(r=>setTimeout(r,400));
-  }
-  console.log(`\nDone: ${ok} migrated, ${fail} failed. Bill's deals now use UID: ${targetUid}`);
-};
-
 // ── Queue all CRM contacts with email for a full Mailchimp sync ──
 // The nightly sync script will process anything with mailchimpPendingSync: true.
 window._mcQueueFullSync = async () => {
