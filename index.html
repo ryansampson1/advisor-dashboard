@@ -6800,6 +6800,7 @@ function viewBoard(){
       </div>
       <div style="display:flex;align-items:center;gap:.75rem;flex-wrap:wrap">
         ${_advisorFilterDropdown}
+        <button onclick="window._propGmailSyncAll()" class="border border-blue-200 rounded-lg px-3 py-2 text-sm text-blue-600 hover:bg-blue-50 whitespace-nowrap font-semibold" title="Scan Gmail for emails about all active properties (last 30 days)">📧 Gmail Sync${typeof _PROP_GMAIL_SYNC_DATE!=='undefined'?` <span class="font-normal text-xs text-blue-400">(${_PROP_GMAIL_SYNC_DATE})</span>`:''}</button>
         <button onclick="openDealModal(null)" class="brand-btn px-5 py-2.5 text-sm font-semibold transition">+ Add Deal</button>
       </div>
     </div>
@@ -6900,7 +6901,7 @@ function viewBoard(){
 function renderCard(deal){
   const days    = daysInStage(deal);
   const dayCls  = days>45?'text-red-600 bg-red-100':days>21?'text-amber-600 bg-amber-100':'text-gray-400 bg-gray-100';
-  const canDrag = currentUser.isAdmin||deal.advisorUid===currentUser.uid;
+  const canDrag = currentUser.isAdmin||isDealAdvisor(deal,currentUser.uid);
   const price   = getDealPrice(deal);
   const rev     = getEffectiveRevenue(deal);
   // Project name: prefer explicit projectName, fall back to property address
@@ -7535,6 +7536,210 @@ window._pdwGmailLog = async (dealId) => {
   await window._propLoadActivities(dealId, 'pdw-activity-feed');
 };
 
+// ── Bulk Property Gmail Sync — scan all active properties at once ──────────
+// Called from the Gmail Sync button on the Deal Pipeline toolbar.
+window._propGmailSyncAll = async () => {
+  const thirtyAgo = Date.now() - 30*24*60*60*1000;
+  const deals = visibleDeals().filter(d => {
+    if(isLostStage(d.stage||'')) return false;
+    if(isWonStage(d.stage||'') && (d.stageEnteredAt||d.updatedAt||0) < thirtyAgo) return false;
+    return !!(d.propertyAddress || d.projectName);
+  });
+
+  if(!deals.length){ showToast('No active properties to sync','info'); return; }
+
+  const loadId = 'pga-load-' + Date.now();
+  document.body.insertAdjacentHTML('beforeend', `
+    <div id="${loadId}" style="position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9999;display:flex;align-items:center;justify-content:center">
+      <div style="background:#fff;border-radius:16px;padding:2rem 2.5rem;text-align:center;max-width:360px;width:90%">
+        <div style="font-size:1.5rem;margin-bottom:.5rem">📧</div>
+        <div style="font-weight:700;font-size:1rem;margin-bottom:.35rem">Scanning Gmail…</div>
+        <div id="${loadId}-sub" style="font-size:.8rem;color:#6b7280">Getting authorization…</div>
+        <div style="margin-top:.75rem;background:#f1f5f9;border-radius:8px;height:6px;overflow:hidden">
+          <div id="${loadId}-bar" style="height:100%;background:#3b82f6;width:0%;transition:width .3s ease"></div>
+        </div>
+        <div id="${loadId}-cnt" style="font-size:.72rem;color:#9ca3af;margin-top:.4rem">0 / ${deals.length} properties</div>
+      </div>
+    </div>`);
+
+  const setProgress = (i, sub) => {
+    const pct = Math.round((i / deals.length) * 100);
+    const bar = document.getElementById(loadId+'-bar');
+    const cnt = document.getElementById(loadId+'-cnt');
+    const sub_ = document.getElementById(loadId+'-sub');
+    if(bar) bar.style.width = pct+'%';
+    if(cnt) cnt.textContent = `${i} / ${deals.length} properties`;
+    if(sub && sub_) sub_.textContent = sub;
+  };
+
+  try {
+    const token = await _getGmailToken();
+    const AUTH = { Authorization: `Bearer ${token}` };
+
+    const lastSyncTs = parseInt(localStorage.getItem('propGmailSyncAllLastTs')||'0',10);
+    const thirtyAgoTs = Date.now() - 30*24*60*60*1000;
+    const afterDate = new Date(Math.max(lastSyncTs, thirtyAgoTs));
+    const afterStr = `${afterDate.getFullYear()}/${String(afterDate.getMonth()+1).padStart(2,'0')}/${String(afterDate.getDate()).padStart(2,'0')}`;
+
+    // Pre-fetch already-logged gmailIds for all deals in parallel
+    setProgress(0, 'Checking existing activity logs…');
+    const {collection, getDocs} = _fbFns;
+    const loggedByDeal = new Map();
+    await Promise.all(deals.map(async deal => {
+      try {
+        const snap = await getDocs(collection(_fbDb, 'deals', deal.id, 'activities'));
+        loggedByDeal.set(deal.id, new Set(snap.docs.map(d => d.data().gmailId).filter(Boolean)));
+      } catch(e){ loggedByDeal.set(deal.id, new Set()); }
+    }));
+
+    // Search Gmail per property in batches of 5
+    const allEmailsByMsgId = new Map();
+    let done = 0;
+    const BATCH = 5;
+    for(let i=0; i<deals.length; i+=BATCH){
+      await Promise.all(deals.slice(i, i+BATCH).map(async deal => {
+        const kwParts = [...new Set([deal.propertyAddress||'', deal.projectName||''].join(' ')
+          .split(/[\s,\/\-–]+/)
+          .map(w => w.replace(/[^a-zA-Z0-9]/g,''))
+          .filter(w => w.length > 3 && !/^(road|street|drive|blvd|ave|lane|court|pkwy|hwy|florida|fl|the|and|for)$/i.test(w))
+        )].slice(0, 5);
+        if(!kwParts.length){ done++; return; }
+        try {
+          const q = kwParts.map(k => `"${k}"`).join(' OR ') + ` after:${afterStr}`;
+          const r = await fetch(`https://www.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(q)}&maxResults=25`, {headers:AUTH});
+          if(!r.ok){ done++; return; }
+          const data = await r.json();
+          const msgIds = (data.messages||[]).map(m=>m.id);
+          await Promise.all(msgIds.map(async id => {
+            if(allEmailsByMsgId.has(id)){
+              // Already fetched — just associate this deal too
+              const ex = allEmailsByMsgId.get(id);
+              if(!ex.deals.find(d=>d.id===deal.id))
+                ex.deals.push({id:deal.id, name:deal.projectName||deal.propertyAddress});
+              return;
+            }
+            try {
+              const mr = await fetch(`https://www.googleapis.com/gmail/v1/users/me/messages/${id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Date`, {headers:AUTH});
+              if(!mr.ok) return;
+              const msg = await mr.json();
+              const hMap = {};
+              (msg.payload?.headers||[]).forEach(h => { hMap[h.name] = h.value; });
+              const dateMs = parseInt(msg.internalDate||'0');
+              allEmailsByMsgId.set(id, {
+                id, snippet: msg.snippet||'',
+                subject: hMap['Subject']||'(no subject)',
+                from: hMap['From']||'', to: hMap['To']||'',
+                dateMs,
+                dateStr: dateMs ? new Date(dateMs).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'}) : '',
+                deals: [{id:deal.id, name:deal.projectName||deal.propertyAddress}]
+              });
+            } catch(e){ /* skip */ }
+          }));
+        } catch(e){ /* skip this deal */ }
+        done++;
+        setProgress(done, `Scanning: ${deal.projectName||deal.propertyAddress||'Property'}…`);
+      }));
+    }
+
+    document.getElementById(loadId)?.remove();
+
+    // Build row list — one row per (email × deal), excluding already-logged
+    const rows = [];
+    for(const email of allEmailsByMsgId.values()){
+      for(const d of email.deals){
+        if(!(loggedByDeal.get(d.id)||new Set()).has(email.id))
+          rows.push({...email, dealId:d.id, dealName:d.name});
+      }
+    }
+
+    if(!rows.length){
+      showToast('All Gmail emails are already logged across all properties ✓','success',5000);
+      return;
+    }
+    rows.sort((a,b) => b.dateMs - a.dateMs);
+
+    // Show review modal
+    const modal = document.createElement('div');
+    modal.id = 'prop-gmail-all-modal';
+    modal.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.5);padding:16px';
+    modal.innerHTML = `
+      <div style="background:#fff;border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,.25);width:100%;max-width:880px;max-height:88vh;display:flex;flex-direction:column;overflow:hidden">
+        <div style="padding:16px 20px 12px;border-bottom:1px solid #f1f5f9;flex-shrink:0">
+          <div style="font-size:15px;font-weight:700;color:#111">📧 Gmail Sync — All Properties</div>
+          <div style="font-size:12px;color:#64748b;margin-top:2px">${rows.length} unlogged email${rows.length!==1?'s':''} found across ${deals.length} properties · Check the ones to log</div>
+        </div>
+        <div style="flex:1;overflow-y:auto">
+          <table style="width:100%;border-collapse:collapse;font-size:.8rem">
+            <thead style="position:sticky;top:0;background:#f8fafc;z-index:1">
+              <tr style="border-bottom:1px solid #e2e8f0">
+                <th style="padding:8px 12px;text-align:left;width:32px"><input type="checkbox" id="pga-chk-all" checked onchange="document.querySelectorAll('.pga-chk').forEach(c=>c.checked=this.checked);window._pgaUpdateCount()"/></th>
+                <th style="padding:8px 12px;text-align:left;color:#6b7280;font-weight:600;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em">Property</th>
+                <th style="padding:8px 12px;text-align:left;color:#6b7280;font-weight:600;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em">Date</th>
+                <th style="padding:8px 12px;text-align:left;color:#6b7280;font-weight:600;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em">From</th>
+                <th style="padding:8px 12px;text-align:left;color:#6b7280;font-weight:600;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em">Subject</th>
+                <th style="padding:8px 12px;text-align:left;color:#6b7280;font-weight:600;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em">Preview</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows.map((e,i) => `
+                <tr style="border-bottom:1px solid #f1f5f9;cursor:pointer" onclick="this.querySelector('.pga-chk').click();window._pgaUpdateCount()">
+                  <td style="padding:8px 12px"><input type="checkbox" class="pga-chk" data-idx="${i}" checked onclick="event.stopPropagation();window._pgaUpdateCount()"/></td>
+                  <td style="padding:8px 12px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;color:#374151" title="${e.dealName}">${e.dealName}</td>
+                  <td style="padding:8px 12px;white-space:nowrap;color:#64748b">${e.dateStr}</td>
+                  <td style="padding:8px 12px;max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${e.from}">${e.from.replace(/<.*>/,'').trim()||e.from}</td>
+                  <td style="padding:8px 12px;font-weight:600;color:#111;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${e.subject}">${e.subject}</td>
+                  <td style="padding:8px 12px;color:#64748b;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${e.snippet}">${e.snippet}</td>
+                </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+        <div style="padding:12px 20px;border-top:1px solid #f1f5f9;display:flex;gap:8px;align-items:center;flex-shrink:0">
+          <span id="pga-count-label" style="font-size:.75rem;color:#6b7280;flex:1">${rows.length} email${rows.length!==1?'s':''} selected</span>
+          <button onclick="window._propGmailLogAll()" style="background:#111;color:#fff;font-size:.875rem;font-weight:700;padding:10px 20px;border-radius:10px;border:none;cursor:pointer">✅ Log Selected to Properties</button>
+          <button onclick="document.getElementById('prop-gmail-all-modal')?.remove()" style="padding:10px 16px;border-radius:10px;border:1px solid #e2e8f0;background:#f8fafc;font-size:.875rem;color:#374151;cursor:pointer">Cancel</button>
+        </div>
+      </div>`;
+
+    window._pgaAllRows = rows;
+    window._pgaUpdateCount = () => {
+      const n = document.querySelectorAll('.pga-chk:checked').length;
+      const lbl = document.getElementById('pga-count-label');
+      if(lbl) lbl.textContent = `${n} email${n!==1?'s':''} selected`;
+    };
+    modal.addEventListener('click', ev => { if(ev.target===modal) modal.remove(); });
+    document.getElementById('prop-gmail-all-modal')?.remove();
+    document.body.appendChild(modal);
+
+    // Save last sync timestamp + update button label
+    localStorage.setItem('propGmailSyncAllLastTs', String(Date.now()));
+    window._PROP_GMAIL_SYNC_DATE = new Date().toLocaleDateString('en-US',{month:'short',day:'numeric'});
+
+  } catch(e) {
+    document.getElementById(loadId)?.remove();
+    console.error('[propGmailSyncAll]', e);
+    showToast('Gmail sync failed: ' + e.message, 'error', 6000);
+  }
+};
+
+window._propGmailLogAll = async () => {
+  const rows = window._pgaAllRows || [];
+  const checked = [...document.querySelectorAll('.pga-chk:checked')].map(c => parseInt(c.dataset.idx));
+  if(!checked.length){ showToast('No emails selected','warning'); return; }
+  document.getElementById('prop-gmail-all-modal')?.remove();
+  showToast(`Logging ${checked.length} email${checked.length!==1?'s':''}…`,'info',8000);
+  let count = 0;
+  for(const i of checked){
+    const e = rows[i];
+    if(!e) continue;
+    const body = `📧 **${e.subject}**\nFrom: ${e.from}\nDate: ${e.dateStr}\n\n${e.snippet}`;
+    await window._dealLogActivity(e.dealId, 'email', {
+      body, gmailId: e.id, gmailSubject: e.subject, gmailFrom: e.from, gmailDate: e.dateStr,
+    });
+    count++;
+  }
+  showToast(`✅ Logged ${count} email${count!==1?'s':''} across properties`,'success',5000);
+};
+
 // ── Deal activity logger: writes to deals/{dealId}/activities + cross-logs to linked contacts ──
 window._dealLogActivity = async (dealId, type, data = {}) => {
   if (!_fbDb || !_fbFns) { alert('Not connected to database.'); return; }
@@ -7549,6 +7754,7 @@ window._dealLogActivity = async (dealId, type, data = {}) => {
     ...( data.callDuration ? {callDuration: data.callDuration} : {} ),
     ...( data.meetingTitle ? {meetingTitle: data.meetingTitle} : {} ),
     ...( data.meetingDate  ? {meetingDate: data.meetingDate}   : {} ),
+    ...( data.gmailId      ? {gmailId: data.gmailId, gmailSubject: data.gmailSubject||'', gmailFrom: data.gmailFrom||'', gmailDate: data.gmailDate||''} : {} ),
   };
   // Write to deal sub-collection
   await addDoc(collection(_fbDb, 'deals', dealId, 'activities'), activity);
@@ -8097,7 +8303,7 @@ window.handleDrop = (ev,newStage) => {
   if(!id) return;
   const deal=allDeals.find(d=>d.id===id);
   if(!deal) return;
-  if(!currentUser.isAdmin&&deal.advisorUid!==currentUser.uid){ showToast('You can only move your own deals','warning'); return; }
+  if(!currentUser.isAdmin&&!isDealAdvisor(deal,currentUser.uid)){ showToast('You can only move your own deals','warning'); return; }
   if(deal.stage===newStage) return;
   // Helper: open modal, switch it to newStage, render correct fields + update badge
   const openModalForStage = (toastMsg) => {
