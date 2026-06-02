@@ -6587,25 +6587,53 @@ window.setAnthropicKey = async (key) => {
   console.log('%c✅ Anthropic key saved to Firestore', 'color:green;font-weight:bold');
 };
 
-// ── Temporary: scan all deals for Bill and report ──
-window.__scanBill = async () => {
+// ── Complete Bill fix: reset stages + remove stale pending profile ──
+window.__completeBillFix = async () => {
   if(!_fbDb || !_fbFns){ console.error('not ready'); return; }
-  const {collection, getDocs} = _fbFns;
+  const {collection, getDocs, doc, deleteDoc} = _fbFns;
+  const BILL_UID   = 'JgrvLYVX8kWXsWiWiuNxaRTYmH32';
+  const BILL_EMAIL = 'bill@thedirtdog.com';
+  const BILL_NAME  = 'Bill Eshenbaugh';
+  const TARGET_STAGE = 'Due Diligence (Under Contract)';
+
+  // 1. Find all of Bill's primary deals in Firestore
   const snap = await getDocs(collection(_fbDb,'deals'));
-  const results = [];
-  snap.docs.forEach(d => {
-    const dd = d.data();
-    const isBill = (dd.advisorUid||'').includes('bill') ||
-                   (dd.advisorUid||'') === 'JgrvLYVX8kWXsWiWiuNxaRTYmH32' ||
-                   (dd.advisorEmail||'').toLowerCase() === 'bill@thedirtdog.com' ||
-                   (dd.advisorName||'').toLowerCase().includes('bill') ||
-                   (dd.coAdvisors||[]).some(c=>(c.email||'').toLowerCase()==='bill@thedirtdog.com');
-    if(isBill) results.push({id:d.id, project:dd.projectName||dd.propertyAddress, advisorUid:dd.advisorUid, advisorEmail:dd.advisorEmail, stage:dd.stage});
-  });
-  console.log(`Total deals in Firestore: ${snap.docs.length}`);
-  console.log(`Bill-related deals: ${results.length}`);
-  results.forEach(r=>console.log(` - ${r.project} | uid:${r.advisorUid} | email:${r.advisorEmail} | stage:${r.stage}`));
-  return results;
+  const billPrimary = snap.docs
+    .filter(d => d.data().advisorUid === BILL_UID)
+    .map(d => ({id: d.id, data: d.data()}));
+  console.log(`Found ${billPrimary.length} of Bill's primary deals`);
+
+  // 2. Delete + recreate each with correct stage
+  let ok=0, fail=0;
+  for(const {id, data} of billPrimary){
+    const project = data.projectName || data.propertyAddress || id;
+    const newData = {
+      ...data,
+      advisorUid: BILL_UID,
+      advisorName: BILL_NAME,
+      advisorEmail: BILL_EMAIL,
+      stage: TARGET_STAGE,
+      probability: 65,
+      stageEnteredAt: data.stageEnteredAt || Date.now(),
+    };
+    delete newData.id;
+    try{
+      await Store.deleteDeal(id);
+      await Store.createDeal(newData);
+      console.log(`✅ Fixed stage: ${project}`);
+      ok++;
+    } catch(e){ console.error(`❌ ${project}:`, e.message); fail++; }
+    await new Promise(r=>setTimeout(r,400));
+  }
+
+  // 3. Remove stale pending profile so filter dropdown uses real UID
+  try{
+    await deleteDoc(doc(_fbDb,'advisorProfiles','pending_bill_thedirtdog_com'));
+    console.log('✅ Removed stale pending profile');
+  } catch(e){ console.warn('Pending profile delete failed (may already be gone):', e.message); }
+
+  console.log(`\nDone: ${ok} deals fixed, ${fail} failed.`);
+  console.log('Bill\'s deals are now in "Due Diligence (Under Contract)". Refresh to confirm.');
 };
 
 // ── Queue all CRM contacts with email for a full Mailchimp sync ──
