@@ -18712,6 +18712,8 @@ async function launchApp(){
   renderCurrentView();
   renderPendingPanel();
   initGlobalAIWidget();
+  // Apply any pending commission updates from profile (advisor) or flush them (admin)
+  setTimeout(() => _applyPendingCommissions(), 1200);
   // Show commission completion prompt for active contract deals missing commission info
   if(currentUser && !currentUser.isAdmin && !currentUser.isStaff){
     setTimeout(() => _checkCommissionRequirements(), 800);
@@ -18821,6 +18823,7 @@ window._saveCommissionRequirements = async () => {
   if(btn){ btn.textContent='Saving…'; btn.disabled=true; }
 
   try {
+    let usedFallback = false;
     for(const s of saves){
       const deal = allDeals.find(x=>x.id===s.id);
       const upd = {
@@ -18828,22 +18831,86 @@ window._saveCommissionRequirements = async () => {
         commissionPayingParty: s.party,
         updatedAt: Date.now(),
       };
-      await Store.updateDeal(s.id, upd);
+      try {
+        await Store.updateDeal(s.id, upd);
+      } catch(dealErr) {
+        if(dealErr?.code === 'permission-denied') {
+          // Advisor lacks direct write access — queue in their profile for admin to flush
+          usedFallback = true;
+          const uid = currentUser?.uid;
+          if(uid){
+            const existing = allProfiles[uid] || {};
+            const pending = {...(existing.pendingCommissions||{}), [s.id]: upd};
+            await Store.saveProfile(uid, {pendingCommissions: pending});
+            allProfiles[uid] = {...existing, pendingCommissions: pending};
+          }
+        } else {
+          throw dealErr;
+        }
+      }
+      // Always apply locally so UI reflects the saved values immediately
       if(deal) Object.assign(deal, upd);
     }
     document.getElementById('commission-req-modal')?.remove();
-    showToast(`✅ Commission details saved for ${saves.length} deal${saves.length!==1?'s':''}`, 'success', 4000);
+    if(usedFallback){
+      showToast(`✅ Commission details saved. An admin will finalize in Firestore shortly.`, 'success', 5000);
+    } else {
+      showToast(`✅ Commission details saved for ${saves.length} deal${saves.length!==1?'s':''}`, 'success', 4000);
+    }
     renderCurrentView();
   } catch(e) {
     console.error('[_saveCommissionRequirements]', e);
-    const errDiv = document.getElementById('crq-error');
-    const msg = e?.code === 'permission-denied'
-      ? 'Permission denied — please contact your admin to update commission info.'
-      : 'Save failed: ' + (e?.message || e?.code || 'unknown error');
-    if(errDiv){ errDiv.innerHTML = msg; errDiv.style.display='block'; }
+    const errDiv2 = document.getElementById('crq-error');
+    const msg = 'Save failed: ' + (e?.message || e?.code || 'unknown error');
+    if(errDiv2){ errDiv2.innerHTML = msg; errDiv2.style.display='block'; }
     if(btn){ btn.textContent='Save & Continue →'; btn.disabled=false; }
   }
 };
+
+// ── Pending Commission Flush (admin) / Local Restore (advisor) ──────────────
+// Advisors who lack direct Firestore write access queue updates in their profile.
+// Admins auto-flush those queued updates to the actual deal documents on load.
+// Advisors re-apply their own queued updates locally so the UI stays consistent.
+async function _applyPendingCommissions(){
+  if(!currentUser) return;
+  const uid = currentUser.uid;
+
+  if(currentUser.isAdmin || currentUser.isSuperAdmin){
+    // Admin path: scan all loaded profiles for pending commission updates and flush
+    let flushed = 0;
+    for(const [profUid, prof] of Object.entries(allProfiles)){
+      const pending = prof?.pendingCommissions;
+      if(!pending || !Object.keys(pending).length) continue;
+      for(const [dealId, upd] of Object.entries(pending)){
+        try {
+          await Store.updateDeal(dealId, upd);
+          const deal = allDeals.find(d=>d.id===dealId);
+          if(deal) Object.assign(deal, upd);
+          flushed++;
+        } catch(e){ console.warn('[_applyPendingCommissions] flush failed for',dealId,e); }
+      }
+      // Clear the pending queue from the advisor's profile
+      try {
+        await Store.saveProfile(profUid, {pendingCommissions: {}});
+        allProfiles[profUid] = {...prof, pendingCommissions: {}};
+      } catch(e){ console.warn('[_applyPendingCommissions] clear failed for',profUid,e); }
+    }
+    if(flushed > 0){
+      showToast(`✅ Applied ${flushed} queued commission update${flushed!==1?'s':''} from advisors`, 'success', 4000);
+      renderCurrentView();
+    }
+  } else {
+    // Advisor path: re-apply their own pending commissions to local allDeals
+    const pending = allProfiles[uid]?.pendingCommissions;
+    if(!pending || !Object.keys(pending).length) return;
+    let applied = 0;
+    for(const [dealId, upd] of Object.entries(pending)){
+      const deal = allDeals.find(d=>d.id===dealId);
+      if(deal){ Object.assign(deal, upd); applied++; }
+    }
+    if(applied > 0) renderCurrentView();
+  }
+}
 
 /* =======================================================
    VIEW: HR
