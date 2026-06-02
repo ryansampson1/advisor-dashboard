@@ -6587,6 +6587,26 @@ window.setAnthropicKey = async (key) => {
   console.log('%c✅ Anthropic key saved to Firestore', 'color:green;font-weight:bold');
 };
 
+// ── Revert 3 pre-existing Bill deals back to Listing ──
+window.__revertBillListing = async () => {
+  const {collection, getDocs} = _fbFns;
+  const snap = await getDocs(collection(_fbDb,'deals'));
+  const toFix = ['CPEV Swope Apts', 'Miller Cypress blvd 14', 'Miller Cypress Creek 13'];
+  const targets = snap.docs
+    .filter(d => toFix.includes(d.data().projectName || d.data().propertyAddress))
+    .map(d => ({id: d.id, data: d.data()}));
+  console.log(`Found ${targets.length} deals to revert to Listing`);
+  for(const {id, data} of targets){
+    const newData = {...data, stage: 'Listing', probability: 25};
+    delete newData.id;
+    await Store.deleteDeal(id);
+    await Store.createDeal(newData);
+    console.log('✅ Reverted to Listing:', data.projectName || data.propertyAddress);
+    await new Promise(r=>setTimeout(r,400));
+  }
+  console.log('Done.');
+};
+
 // ── Complete Bill fix: reset stages + remove stale pending profile ──
 window.__completeBillFix = async () => {
   if(!_fbDb || !_fbFns){ console.error('not ready'); return; }
