@@ -7944,12 +7944,19 @@ window._pgaNextPage = async (logSelected) => {
     if(btn){ btn.disabled = true; btn.textContent = 'Logging…'; }
 
     const senderMap = window._pgaGetSenderMap();
-    let count = 0, errors = 0;
+    let count = 0, skipped = 0, errors = 0;
     for(const i of checked){
       const e = rows[i];
       if(!e) continue;
       const dealId = dealSelections[i] || e.dealId;
       if(!dealId) continue;
+      // Only write to deals this user is the advisor (or co-advisor) on —
+      // Firestore rules deny writes to other advisors' deals
+      const deal = (window.allDeals||[]).find(d => d.id === dealId);
+      if(deal && typeof isDealAdvisor === 'function' && !isDealAdvisor(deal, currentUser?.uid)){
+        skipped++;
+        continue;
+      }
       try {
         const body = `📧 **${e.subject}**\nFrom: ${e.from}\nDate: ${e.dateStr}\n\n${e.snippet}`;
         await window._dealLogActivity(dealId, 'email', {
@@ -7966,8 +7973,11 @@ window._pgaNextPage = async (logSelected) => {
       }
     }
     window._pgaSetSenderMap(senderMap);
-    if(count)  showToast(`✅ Logged ${count} email${count!==1?'s':''}`, 'success', 2500);
-    if(errors) showToast(`⚠️ ${errors} failed — open browser console (Cmd+Option+J) to see why`, 'warning', 6000);
+    const parts = [];
+    if(count)   parts.push(`✅ Logged ${count}`);
+    if(skipped) parts.push(`${skipped} skipped (other advisor's deal)`);
+    if(parts.length) showToast(parts.join(' · '), 'success', 3000);
+    if(errors)  showToast(`⚠️ ${errors} failed — check console`, 'warning', 5000);
   }
 
   // Always advance regardless of logging outcome — re-enable button first
