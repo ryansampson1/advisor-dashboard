@@ -7950,13 +7950,8 @@ window._pgaNextPage = async (logSelected) => {
       if(!e) continue;
       const dealId = dealSelections[i] || e.dealId;
       if(!dealId) continue;
-      // Only write to deals this user is the advisor (or co-advisor) on —
-      // Firestore rules deny writes to other advisors' deals
-      const deal = (window.allDeals||[]).find(d => d.id === dealId);
-      if(deal && typeof isDealAdvisor === 'function' && !isDealAdvisor(deal, currentUser?.uid)){
-        skipped++;
-        continue;
-      }
+      // Note: Firestore rules must allow authenticated users to write to any deal's activities
+      // (update the /deals/{dealId}/activities rule to: allow write: if request.auth != null)
       try {
         const body = `📧 **${e.subject}**\nFrom: ${e.from}\nDate: ${e.dateStr}\n\n${e.snippet}`;
         await window._dealLogActivity(dealId, 'email', {
@@ -7973,11 +7968,8 @@ window._pgaNextPage = async (logSelected) => {
       }
     }
     window._pgaSetSenderMap(senderMap);
-    const parts = [];
-    if(count)   parts.push(`✅ Logged ${count}`);
-    if(skipped) parts.push(`${skipped} skipped (other advisor's deal)`);
-    if(parts.length) showToast(parts.join(' · '), 'success', 3000);
-    if(errors)  showToast(`⚠️ ${errors} failed — check console`, 'warning', 5000);
+    if(count)  showToast(`✅ Logged ${count} email${count!==1?'s':''}`, 'success', 3000);
+    if(errors) showToast(`⚠️ ${errors} failed — check console`, 'warning', 5000);
   }
 
   // Always advance regardless of logging outcome — re-enable button first
@@ -8065,9 +8057,11 @@ window._propLoadActivities = async (dealId, feedElId) => {
                      : a.type === 'email'   ? '📧' : '📝';
         const title  = a.type === 'call'    ? '📞 Call'
                      : a.type === 'meeting' ? `📅 ${a.meetingTitle || 'Meeting'}`
+                     : a.type === 'email'   ? `📧 Email${a.gmailFrom ? ' · ' + a.gmailFrom.replace(/<.*>/,'').trim() : ''}`
                      : '📝 Note';
         const meta   = a.type === 'call'    && a.callDate    ? ` · ${a.callDate}${a.callDuration ? ` (${a.callDuration} min)` : ''}`
-                     : a.type === 'meeting' && a.meetingDate ? ` · ${a.meetingDate}` : '';
+                     : a.type === 'meeting' && a.meetingDate ? ` · ${a.meetingDate}`
+                     : a.type === 'email'   && a.gmailDate   ? ` · ${a.gmailDate}` : '';
         const tsStr  = a.createdAt ? new Date(a.createdAt).toLocaleString() : '';
         activities.push({ ts: a.createdAt || 0, tsStr, icon, text: a.body || '', title, meta, createdByName: a.createdByName || '', type: a.type });
       });
