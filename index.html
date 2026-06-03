@@ -7545,13 +7545,14 @@ window._pdwGmailLog = async (dealId) => {
   if(!checked.length){ showToast('No emails selected','warning'); return; }
 
   document.getElementById('pdw-gmail-modal')?.remove();
-  showToast(`Logging ${checked.length} email${checked.length!==1?'s':''}…`,'info',8000);
+  showToast(`Summarizing & logging ${checked.length} email${checked.length!==1?'s':''}…`,'info',10000);
 
   let count = 0;
   for(const i of checked){
     const e = emails[i];
     if(!e) continue;
-    const body = `📧 **${e.subject}**\nFrom: ${e.from}\nDate: ${e.dateStr}\n\n${e.snippet}`;
+    const summary = await window._pgaSummarizeEmail(e);
+    const body = summary || e.snippet || e.subject;
     await window._dealLogActivity(dealId, 'email', {
       body,
       gmailId: e.id,
@@ -7603,6 +7604,42 @@ window._pgaToggleExpand = (i) => {
     </td>`;
   document.getElementById('pga-row-'+i)?.insertAdjacentElement('afterend', tr);
   if(btn) btn.textContent = '⌃ Hide';
+};
+
+// ── AI email summarizer — generates a clean 1-2 sentence summary for logging ──
+window._pgaSummaryCache = {};
+window._pgaSummarizeEmail = async (email) => {
+  if(window._pgaSummaryCache[email.id]) return window._pgaSummaryCache[email.id];
+  try {
+    const content = [
+      `Subject: ${email.subject}`,
+      `From: ${(email.from||'').replace(/<[^>]*>/g,'').trim()}`,
+      ``,
+      (email.body || email.snippet || '').slice(0, 1500)
+    ].join('\n');
+    const r = await _aiPost({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 120,
+      messages: [{ role: 'user', content:
+        `Summarize this email in 1-2 concise sentences focused on the key business detail, action item, or information exchanged. Be specific and factual. Do not start with "The email" or "This email". Do not include the sender name or date — those are shown separately.\n\n${content}`
+      }]
+    });
+    if(!r.ok) return null;
+    const data = await r.json();
+    const summary = data.content?.[0]?.text?.trim() || null;
+    if(summary) window._pgaSummaryCache[email.id] = summary;
+    return summary;
+  } catch(e){ return null; }
+};
+
+// Pre-generate summaries for a list of emails in the background (5 at a time)
+window._pgaPreloadSummaries = (emails) => {
+  (async () => {
+    const unsummarized = emails.filter(e => !window._pgaSummaryCache[e.id]);
+    for(let i = 0; i < unsummarized.length; i += 5){
+      await Promise.all(unsummarized.slice(i, i+5).map(e => window._pgaSummarizeEmail(e)));
+    }
+  })();
 };
 
 // Skip a single row forever (saved immediately so Cancel still persists the skip)
@@ -7923,6 +7960,8 @@ window._pgaRenderPage = (n) => {
   if(logBtn){ logBtn.disabled = false; logBtn.innerHTML = '✅ Log Selected &amp; Next →'; }
   document.getElementById('pga-scroll')?.scrollTo(0, 0);
   window._pgaUpdateCount();
+  // Pre-generate AI summaries in the background while user reviews
+  window._pgaPreloadSummaries(pageRows);
 };
 
 // Log selected on current page and advance (or just advance if logSelected=false)
@@ -7953,7 +7992,8 @@ window._pgaNextPage = async (logSelected) => {
       // Note: Firestore rules must allow authenticated users to write to any deal's activities
       // (update the /deals/{dealId}/activities rule to: allow write: if request.auth != null)
       try {
-        const body = `📧 **${e.subject}**\nFrom: ${e.from}\nDate: ${e.dateStr}\n\n${e.snippet}`;
+        const summary = window._pgaSummaryCache[e.id] || null;
+        const body = summary || e.snippet || e.subject;
         await window._dealLogActivity(dealId, 'email', {
           body, gmailId: e.id, gmailSubject: e.subject, gmailFrom: e.from, gmailDate: e.dateStr,
         });
@@ -8063,7 +8103,7 @@ window._propLoadActivities = async (dealId, feedElId) => {
                      : a.type === 'meeting' && a.meetingDate ? ` · ${a.meetingDate}`
                      : a.type === 'email'   && a.gmailDate   ? ` · ${a.gmailDate}` : '';
         const tsStr  = a.createdAt ? new Date(a.createdAt).toLocaleString() : '';
-        activities.push({ ts: a.createdAt || 0, tsStr, icon, text: a.body || '', title, meta, createdByName: a.createdByName || '', type: a.type });
+        activities.push({ ts: a.createdAt || 0, tsStr, icon, text: a.body || '', title, meta, createdByName: a.createdByName || '', type: a.type, gmailSubject: a.gmailSubject||'' });
       });
     } catch (e) { /* sub-collection may not exist yet — that's fine */ }
   }
@@ -8081,6 +8121,7 @@ window._propLoadActivities = async (dealId, feedElId) => {
       <div class="activity-icon" style="font-size:1rem;width:1.25rem;flex-shrink:0;margin-top:.1rem">${a.icon}</div>
       <div style="flex:1;min-width:0">
         ${a.title ? `<div style="font-size:.68rem;font-weight:600;color:#6b7280;text-transform:uppercase;letter-spacing:.04em;margin-bottom:.1rem">${a.title}${a.meta || ''}</div>` : ''}
+        ${a.type==='email' && a.gmailSubject ? `<div style="font-size:.75rem;font-weight:600;color:#374151;margin-bottom:.15rem">${a.gmailSubject.replace(/</g,'&lt;')}</div>` : ''}
         <div style="color:#1f2937;line-height:1.45;font-size:.8rem">${(a.text || '').replace(/</g, '&lt;') || '<em style="color:#9ca3af">No notes</em>'}</div>
         <div style="font-size:.7rem;color:#9ca3af;margin-top:.15rem">${a.tsStr}${a.createdByName ? ' · ' + a.createdByName : ''}</div>
       </div>
