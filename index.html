@@ -7956,7 +7956,7 @@ window._pgaNextPage = async (logSelected) => {
         if(senderEmail) senderMap[senderEmail] = dealId;
         count++;
       } catch(err){
-        console.error('[pgaNextPage] log failed for', e.id, err);
+        console.error('[pgaNextPage] log failed —', e.subject, '— dealId:', dealId, '— error:', err?.message||err);
         errors++;
       }
     }
@@ -7993,16 +7993,20 @@ window._dealLogActivity = async (dealId, type, data = {}) => {
   };
   // Write to deal sub-collection
   await addDoc(collection(_fbDb, 'deals', dealId, 'activities'), activity);
-  // Cross-log to all linked CRM contacts
-  const deal = allDeals.find(d => d.id === dealId);
-  const propLabel = deal ? (deal.projectName || deal.propertyAddress || 'property') : 'property';
-  const linkedContacts = (allContacts || []).filter(c => (c.linkedDeals || []).includes(dealId));
-  for (const c of linkedContacts) {
-    await _crmLogActivity(c.id, type, {
-      ...activity,
-      body: `[${propLabel}] ${activity.body}`,
-    });
-  }
+  // Cross-log to linked CRM contacts — isolated so failures here never roll back the deal write
+  try {
+    const deal = allDeals.find(d => d.id === dealId);
+    const propLabel = deal ? (deal.projectName || deal.propertyAddress || 'property') : 'property';
+    const linkedContacts = (allContacts || []).filter(c => c.id && (c.linkedDeals || []).includes(dealId));
+    for (const c of linkedContacts) {
+      try {
+        await _crmLogActivity(c.id, type, {
+          ...activity,
+          body: `[${propLabel}] ${activity.body}`,
+        });
+      } catch(e){ console.warn('[dealLogActivity] cross-log failed for contact', c.id, e); }
+    }
+  } catch(e){ console.warn('[dealLogActivity] cross-log setup error', e); }
 };
 
 // ── Load + render property activity feed (Firestore sub-collection + legacy deal.notes) ──
