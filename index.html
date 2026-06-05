@@ -808,10 +808,15 @@ body {
 
         <!-- ④ CONTACT ────────────────────────────────────────────────── -->
         <div class="space-y-3">
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Contact Name</label>
-            <input id="f-contact-person" type="text" placeholder="Seller / Buyer / Broker name"
+          <div style="position:relative">
+            <label class="block text-sm font-medium text-gray-700 mb-1">Contact Name
+              <span class="text-xs font-normal text-gray-400 ml-1">— type to search your CRM</span>
+            </label>
+            <input id="f-contact-person" type="text" placeholder="Seller / Buyer / Broker name" autocomplete="off"
+              oninput="newCardContactSearch(this.value)" onfocus="newCardContactSearch(this.value)"
               class="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none"/>
+            <div id="new-card-contact-dropdown"
+              style="display:none;position:absolute;z-index:50;left:0;right:0;top:100%;margin-top:2px;max-height:240px;overflow-y:auto;background:#fff;border:1px solid #e5e7eb;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.12)"></div>
           </div>
           <div class="grid grid-cols-2 gap-3">
             <div>
@@ -4413,6 +4418,67 @@ function boContactSearch(value, dealKey){
   }
 }
 window.boContactSearch = boContactSearch;
+
+// ── Add-Card form: live CRM search on the Contact Name field ──────────────
+// Typing a name shows matching CRM contacts; picking one auto-fills the
+// contact name, phone, and email fields on the new-card form.
+function _ncContactFullName(c){
+  return (c.name && c.name.trim())
+    ? c.name.trim()
+    : [c.firstName,c.lastName].filter(Boolean).join(' ').trim();
+}
+function newCardContactSearch(value){
+  const dd = document.getElementById('new-card-contact-dropdown');
+  if(!dd) return;
+  const q = (value||'').toLowerCase().trim();
+  const contacts = (typeof allContacts !== 'undefined' ? allContacts : [])
+    .slice()
+    .sort((a,b)=>_ncContactFullName(a).localeCompare(_ncContactFullName(b)));
+  const matches = q
+    ? contacts.filter(c=>{
+        const hay = [_ncContactFullName(c),c.email,c.email2,c.company,c.phone]
+          .filter(Boolean).join(' ').toLowerCase();
+        return hay.includes(q);
+      }).slice(0,30)
+    : contacts.slice(0,30);
+  if(!matches.length){ dd.style.display='none'; return; }
+  dd.innerHTML = matches.map(c=>{
+    const nm    = _ncContactFullName(c) || c.email || 'Unknown';
+    const phone = c.phone||c.officePhone||c.phone2||'';
+    const email = c.email||c.email2||'';
+    const enc = s => (s||'').replace(/"/g,'&quot;');
+    return `
+    <div data-cname="${enc(nm)}" data-cphone="${enc(phone)}" data-cemail="${enc(email)}"
+      style="padding:8px 12px;cursor:pointer;border-bottom:1px solid #f3f4f6;font-size:13px"
+      onmousedown="event.preventDefault()"
+      onclick="newCardContactPick(this)">
+      <span style="font-weight:600">${nm}</span>
+      ${c.company?`<span style="color:#9ca3af;margin-left:4px">— ${c.company}</span>`:''}
+      <div style="font-size:11px;color:#9ca3af;margin-top:1px">
+        ${email?email:'<span style=\"color:#d1d5db\">no email</span>'}${phone?' · '+phone:''}
+      </div>
+    </div>`;
+  }).join('');
+  dd.style.display='block';
+  const inp = document.getElementById('f-contact-person');
+  if(inp && !inp._ncBlurBound){
+    inp._ncBlurBound=true;
+    inp.addEventListener('blur', ()=>{ setTimeout(()=>{ if(dd) dd.style.display='none'; },150); });
+  }
+}
+function newCardContactPick(el){
+  const name  = el.dataset.cname||'';
+  const phone = el.dataset.cphone||'';
+  const email = el.dataset.cemail||'';
+  const set = (id,v)=>{ const f=document.getElementById(id); if(f && v) f.value=v; };
+  set('f-contact-person', name);
+  set('f-contact-phone',  phone);
+  set('f-contact-email',  email);
+  const dd = document.getElementById('new-card-contact-dropdown');
+  if(dd) dd.style.display='none';
+}
+window.newCardContactSearch = newCardContactSearch;
+window.newCardContactPick   = newCardContactPick;
 
 // ── Required fields per stage ─────────────────────────────────────────────
 // Fields marked carryForward:true are only required if NOT already present in
@@ -8145,7 +8211,7 @@ window._propLoadActivities = async (dealId, feedElId) => {
       <div style="flex:1;min-width:0">
         ${a.title ? `<div style="font-size:.68rem;font-weight:600;color:#6b7280;text-transform:uppercase;letter-spacing:.04em;margin-bottom:.1rem">${a.title}${a.meta || ''}</div>` : ''}
         ${a.type==='email' && a.gmailSubject ? `<div style="font-size:.75rem;font-weight:600;color:#374151;margin-bottom:.15rem">${a.gmailSubject.replace(/</g,'&lt;')}</div>` : ''}
-        <div style="color:#1f2937;line-height:1.45;font-size:.8rem">${(a.text || '').replace(/</g, '&lt;') || '<em style="color:#9ca3af">No notes</em>'}</div>
+        <div style="color:#1f2937;line-height:1.45;font-size:.8rem;white-space:pre-wrap;word-break:break-word">${(a.text || '').replace(/</g, '&lt;') || '<em style="color:#9ca3af">No notes</em>'}</div>
         <div style="font-size:.7rem;color:#9ca3af;margin-top:.15rem">${a.tsStr}${a.createdByName ? ' · ' + a.createdByName : ''}</div>
       </div>
     </div>`).join('');
@@ -13345,8 +13411,8 @@ window._execManualMergeContacts = async () => {
 };
 
 // ── CRM Outreach Imports (updated nightly by daily-crm-outreach-sync task) ──
-const _CRM_OUTREACH_SYNC_DATE = '2026-06-04';
-const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-06-03_0","emailDate":"2026-06-03","emailSubject":"Mohawk Closing Docs","attachmentNames":["Asg  Assumption of Lease  Rent.docx","Hud Sig Page.pdf","LLC Affidavit-Mohawk (002).docx","NO-LIEN AFFIDAVIT.pdf","Non-Foreign Affidavit-mohawk (002).docx","Special Warranty Deed-Mohawk.docx"],"recipientEmail":"justin@rocwell.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Rocwell","propertyHint":"Mohawk","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-06-03_1","emailDate":"2026-06-03","emailSubject":"Mohawk Closing Docs","attachmentNames":["Asg  Assumption of Lease  Rent.docx","Hud Sig Page.pdf","LLC Affidavit-Mohawk (002).docx","NO-LIEN AFFIDAVIT.pdf","Non-Foreign Affidavit-mohawk (002).docx","Special Warranty Deed-Mohawk.docx"],"recipientEmail":"aravi@ripcofl.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Ripcofl","propertyHint":"Mohawk","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-06-03_2","emailDate":"2026-06-03","emailSubject":"Need to sign this as well and mail back either others","attachmentNames":["Affidavit.Waiver of Right of First Refusal.docx"],"recipientEmail":"justin@rocwell.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Rocwell","propertyHint":"Mohawk","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-06-03_3","emailDate":"2026-06-03","emailSubject":"Northridge Response","attachmentNames":["Blackfin LOI_ SEC County Line Rd and Ashwell Ridge Ln, Spring Hill, FL BUYER Comments (6.3.26).docx"],"recipientEmail":"rsacchi@ripaconstruction.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Ripaconstruction","propertyHint":"Northridge","matchedDealId":null,"imported":false,"skipped":false}];
+const _CRM_OUTREACH_SYNC_DATE = '2026-06-05';
+const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-06-04_0","emailDate":"2026-06-04","emailSubject":"Re: LoopNet Lead for Tallahassee Core MF/Hotel site","attachmentNames":["OM Bloxham Tallahassee.pdf"],"recipientEmail":"walterlandandproperties2@gmail.com","recipientName":"Walter Clamser","recipientFirstName":"Walter","recipientLastName":"Clamser","companyName":"","propertyHint":"Bloxham Tallahassee","matchedDealId":null,"imported":false,"skipped":false}];
 
 // ── Gmail Sync ───────────────────────────────────────────────────────
 let _GMAIL_SYNC_DATE = '2026-05-31';
