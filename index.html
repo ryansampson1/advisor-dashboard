@@ -5717,17 +5717,23 @@ function allOffices(){ return [...new Set(allDeals.map(dealOffice))].filter(Bool
 
 // Returns the correct deal set for the current user:
 //   admin (full view) → all deals
+//   admin (staff view toggle) → all deals (read-only, enforced by isStaffView())
 //   admin (advisor view toggle) → only their own deals
-//   office manager (manager view) → handled via isStaffView() → viewBoardStaff()
-//   office manager (advisor view toggle) → only their own deals
+//   dual-role (staff view) → all deals (read-only); (advisor view) → only their own deals
+//   office manager (manager view) → all deals in their office; (advisor view) → only their own deals
 //   advisor → only their own deals
+// NOTE: keep this in sync with isStaffView() — any user currently in staff/manager
+// view sees the broader deal set; editing is blocked separately by isStaffView().
 function visibleDeals(){
   if(currentUser.isAdmin && !adminViewAsAdvisor) return allDeals;
   // Staff-only accounts see all deals (they support all advisors)
   if(currentUser.isStaff) return allDeals;
-  // Office managers in advisor mode see only their own deals; manager view is handled by isStaffView()
-  if(currentUser.isOfficeManager && !currentUser.isAdmin) return allDeals.filter(d => isDealAdvisor(d, currentUser.uid));
-  if(currentUser.isOfficeManager && !adminViewAsAdvisor) return allDeals.filter(d=>dealOffice(d)===currentUser.officeManagerOffice);
+  // Dual-role users: Staff view → ALL deals (read-only); Advisor view → only their own deals
+  if(currentUser.isDualRole) return isStaffView() ? allDeals : allDeals.filter(d => isDealAdvisor(d, currentUser.uid));
+  // Office managers: Manager view → all deals in their office; Advisor view → only their own deals
+  if(currentUser.isOfficeManager && !currentUser.isAdmin)
+    return isStaffView() ? allDeals.filter(d=>dealOffice(d)===currentUser.officeManagerOffice)
+                         : allDeals.filter(d => isDealAdvisor(d, currentUser.uid));
   // Advisors see deals they own OR are listed as co-advisors on
   return allDeals.filter(d => isDealAdvisor(d, currentUser.uid));
 }
