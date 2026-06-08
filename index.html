@@ -11519,6 +11519,7 @@ function viewCRM(){
             <div class="flex-1 min-w-0">
               <span class="text-sm font-medium text-gray-800">${fullName}</span>
               ${c.title?`<span class="text-xs text-gray-400 ml-1">${c.title}</span>`:''}
+              ${c.contactRefreshPending?`<span onclick="event.stopPropagation();openContactPanel('${c.id}')" class="inline-flex items-center ml-1.5 px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-700 cursor-pointer hover:bg-amber-200" title="Suggested contact update — click to review">↻ review</span>`:''}
             </div>
             ${phones?`<div class="text-xs text-gray-500 flex items-center gap-1 shrink-0 whitespace-nowrap">${phones}</div>`:''}
           </div>`;
@@ -11969,6 +11970,38 @@ window.openContactPanel = id => {
 
   const addrParts = [c.mailingAddress?.street, [c.mailingAddress?.city, c.mailingAddress?.state, c.mailingAddress?.zip].filter(Boolean).join(' ')].filter(Boolean);
 
+  // ── Contact-refresh suggestion banner (from the departure/bounce scan) ──
+  let refreshBanner = '';
+  if (c.contactRefreshPending) {
+    let s = {};
+    try { s = JSON.parse(c.contactRefreshSuggestion || '{}'); } catch(_) {}
+    const hasNew = !!s.proposedEmail;
+    const conf = (s.confidence||'').toLowerCase();
+    const confDot = conf==='high'?'#16a34a':conf==='medium'?'#d97706':'#6b7280';
+    refreshBanner = `
+    <div class="px-5 py-3 border-b bg-amber-50">
+      <div class="flex items-start gap-2">
+        <span class="text-amber-500 text-base leading-none mt-0.5">↻</span>
+        <div class="flex-1 min-w-0">
+          <div class="text-xs font-bold text-amber-800 uppercase tracking-wide">Suggested update — confirm</div>
+          <div class="text-sm text-amber-900 mt-1">
+            ${s.source==='hard bounce'?'Email bounced':'Auto-reply says this person has left'}${s.company?` ${s.company}`:''}.
+            ${hasNew
+              ? `New contact: <span class="font-semibold">${s.proposedName?s.proposedName+' — ':''}${s.proposedEmail}</span>`
+              : `No successor was named — needs a manual lookup.`}
+          </div>
+          <div class="text-xs text-amber-700 mt-1">
+            <span style="color:${confDot}">●</span> ${conf||'unknown'} confidence · was ${s.oldEmail||c.email||'—'}${s.detectedAt?` · found ${new Date(s.detectedAt).toLocaleDateString()}`:''}
+          </div>
+          <div class="flex gap-2 mt-2.5">
+            <button onclick="acceptContactRefresh('${id}')" class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-amber-600 text-white hover:bg-amber-700 transition">${hasNew?'✓ Accept update':'Mark departed'}</button>
+            <button onclick="dismissContactRefresh('${id}')" class="px-3 py-1.5 rounded-lg text-xs font-semibold border border-amber-300 text-amber-800 hover:bg-amber-100 transition">Dismiss</button>
+          </div>
+        </div>
+      </div>
+    </div>`;
+  }
+
   // ── Panel HTML ──────────────────────────────────────────────────
   const panel = document.createElement('div');
   panel.id = 'crm-contact-panel';
@@ -11987,7 +12020,7 @@ window.openContactPanel = id => {
         <button onclick="closeContactPanel()" class="p-2 rounded-lg text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition text-lg leading-none">&times;</button>
       </div>
     </div>
-
+    ${refreshBanner}
     <!-- Contact details (compact) -->
     <div class="px-5 py-3 border-b bg-gray-50 text-sm space-y-1.5 text-gray-600">
       ${c.email ? `<div class="flex gap-2"><span class="text-gray-400 w-20 flex-shrink-0">Email</span><span class="text-blue-600 truncate">${c.email}${c.email2 ? `<span class="text-gray-400 ml-2 text-xs">${c.email2}</span>` : ''}</span></div>` : ''}
@@ -12044,6 +12077,64 @@ window.closeContactPanel = () => {
   document.getElementById('crm-panel-backdrop')?.remove();
   if (_crmPanelUnsub) { _crmPanelUnsub(); _crmPanelUnsub = null; }
   _crmPanelContactId = null;
+};
+
+// ── Contact refresh: accept / dismiss a departure-scan suggestion ────
+// Suggestions are written by contact-refresh/scan.js onto the contact as
+// { contactRefreshPending:true, contactRefreshSuggestion:"<json>" }.
+window.acceptContactRefresh = async (id) => {
+  const c = (allContacts||[]).find(x => x.id === id);
+  if (!c) return;
+  if (!_fbDb || !_fbFns) { alert('Not connected to database.'); return; }
+  const { doc, updateDoc } = _fbFns;
+  let s = {};
+  try { s = JSON.parse(c.contactRefreshSuggestion || '{}'); } catch(_) {}
+  const oldEmail = (c.email || s.oldEmail || '').toLowerCase();
+  const newEmail = (s.proposedEmail || '').toLowerCase().trim();
+  const updates = { contactRefreshPending:false, contactRefreshSuggestion:'', updatedAt:Date.now() };
+  let msg;
+  if (newEmail && newEmail !== oldEmail) {
+    // Successor found: the record now points to the new person at that company.
+    updates.email = newEmail;
+    updates.previousEmail = oldEmail;
+    updates.mailchimpPendingSync = true;   // refresh address on email lists
+    updates.dayliteUpdatePending = true;   // flag for Daylite / list hygiene
+    if (s.proposedName) {
+      const parts = s.proposedName.trim().split(/\s+/);
+      updates.firstName = parts.shift() || c.firstName || '';
+      updates.lastName  = parts.join(' ') || '';
+    }
+    const note = `↻ ${new Date().toLocaleDateString()}: ${oldEmail||'(unknown)'} departed${s.company?(' '+s.company):''} → updated to ${newEmail}${s.proposedName?(' ('+s.proposedName+')'):''}.`;
+    updates.notes = (c.notes ? c.notes+'\n' : '') + note;
+    msg = `Updated to ${newEmail}`;
+  } else {
+    // No successor (e.g. hard bounce): just mark departed, keep address for history.
+    updates.departed = true;
+    updates.mailchimpPendingSync = true;
+    updates.dayliteUpdatePending = true;
+    const note = `↻ ${new Date().toLocaleDateString()}: ${oldEmail||'(unknown)'} marked departed (no successor found).`;
+    updates.notes = (c.notes ? c.notes+'\n' : '') + note;
+    msg = 'Marked as departed';
+  }
+  try {
+    await updateDoc(doc(_fbDb,'contacts',id), updates);
+    try { await window._crmLogActivity(id, 'note', { autoLogged:true, body: (newEmail && newEmail!==oldEmail) ? `Contact refresh accepted — email ${oldEmail} → ${newEmail}.` : `Contact refresh — marked departed (${oldEmail||'unknown'}).` }); } catch(_) {}
+    showToast(msg, 'success');
+    closeContactPanel(); setTimeout(()=>openContactPanel(id), 150);
+  } catch(e) { showToast('Update failed: '+e.message, 'error'); }
+};
+
+window.dismissContactRefresh = async (id) => {
+  const c = (allContacts||[]).find(x => x.id === id);
+  if (!c) return;
+  if (!_fbDb || !_fbFns) { alert('Not connected to database.'); return; }
+  const { doc, updateDoc } = _fbFns;
+  try {
+    await updateDoc(doc(_fbDb,'contacts',id), { contactRefreshPending:false, contactRefreshSuggestion:'', updatedAt:Date.now() });
+    try { await window._crmLogActivity(id, 'note', { autoLogged:true, body:'Contact refresh suggestion dismissed.' }); } catch(_) {}
+    showToast('Suggestion dismissed', 'info');
+    closeContactPanel(); setTimeout(()=>openContactPanel(id), 150);
+  } catch(e) { showToast('Dismiss failed: '+e.message, 'error'); }
 };
 
 // ── Group slide-out panel ────────────────────────────────────────────
