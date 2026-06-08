@@ -1076,6 +1076,10 @@ const APP_CONFIG = {
     geminiKey: '',      // dev-only fallback; leave blank in production (key must stay server-side)
     // HR context shown to the bot on the HR tab
     hrContext: 'You are a helpful HR assistant for Eshenbaugh Land Company. Answer questions about HR policies, benefits, time off, payroll, onboarding, and general workplace questions professionally and warmly. If you do not know a specific policy detail, say so honestly and suggest they email hr@thedirtdog.com for confirmation.',
+    // Admin-editable HR knowledge base (policies, FAQs). Edited from the HR tab
+    // (admin only), saved to Firestore eos/settings, and injected into the bot's
+    // system prompt at runtime. Leave blank here; the saved value loads at runtime.
+    hrKnowledge: '',
     // General assistant context
     generalContext: 'You are an AI assistant for Eshenbaugh Land Company (The Dirt Dog), a land brokerage firm. Help advisors with deal questions, pipeline analysis, real estate concepts, and general productivity. Be concise and professional.',
   },
@@ -5226,6 +5230,8 @@ const FB = {
           }
         } else if(docId === 'settings'){
           if(payload.anthropicKey) APP_CONFIG.ai.anthropicKey = payload.anthropicKey;
+          if(payload.hrKnowledge != null)   APP_CONFIG.ai.hrKnowledge          = payload.hrKnowledge;   // admin-editable HR knowledge base
+          if(payload.hrContext)             APP_CONFIG.ai.hrContext            = payload.hrContext;     // optional admin override of the bot persona
           if(payload.mailchimpApiKey)       APP_CONFIG.mailchimp.apiKey       = payload.mailchimpApiKey;
           if(payload.mailchimpListId)       APP_CONFIG.mailchimp.listId       = payload.mailchimpListId;
           if(payload.mailchimpCategoryName) APP_CONFIG.mailchimp.categoryName = payload.mailchimpCategoryName;
@@ -20065,6 +20071,34 @@ function viewHR(){
     </div>
   ` : '';
 
+  // ── Admin-only HR knowledge base editor ────────────────────────────────
+  // Reuses the same admin gate as Company Headlines.
+  const _kbEsc = (APP_CONFIG.ai?.hrKnowledge||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const kbHtml = isHlAdmin ? `
+    <div style="margin-bottom:1.75rem;background:#f0fdfa;border:1px solid #99f6e4;border-radius:12px;padding:1.25rem 1.5rem">
+      <div style="display:flex;align-items:center;gap:.4rem;font-size:.72rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--brand-teal);margin-bottom:.5rem">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
+        HR Knowledge Base · Admin Only
+      </div>
+      <p style="font-size:.8rem;color:var(--text-2);margin-bottom:.85rem">This is what the AI assistant knows. Paste your policies, benefits, PTO rules, onboarding steps, and FAQs below. Saved instantly for everyone — no redeploy. Don't put individual/sensitive data here (specific PTO balances, payroll); the bot will tell people to email HR for those.</p>
+      <textarea id="hr-kb-text" rows="12" placeholder="Example:
+
+PTO: Full-time employees accrue 15 days per year, increasing to 20 after 3 years. Submit requests to your manager at least 2 weeks ahead.
+
+Health benefits: Coverage starts the 1st of the month after 30 days. We offer a PPO and an HDHP+HSA through Blue Cross.
+
+Office hours / remote policy: ...
+
+Onboarding: New hires complete I-9 and direct deposit in the first week. IT sets up email and the dashboard on day one."
+        style="width:100%;border:1px solid var(--border);border-radius:8px;padding:.65rem .8rem;font-size:.85rem;line-height:1.5;outline:none;resize:vertical;font-family:inherit;box-sizing:border-box"
+        onfocus="this.style.borderColor='var(--brand-teal)'" onblur="this.style.borderColor='var(--border)'">${_kbEsc}</textarea>
+      <div style="display:flex;align-items:center;gap:.85rem;margin-top:.75rem">
+        <button onclick="saveHrKnowledge()" style="background:var(--brand-teal);color:#fff;border:none;border-radius:8px;padding:.55rem 1.25rem;font-size:.85rem;font-weight:600;cursor:pointer">Save knowledge</button>
+        <span id="hr-kb-status" style="font-size:.8rem;color:var(--text-3)"></span>
+      </div>
+    </div>
+  ` : '';
+
   setContent(`
     <div style="max-width:860px">
       <h2 style="font-size:1.35rem;font-weight:700;color:var(--text-1);letter-spacing:-.01em;margin-bottom:.35rem">Human Resources</h2>
@@ -20132,9 +20166,30 @@ function viewHR(){
         </div>
 
       </div>
+      ${kbHtml}
     </div>
   `);
 }
+
+window.saveHrKnowledge = async function(){
+  const ta = document.getElementById('hr-kb-text');
+  const status = document.getElementById('hr-kb-status');
+  if(!ta) return;
+  const text = ta.value;
+  APP_CONFIG.ai.hrKnowledge = text;
+  if(status){ status.textContent = 'Saving…'; status.style.color = 'var(--text-3)'; }
+  try {
+    if(_fbDb && _fbFns){
+      const {doc, setDoc} = _fbFns;
+      await setDoc(doc(_fbDb,'eos','settings'), { hrKnowledge: text }, { merge:true });
+      if(status){ status.textContent = '✓ Saved — the assistant now uses this for everyone.'; status.style.color = 'var(--brand-teal)'; }
+    } else {
+      if(status){ status.textContent = '✓ Saved for this session (no database connection detected).'; status.style.color = 'var(--brand-teal)'; }
+    }
+  } catch(e){
+    if(status){ status.textContent = 'Save failed: '+e.message; status.style.color = 'var(--brand-red)'; }
+  }
+};
 
 window.sendHREmail = function(){
   const name    = document.getElementById('hr-name')?.value.trim()||'';
@@ -20165,7 +20220,10 @@ window.sendHRAIMessage = async function(){
   msgs.scrollTop = msgs.scrollHeight;
 
   try {
-    const reply = await callAIAssistant(text, APP_CONFIG.ai?.hrContext||'You are a helpful HR assistant for Eshenbaugh Land Company.', '_hrHistory');
+    const _kb = (APP_CONFIG.ai?.hrKnowledge||'').trim();
+    const _sysPrompt = (APP_CONFIG.ai?.hrContext||'You are a helpful HR assistant for Eshenbaugh Land Company.')
+      + (_kb ? '\n\n=== Eshenbaugh Land Company HR knowledge base ===\nThe following is the authoritative HR information for this company. Answer questions using ONLY this information plus general HR best practices. If a specific answer is not covered here, say you are not certain and suggest emailing hr@thedirtdog.com. Do not invent company-specific policies.\n\n'+_kb : '');
+    const reply = await callAIAssistant(text, _sysPrompt, '_hrHistory');
     document.getElementById(loadId)?.remove();
     if(!reply) return;
     msgs.innerHTML += `<div style="background:#f0fdfa;border-radius:10px;padding:.75rem 1rem;font-size:.825rem;color:var(--text-1);border-left:3px solid var(--brand-teal)">${reply.replace(/\n/g,'<br>').replace(/</g,'&lt;').replace(/&lt;br>/g,'<br>')}</div>`;
