@@ -3831,6 +3831,9 @@ function _showCriticalDatesReview(extracted, stage){
 
   const panel = document.createElement('div');
   panel.id = 'critical-dates-panel';
+  // Remember which stage triggered this review — the critical-dates task is
+  // only sent when the deal is in Due Diligence (not for a new listing, LOI, etc.)
+  panel.dataset.stage = stage || '';
   panel.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.5);padding:16px;';
   panel.innerHTML = `
     <div style="background:#fff;border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,0.25);width:100%;max-width:580px;max-height:90vh;display:flex;flex-direction:column;overflow:hidden;">
@@ -3868,6 +3871,11 @@ window._showCriticalDatesReview = _showCriticalDatesReview;
 function _applyCriticalDates(){
   const panel = document.getElementById('critical-dates-panel');
   if(!panel) return;
+
+  // Capture the stage before the panel is removed below. The critical-dates
+  // task is only sent for deals in Due Diligence — never for a new listing.
+  const cdStage = panel.dataset.stage || '';
+  const isDueDiligence = cdStage.toLowerCase().includes('due diligence');
 
   // Collect all edited values from the review panel inputs
   const inputs = panel.querySelectorAll('input[data-cd-key]');
@@ -3941,7 +3949,11 @@ function _applyCriticalDates(){
   showToast('✅ Applied '+filled+' field'+(filled===1?'':'s')+' to the form', 'success');
 
   // ── Send Critical Dates task to advisor ────────────────────────────
-  _sendCriticalDatesTask(vals);
+  // Only when the deal is in Due Diligence. A new listing (or LOI, Prospect,
+  // etc.) should NOT generate a critical-dates task.
+  if(isDueDiligence){
+    _sendCriticalDatesTask(vals);
+  }
 }
 window._applyCriticalDates = _applyCriticalDates;
 
@@ -9142,10 +9154,15 @@ function handleLostTerminatedDrop(dealId, deal){
           📄 Lost Proposal
           <div style="font-weight:400;font-size:.8rem;color:#166534;margin-top:.2rem">Proposal was not accepted by the client</div>
         </button>
+        <button id="lt-buyerrep" style="background:#fefce8;color:#854d0e;border:2px solid #fde68a;border-radius:10px;padding:.875rem 1rem;font-weight:700;font-size:.95rem;cursor:pointer;text-align:left">
+          🤝 Buyer Rep
+          <div style="font-weight:400;font-size:.8rem;color:#a16207;margin-top:.2rem">Buyer representation engagement was lost</div>
+        </button>
       </div>`;
     card.querySelector('#lt-cancelled').addEventListener('click', showContractCancelledForm);
     card.querySelector('#lt-listing').addEventListener('click', showLostListingForm);
     card.querySelector('#lt-proposal').addEventListener('click', showLostProposalForm);
+    card.querySelector('#lt-buyerrep').addEventListener('click', showBuyerRepForm);
   }
 
   function showContractCancelledForm(){
@@ -9237,6 +9254,26 @@ function handleLostTerminatedDrop(dealId, deal){
     });
   }
 
+  function showBuyerRepForm(){
+    card.innerHTML = `
+      <h3 style="font-weight:700;color:#854d0e;font-size:1.125rem;margin:0 0 .25rem">🤝 Buyer Rep</h3>
+      <p style="color:#6b7280;font-size:.875rem;margin:0 0 1.25rem;line-height:1.4">${escH(addr)}</p>
+      <div style="margin-bottom:1.25rem">
+        <label style="display:block;font-weight:600;color:#374151;font-size:.875rem;margin-bottom:.5rem">Reason the buyer rep engagement was lost</label>
+        <textarea id="lt-reason" rows="3" placeholder="Why was the buyer rep engagement lost?" style="width:100%;border:1.5px solid #e5e7eb;border-radius:8px;padding:.625rem;font-size:.875rem;font-family:inherit;resize:vertical;box-sizing:border-box"></textarea>
+      </div>
+      <div style="display:flex;gap:.75rem">
+        <button id="lt-submit" style="flex:1;background:#1a3a5c;color:#fff;border:none;border-radius:10px;padding:.75rem;font-weight:700;font-size:.95rem;cursor:pointer">Confirm</button>
+        <button id="lt-back" style="background:none;border:1px solid #e5e7eb;border-radius:10px;padding:.75rem .9rem;font-size:.875rem;cursor:pointer;color:#6b7280">← Back</button>
+      </div>`;
+    card.querySelector('#lt-back').addEventListener('click', showStep1);
+    card.querySelector('#lt-submit').addEventListener('click', async ()=>{
+      const reason = card.querySelector('#lt-reason').value.trim();
+      document.body.removeChild(overlay);
+      await _doBuyerRep(dealId, deal, reason);
+    });
+  }
+
   showStep1();
 }
 
@@ -9324,6 +9361,28 @@ async function _doLostProposal(dealId, deal, reason){
   Object.assign(deal, upd);
   viewBoard();
   showToast('✅ Lost Proposal logged','info',3000);
+}
+
+/* ── Buyer Rep handler ── */
+async function _doBuyerRep(dealId, deal, reason){
+  const oldStage = deal.stage;
+  const _sh=[...(deal.stageHistory||[])];
+  if(!_sh.length && deal.stageEnteredAt) _sh.push({stage:oldStage,enteredAt:deal.stageEnteredAt});
+  if(_sh.length){const _l=_sh[_sh.length-1];if(!_l.exitedAt){_l.exitedAt=Date.now();_l.durationMs=_l.exitedAt-_l.enteredAt;}}
+  _sh.push({stage:'Lost / Terminated',enteredAt:Date.now()});
+  const upd = {
+    stage:'Lost / Terminated',
+    probability:0,
+    stageEnteredAt:Date.now(),
+    updatedAt:Date.now(),
+    lostType:'buyer_rep',
+    lostReason:reason||'',
+    stageHistory:_sh,
+  };
+  await Store.updateDeal(dealId, upd);
+  Object.assign(deal, upd);
+  viewBoard();
+  showToast('✅ Buyer Rep logged','info',3000);
 }
 
 /* =======================================================
