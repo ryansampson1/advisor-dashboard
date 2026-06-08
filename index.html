@@ -10379,14 +10379,32 @@ window.sendInvite = async function(){
   } catch(e){ console.warn('Could not save pending profile:', e); }
   const dashUrl = window.location.href.split('?')[0];
   const roleLabel = roles.map(r=>r.charAt(0).toUpperCase()+r.slice(1)).join(', ');
-  const subj = encodeURIComponent('You have been invited to the ELC Advisor Dashboard');
+  const subjRaw = 'You have been invited to the ELC Advisor Dashboard';
   const bodyText = 'Hi '+(name||'there')+',\n\n'
     +'You\'ve been invited to join the Eshenbaugh Land Company Advisor Dashboard.\n\n'
     +'Sign in with your Google account ('+email+') at:\n'+dashUrl+'\n\n'
     +'Your role'+(roles.length>1?'s':'')+': '+roleLabel+'\n\nThe ELC Team';
-  window.location.href = 'mailto:'+email+'?subject='+subj+'&body='+encodeURIComponent(bodyText);
-  showToast('Invite email opened for '+(name||email), 'success');
   const f = document.getElementById('invite-form');
+  const ejsCfg = APP_CONFIG.emailjs;
+  // If EmailJS is configured, send the invite automatically from the connected account.
+  if(ejsCfg?.publicKey && ejsCfg.publicKey!=='YOUR_EMAILJS_PUBLIC_KEY'){
+    try {
+      await window.emailjs.send(ejsCfg.serviceId, ejsCfg.templateId, {
+        to_email: email, subject: subjRaw, message: bodyText,
+        advisor_name: name||'', property_address: '',
+      });
+      showToast('✉️ Invite sent to '+(name||email), 'success');
+      if(f) f.style.display = 'none';
+    } catch(err){
+      console.error('Invite email failed:', err);
+      showToast('Auto-send failed — opening a draft instead', 'warning', 5000);
+      window.location.href = 'mailto:'+email+'?subject='+encodeURIComponent(subjRaw)+'&body='+encodeURIComponent(bodyText);
+    }
+    return;
+  }
+  // EmailJS not configured → fall back to opening a mail draft (manual send).
+  window.location.href = 'mailto:'+email+'?subject='+encodeURIComponent(subjRaw)+'&body='+encodeURIComponent(bodyText);
+  showToast('Invite draft opened for '+(name||email)+' (configure EmailJS to auto-send)', 'warning', 5000);
   if(f) f.style.display = 'none';
 };
 
