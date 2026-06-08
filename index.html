@@ -14183,18 +14183,99 @@ async function _getGmailToken(){
 }
 
 function _parseEmailHeader(raw){
-  // Handle comma-separated addresses carefully (split on commas not inside <>)
+  // Handle comma-separated addresses carefully (split on commas not inside <> or quotes)
   const parts = [];
-  let depth=0, cur='';
-  for(const ch of raw){ if(ch==='<') depth++; else if(ch==='>') depth--; if(ch===',' && depth===0){ parts.push(cur.trim()); cur=''; } else cur+=ch; }
+  let depth=0, inQuote=false, cur='';
+  for(const ch of raw){
+    if(ch==='"') inQuote=!inQuote;
+    else if(!inQuote){ if(ch==='<') depth++; else if(ch==='>') depth--; }
+    if(ch===',' && depth===0 && !inQuote){ parts.push(cur.trim()); cur=''; }
+    else cur+=ch;
+  }
   if(cur.trim()) parts.push(cur.trim());
   return parts.map(p=>{
     const m = p.match(/^"?([^"<]*?)"?\s*<([^>]+)>\s*$/) || p.match(/^([^\s<>]+@[^\s<>]+)$/);
     if(!m) return null;
     const email = (m[2]||m[1]||'').trim().toLowerCase();
-    const nameRaw = (m[2] ? m[1] : '').trim().replace(/^["']|["']$/g,'');
+    let nameRaw = (m[2] ? m[1] : '').trim().replace(/^["']|["']$/g,'');
+    nameRaw = _normalizeName(nameRaw);
     return email.includes('@') ? { email, nameRaw } : null;
   }).filter(Boolean);
+}
+
+// ── Signature/name/phone parsing helpers (used by Gmail contact sync) ──
+function _normalizeName(n){
+  if(!n) return '';
+  n = n.replace(/\s+/g,' ').trim();
+  if(/@/.test(n)) return '';
+  // "Last, First" (Outlook) -> "First Last", but leave company names alone
+  if(/^[^,]+,\s*[^,]+$/.test(n) && !/\b(inc|llc|ltd|co|corp|corporation|group|properties|company|partners|capital|realty|homes|bank)\b/i.test(n)){
+    const [last, first] = n.split(',').map(s=>s.trim());
+    if(first && last) n = `${first} ${last}`;
+  }
+  return n;
+}
+function _isLikelyPersonName(n){
+  if(!n) return false;
+  n = n.trim();
+  if(/@|https?:|www\.|\d/.test(n)) return false;
+  const words = n.split(/\s+/);
+  if(words.length < 2 || words.length > 4) return false;
+  if(n.length > 40) return false;
+  if(!words.every(w=>/^[A-Z][A-Za-z'’.\-]*$/.test(w))) return false;
+  if(/\b(thanks|thank|regards|best|sincerely|cheers|sent|from|the|team|hi|hello|dear|please|via|see|attached|get|outlook|iphone)\b/i.test(n)) return false;
+  return true;
+}
+// Trim quoted reply history so a sender's signature isn't confused with quoted ones
+function _topPortion(text){
+  if(!text) return '';
+  const markers = [
+    /\n\s*On .{0,120}\bwrote:/,
+    /\n\s*-{2,}\s*Original Message\s*-{2,}/i,
+    /\n\s*From:\s.+/i,
+    /\n_{5,}/,
+    /\n\s*Sent from my /i,
+    /\n>/
+  ];
+  let cut = text.length;
+  for(const rx of markers){ const m = text.match(rx); if(m && m.index < cut) cut = m.index; }
+  return text.slice(0, cut);
+}
+function _extractPhone(text){
+  if(!text) return '';
+  const t = text.replace(/[   ]/g,' ').replace(/[‐-―]/g,'-');
+  const re = /(?:\+?1[\s.\-]?)?\(?([2-9]\d{2})\)?[\s.\-]\s?(\d{3})[\s.\-](\d{4})\b/g;
+  let m, labeled=[], plain=[];
+  while((m = re.exec(t))){
+    const start = m.index;
+    if(/\d/.test(t[start-1]||'')) continue;
+    const before = t.slice(Math.max(0,start-16), start).toLowerCase();
+    if(/fax|f:\s*$/.test(before)) continue;
+    const full = m[0].trim().replace(/^\+?1[\s.\-]?/,'');
+    if(/(mobile|cell|direct|office|phone|tel|\bm\b|\bc\b|\bd\b|\bo\b|\bp\b|ph)[\s:.\-]*$/.test(before)) labeled.push(full);
+    else plain.push(full);
+  }
+  return (labeled[0] || plain[0] || '').trim();
+}
+function _extractSignatureName(text){
+  if(!text) return '';
+  const lines = text.split(/\r?\n/).map(l=>l.trim());
+  const signoff = /^(thanks|thank you|thanks so much|best|best regards|regards|warm regards|kind regards|sincerely|cheers|respectfully|all the best|many thanks|talk soon|warmly)[,!.]*$/i;
+  for(let i=0;i<lines.length;i++){
+    if(signoff.test(lines[i])){
+      for(let j=i+1;j<Math.min(i+4,lines.length);j++){
+        if(lines[j] && _isLikelyPersonName(lines[j])) return _normalizeName(lines[j]);
+      }
+    }
+  }
+  for(const l of lines.slice(-12)){ if(_isLikelyPersonName(l)) return _normalizeName(l); }
+  return '';
+}
+function _applyContactName(c, raw){
+  const nm = _normalizeName(raw);
+  if(!nm) return;
+  const p = nm.split(/\s+/);
+  c.nameRaw = nm; c.firstName = p[0]||''; c.lastName = p.slice(1).join(' ')||'';
 }
 
 async function _fetchGmailContacts(token, afterTs){
@@ -14242,19 +14323,32 @@ async function _fetchGmailContacts(token, afterTs){
         };
         const {text: bodyText, atts: attNames} = _extractParts([msg.payload]);
         const richText = (subject+' '+(msg.snippet||'')+' '+bodyText.slice(0,2000)+' '+attNames.join(' ')).slice(0,3000);
-        // Parse contacts from From/To
+        // Mine the sender's own writing (excl. quoted history) for signature name + phone
+        const sigText  = _topPortion(bodyText);
+        const sigPhone = _extractPhone(sigText);
+        const sigName  = _extractSignatureName(sigText);
+        // Parse contacts from From/To. Entries are UPGRADED on later sightings
+        // (a name/phone found in any message fills a previously-blank field).
         for(const field of ['From','To']){
           if(!hMap[field]) continue;
+          const isFrom = field==='From';
           for(const {email, nameRaw} of _parseEmailHeader(hMap[field])){
-            if(contacts.has(email)) continue;
             if(SKIP.some(s=>email.includes(s))) continue;
             if(window._isGmailBlocked && window._isGmailBlocked(email)) continue;
-            const parts = nameRaw.split(/\s+/);
-            const firstName = parts[0]||'';
-            const lastName  = parts.slice(1).join(' ')||'';
-            const domPart   = email.split('@')[1]?.split('.')[0]||'';
-            const companyHint = domPart ? domPart.charAt(0).toUpperCase()+domPart.slice(1) : '';
-            contacts.set(email, {email, nameRaw, firstName, lastName, companyHint, phone:''});
+            let c = contacts.get(email);
+            if(!c){
+              const domPart = email.split('@')[1]?.split('.')[0]||'';
+              const companyHint = domPart ? domPart.charAt(0).toUpperCase()+domPart.slice(1) : '';
+              c = {email, nameRaw:'', firstName:'', lastName:'', companyHint, phone:''};
+              contacts.set(email, c);
+            }
+            // Name from the header display name (best, most reliable source)
+            if(!c.nameRaw && nameRaw && _isLikelyPersonName(nameRaw)) _applyContactName(c, nameRaw);
+            // Signature belongs to the SENDER only — never attribute it to recipients
+            if(isFrom){
+              if(!c.phone && sigPhone) c.phone = sigPhone;
+              if(!c.nameRaw && sigName) _applyContactName(c, sigName);
+            }
           }
         }
         // Store individual message for property matching (include rich text for matching)
@@ -14294,10 +14388,19 @@ window.crmGmailSync = async () => {
 
     const {contacts: fresh, messages: freshMsgs} = await _fetchGmailContacts(token, afterTs);
 
-    // Merge new contacts into global sync data
-    const seen = new Set(_GMAIL_SYNC_DATA.map(g=>g.email.toLowerCase()));
-    const added = fresh.filter(c=>!seen.has(c.email.toLowerCase()));
-    _GMAIL_SYNC_DATA = [..._GMAIL_SYNC_DATA, ...added];
+    // Merge fresh contacts into global sync data.
+    // New emails are appended; existing entries are UPGRADED — any blank
+    // name/phone/company field gets filled from the freshly-parsed data.
+    const byEmail = new Map(_GMAIL_SYNC_DATA.map(g=>[g.email.toLowerCase(), g]));
+    for(const f of fresh){
+      const key = (f.email||'').toLowerCase();
+      const existing = byEmail.get(key);
+      if(!existing){ byEmail.set(key, f); continue; }
+      if(!existing.nameRaw && f.nameRaw){ existing.nameRaw=f.nameRaw; existing.firstName=f.firstName; existing.lastName=f.lastName; }
+      if(!existing.phone && f.phone) existing.phone = f.phone;
+      if(!existing.companyHint && f.companyHint) existing.companyHint = f.companyHint;
+    }
+    _GMAIL_SYNC_DATA = Array.from(byEmail.values());
     // Store individual messages for property matching
     if(!window._GMAIL_SYNC_MESSAGES) window._GMAIL_SYNC_MESSAGES = [];
     const seenMsgIds = new Set(window._GMAIL_SYNC_MESSAGES.map(m=>m.id));
