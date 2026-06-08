@@ -283,6 +283,17 @@ body {
   padding: .5rem .75rem;
   border-radius: 10px 10px 0 0;
 }
+/* Pipeline board: internal scroll so column titles can stick while scrolling deals.
+   (A horizontal-scroll parent otherwise breaks position:sticky on its children.) */
+.board-scroll {
+  max-height: calc(100vh - 7.5rem);
+  overflow: auto;
+}
+.col-hdr-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
 
 /* ── Upload zone ────────────────────────────────── */
 .upload-zone {
@@ -7016,7 +7027,7 @@ function viewBoard(){
       </div>`;
     })()}
     ${kpiBar}
-    <div id="pipeline-kanban" style="display:flex;gap:0.75rem;align-items:stretch;overflow-x:auto;padding-bottom:0.75rem;">
+    <div id="pipeline-kanban" class="board-scroll" style="display:flex;gap:0.75rem;align-items:stretch;padding-bottom:0.75rem;">
       ${STAGES.map(stage=>{
         const allSd=(byStage[stage]||[]).slice().sort(_boardOrderCmp);
         const isLT = stage==='Lost / Terminated';
@@ -7051,7 +7062,7 @@ function viewBoard(){
             : '';
         return `
           <div style="min-width:240px;width:240px;flex-shrink:0;display:flex;flex-direction:column;">
-            <div class="${sc.hdr} rounded-t-xl px-3 py-2 flex items-center justify-between">
+            <div class="${sc.hdr} col-hdr-sticky rounded-t-xl px-3 py-2 flex items-center justify-between">
               <span class="${sc.txt} font-semibold text-xs uppercase tracking-wide">${stage}</span>
               <div class="flex items-center gap-2">
                 <span class="${sc.txt} text-xs opacity-70">${allSd.length}</span>
@@ -8648,13 +8659,13 @@ function viewBoardStaff(){
       ${_staffAdvisorFilter}
     </div>
     ${staffKpis}
-    <div style="${_boardStyle}">
+    <div class="board-scroll" style="${_boardStyle}">
       ${STAGES.map(stage => {
         const sd = (byStage[stage] || []).slice().sort(_boardOrderCmp);
         const sc = SC[stage];
         return `
           <div style="${_colStyle}">
-            <div class="${sc.hdr} rounded-t-xl px-3 py-2 flex items-center justify-between">
+            <div class="${sc.hdr} col-hdr-sticky rounded-t-xl px-3 py-2 flex items-center justify-between">
               <span class="${sc.txt} font-semibold text-xs uppercase tracking-wide">${stage}</span>
               <span class="${sc.txt} text-xs opacity-70">${sd.length}</span>
             </div>
@@ -9154,15 +9165,10 @@ function handleLostTerminatedDrop(dealId, deal){
           📄 Lost Proposal
           <div style="font-weight:400;font-size:.8rem;color:#166534;margin-top:.2rem">Proposal was not accepted by the client</div>
         </button>
-        <button id="lt-buyerrep" style="background:#fefce8;color:#854d0e;border:2px solid #fde68a;border-radius:10px;padding:.875rem 1rem;font-weight:700;font-size:.95rem;cursor:pointer;text-align:left">
-          🤝 Buyer Rep
-          <div style="font-weight:400;font-size:.8rem;color:#a16207;margin-top:.2rem">Buyer representation engagement was lost</div>
-        </button>
       </div>`;
     card.querySelector('#lt-cancelled').addEventListener('click', showContractCancelledForm);
     card.querySelector('#lt-listing').addEventListener('click', showLostListingForm);
     card.querySelector('#lt-proposal').addEventListener('click', showLostProposalForm);
-    card.querySelector('#lt-buyerrep').addEventListener('click', showBuyerRepForm);
   }
 
   function showContractCancelledForm(){
@@ -9189,13 +9195,9 @@ function handleLostTerminatedDrop(dealId, deal){
   }
 
   function showLostListingForm(){
-    card.innerHTML = `
-      <h3 style="font-weight:700;color:#0c4a6e;font-size:1.125rem;margin:0 0 .25rem">🏠 Lost Listing</h3>
-      <p style="color:#6b7280;font-size:.875rem;margin:0 0 1.25rem;line-height:1.4">${escH(addr)}</p>
-      <div style="margin-bottom:1rem">
-        <label style="display:block;font-weight:600;color:#374151;font-size:.875rem;margin-bottom:.5rem">Reason for losing listing</label>
-        <textarea id="lt-reason" rows="3" placeholder="Why was the listing lost?" style="width:100%;border:1.5px solid #e5e7eb;border-radius:8px;padding:.625rem;font-size:.875rem;font-family:inherit;resize:vertical;box-sizing:border-box"></textarea>
-      </div>
+    // Buyer Rep deals have no listing sign or protection list — skip those questions.
+    const isBuyer = deal.representation === 'buyer';
+    const questionsHtml = isBuyer ? '' : `
       <div style="border:1px solid #e5e7eb;border-radius:10px;padding:1rem;margin-bottom:.75rem">
         <p style="font-weight:600;color:#1f2937;font-size:.875rem;margin:0 0 .625rem">Does this listing need a protection list?</p>
         <div style="display:flex;gap:.5rem">
@@ -9209,13 +9211,21 @@ function handleLostTerminatedDrop(dealId, deal){
           <button data-q="sign" data-v="yes" style="${btnBase()}">Yes</button>
           <button data-q="sign" data-v="no"  style="${btnBase()}">No</button>
         </div>
+      </div>`;
+    card.innerHTML = `
+      <h3 style="font-weight:700;color:#0c4a6e;font-size:1.125rem;margin:0 0 .25rem">🏠 Lost Listing</h3>
+      <p style="color:#6b7280;font-size:.875rem;margin:0 0 1.25rem;line-height:1.4">${escH(addr)}</p>
+      <div style="margin-bottom:1rem">
+        <label style="display:block;font-weight:600;color:#374151;font-size:.875rem;margin-bottom:.5rem">Reason for losing listing</label>
+        <textarea id="lt-reason" rows="3" placeholder="Why was the listing lost?" style="width:100%;border:1.5px solid #e5e7eb;border-radius:8px;padding:.625rem;font-size:.875rem;font-family:inherit;resize:vertical;box-sizing:border-box"></textarea>
       </div>
+      ${questionsHtml}
       <div style="display:flex;gap:.75rem">
-        <button id="lt-submit" disabled style="flex:1;background:#1a3a5c;color:#fff;border:none;border-radius:10px;padding:.75rem;font-weight:700;font-size:.95rem;cursor:pointer;opacity:.4">Confirm</button>
+        <button id="lt-submit" ${isBuyer?'':'disabled'} style="flex:1;background:#1a3a5c;color:#fff;border:none;border-radius:10px;padding:.75rem;font-weight:700;font-size:.95rem;cursor:pointer;opacity:${isBuyer?'1':'.4'}">Confirm</button>
         <button id="lt-back" style="background:none;border:1px solid #e5e7eb;border-radius:10px;padding:.75rem .9rem;font-size:.875rem;cursor:pointer;color:#6b7280">← Back</button>
       </div>`;
     card.querySelector('#lt-back').addEventListener('click', showStep1);
-    const answers = {};
+    const answers = isBuyer ? {protection:'no', sign:'no'} : {};
     card.querySelectorAll('button[data-q]').forEach(btn=>{
       btn.addEventListener('click', ()=>{
         const q=btn.dataset.q, v=btn.dataset.v;
@@ -9251,26 +9261,6 @@ function handleLostTerminatedDrop(dealId, deal){
       const reason = card.querySelector('#lt-reason').value.trim();
       document.body.removeChild(overlay);
       await _doLostProposal(dealId, deal, reason);
-    });
-  }
-
-  function showBuyerRepForm(){
-    card.innerHTML = `
-      <h3 style="font-weight:700;color:#854d0e;font-size:1.125rem;margin:0 0 .25rem">🤝 Buyer Rep</h3>
-      <p style="color:#6b7280;font-size:.875rem;margin:0 0 1.25rem;line-height:1.4">${escH(addr)}</p>
-      <div style="margin-bottom:1.25rem">
-        <label style="display:block;font-weight:600;color:#374151;font-size:.875rem;margin-bottom:.5rem">Reason the buyer rep engagement was lost</label>
-        <textarea id="lt-reason" rows="3" placeholder="Why was the buyer rep engagement lost?" style="width:100%;border:1.5px solid #e5e7eb;border-radius:8px;padding:.625rem;font-size:.875rem;font-family:inherit;resize:vertical;box-sizing:border-box"></textarea>
-      </div>
-      <div style="display:flex;gap:.75rem">
-        <button id="lt-submit" style="flex:1;background:#1a3a5c;color:#fff;border:none;border-radius:10px;padding:.75rem;font-weight:700;font-size:.95rem;cursor:pointer">Confirm</button>
-        <button id="lt-back" style="background:none;border:1px solid #e5e7eb;border-radius:10px;padding:.75rem .9rem;font-size:.875rem;cursor:pointer;color:#6b7280">← Back</button>
-      </div>`;
-    card.querySelector('#lt-back').addEventListener('click', showStep1);
-    card.querySelector('#lt-submit').addEventListener('click', async ()=>{
-      const reason = card.querySelector('#lt-reason').value.trim();
-      document.body.removeChild(overlay);
-      await _doBuyerRep(dealId, deal, reason);
     });
   }
 
@@ -9361,28 +9351,6 @@ async function _doLostProposal(dealId, deal, reason){
   Object.assign(deal, upd);
   viewBoard();
   showToast('✅ Lost Proposal logged','info',3000);
-}
-
-/* ── Buyer Rep handler ── */
-async function _doBuyerRep(dealId, deal, reason){
-  const oldStage = deal.stage;
-  const _sh=[...(deal.stageHistory||[])];
-  if(!_sh.length && deal.stageEnteredAt) _sh.push({stage:oldStage,enteredAt:deal.stageEnteredAt});
-  if(_sh.length){const _l=_sh[_sh.length-1];if(!_l.exitedAt){_l.exitedAt=Date.now();_l.durationMs=_l.exitedAt-_l.enteredAt;}}
-  _sh.push({stage:'Lost / Terminated',enteredAt:Date.now()});
-  const upd = {
-    stage:'Lost / Terminated',
-    probability:0,
-    stageEnteredAt:Date.now(),
-    updatedAt:Date.now(),
-    lostType:'buyer_rep',
-    lostReason:reason||'',
-    stageHistory:_sh,
-  };
-  await Store.updateDeal(dealId, upd);
-  Object.assign(deal, upd);
-  viewBoard();
-  showToast('✅ Buyer Rep logged','info',3000);
 }
 
 /* =======================================================
