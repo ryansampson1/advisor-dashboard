@@ -260,6 +260,12 @@ body {
 }
 .deal-card[draggable="true"] { cursor: grab; }
 .deal-card[draggable="true"]:active { cursor: grabbing; }
+.deal-card.card-search-hit { animation: cardSearchHit 2.1s ease-out; position: relative; z-index: 5; }
+@keyframes cardSearchHit {
+  0%   { box-shadow: 0 0 0 3px rgba(99,102,241,.9), 0 0 0 7px rgba(99,102,241,.35); }
+  60%  { box-shadow: 0 0 0 3px rgba(99,102,241,.9), 0 0 0 7px rgba(99,102,241,.25); }
+  100% { box-shadow: 0 0 0 0 rgba(99,102,241,0), 0 0 0 0 rgba(99,102,241,0); }
+}
 
 /* ── Kanban ─────────────────────────────────────── */
 .kanban-col {
@@ -3357,6 +3363,7 @@ let allAutomations = [];
 let allOfficeManagers = []; // [{email, office, name?}] — loaded from DB / localStorage
 let allTasks = [];
 let allHeadlines = [];   // [{id,title,body,createdAt,createdBy,pinned}]         // [{id, title, description, assignedTo, assignedToName, dueDate, status, dealId, dealAddress, createdBy, createdAt}]
+let allHrDocs = [];      // HR knowledge documents uploaded by admins: [{id,name,text,chars,createdAt,createdByName}]
 let allDocuments = [];     // [{id, type, office, url, name, uploadedAt}]
 let pendingActions = [];
 let activeChart  = null;
@@ -5241,6 +5248,11 @@ const FB = {
           eosCache[docId] = payload.data;
         }
       });
+      // Rebuild the HR knowledge documents list from eos/hrdoc_* docs
+      allHrDocs = snap.docs
+        .filter(d => d.id.indexOf('hrdoc_') === 0)
+        .map(d => { const p = (d.data()||{}).data || {}; return { id:d.id, name:p.name||'document', text:p.text||'', chars:p.chars||(p.text?p.text.length:0), createdAt:p.createdAt||0, createdByName:p.createdByName||'' }; })
+        .sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
       onUpdate('eos');
     }));
     _fbUnsubs.push(onSnapshot(collection(_fbDb,'advisorRocks'), snap=>{
@@ -5287,6 +5299,8 @@ const FB = {
       allHeadlines = snap.docs.map(d=>({...d.data(), id:d.id}));
       onUpdate('headlines');
     }, err=>{ console.warn('[hrHeadlines listener]', err.code, err.message); allHeadlines=[]; }));
+    // HR knowledge documents are stored as eos/hrdoc_* docs (see the eos listener
+    // above, which rebuilds allHrDocs) so they reuse the admin-write eos rules.
   },
   async createTask(data){
     const {collection, addDoc} = _fbFns;
@@ -6931,6 +6945,12 @@ function viewBoard(){
         ${currentUser.isAdmin ? `<p class="text-sm text-gray-500 mt-0.5">${deals.length} deal${deals.length!==1?'s':''} ${_filterAdvisorName ? '· '+_filterAdvisorName : 'across all advisors'}</p>` : ''}
       </div>
       <div style="display:flex;align-items:center;gap:.75rem;flex-wrap:wrap">
+        <div id="deal-search-wrap" style="position:relative">
+          <input id="deal-search-input" type="text" autocomplete="off" placeholder="🔍 Search deals…"
+            oninput="_dealSearch(this.value)" onfocus="_dealSearch(this.value)" onkeydown="_dealSearchKey(event)"
+            style="font-size:.85rem;padding:.45rem .7rem;border:1px solid #d1d5db;border-radius:.5rem;background:#fff;color:#111;outline:none;width:220px"/>
+          <div id="deal-search-results" style="display:none;position:absolute;top:calc(100% + 4px);left:0;width:320px;max-height:340px;overflow-y:auto;background:#fff;border:1px solid #e5e7eb;border-radius:.6rem;box-shadow:0 12px 32px rgba(0,0,0,.14);z-index:60"></div>
+        </div>
         ${_advisorFilterDropdown}
         <button onclick="window._propGmailSyncAll()" class="border border-blue-200 rounded-lg px-3 py-2 text-sm text-blue-600 hover:bg-blue-50 whitespace-nowrap font-semibold" title="Scan Gmail for emails about all active properties (last 30 days)">📧 Gmail Sync${typeof _PROP_GMAIL_SYNC_DATE!=='undefined'?` <span class="font-normal text-xs text-blue-400">(${_PROP_GMAIL_SYNC_DATE})</span>`:''}</button>
         <button onclick="openDealModal(null)" class="brand-btn px-5 py-2.5 text-sm font-semibold transition">+ Add Deal</button>
@@ -6970,7 +6990,7 @@ function viewBoard(){
     ${kpiBar}
     <div id="pipeline-kanban" style="display:flex;gap:0.75rem;align-items:stretch;overflow-x:auto;padding-bottom:0.75rem;">
       ${STAGES.map(stage=>{
-        const allSd=byStage[stage]||[];
+        const allSd=(byStage[stage]||[]).slice().sort(_boardOrderCmp);
         const isLT = stage==='Lost / Terminated';
         // For Lost / Terminated: hide cards older than 7 days unless admin toggled
         const weekAgo = Date.now() - 7*86400000;
@@ -8602,7 +8622,7 @@ function viewBoardStaff(){
     ${staffKpis}
     <div style="${_boardStyle}">
       ${STAGES.map(stage => {
-        const sd = byStage[stage] || [];
+        const sd = (byStage[stage] || []).slice().sort(_boardOrderCmp);
         const sc = SC[stage];
         return `
           <div style="${_colStyle}">
@@ -8820,21 +8840,173 @@ window.openStaffDealView = function(dealId){
   document.body.appendChild(overlay);
 };
 
+// ── Manual card ordering within a column ──────────────────────────────────
+// Cards are sorted by `boardOrder` (lower = higher in the column). Deals that
+// have never been arranged fall back to 1e9 and keep their natural order at the
+// bottom. Stable sort preserves relative order for ties.
+window._boardOrderCmp = (a,b) =>
+  ((a.boardOrder ?? 1e9) - (b.boardOrder ?? 1e9));
+
+// Given the column element a card was dropped on, the cursor Y position, and the
+// id of the dragged card, return the desired top→bottom list of deal ids for
+// that column (dragged card inserted at the drop point).
+window._columnOrderAfterDrop = (colEl, clientY, draggedId) => {
+  const cards = [...colEl.querySelectorAll('.deal-card[data-id]')]
+    .filter(c => c.dataset.id !== draggedId);
+  let idx = cards.length;
+  for(let i=0;i<cards.length;i++){
+    const r = cards[i].getBoundingClientRect();
+    if(clientY < r.top + r.height/2){ idx = i; break; }
+  }
+  const ids = cards.map(c => c.dataset.id);
+  ids.splice(idx, 0, draggedId);
+  return ids;
+};
+
+// Persist a new top→bottom ordering for the deals in `orderedIds`. Local state
+// is updated synchronously (so the next render is correct); the write is async.
+window._applyColumnOrder = (orderedIds) => {
+  const changed = [];
+  orderedIds.forEach((id,i) => {
+    const d = allDeals.find(x => x.id === id);
+    if(d && d.boardOrder !== i){ d.boardOrder = i; changed.push(d); }
+  });
+  if(!changed.length) return Promise.resolve();
+  try {
+    if(_fbDb && _fbFns?.writeBatch){
+      const {doc, writeBatch} = _fbFns;
+      const b = writeBatch(_fbDb);
+      changed.forEach(d => b.update(doc(_fbDb,'deals',d.id), {boardOrder:d.boardOrder, updatedAt:Date.now()}));
+      return b.commit().catch(e => console.error('[boardOrder] batch failed', e));
+    }
+    return Promise.all(changed.map(d => Store.updateDeal(d.id, {boardOrder:d.boardOrder})))
+      .catch(e => console.error('[boardOrder] save failed', e));
+  } catch(e){ console.error('[boardOrder]', e); return Promise.resolve(); }
+};
+
+// ── Deal card search (Deals tab) ──────────────────────────────────────────
+// Live dropdown of matching cards; clicking scrolls the board to the card and
+// flashes a highlight ring.
+window._dealSearchResults = [];
+window._dealSearchActive = -1;
+window._dealSearch = (q) => {
+  const box = document.getElementById('deal-search-results');
+  if(!box) return;
+  q = (q||'').trim().toLowerCase();
+  if(!q){ box.style.display='none'; box.innerHTML=''; window._dealSearchResults=[]; window._dealSearchActive=-1; return; }
+  const terms = q.split(/\s+/).filter(Boolean);
+  const pool = (typeof visibleDeals==='function' ? visibleDeals() : allDeals);
+  const matches = [];
+  for(const d of pool){
+    const hay = [d.projectName,d.propertyAddress,d.address,d.city,d.buyer,d.loiBuyer,
+      d.boBuyerName,d.contactPerson,d.stage,d.advisorName,d.zoning,d.escrowAgent,
+      d.boUse,d.boSubmarket,d.landType].filter(Boolean).join(' ').toLowerCase();
+    if(terms.every(t => hay.includes(t))) matches.push(d);
+  }
+  matches.sort((a,b)=>(a.projectName||a.propertyAddress||'').localeCompare(b.projectName||b.propertyAddress||''));
+  const top = matches.slice(0,12);
+  window._dealSearchResults = top.map(d=>d.id);
+  window._dealSearchActive = top.length ? 0 : -1;
+  const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  if(!top.length){
+    box.innerHTML = '<div style="padding:.6rem .8rem;color:#9ca3af;font-size:.82rem">No matching deals</div>';
+    box.style.display='block'; return;
+  }
+  box.innerHTML = top.map((d,i)=>{
+    const title = esc(d.projectName||d.propertyAddress||'Unnamed');
+    const sub = [d.stage, d.buyer||d.loiBuyer||d.boBuyerName, d.advisorName].filter(Boolean).map(esc).join(' · ');
+    return `<div class="deal-search-row" data-i="${i}" data-id="${d.id}"
+        onclick="_dealSearchGoTo('${d.id}')" onmouseenter="_dealSearchSetActive(${i})"
+        style="padding:.5rem .8rem;cursor:pointer;border-bottom:1px solid #f3f4f6;${i===0?'background:#eef2ff':''}">
+      <div style="font-size:.85rem;font-weight:600;color:#111;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${title}</div>
+      ${sub?`<div style="font-size:.74rem;color:#6b7280;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${sub}</div>`:''}
+    </div>`;
+  }).join('');
+  box.style.display='block';
+};
+window._dealSearchSetActive = (i) => {
+  window._dealSearchActive = i;
+  const box = document.getElementById('deal-search-results');
+  if(!box) return;
+  [...box.querySelectorAll('.deal-search-row')].forEach(r => {
+    r.style.background = (+r.dataset.i === i) ? '#eef2ff' : '';
+  });
+};
+window._closeDealSearch = () => {
+  const box = document.getElementById('deal-search-results');
+  if(box) box.style.display='none';
+  window._dealSearchActive = -1;
+};
+window._dealSearchKey = (e) => {
+  const res = window._dealSearchResults || [];
+  if(e.key === 'Escape'){ window._closeDealSearch(); e.target.blur(); return; }
+  if(!res.length) return;
+  if(e.key === 'ArrowDown'){ e.preventDefault(); window._dealSearchSetActive(Math.min((window._dealSearchActive||0)+1, res.length-1)); }
+  else if(e.key === 'ArrowUp'){ e.preventDefault(); window._dealSearchSetActive(Math.max((window._dealSearchActive||0)-1, 0)); }
+  else if(e.key === 'Enter'){ e.preventDefault(); const id = res[window._dealSearchActive>=0?window._dealSearchActive:0]; if(id) window._dealSearchGoTo(id); }
+};
+window._dealSearchGoTo = (id) => {
+  const deal = (typeof visibleDeals==='function' ? visibleDeals() : allDeals).find(d=>d.id===id);
+  window._closeDealSearch();
+  if(!deal) return;
+  // Make sure the card is actually rendered before scrolling to it
+  let needRender = false;
+  const eff = (typeof STAGE_ALIAS!=='undefined' ? (STAGE_ALIAS[deal.stage]||deal.stage) : deal.stage);
+  if(eff==='Lost / Terminated' && !_showAllLostTerminated){ _showAllLostTerminated = true; needRender = true; }
+  const af = sessionStorage.getItem('boardAdvisorFilter');
+  if(af){
+    const inFilter = String(deal.advisorUid||'')===af
+      || (deal.coAdvisorUids||[]).includes(af)
+      || (deal.coAdvisors||[]).some(c=>c.uid===af);
+    if(!inFilter){ sessionStorage.removeItem('boardAdvisorFilter'); needRender = true; }
+  }
+  const doScroll = () => {
+    const el = document.querySelector('#pipeline-kanban .deal-card[data-id="'+(window.CSS&&CSS.escape?CSS.escape(id):id)+'"]');
+    if(!el){ if(typeof openDealModal==='function') openDealModal(id); return; }
+    el.scrollIntoView({behavior:'smooth', block:'center', inline:'center'});
+    el.classList.add('card-search-hit');
+    setTimeout(()=>el.classList.remove('card-search-hit'), 2200);
+  };
+  if(needRender){ viewBoard(); requestAnimationFrame(()=>requestAnimationFrame(doScroll)); }
+  else doScroll();
+};
+if(!window._dealSearchDocBound){
+  window._dealSearchDocBound = true;
+  document.addEventListener('click', (e)=>{
+    const w = document.getElementById('deal-search-wrap');
+    if(w && !w.contains(e.target)) window._closeDealSearch();
+  });
+}
+
 window.handleDragStart = (ev,id) => {
   window._cardDragMoved=true;
+  window._pendingDropOrder=null;
   draggedDealId=id;
   ev.dataTransfer.effectAllowed='move';
   ev.dataTransfer.setData('text/plain',id);
 };
 window.handleDrop = (ev,newStage) => {
   ev.preventDefault();
-  ev.currentTarget.classList.remove('drag-over');
+  const _colEl = ev.currentTarget;
+  const _dropY = ev.clientY;
+  _colEl.classList.remove('drag-over');
   const id=ev.dataTransfer.getData('text/plain')||draggedDealId;
   if(!id) return;
   const deal=allDeals.find(d=>d.id===id);
   if(!deal) return;
   if(!currentUser.isAdmin&&!isDealAdvisor(deal,currentUser.uid)){ showToast('You can only move your own deals','warning'); return; }
-  if(deal.stage===newStage) return;
+  // Desired top→bottom ordering of this column once the drop lands
+  const _desiredIds = _columnOrderAfterDrop(_colEl, _dropY, id);
+  const _effStage = STAGE_ALIAS[deal.stage] || deal.stage;
+  // ── Pure reorder within the same column (no stage change) ──
+  if(_effStage===newStage){
+    _applyColumnOrder(_desiredIds);
+    viewBoard();
+    return;
+  }
+  // Stash the intended drop position so it can be applied once the move
+  // (including any modal-gated flow) completes in the destination column.
+  window._pendingDropOrder = _desiredIds;
   // Helper: open modal, switch it to newStage, render correct fields + update badge
   const openModalForStage = (toastMsg) => {
     openDealModal(id);
@@ -8910,6 +9082,8 @@ window.handleDrop = (ev,newStage) => {
     }
     // ── Structured Drive workflow on stage drag ───────────────────────────
     window._driveStageWorkflow(deal, newStage).catch(()=>{});
+    // ── Apply the drop position within the destination column ──
+    if(window._pendingDropOrder){ _applyColumnOrder(window._pendingDropOrder); window._pendingDropOrder=null; }
     viewBoard();
     showToast(`Moved to ${newStage}`,'success');
   });
@@ -19385,6 +19559,10 @@ window.handleDealSubmit = async ev => {
     }
     await Store.updateDeal(id,data);
     Object.assign(existing,data);
+    // ── Apply a drop position captured from a drag-to-stage move ──
+    if(oldStage!==stage && window._pendingDropOrder){
+      _applyColumnOrder(window._pendingDropOrder); window._pendingDropOrder=null;
+    }
     if(oldStage!==stage) fireAutomations(existing,oldStage);
     // ── Structured Drive workflow on stage change ──────────────────────────
     // Capture files synchronously NOW before async cleanup runs later
@@ -20074,6 +20252,15 @@ function viewHR(){
   // ── Admin-only HR knowledge base editor ────────────────────────────────
   // Reuses the same admin gate as Company Headlines.
   const _kbEsc = (APP_CONFIG.ai?.hrKnowledge||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const _docsList = (allHrDocs||[]).map(d=>`
+        <div style="display:flex;align-items:center;gap:.6rem;background:#fff;border:1px solid #d1fae5;border-radius:8px;padding:.5rem .75rem;margin-bottom:.4rem">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#0d9488" stroke-width="2" style="flex-shrink:0"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+          <div style="flex:1;min-width:0">
+            <div style="font-size:.82rem;font-weight:600;color:var(--text-1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${(d.name||'document').replace(/</g,'&lt;')}</div>
+            <div style="font-size:.7rem;color:var(--text-3)">${Math.round((d.chars||0)/1000)}k characters${d.createdByName?(' · '+String(d.createdByName).replace(/</g,'&lt;')):''}</div>
+          </div>
+          <button onclick="_hrDeleteDoc('${d.id}')" title="Remove" style="background:none;border:1px solid #fca5a5;color:#ef4444;border-radius:6px;padding:.2rem .5rem;font-size:.7rem;cursor:pointer;flex-shrink:0">✕</button>
+        </div>`).join('');
   const kbHtml = isHlAdmin ? `
     <div style="margin-bottom:1.75rem;background:#f0fdfa;border:1px solid #99f6e4;border-radius:12px;padding:1.25rem 1.5rem">
       <div style="display:flex;align-items:center;gap:.4rem;font-size:.72rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--brand-teal);margin-bottom:.5rem">
@@ -20095,6 +20282,17 @@ Onboarding: New hires complete I-9 and direct deposit in the first week. IT sets
       <div style="display:flex;align-items:center;gap:.85rem;margin-top:.75rem">
         <button onclick="saveHrKnowledge()" style="background:var(--brand-teal);color:#fff;border:none;border-radius:8px;padding:.55rem 1.25rem;font-size:.85rem;font-weight:600;cursor:pointer">Save knowledge</button>
         <span id="hr-kb-status" style="font-size:.8rem;color:var(--text-3)"></span>
+      </div>
+
+      <div style="margin-top:1.25rem;border-top:1px dashed #99f6e4;padding-top:1rem">
+        <div style="font-size:.72rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--brand-teal);margin-bottom:.6rem">Uploaded Documents</div>
+        ${_docsList || '<div style="font-size:.8rem;color:var(--text-3);margin-bottom:.5rem">No documents yet. Upload a handbook, policy, or benefits file and the assistant will read it.</div>'}
+        <input type="file" id="hr-doc-file" accept=".pdf,.doc,.docx,.txt,.md,.csv,.rtf" style="display:none" onchange="_hrUploadDoc(this)"/>
+        <div style="display:flex;align-items:center;gap:.85rem;margin-top:.5rem">
+          <button onclick="document.getElementById('hr-doc-file').click()" style="background:#fff;border:1.5px solid var(--brand-teal);color:var(--brand-teal);border-radius:8px;padding:.5rem 1rem;font-size:.82rem;font-weight:600;cursor:pointer">+ Upload document</button>
+          <span id="hr-doc-status" style="font-size:.8rem;color:var(--text-3)"></span>
+        </div>
+        <p style="font-size:.72rem;color:var(--text-3);margin-top:.6rem;line-height:1.5">PDF, Word (.docx), or text files. The text is pulled out in your browser and added to what the assistant knows. Scanned or image-only PDFs won't work — there's no readable text in them.</p>
       </div>
     </div>
   ` : '';
@@ -20191,6 +20389,110 @@ window.saveHrKnowledge = async function(){
   }
 };
 
+// Lazy-load an external script once (returns a promise that resolves when ready)
+const _loadedScripts = {};
+function _loadScript(src){
+  if(_loadedScripts[src]) return _loadedScripts[src];
+  _loadedScripts[src] = new Promise((resolve,reject)=>{
+    const s = document.createElement('script');
+    s.src = src; s.async = true;
+    s.onload = ()=>resolve();
+    s.onerror = ()=>{ delete _loadedScripts[src]; reject(new Error('Failed to load '+src)); };
+    document.head.appendChild(s);
+  });
+  return _loadedScripts[src];
+}
+
+// Extract plain text from an uploaded HR document (PDF / Word / text), in-browser.
+async function _extractFileText(file){
+  const name = file.name || 'document';
+  const ext = (name.split('.').pop()||'').toLowerCase();
+  if(['txt','md','csv','rtf','text','log'].includes(ext)){
+    let t = await file.text();
+    if(ext==='rtf') t = t.replace(/\\[a-z]+-?\d* ?/gi,' ').replace(/[{}]/g,' '); // crude RTF strip
+    return t;
+  }
+  if(ext==='pdf'){
+    await _loadScript('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js');
+    const pdfjsLib = window.pdfjsLib;
+    if(!pdfjsLib) throw new Error('PDF reader failed to load');
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    const buf = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({data: buf}).promise;
+    let out = '';
+    for(let i=1;i<=pdf.numPages;i++){
+      const page = await pdf.getPage(i);
+      const content = await page.getTextContent();
+      out += content.items.map(it=>it.str).join(' ') + '\n\n';
+    }
+    return out.trim();
+  }
+  if(ext==='docx' || ext==='doc'){
+    await _loadScript('https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js');
+    if(!window.mammoth) throw new Error('Word reader failed to load');
+    const buf = await file.arrayBuffer();
+    const res = await window.mammoth.extractRawText({arrayBuffer: buf});
+    return (res && res.value || '').trim();
+  }
+  // Fallback: try reading as text
+  return await file.text();
+}
+
+window._hrUploadDoc = async function(input){
+  const file = input && input.files && input.files[0];
+  const status = document.getElementById('hr-doc-status');
+  const setStatus = (msg,color)=>{ if(status){ status.textContent = msg; status.style.color = color||'var(--text-3)'; } };
+  if(!file){ return; }
+  // ~5 MB raw file guard (PDFs compress; extracted text is what matters)
+  if(file.size > 25*1024*1024){ setStatus('That file is very large (>25 MB). Try a smaller one or split it.','var(--brand-red)'); input.value=''; return; }
+  setStatus('Reading "'+file.name+'"…');
+  try {
+    let text = (await _extractFileText(file) || '').trim();
+    if(!text){
+      setStatus('No readable text found. If this is a scanned PDF, it has no text to extract.','var(--brand-red)');
+      input.value=''; return;
+    }
+    // Firestore document limit is ~1 MB; keep extracted text comfortably under it
+    const MAX = 900000;
+    let truncated = false;
+    if(text.length > MAX){ text = text.slice(0, MAX); truncated = true; }
+    if(!_fbDb || !_fbFns){ setStatus('Not connected to the database — please refresh and try again.','var(--brand-red)'); input.value=''; return; }
+    setStatus('Saving "'+file.name+'"…');
+    const {doc: _d, setDoc: _set} = _fbFns;
+    const _id = 'hrdoc_' + Date.now() + '_' + Math.random().toString(36).slice(2,7);
+    await _set(_d(_fbDb,'eos',_id), { data: {
+      name: file.name,
+      text,
+      chars: text.length,
+      truncated,
+      createdAt: Date.now(),
+      createdBy: currentUser?.uid || '',
+      createdByName: currentUser?.name || currentUser?.email || ''
+    }}, { merge:false });
+    setStatus('✓ Added "'+file.name+'"'+(truncated?' (trimmed to fit)':'')+' — the assistant can now use it.','var(--brand-teal)');
+    input.value='';
+    if(currentView==='hr') viewHR();
+  } catch(e){
+    console.error('[hrUploadDoc]', e);
+    setStatus('Couldn\'t read that file: '+(e?.message||'unknown error'),'var(--brand-red)');
+    input.value='';
+  }
+};
+
+window._hrDeleteDoc = async function(id){
+  if(!confirm('Remove this document from the assistant\'s knowledge?')) return;
+  if(!_fbDb || !_fbFns) return;
+  const {doc: _d, deleteDoc: _del} = _fbFns;
+  try {
+    await _del(_d(_fbDb,'eos',id));
+    if(typeof showToast==='function') showToast('Document removed','success');
+    if(currentView==='hr') viewHR();
+  } catch(e){
+    console.error('[hrDeleteDoc]', e);
+    if(typeof showToast==='function') showToast('Remove failed: '+(e?.code||e?.message||''),'error',6000);
+  }
+};
+
 window.sendHREmail = function(){
   const name    = document.getElementById('hr-name')?.value.trim()||'';
   const subject = document.getElementById('hr-subject')?.value.trim()||'';
@@ -20220,9 +20522,11 @@ window.sendHRAIMessage = async function(){
   msgs.scrollTop = msgs.scrollHeight;
 
   try {
-    const _kb = (APP_CONFIG.ai?.hrKnowledge||'').trim();
+    const _kbTyped = (APP_CONFIG.ai?.hrKnowledge||'').trim();
+    const _kbDocs = (allHrDocs||[]).map(d=>`--- Document: ${d.name||'document'} ---\n${(d.text||'').trim()}`).filter(s=>s.length>20).join('\n\n');
+    const _kbAll = [_kbTyped, _kbDocs].filter(Boolean).join('\n\n');
     const _sysPrompt = (APP_CONFIG.ai?.hrContext||'You are a helpful HR assistant for Eshenbaugh Land Company.')
-      + (_kb ? '\n\n=== Eshenbaugh Land Company HR knowledge base ===\nThe following is the authoritative HR information for this company. Answer questions using ONLY this information plus general HR best practices. If a specific answer is not covered here, say you are not certain and suggest emailing hr@thedirtdog.com. Do not invent company-specific policies.\n\n'+_kb : '');
+      + (_kbAll ? '\n\n=== Eshenbaugh Land Company HR knowledge base ===\nThe following is the authoritative HR information for this company (admin-entered notes and uploaded documents). Answer questions using ONLY this information plus general HR best practices. When you use a fact from an uploaded document, you may mention the document name. If a specific answer is not covered here, say you are not certain and suggest emailing hr@thedirtdog.com. Do not invent company-specific policies.\n\n'+_kbAll : '');
     const reply = await callAIAssistant(text, _sysPrompt, '_hrHistory');
     document.getElementById(loadId)?.remove();
     if(!reply) return;
