@@ -11422,7 +11422,7 @@ function viewCRM(){
               <td class="px-4 py-3 font-medium text-gray-800">${name}${c.title?`<br><span class="text-xs text-gray-400 font-normal">${c.title}</span>`:''}</td>
               <td class="px-4 py-3 text-gray-600">${c.company||'<span class="text-gray-300">—</span>'}</td>
               <td class="px-4 py-3 text-blue-600">${c.email?`<a href="mailto:${c.email}" onclick="event.stopPropagation()">${c.email}</a>${c.email2?`<br><a href="mailto:${c.email2}" onclick="event.stopPropagation()" class="text-xs text-gray-400 font-normal">${c.email2}</a>`:''}`:'<span class="text-gray-300">—</span>'}</td>
-              <td class="px-4 py-3 text-gray-600">${c.phone||'<span class="text-gray-300">—</span>'}</td>
+              <td class="px-4 py-3 text-gray-600">${c.phone?window._fmtPhone(c.phone):'<span class="text-gray-300">—</span>'}</td>
               <td class="px-4 py-3">${groups||'<span class="text-gray-300">—</span>'}</td>
               <td class="px-4 py-3">${deals||'<span class="text-gray-300">—</span>'}</td>
               <td class="px-4 py-3 text-gray-400 text-xs whitespace-nowrap">${added}</td>
@@ -12024,8 +12024,8 @@ window.openContactPanel = id => {
     <!-- Contact details (compact) -->
     <div class="px-5 py-3 border-b bg-gray-50 text-sm space-y-1.5 text-gray-600">
       ${c.email ? `<div class="flex gap-2"><span class="text-gray-400 w-20 flex-shrink-0">Email</span><span class="text-blue-600 truncate">${c.email}${c.email2 ? `<span class="text-gray-400 ml-2 text-xs">${c.email2}</span>` : ''}</span></div>` : ''}
-      ${c.phone ? `<div class="flex gap-2"><span class="text-gray-400 w-20 flex-shrink-0">Mobile</span><span>${c.phone}</span></div>` : ''}
-      ${c.officePhone ? `<div class="flex gap-2"><span class="text-gray-400 w-20 flex-shrink-0">Office</span><span>${c.officePhone}${c.officePhoneExt ? ` x${c.officePhoneExt}` : ''}</span></div>` : ''}
+      ${c.phone ? `<div class="flex gap-2"><span class="text-gray-400 w-20 flex-shrink-0">Mobile</span><span>${window._fmtPhone(c.phone)}</span></div>` : ''}
+      ${c.officePhone ? `<div class="flex gap-2"><span class="text-gray-400 w-20 flex-shrink-0">Office</span><span>${window._fmtPhone(c.officePhone)}${c.officePhoneExt ? ` x${c.officePhoneExt}` : ''}</span></div>` : ''}
       ${addrParts.length ? `<div class="flex gap-2"><span class="text-gray-400 w-20 flex-shrink-0">Address</span><span>${addrParts.join(', ')}</span></div>` : ''}
       ${c.source ? `<div class="flex gap-2"><span class="text-gray-400 w-20 flex-shrink-0">Source</span><span>${c.source}</span></div>` : ''}
       ${groupsHtml ? `<div class="flex gap-2 items-start"><span class="text-gray-400 w-20 flex-shrink-0 mt-0.5">Groups</span><div class="flex flex-wrap">${groupsHtml}</div></div>` : ''}
@@ -12441,12 +12441,12 @@ window.openContactModal = id => {
           <div class="grid grid-cols-2 gap-3">
             <div>
               <label class="block text-xs font-medium text-gray-600 mb-1">Mobile Phone</label>
-              <input id="cm-phone" type="tel" value="${c?.phone||''}" class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-200"/>
+              <input id="cm-phone" type="tel" value="${c?.phone?window._fmtPhone(c.phone):''}" class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-200"/>
             </div>
             <div>
               <label class="block text-xs font-medium text-gray-600 mb-1">Office Phone</label>
               <div class="flex gap-2">
-                <input id="cm-office-phone" type="tel" value="${c?.officePhone||''}" placeholder="Number" class="flex-1 border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-200"/>
+                <input id="cm-office-phone" type="tel" value="${c?.officePhone?window._fmtPhone(c.officePhone):''}" placeholder="Number" class="flex-1 border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-200"/>
                 <input id="cm-office-ext" type="text" value="${c?.officePhoneExt||''}" placeholder="Ext" class="w-16 border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-200"/>
               </div>
             </div>
@@ -12606,8 +12606,8 @@ window.saveContact = async () => {
     company:         document.getElementById('cm-company')?.value.trim()||'',
     email,
     email2:          document.getElementById('cm-email2')?.value.trim().toLowerCase()||'',
-    phone:           document.getElementById('cm-phone')?.value.trim()||'',
-    officePhone:     document.getElementById('cm-office-phone')?.value.trim()||'',
+    phone:           window._fmtPhone(document.getElementById('cm-phone')?.value.trim()||''),
+    officePhone:     window._fmtPhone(document.getElementById('cm-office-phone')?.value.trim()||''),
     officePhoneExt:  document.getElementById('cm-office-ext')?.value.trim()||'',
     mailingAddress: {
       street: document.getElementById('cm-addr-street')?.value.trim()||'',
@@ -14515,6 +14515,18 @@ window._execGmailSync = async () => {
   viewCRM();
 };
 
+// ── Phone formatting helper ──────────────────────────────────────────
+// Normalizes US numbers to "(XXX) XXX-XXXX". Leaves anything that isn't a
+// clean 10-digit (or 1+10) number untouched (extensions, intl, partials).
+window._fmtPhone = v => {
+  if(!v) return v;
+  const raw = (''+v).trim();
+  let digits = raw.replace(/\D/g,'');
+  if(digits.length===11 && digits[0]==='1') digits = digits.slice(1);
+  if(digits.length===10) return `(${digits.slice(0,3)}) ${digits.slice(3,6)}-${digits.slice(6)}`;
+  return raw;
+};
+
 // ── Paste Signature Modal ────────────────────────────────────────────
 window._parseContactSignature = text => {
   const emailRe=/\b[\w._%+-]+@[\w.-]+\.[a-z]{2,}\b/i;
@@ -14645,8 +14657,8 @@ window._crmSigSave = async () => {
     firstName:document.getElementById('sig-fn')?.value.trim()||'',
     lastName: document.getElementById('sig-ln')?.value.trim()||'',
     email:    document.getElementById('sig-email')?.value.trim().toLowerCase()||'',
-    phone:    document.getElementById('sig-phone')?.value.trim()||'',
-    officePhone:document.getElementById('sig-officephone')?.value.trim()||'',
+    phone:    window._fmtPhone(document.getElementById('sig-phone')?.value.trim()||''),
+    officePhone:window._fmtPhone(document.getElementById('sig-officephone')?.value.trim()||''),
     title:    document.getElementById('sig-title')?.value.trim()||'',
     company:  document.getElementById('sig-company')?.value.trim()||'',
     updatedAt:Date.now(),
@@ -15108,7 +15120,7 @@ window.saveCompany = async () => {
   if(!name){ showToast('Company name is required','error'); return; }
   const data = {
     name,
-    phone:   document.getElementById('cco-phone')?.value.trim()||'',
+    phone:   window._fmtPhone(document.getElementById('cco-phone')?.value.trim()||''),
     website: document.getElementById('cco-website')?.value.trim()||'',
     address: {
       street: document.getElementById('cco-addr-street')?.value.trim()||'',
