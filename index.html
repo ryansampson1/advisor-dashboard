@@ -10990,10 +10990,54 @@ window._dismissMergePair = async (type, id1, id2, rowEl) => {
   showToast('Pair dismissed — won\'t appear again', 'success', 2500);
 };
 
+// ── Gmail "never sync" blocklist (persisted to Firestore) ──────────
+// Email addresses here are permanently excluded from Gmail Sync — they
+// will never be suggested as new contacts again.
+window._gmailBlocklist = new Set();
+
+window._isGmailBlocked = email =>
+  !!email && window._gmailBlocklist.has(email.toLowerCase().trim());
+
+window._saveGmailBlocklist = async () => {
+  if(!_fbDb || !_fbFns) return;
+  const {doc, setDoc} = _fbFns;
+  try {
+    await setDoc(doc(_fbDb, 'settings', 'gmailNeverSync'), {
+      emails: [...window._gmailBlocklist],
+      updatedAt: Date.now(),
+    }, { merge: true });
+  } catch(e) { console.warn('[gmailBlocklist save]', e); }
+};
+
+window._loadGmailBlocklist = async () => {
+  if(!_fbDb || !_fbFns) return;
+  const {doc, getDoc} = _fbFns;
+  try {
+    const snap = await getDoc(doc(_fbDb, 'settings', 'gmailNeverSync'));
+    if(snap.exists()){
+      window._gmailBlocklist = new Set((snap.data().emails || []).map(e=>(e||'').toLowerCase().trim()).filter(Boolean));
+    }
+  } catch(e) { console.warn('[gmailBlocklist load]', e); }
+};
+
+// Escape hatch: un-block an address from the browser console, e.g.
+//   _gmailUnblock('jane@example.com')
+window._gmailUnblock = async (email) => {
+  const e = (email||'').toLowerCase().trim();
+  if(window._gmailBlocklist.delete(e)){
+    await window._saveGmailBlocklist();
+    console.log(`✅ Un-blocked ${e} — it can be synced again.`);
+    if(typeof showToast==='function') showToast(`Un-blocked ${e}`, 'success', 3000);
+  } else {
+    console.log(`${e} was not in the blocklist.`);
+  }
+};
+
 function bootCRM(){
   if(window._crmReady) return;
   window._crmReady = true;
   window._loadDismissedPairs(); // load dismissed pairs on CRM boot
+  window._loadGmailBlocklist(); // load Gmail never-sync blocklist on CRM boot
   const {collection, onSnapshot, query, orderBy} = _fbFns;
   // Debounce: collapse burst of 3 independent snapshot fires into a single render
   let _crmRenderTimer = null;
@@ -14156,6 +14200,7 @@ async function _fetchGmailContacts(token, afterTs){
           for(const {email, nameRaw} of _parseEmailHeader(hMap[field])){
             if(contacts.has(email)) continue;
             if(SKIP.some(s=>email.includes(s))) continue;
+            if(window._isGmailBlocked && window._isGmailBlocked(email)) continue;
             const parts = nameRaw.split(/\s+/);
             const firstName = parts[0]||'';
             const lastName  = parts.slice(1).join(' ')||'';
@@ -14228,6 +14273,7 @@ window.crmGmailSync = async () => {
   for(const g of _GMAIL_SYNC_DATA) {
     const email = (g.email||'').toLowerCase().trim();
     if(!email) continue;
+    if(window._isGmailBlocked(email)) continue; // permanently excluded address
     const existing = emailIndex[email];
     if(existing) {
       // Only show as UPDATE if we have new data to add
@@ -14317,7 +14363,12 @@ window.crmGmailSync = async () => {
                   <option value="">— none —</option>${groupOpts}
                 </select>
               </td>
-              <td class="px-3 py-2 text-xs text-gray-400">${isUpd?`Adds: ${addLabels}`:''}</td>
+              <td class="px-3 py-2 text-xs text-gray-400">
+                <div style="display:flex;align-items:center;gap:8px;justify-content:space-between">
+                  <span>${isUpd?`Adds: ${addLabels}`:''}</span>
+                  <button onclick="window._gssBlockRow(${i})" title="Never sync this address — permanently exclude it from future Gmail Syncs" class="shrink-0 text-xs text-gray-400 hover:text-red-600 hover:bg-red-50 rounded px-1.5 py-0.5 border border-transparent hover:border-red-200">🚫 Never</button>
+                </div>
+              </td>
             </tr>`;
           }).join('')}
         </tbody>
@@ -14522,6 +14573,30 @@ window._execGmailSync = async () => {
   }
   showToast(`Gmail Sync complete: ${toAdd.length} added, ${toUpdate.length} updated ✓`,'success');
   viewCRM();
+};
+
+// Permanently exclude a sender's address from all future Gmail Syncs.
+window._gssBlockRow = async (i) => {
+  const rows = window._gsRows || [];
+  const r = rows[i];
+  const email = (r?.gmail?.email||'').toLowerCase().trim();
+  if(!email) return;
+  // Add to blocklist + persist
+  window._gmailBlocklist.add(email);
+  await window._saveGmailBlocklist();
+  // Drop it from the in-memory sync cache so it won't reappear this session
+  if(typeof _GMAIL_SYNC_DATA !== 'undefined'){
+    _GMAIL_SYNC_DATA = _GMAIL_SYNC_DATA.filter(g => (g.email||'').toLowerCase().trim() !== email);
+  }
+  // Hide + un-check the row
+  const row = document.querySelector(`.gss-row[data-idx="${i}"]`);
+  if(row){
+    const cb = row.querySelector('.gss-chk');
+    if(cb) cb.checked = false;
+    row.style.display = 'none';
+  }
+  window._gssUpdateCount?.();
+  showToast(`🚫 ${email} blocked — it won't be suggested again`, 'success', 4000);
 };
 
 // ── Phone formatting helper ──────────────────────────────────────────
