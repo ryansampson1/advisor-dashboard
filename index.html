@@ -800,17 +800,38 @@ body {
             <input id="f-address" type="text" required placeholder="123 Main St, City, FL"
               class="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none"/>
           </div>
-          <div class="grid grid-cols-2 gap-3">
-            <div>
-              <label class="block text-sm font-medium text-gray-700 mb-1">Folio / APN #</label>
-              <input id="f-folio" type="text" placeholder="12-34-567-890"
-                class="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none"/>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">County
+              <span class="text-xs font-normal text-gray-400 ml-1">— used in the Parcel ID</span>
+            </label>
+            <input id="f-county" type="text" placeholder="e.g. Orange, Hillsborough" autocomplete="off"
+              oninput="window._reformatAllParcels&&window._reformatAllParcels()"
+              class="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none"/>
+          </div>
+          <!-- ── PARCEL ID (Folio/APN) — required, LandTech format, dup-check ── -->
+          <div class="rounded-xl border border-indigo-200 bg-indigo-50/60 p-3 space-y-2">
+            <div class="flex items-center justify-between gap-2 flex-wrap">
+              <label class="block text-sm font-semibold text-gray-700">Parcel ID <span class="text-red-500">*</span>
+                <span class="text-xs font-normal text-gray-400 ml-1">— Folio / APN, LandTech format</span>
+              </label>
+              <label class="inline-flex items-center gap-1.5 text-xs font-medium text-gray-600 cursor-pointer select-none">
+                <input type="checkbox" id="f-multi-parcel-toggle" onchange="window.toggleMultiParcel()"
+                  class="rounded border-gray-300 text-indigo-600 focus:ring-indigo-400"/>
+                Multiple parcels (assemblage)
+              </label>
             </div>
-            <div>
-              <label class="block text-sm font-medium text-gray-700 mb-1">County</label>
-              <input id="f-county" type="text" placeholder="e.g. Orange, Hillsborough"
-                class="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none"/>
+            <!-- Primary slot — keeps id="f-folio" for backward compatibility -->
+            <div class="parcel-slot">
+              <input id="f-folio" type="text" placeholder="e.g. U-21-28-17-ZZZ-000001-12345" autocomplete="off"
+                oninput="window.onParcelInput(0)" onblur="window.formatParcelField(0)"
+                class="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none"/>
+              <div id="parcel-dup-0" class="parcel-dup-msg text-xs mt-1" style="display:none"></div>
             </div>
+            <!-- Additional assemblage slots injected here (slots 1–9) -->
+            <div id="parcel-extra-slots" class="hidden space-y-2"></div>
+            <button type="button" id="parcel-add-btn" onclick="window.addParcelSlot()"
+              class="hidden text-xs text-indigo-600 hover:underline font-semibold">+ Add parcel</button>
+            <p id="parcel-format-hint" class="text-xs text-indigo-400 leading-snug">Saved as <span class="font-mono">County · Folio</span> for LandTech compatibility. The system checks for duplicates as you type.</p>
           </div>
           <div class="grid grid-cols-3 gap-3">
             <div>
@@ -19359,6 +19380,246 @@ window.saveQuickEdit = async function() {
   }
 };
 
+/* ============================================================
+   PARCEL ID — LandTech formatting, duplicate detection, notify
+   ============================================================
+   Format (LandTech spec): "County · RawFolio" (dashes preserved).
+   Matching key: county + folio reduced to uppercase alphanumerics.
+   Up to 10 parcel slots for assemblages (primary = f-folio, extras
+   = f-folio-1 … f-folio-9). Required on NEW deals only.            */
+const PARCEL_MAX_SLOTS = 10;
+let _parcelDupTimers = {};
+
+// Reduce any string to comparable uppercase alphanumerics (drops dashes/spaces/dots).
+function _normParcel(s){ return (s==null?'':String(s)).toUpperCase().replace(/[^0-9A-Z]/g,''); }
+
+// LandTech display/storage label for one parcel: "County · RawFolio".
+function _landTechParcel(county, rawFolio){
+  const f = (rawFolio||'').trim();
+  if(!f) return '';
+  const c = (county||'').trim();
+  return c ? `${c} · ${f}` : f;
+}
+
+// Build the match key for one parcel (county + folio, normalized).
+function _parcelMatchKey(county, rawFolio){
+  const f = _normParcel(rawFolio);
+  if(!f) return '';
+  return _normParcel(county) + '|' + f;
+}
+
+// All parcel match keys already stored on a deal (handles legacy folioNumber too).
+function _dealParcelKeys(d){
+  if(!d) return [];
+  if(Array.isArray(d.parcelKeys) && d.parcelKeys.length) return d.parcelKeys.filter(Boolean);
+  // Legacy fallback: single folioNumber + county
+  const k = _parcelMatchKey(d.county, d.folioNumber);
+  return k ? [k] : [];
+}
+
+// Folio-only key (county-agnostic) so a missing/typo'd county still catches a match.
+function _folioOnlyKey(key){ return (key||'').split('|').pop(); }
+
+// Find the first OTHER deal that shares a parcel with the given folio.
+// Returns {deal, key} or null. Matches on full county+folio key first, then folio-only.
+function _findParcelDuplicate(county, rawFolio, excludeDealId){
+  const fullKey = _parcelMatchKey(county, rawFolio);
+  const folioKey = _normParcel(rawFolio);
+  if(!folioKey || folioKey.length < 5) return null;           // too short to be meaningful
+  if(typeof allDeals === 'undefined') return null;
+  for(const d of allDeals){
+    if(!d || d.id === excludeDealId) continue;
+    const keys = _dealParcelKeys(d);
+    for(const k of keys){
+      if(k === fullKey || _folioOnlyKey(k) === folioKey){ return {deal:d, key:k}; }
+    }
+  }
+  return null;
+}
+
+// Resolve an advisor display name from a deal record.
+function _advisorNameForDeal(d){
+  if(!d) return 'another advisor';
+  return d.advisorName || (typeof allProfiles!=='undefined' && allProfiles[d.advisorUid]?.name)
+       || d.advisorEmail || 'another advisor';
+}
+
+// All parcel slot DOM ids currently in the form (primary + any extras present).
+function _parcelSlotIds(){
+  const ids = ['f-folio'];
+  for(let i=1;i<PARCEL_MAX_SLOTS;i++){ if(document.getElementById('f-folio-'+i)) ids.push('f-folio-'+i); }
+  return ids;
+}
+
+// Render the duplicate banner for one slot index.
+function _renderParcelDup(idx){
+  const slotId = idx===0 ? 'f-folio' : 'f-folio-'+idx;
+  const input  = document.getElementById(slotId);
+  const box    = document.getElementById('parcel-dup-'+idx);
+  if(!input || !box) return;
+  const raw = input.value.trim();
+  const county = (document.getElementById('f-county')?.value||'').trim();
+  const dup = raw ? _findParcelDuplicate(county, raw, editingDealId) : null;
+  if(dup){
+    const adv  = _advisorNameForDeal(dup.deal);
+    const stg  = dup.deal.stage || 'Unknown stage';
+    const proj = dup.deal.projectName || dup.deal.propertyAddress || 'an existing deal';
+    box.style.display = 'block';
+    box.style.color = '#9a3412';
+    box.innerHTML = `⚠️ <strong>Already in the database</strong> — “${proj}”, <strong>${stg}</strong>, assigned to <strong>${adv}</strong>. Coordinate before contacting the owner.`;
+    input.style.borderColor = '#f59e0b';
+  } else if(raw && _normParcel(raw).length >= 5){
+    box.style.display = 'block';
+    box.style.color = '#15803d';
+    box.innerHTML = '✓ No duplicate found.';
+    input.style.borderColor = '';
+  } else {
+    box.style.display = 'none';
+    box.innerHTML = '';
+    input.style.borderColor = '';
+  }
+}
+
+// Debounced live duplicate check as the advisor types.
+window.onParcelInput = idx => {
+  clearTimeout(_parcelDupTimers[idx]);
+  _parcelDupTimers[idx] = setTimeout(()=>_renderParcelDup(idx), 300);
+};
+
+// On blur: trim/tidy the folio, then refresh the banner.
+window.formatParcelField = idx => {
+  const slotId = idx===0 ? 'f-folio' : 'f-folio-'+idx;
+  const input  = document.getElementById(slotId);
+  if(input) input.value = input.value.trim().replace(/\s{2,}/g,' ');
+  _renderParcelDup(idx);
+};
+
+// Re-run all parcel duplicate banners (e.g. after County changes).
+window._reformatAllParcels = () => { _parcelSlotIds().forEach((_,i)=>_renderParcelDup(i)); };
+
+// Toggle assemblage mode: reveal/hide the extra-slot area + add button.
+window.toggleMultiParcel = () => {
+  const on = document.getElementById('f-multi-parcel-toggle')?.checked;
+  const wrap = document.getElementById('parcel-extra-slots');
+  const addBtn = document.getElementById('parcel-add-btn');
+  if(on){
+    wrap?.classList.remove('hidden');
+    addBtn?.classList.remove('hidden');
+    if(wrap && !wrap.querySelector('.parcel-slot')) window.addParcelSlot();
+  } else {
+    wrap?.classList.add('hidden');
+    addBtn?.classList.add('hidden');
+    if(wrap) wrap.innerHTML='';   // discard extra parcels when assemblage turned off
+  }
+};
+
+// Add one assemblage parcel slot (up to PARCEL_MAX_SLOTS total).
+window.addParcelSlot = (value='') => {
+  const wrap = document.getElementById('parcel-extra-slots');
+  if(!wrap) return;
+  const used = 1 + wrap.querySelectorAll('.parcel-slot').length;   // primary + existing extras
+  if(used >= PARCEL_MAX_SLOTS){ showToast(`Up to ${PARCEL_MAX_SLOTS} parcels per deal`,'warning'); return; }
+  const idx = used;   // next index (1..9)
+  const row = document.createElement('div');
+  row.className = 'parcel-slot';
+  row.innerHTML =
+    `<div class="flex items-center gap-2">
+       <input id="f-folio-${idx}" type="text" placeholder="Additional parcel folio" autocomplete="off"
+         oninput="window.onParcelInput(${idx})" onblur="window.formatParcelField(${idx})"
+         class="flex-1 border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none"/>
+       <button type="button" title="Remove parcel" onclick="window.removeParcelSlot(this)"
+         class="text-gray-400 hover:text-red-500 text-lg leading-none px-1">×</button>
+     </div>
+     <div id="parcel-dup-${idx}" class="parcel-dup-msg text-xs mt-1" style="display:none"></div>`;
+  wrap.appendChild(row);
+  const inp = row.querySelector('input'); if(inp){ inp.value = value; if(value) window.formatParcelField(idx); }
+};
+
+// Remove an assemblage slot and reindex the remaining extra slots.
+window.removeParcelSlot = btn => {
+  const slot = btn.closest('.parcel-slot');
+  const wrap = document.getElementById('parcel-extra-slots');
+  if(!slot || !wrap) return;
+  const vals = [...wrap.querySelectorAll('.parcel-slot input')].map(i=>i.value);
+  const removeIdx = [...wrap.querySelectorAll('.parcel-slot')].indexOf(slot);
+  vals.splice(removeIdx,1);
+  wrap.innerHTML='';
+  vals.forEach(v=>window.addParcelSlot(v));
+};
+
+// Read every parcel slot → arrays of raw folios, LandTech labels, and match keys.
+function _collectParcels(){
+  const county = (document.getElementById('f-county')?.value||'').trim();
+  const raws = [];
+  _parcelSlotIds().forEach(id=>{
+    const v = (document.getElementById(id)?.value||'').trim();
+    if(v) raws.push(v);
+  });
+  // De-dupe identical folios within the same deal
+  const seen = new Set(); const uniqRaw = [];
+  raws.forEach(r=>{ const k=_normParcel(r); if(k && !seen.has(k)){ seen.add(k); uniqRaw.push(r); } });
+  const parcelIds  = uniqRaw.map(r=>_landTechParcel(county, r));
+  const parcelKeys = uniqRaw.map(r=>_parcelMatchKey(county, r));
+  return {
+    raws: uniqRaw,
+    parcelIds,
+    parcelKeys,
+    primaryRaw: uniqRaw[0]||'',
+    primaryLabel: parcelIds[0]||'',
+    multiParcel: !!document.getElementById('f-multi-parcel-toggle')?.checked && uniqRaw.length>1,
+  };
+}
+
+// Populate parcel slots when opening an existing deal for edit.
+function _populateParcelFields(deal){
+  // Reset multi state + extra slots
+  const toggle = document.getElementById('f-multi-parcel-toggle');
+  const wrap   = document.getElementById('parcel-extra-slots');
+  if(wrap) wrap.innerHTML='';
+  if(toggle) toggle.checked=false;
+  document.getElementById('parcel-extra-slots')?.classList.add('hidden');
+  document.getElementById('parcel-add-btn')?.classList.add('hidden');
+  // Source list: prefer stored raw parcels, fall back to legacy folioNumber
+  const raws = (Array.isArray(deal?.parcelRaw) && deal.parcelRaw.length)
+    ? deal.parcelRaw.slice()
+    : (deal?.folioNumber ? [deal.folioNumber] : []);
+  const primary = document.getElementById('f-folio');
+  if(primary) primary.value = raws[0]||'';
+  if(raws.length>1){
+    if(toggle) toggle.checked=true;
+    window.toggleMultiParcel();
+    if(wrap) wrap.innerHTML='';
+    raws.slice(1).forEach(r=>window.addParcelSlot(r));
+  }
+  // Render banners
+  window._reformatAllParcels && window._reformatAllParcels();
+}
+
+// Fire an in-app task to the original advisor when a different advisor logs their parcel.
+function _notifyParcelOwner(matchedDeal, newDeal){
+  try{
+    if(!matchedDeal || !newDeal) return;
+    if(matchedDeal.advisorUid && newDeal.advisorUid && matchedDeal.advisorUid === newDeal.advisorUid) return; // same advisor — no notice
+    const owner   = _advisorNameForDeal(matchedDeal);
+    const newAdv  = newDeal.advisorName || newDeal.advisorEmail || 'Another advisor';
+    const parcel  = newDeal.parcelId || newDeal.folioNumber || 'a parcel';
+    const newProj = newDeal.projectName || newDeal.propertyAddress || 'a new deal';
+    const oldProj = matchedDeal.projectName || matchedDeal.propertyAddress || 'your existing deal';
+    const dueDate = (()=>{ const d=new Date(); d.setDate(d.getDate()+1); return d.toISOString().slice(0,10); })();
+    Store.createTask({
+      title: `🔁 Duplicate parcel alert — ${parcel}`,
+      description:`Heads up: ${newAdv} just logged a deal (“${newProj}”) on a parcel that matches your deal “${oldProj}”.\n\nParcel: ${parcel}\nYour deal stage: ${matchedDeal.stage||'—'}\n\nReach out to ${newAdv} to coordinate so the owner isn't contacted twice.`,
+      assignedTo: matchedDeal.advisorUid||null,
+      assignedToName: owner,
+      assignedToEmail: matchedDeal.advisorEmail||'',
+      dealId: matchedDeal.id, dealAddress: matchedDeal.propertyAddress,
+      dueDate, status:'pending',
+      createdBy: currentUser?.uid||'system', createdByName:'Parcel Dedupe', createdAt: Date.now(),
+    }).then(()=>showToast('🔁 Duplicate parcel — original advisor notified','warning',5000))
+      .catch(e=>console.warn('[parcel notify]',e));
+  }catch(e){ console.warn('[parcel notify]',e); }
+}
+
 window.openDealModal = (id, defaultStage) => {
   editingDealId = id||null;
   const modal=document.getElementById('deal-modal');
@@ -19377,6 +19638,12 @@ window.openDealModal = (id, defaultStage) => {
   // Reset representation to Seller (default)
   const reprEl = document.getElementById('f-representation');
   if(reprEl) reprEl.value = 'seller';
+  // Reset parcel UI (assemblage extras, toggle, dup banner, highlight)
+  const _pxs=document.getElementById('parcel-extra-slots'); if(_pxs){ _pxs.innerHTML=''; _pxs.classList.add('hidden'); }
+  const _pmt=document.getElementById('f-multi-parcel-toggle'); if(_pmt) _pmt.checked=false;
+  document.getElementById('parcel-add-btn')?.classList.add('hidden');
+  const _pd0=document.getElementById('parcel-dup-0'); if(_pd0){ _pd0.style.display='none'; _pd0.innerHTML=''; }
+  const _pf0=document.getElementById('f-folio'); if(_pf0) _pf0.style.borderColor='';
 
   if(id){
     titleEl.textContent='Edit Deal';
@@ -19386,8 +19653,8 @@ window.openDealModal = (id, defaultStage) => {
     document.getElementById('f-id').value=id;
     const _pnEl=document.getElementById('f-project-name'); if(_pnEl) _pnEl.value=deal.projectName||'';
     document.getElementById('f-address').value=deal.propertyAddress||'';
-    document.getElementById('f-folio').value=deal.folioNumber||'';
     document.getElementById('f-county').value=deal.county||'';
+    _populateParcelFields(deal);   // sets f-folio + any assemblage slots, runs dup check
     const ltEl=document.getElementById('f-land-type'); if(ltEl) ltEl.value=deal.landType||'';
     const acreageEl=document.getElementById('f-acreage'); if(acreageEl) acreageEl.value=deal.acreage||deal.acres||'';
     const zoningEl=document.getElementById('f-zoning'); if(zoningEl) zoningEl.value=deal.zoning||'';
@@ -19761,6 +20028,18 @@ window.handleDealSubmit = async ev => {
   // (built-in stage templates use sf-* IDs, not gf-* IDs, so gf- elements won't exist)
   const sf = collectStageFields();
 
+  // ── Parcel ID required on NEW deals only ────────────────────────────────
+  if(!id){
+    const _pPrimary = (document.getElementById('f-folio')?.value||'').trim();
+    if(!_pPrimary){
+      const el = document.getElementById('f-folio');
+      if(el){ el.focus(); el.style.outline='2px solid #DC2626'; el.style.borderColor='#DC2626';
+        setTimeout(()=>{ el.style.outline=''; el.style.borderColor=''; }, 3000); }
+      showToast('Parcel ID is required for new deals','warning');
+      return;
+    }
+  }
+
   // ── Unified required-field validation (driven by STAGE_REQUIRED_FIELDS) ──
   // Pass existing deal data so carryForward fields aren't re-required if already set
   const _existingForReq = allDeals.find(d=>d.id===id) || {};
@@ -19932,12 +20211,28 @@ window.handleDealSubmit = async ev => {
   });
   const coAdvisorUids = coAdvisors.map(ca=>ca.uid);
 
+  // ── Parcel ID collection (LandTech format) + duplicate match for notify ──
+  const _parcels = _collectParcels();
+  // Find a colliding deal owned by someone else, before this deal is saved into allDeals
+  let _parcelDupMatch = null;
+  const _parcelCounty = (document.getElementById('f-county')?.value||'').trim();
+  for(const r of _parcels.raws){
+    const m = _findParcelDuplicate(_parcelCounty, r, id||editingDealId);
+    if(m){ _parcelDupMatch = m.deal; break; }
+  }
+
   const data={
     advisorUid, advisorEmail, advisorName,
     coAdvisors, coAdvisorUids,
     projectName:(document.getElementById('f-project-name')?.value||'').trim()||undefined,
     propertyAddress:document.getElementById('f-address').value.trim(),
-    folioNumber:(document.getElementById('f-folio')?.value||'').trim(),
+    // Parcel ID (LandTech "County · Folio" format) + assemblage support + dedupe keys
+    folioNumber:_parcels.primaryRaw,
+    parcelId:_parcels.primaryLabel,
+    parcelRaw:_parcels.raws,
+    parcelIds:_parcels.parcelIds,
+    parcelKeys:_parcels.parcelKeys,
+    multiParcel:_parcels.multiParcel,
     county:(document.getElementById('f-county')?.value||'').trim(),
     landType:(document.getElementById('f-land-type')?.value||'').trim(),
     acreage:(()=>{const v=parseFloat(document.getElementById('f-acreage')?.value||''); return isNaN(v)?'':(v||'');})(),
@@ -20004,6 +20299,7 @@ window.handleDealSubmit = async ev => {
     }
     await Store.updateDeal(id,data);
     Object.assign(existing,data);
+    if(_parcelDupMatch) _notifyParcelOwner(_parcelDupMatch, existing);   // warn + notify original advisor
     // ── Apply a drop position captured from a drag-to-stage move ──
     if(oldStage!==stage && window._pendingDropOrder){
       _applyColumnOrder(window._pendingDropOrder); window._pendingDropOrder=null;
@@ -20062,6 +20358,7 @@ window.handleDealSubmit = async ev => {
     const newId=await Store.createDeal(data);
     const newDeal={...data,id:newId};
     if(!allDeals.find(d=>d.id===newId)) allDeals.push(newDeal);
+    if(_parcelDupMatch) _notifyParcelOwner(_parcelDupMatch, newDeal);   // warn + notify original advisor
     fireAutomations(newDeal,null);
     // ── Structured Drive workflow on new deal create ───────────────────────
     const _driveSnapNew = {
