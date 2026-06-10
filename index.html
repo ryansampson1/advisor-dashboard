@@ -23156,28 +23156,77 @@ const _MAP_HEX={'bg-gray-200':'#6b7280','bg-teal-100':'#0d9488','bg-blue-100':'#
 const _mapStageColor=stage=>{const sc=SC[stage];return (sc&&_MAP_HEX[sc.hdr])||'#6b7280';};
 const _mapEsc=s=>String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
 
-// Geocode one deal, with Firestore caching. Returns {lat,lng} or null.
+// ── Nominatim/OSM queue: usage policy is max 1 request/sec, so all calls are
+//    chained through a single promise with a 1.1s gap. Identical area queries
+//    (e.g. 50 deals in "Hillsborough County, FL") share one cached lookup.
+let _nomChain=Promise.resolve();
+const _nomCache={};
+function _nominatim(q){
+  if(q in _nomCache) return Promise.resolve(_nomCache[q]);
+  const run=async()=>{
+    if(q in _nomCache) return _nomCache[q];
+    try{
+      const r=await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=us&q='+encodeURIComponent(q));
+      const j=r.ok?await r.json():null;
+      const hit=(j&&j[0])?{lat:parseFloat(j[0].lat),lng:parseFloat(j[0].lon)}:null;
+      _nomCache[q]=(hit&&!isNaN(hit.lat))?hit:null;
+    }catch(e){ _nomCache[q]=null; }
+    return _nomCache[q];
+  };
+  const p=_nomChain.then(run);
+  _nomChain=p.then(()=>new Promise(res=>setTimeout(res,1100)),()=>new Promise(res=>setTimeout(res,1100)));
+  return p;
+}
+
+// Pull a "City, FL" string out of a free-form address tail, e.g.
+// "SE corner of US-301 & SR-39, Zephyrhills, FL 33542" → "Zephyrhills, FL"
+function _mapCityFromAddr(addr){
+  const m=String(addr||'').match(/(?:^|,)\s*([A-Za-z .'-]{3,}?)\s*,?\s*(?:FL|Florida)\b/i);
+  return m?m[1].trim()+', FL':null;
+}
+
+// Geocode one deal with a fallback ladder, caching the result on the deal doc.
+// Returns {lat,lng,precision} (precision: 'exact' | 'city' | 'county') or null.
 async function _mapGeocode(d){
   const addr=(d.propertyAddress||'').trim();
-  if(!addr) return null;
+  if(!addr&&!(d.county||'').trim()) return null;
   if(typeof d.geoLat==='number'&&typeof d.geoLng==='number'&&d.geoAddr===addr)
-    return {lat:d.geoLat,lng:d.geoLng};
-  let lat=null,lng=null;
-  const g=await _prGeocode(addr).catch(()=>null);          // US Census geocoder (free)
-  if(g){lat=g.lat;lng=g.lon;}
-  if(lat==null){                                            // fallback: Nominatim/OSM
-    try{
-      const q=/,\s*(fl|florida)\b/i.test(addr)?addr:addr+', FL';
-      const r=await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=us&q='+encodeURIComponent(q));
-      const j=await r.json();
-      if(j&&j[0]){lat=parseFloat(j[0].lat);lng=parseFloat(j[0].lon);}
-    }catch(e){}
+    return {lat:d.geoLat,lng:d.geoLng,precision:d.geoPrecision||'exact'};
+  let hit=null,precision='exact';
+  // 1) US Census geocoder — exact street addresses
+  if(addr){
+    const g=await _prGeocode(addr).catch(()=>null);
+    if(g) hit={lat:g.lat,lng:g.lon};
   }
-  if(lat==null||isNaN(lat)||isNaN(lng)) return null;
-  d.geoLat=lat; d.geoLng=lng; d.geoAddr=addr;
-  Store.updateDeal(d.id,{geoLat:lat,geoLng:lng,geoAddr:addr})
+  // 2) Nominatim with the full address — handles roads/intersections Census can't
+  if(!hit&&addr){
+    const q=/,\s*(fl|florida)\b/i.test(addr)?addr:addr+', FL';
+    hit=await _nominatim(q);
+  }
+  // 3) City-level fallback: explicit city field, or city parsed from the address
+  if(!hit){
+    const city=(d.city||'').trim()?((d.city||'').trim()+', FL'):_mapCityFromAddr(addr);
+    if(city){ hit=await _nominatim(city); if(hit) precision='city'; }
+  }
+  // 4) County-level fallback — county is required on new deals, so this catches
+  //    nearly everything ("31 acres on Hwy 52" etc.)
+  if(!hit&&(d.county||'').trim()){
+    hit=await _nominatim((d.county||'').trim().replace(/\s+county$/i,'')+' County, Florida');
+    if(hit) precision='county';
+  }
+  if(!hit) return null;
+  d.geoLat=hit.lat; d.geoLng=hit.lng; d.geoAddr=addr; d.geoPrecision=precision;
+  Store.updateDeal(d.id,{geoLat:hit.lat,geoLng:hit.lng,geoAddr:addr,geoPrecision:precision})
     .catch(e=>console.warn('[map] geo cache save failed',e));
-  return {lat,lng};
+  return {lat:hit.lat,lng:hit.lng,precision};
+}
+
+// Deterministic jitter (by deal id) so approximate pins in the same city/county
+// don't stack on one point. ~±2km spread; cached coords stay un-jittered.
+function _mapJitter(id,scale){
+  let h=0; for(const c of String(id)) h=(h*31+c.charCodeAt(0))>>>0;
+  const a=(h%360)*Math.PI/180, r=(((h>>>9)%1000)/1000)*scale;
+  return [Math.sin(a)*r,Math.cos(a)*r];
 }
 
 window._mapOpenDeal=id=>{ window.closeDealMap(); openDealModal(id); };
@@ -23212,8 +23261,8 @@ window.openDealMap=async(includeClosed)=>{
   try{ await _loadLeaflet(); }catch(e){ status('⚠️ '+e.message); return; }
   if(!document.getElementById('deal-map-canvas')) return; // closed while loading
 
-  // Same deal set as the board, minus deals with no address
-  const all=visibleDeals().filter(d=>(d.propertyAddress||'').trim());
+  // Same deal set as the board, minus deals with nothing locatable at all
+  const all=visibleDeals().filter(d=>(d.propertyAddress||'').trim()||(d.county||'').trim()||(d.city||'').trim());
   const deals=includeClosed ? all : all.filter(d=>{
     const s=STAGE_ALIAS[d.stage]||d.stage||'';
     return !isLostStage(s)&&!isWonStage(s);
@@ -23232,33 +23281,40 @@ window.openDealMap=async(includeClosed)=>{
     `<span style="display:flex;align-items:center;gap:.3rem"><span style="width:10px;height:10px;border-radius:50%;background:${_mapStageColor(s)};display:inline-block;border:1px solid #fff;box-shadow:0 0 0 1px rgba(0,0,0,.15)"></span>${_mapEsc(s)}</span>`).join('');
 
   const fmt$=n=>n?'$'+Math.round(n).toLocaleString():'';
-  const bounds=[];
-  const plot=(d,ll)=>{
+  const bounds=[];let approxCount=0;
+  const plot=(d,ll,precision)=>{
     const stage=STAGE_ALIAS[d.stage]||d.stage||'';
     const color=_mapStageColor(stage);
-    const m=L.circleMarker([ll.lat,ll.lng],{radius:9,color:'#fff',weight:2,fillColor:color,fillOpacity:.95}).addTo(map);
+    const approx=precision&&precision!=='exact';
+    let lat=ll.lat,lng=ll.lng;
+    if(approx){ const [dy,dx]=_mapJitter(d.id,precision==='county'?0.04:0.018); lat+=dy; lng+=dx; approxCount++; }
+    const m=L.circleMarker([lat,lng],
+      approx?{radius:8,color:color,weight:2,dashArray:'3,3',fillColor:color,fillOpacity:.45}
+            :{radius:9,color:'#fff',weight:2,fillColor:color,fillOpacity:.95}).addTo(map);
     const price=fmt$(d.purchasePrice||d.contractPrice||d.listedPrice||d.suggestedPrice||0);
     m.bindPopup(`<div style="font-family:Inter,sans-serif;min-width:210px">
       ${d.primaryPhotoUrl?`<img src="${_mapEsc(d.primaryPhotoUrl)}" style="width:100%;height:92px;object-fit:cover;border-radius:8px;margin-bottom:.4rem" onerror="this.remove()">`:''}
       <div style="font-weight:700;font-size:.9rem;margin-bottom:.15rem">${_mapEsc(d.projectName||d.propertyAddress||'Unnamed')}</div>
-      <div style="font-size:.75rem;color:#6b7280">${_mapEsc(d.propertyAddress)}</div>
+      <div style="font-size:.75rem;color:#6b7280">${_mapEsc(d.propertyAddress||((d.county||'')+' County'))}</div>
       <div style="font-size:.72rem;margin:.35rem 0"><span style="background:${color};color:#fff;border-radius:99px;padding:.12rem .55rem;font-weight:600">${_mapEsc(stage)}</span>${price?` <strong style="margin-left:.3rem">${price}</strong>`:''}</div>
       ${d.advisorName?`<div style="font-size:.72rem;color:#6b7280;margin-bottom:.45rem">${_mapEsc(d.advisorName)}</div>`:''}
+      ${approx?`<div style="font-size:.68rem;color:#b45309;margin-bottom:.45rem">📍 Approximate — ${precision}-level location</div>`:''}
       <button onclick="window._mapOpenDeal('${_mapEsc(d.id)}')" style="width:100%;background:#1d4ed8;color:#fff;border:none;border-radius:8px;padding:.45rem;font-weight:700;cursor:pointer;font-size:.78rem">Open Deal Card →</button>
     </div>`);
-    bounds.push([ll.lat,ll.lng]);
+    bounds.push([lat,lng]);
   };
   const fit=()=>{ if(bounds.length){ try{map.fitBounds(bounds,{padding:[40,40],maxZoom:13});}catch(e){} } };
 
   // 1) Pins with cached coordinates appear instantly
   const cached=deals.filter(d=>typeof d.geoLat==='number'&&typeof d.geoLng==='number'&&d.geoAddr===(d.propertyAddress||'').trim());
   const todo=deals.filter(d=>!cached.includes(d));
-  cached.forEach(d=>plot(d,{lat:d.geoLat,lng:d.geoLng}));
+  cached.forEach(d=>plot(d,{lat:d.geoLat,lng:d.geoLng},d.geoPrecision||'exact'));
   fit();
 
-  // 2) Geocode the rest (3 at a time), pinning as results arrive
+  // 2) Geocode the rest (3 at a time; Nominatim calls are internally queued
+  //    to 1/sec per its usage policy), pinning as results arrive
   let done=cached.length; const failed=[];
-  if(todo.length) status(`Locating ${todo.length} new address${todo.length!==1?'es':''}…`);
+  if(todo.length) status(`Locating ${todo.length} new address${todo.length!==1?'es':''}… (first run only — results are saved)`);
   let i=0;
   const worker=async()=>{
     while(i<todo.length){
@@ -23266,7 +23322,7 @@ window.openDealMap=async(includeClosed)=>{
       if(!window._dealMap) return;          // map was closed
       const ll=await _mapGeocode(d);
       if(!window._dealMap) return;
-      if(ll){ plot(d,ll); fit(); } else failed.push(d.projectName||d.propertyAddress);
+      if(ll){ plot(d,ll,ll.precision); fit(); } else failed.push(d.projectName||d.propertyAddress);
       done++;
       status(`${done}/${deals.length} located${failed.length?` · ${failed.length} not found`:''}`);
     }
@@ -23274,6 +23330,7 @@ window.openDealMap=async(includeClosed)=>{
   await Promise.all([worker(),worker(),worker()]);
   if(!window._dealMap) return;
   status(`${bounds.length} of ${deals.length} deal${deals.length!==1?'s':''} pinned`+
+    (approxCount?` · ${approxCount} approximate (dashed pins)`:'')+
     (failed.length?` · couldn't locate: ${failed.slice(0,4).join(', ')}${failed.length>4?` +${failed.length-4} more`:''}`:''));
 };
 
