@@ -3416,6 +3416,11 @@ function makeSeedAutomations(){
 let currentUser  = null;   // {uid, name, email, isAdmin, isOfficeManager, officeManagerOffice}
 let _fbStorage  = null;
 let allDeals     = [];
+// Company-wide deal feed (ALL advisors). Used only for company-level rollups such as the
+// EOS "2026 Company Goals" card, so every user sees true company totals. Kept separate from
+// allDeals so advisor-scoped lists/scorecards stay private. Stays empty (graceful fallback to
+// allDeals) if Firestore rules deny a full-collection read for non-admins.
+let allDealsCompany = [];
 let allProfiles  = {};
 let allAutomations = [];
 let allOfficeManagers = []; // [{email, office, name?}] — loaded from DB / localStorage
@@ -5212,6 +5217,7 @@ const FB = {
       primaryDeals = snap.docs.map(d=>({...d.data(),id:d.id}));
       if(isAdmin){
         allDeals=primaryDeals;
+        allDealsCompany=primaryDeals; // admins already load every deal — reuse for company rollups
         // Migration: backfill coAdvisorUids on deals with coAdvisors[] but missing flat array
         // Required so the Firestore array-contains query works for non-admin co-advisors
         const {updateDoc:_upDoc}=_fbFns;
@@ -5235,6 +5241,14 @@ const FB = {
         coAdvisorDeals = snap.docs.map(d=>({...d.data(),id:d.id}));
         mergeDeals();
       }));
+      // Company-wide feed for the EOS "2026 Company Goals" card so non-admin advisors see true
+      // company totals (not just their own deals). Read-only and used solely for rollups — it
+      // never feeds advisor-scoped lists. If Firestore rules deny a full-collection read, the
+      // error handler leaves allDealsCompany empty and the card falls back to allDeals.
+      _fbUnsubs.push(onSnapshot(collection(_fbDb,'deals'),
+        snap=>{ allDealsCompany = snap.docs.map(d=>({...d.data(),id:d.id})); onUpdate('deals'); },
+        err=>{ console.warn('[company-goals] full deal read denied — falling back to own deals',err); allDealsCompany=[]; }
+      ));
     }
     _fbUnsubs.push(onSnapshot(collection(_fbDb,'advisorProfiles'), snap=>{
       allProfiles={}; snap.docs.forEach(d=>{allProfiles[d.id]=d.data();});
@@ -5978,7 +5992,7 @@ function buildMonthlyProjection(deals){
 function buildYearlyOutlook(deals){
   const now=new Date();
   const todayStr=now.toISOString().slice(0,10);
-  const years=[0,1,2].map(i=>({label:`${now.getFullYear()+i}`,yr:now.getFullYear()+i,remaining:0,closed:0,projected:0}));
+  const years=[0,1,2].map(i=>({label:`${now.getFullYear()+i}`,yr:now.getFullYear()+i,remaining:0,closed:0,projected:0,closedVol:0,remainingVol:0,vol:0}));
   for(const deal of deals){
     if(isLostStage(deal.stage)) continue;
     // Won deals without a closeDate still count — default to today
@@ -5987,13 +6001,16 @@ function buildYearlyOutlook(deals){
     const yr=new Date(dateStr+'T00:00:00').getFullYear();
     const y=years.find(y=>y.yr===yr);
     if(!y) continue;
+    const dealVol = (deal.purchasePrice||deal.contractPrice||0);
     if(isWonStage(deal.stage)){
       y.closed+=getEffectiveRevenue(deal);
+      y.closedVol+=dealVol;
     } else {
       y.remaining+=dealProjected(deal);
+      y.remainingVol+=dealVol;
     }
   }
-  years.forEach(y=>{ y.projected=y.closed+y.remaining; });
+  years.forEach(y=>{ y.projected=y.closed+y.remaining; y.vol=y.closedVol+y.remainingVol; });
   return years;
 }
 
@@ -9552,9 +9569,13 @@ function viewDashboard(){
             <div class="mt-2 pt-2 border-t border-gray-100 space-y-0.5 text-xs text-gray-500">
               <div class="flex justify-between"><span>Closed YTD</span><span class="font-semibold text-green-600">${fmt$(y.closed)}</span></div>
               <div class="flex justify-between"><span>Full year projected</span><span class="font-semibold text-gray-700">${fmt$(y.projected)}</span></div>
+              <div class="flex justify-between"><span>Total under contract</span><span class="font-semibold text-gray-700">${fmt$(y.vol)}</span></div>
             </div>`:`
             <div class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">${y.label} Projected Revenue</div>
-            <div class="text-2xl font-bold text-blue-700">${fmt$(y.projected)}</div>`}
+            <div class="text-2xl font-bold text-blue-700">${fmt$(y.projected)}</div>
+            <div class="mt-2 pt-2 border-t border-gray-100 text-xs text-gray-500">
+              <div class="flex justify-between"><span>Total under contract</span><span class="font-semibold text-gray-700">${fmt$(y.vol)}</span></div>
+            </div>`}
         </div>`).join('')}
     </div>
     <div class="bg-white rounded-2xl border p-5 mb-8">
@@ -17602,20 +17623,20 @@ function viewEOS(sub='rocks'){
         <div class="bg-white rounded-2xl border p-5">
           <div class="flex items-center justify-between mb-4">
             <h3 class="font-semibold text-gray-800">🏢 Company Rocks</h3>
-            ${isAdmin?`<button onclick="addCompRock()" class="brand-btn text-xs px-3 py-1.5 rounded-lg font-semibold">+ Rock</button>`:''}
+            ${effectiveAdminGlobal?`<button onclick="addCompRock()" class="brand-btn text-xs px-3 py-1.5 rounded-lg font-semibold">+ Rock</button>`:''}
           </div>
           <div class="space-y-2" id="comp-rocks-list">
             ${compRocks.length===0?'<p class="text-sm text-gray-400">No company rocks set yet.</p>':
               compRocks.map((r,i)=>`
               <div class="flex items-start gap-3 p-3 rounded-lg ${r.status==='complete'?'bg-green-50':'bg-gray-50'}">
-                ${isAdmin?`<input type="checkbox" ${r.status==='complete'?'checked':''}
+                ${effectiveAdminGlobal?`<input type="checkbox" ${r.status==='complete'?'checked':''}
                   onchange="toggleCompRock(${i},this.checked)" class="mt-0.5 accent-green-600 rounded"/>`:
                   `<span class="${r.status==='complete'?'text-green-500':'text-gray-300'} mt-0.5">●</span>`}
                 <div class="flex-1 min-w-0">
                   <div class="text-sm ${r.status==='complete'?'line-through text-gray-400':'text-gray-800'}">${r.text}</div>
                   ${r.dueDate?`<div class="text-xs text-gray-400 mt-0.5">Due: ${fmtDate(r.dueDate)}</div>`:''}
                 </div>
-                ${isAdmin?`<button onclick="deleteCompRock(${i})" class="text-gray-300 hover:text-red-400 text-xs">✕</button>`:''}
+                ${effectiveAdminGlobal?`<button onclick="deleteCompRock(${i})" class="text-gray-300 hover:text-red-400 text-xs">✕</button>`:''}
               </div>`).join('')}
           </div>
         </div>
@@ -17639,7 +17660,7 @@ function viewEOS(sub='rocks'){
               </div>`).join('')}
           </div>
         </div>
-        ${isAdmin && Object.keys(allRocks).length>0?`
+        ${effectiveAdminGlobal && Object.keys(allRocks).length>0?`
         <!-- All Advisor Rocks (admin) -->
         <div class="bg-white rounded-2xl border p-5 md:col-span-2">
           <h3 class="font-semibold text-gray-800 mb-4">👥 All Advisor Rocks</h3>
@@ -18885,19 +18906,23 @@ function viewEOS(sub='rocks'){
 
 
   // ── Company 2026 Annual Goals ──────────────────────────────────────────
+  // Always roll up the ENTIRE company, every advisor — never just the viewer's deals. Admins
+  // already hold every deal in allDeals; non-admins get the company-wide feed (allDealsCompany).
+  // Fall back to allDeals if the company feed is empty (e.g. Firestore rules deny the full read).
+  const companyDeals = (allDealsCompany && allDealsCompany.length) ? allDealsCompany : allDeals;
   const y2026s = new Date(2026,0,1).getTime();
   const y2026e = new Date(2026,11,31,23,59,59,999).getTime();
-  const wonDeals2026 = allDeals.filter(d => {
+  const wonDeals2026 = companyDeals.filter(d => {
     if(!isWonStage(d.stage||'')) return false;
     const ts = getEffectiveDealTs(d);
     return ts >= y2026s && ts <= y2026e;
   });
   const landSales2026  = wonDeals2026.reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||0),0);
   // Under Contract pipeline: all deals in UC / Rezoning / Permitting / Closing across all advisors
-  const ucPipelineValue = allDeals
+  const ucPipelineValue = companyDeals
     .filter(d => isContractActiveStage(d.stage) || /^closing$/i.test((d.stage||'').trim()))
     .reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||d.loiPrice||0), 0);
-  const activeListings = allDeals.filter(d=>/^listing$/i.test((d.stage||'').trim())).length;
+  const activeListings = companyDeals.filter(d=>/^listing$/i.test((d.stage||'').trim())).length;
   const teamEventsDone = 2, teamEventsGoal = 4;
 
   const goalKpi = (icon, label, value, goal, fmtFn) => {
