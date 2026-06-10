@@ -7032,6 +7032,7 @@ function viewBoard(){
           <div id="deal-search-results" style="display:none;position:absolute;top:calc(100% + 4px);left:0;width:320px;max-height:340px;overflow-y:auto;background:#fff;border:1px solid #e5e7eb;border-radius:.6rem;box-shadow:0 12px 32px rgba(0,0,0,.14);z-index:60"></div>
         </div>
         ${_advisorFilterDropdown}
+        <button onclick="window.openDealMap()" class="border border-green-200 rounded-lg px-3 py-2 text-sm text-green-700 hover:bg-green-50 whitespace-nowrap font-semibold" title="See every deal pinned on a map">🗺️ Map</button>
         <button onclick="window._propGmailSyncAll()" class="border border-blue-200 rounded-lg px-3 py-2 text-sm text-blue-600 hover:bg-blue-50 whitespace-nowrap font-semibold" title="Scan Gmail for emails about all active properties (last 30 days)">📧 Gmail Sync${typeof _PROP_GMAIL_SYNC_DATE!=='undefined'?` <span class="font-normal text-xs text-blue-400">(${_PROP_GMAIL_SYNC_DATE})</span>`:''}</button>
         <button onclick="openDealModal(null)" class="brand-btn px-5 py-2.5 text-sm font-semibold transition">+ Add Deal</button>
       </div>
@@ -13844,8 +13845,8 @@ window._execManualMergeContacts = async () => {
 };
 
 // ── CRM Outreach Imports (updated nightly by daily-crm-outreach-sync task) ──
-const _CRM_OUTREACH_SYNC_DATE = '2026-06-09';
-const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-06-08_0","emailDate":"2026-06-08","emailSubject":"SaveAlot","attachmentNames":["COstar Report.pdf","W_Hillsborough_Ave_305_Flyer - 305 W Hillsborough Ave.pdf"],"recipientEmail":"adam@soho-capital.com","recipientName":"Adam Harden","recipientFirstName":"Adam","recipientLastName":"Harden","companyName":"Soho Capital","propertyHint":"305 W Hillsborough Ave","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-06-08_1","emailDate":"2026-06-08","emailSubject":"19th Ave Land","attachmentNames":["OM 19th Williams 3.14.25.pdf"],"recipientEmail":"connect@lizfanfan.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Lizfanfan","propertyHint":"19th Ave","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-06-08_2","emailDate":"2026-06-08","emailSubject":"Re: Zephyrhills/301 Inquiry","attachmentNames":["HSW - CR 54 - OM.pdf","Package - Windsong Commercial.pdf"],"recipientEmail":"jim.kovacs@colliers.com","recipientName":"Jim Kovacs","recipientFirstName":"Jim","recipientLastName":"Kovacs","companyName":"Colliers","propertyHint":"Zephyrhills 301","matchedDealId":null,"imported":false,"skipped":false}];
+const _CRM_OUTREACH_SYNC_DATE = '2026-06-10';
+const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-06-09_0","emailDate":"2026-06-09","emailSubject":"Re: Dev SR 50 Site","attachmentNames":["2026.06.03 SEC SR-50 & Kettering LOI.docx"],"recipientEmail":"nick@bounat.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Bounat","propertyHint":"SR 50 Kettering","matchedDealId":null,"imported":false,"skipped":false}];
 
 // ── Gmail Sync ───────────────────────────────────────────────────────
 let _GMAIL_SYNC_DATE = '2026-06-07';
@@ -23126,6 +23127,154 @@ window.runBulkPhotoSync = async function(){
     showToast('Photo sync failed: '+e.message,'error',6000);
     console.error('[bulkPhoto]',e);
   }
+};
+
+/* ════════════════ DEAL MAP VIEW ════════════════
+   🗺️ Map button on the Deal Pipeline toolbar. Plots every visible deal on a
+   Leaflet/OpenStreetMap map (no API key required). Each deal's propertyAddress
+   is geocoded via the Census geocoder (_prGeocode) with a Nominatim fallback,
+   and the result is cached on the deal doc (geoLat/geoLng/geoAddr) so each
+   address is geocoded only once. Re-geocodes automatically if the address
+   changes. Pin colors match the kanban stage colors; popups open the card. */
+let _leafletLoad=null;
+function _loadLeaflet(){
+  if(window.L) return Promise.resolve();
+  if(_leafletLoad) return _leafletLoad;
+  _leafletLoad=new Promise((res,rej)=>{
+    const css=document.createElement('link');
+    css.rel='stylesheet'; css.href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+    document.head.appendChild(css);
+    const s=document.createElement('script');
+    s.src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+    s.onload=res; s.onerror=()=>{_leafletLoad=null;rej(new Error('Map library failed to load'));};
+    document.head.appendChild(s);
+  });
+  return _leafletLoad;
+}
+
+const _MAP_HEX={'bg-gray-200':'#6b7280','bg-teal-100':'#0d9488','bg-blue-100':'#2563eb','bg-sky-100':'#0284c7','bg-orange-100':'#ea580c','bg-purple-100':'#9333ea','bg-green-100':'#16a34a','bg-red-100':'#dc2626','bg-red-200':'#b91c1c','bg-pink-100':'#db2777','bg-cyan-100':'#0891b2','bg-lime-100':'#65a30d','bg-rose-100':'#e11d48','bg-violet-100':'#7c3aed'};
+const _mapStageColor=stage=>{const sc=SC[stage];return (sc&&_MAP_HEX[sc.hdr])||'#6b7280';};
+const _mapEsc=s=>String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+
+// Geocode one deal, with Firestore caching. Returns {lat,lng} or null.
+async function _mapGeocode(d){
+  const addr=(d.propertyAddress||'').trim();
+  if(!addr) return null;
+  if(typeof d.geoLat==='number'&&typeof d.geoLng==='number'&&d.geoAddr===addr)
+    return {lat:d.geoLat,lng:d.geoLng};
+  let lat=null,lng=null;
+  const g=await _prGeocode(addr).catch(()=>null);          // US Census geocoder (free)
+  if(g){lat=g.lat;lng=g.lon;}
+  if(lat==null){                                            // fallback: Nominatim/OSM
+    try{
+      const q=/,\s*(fl|florida)\b/i.test(addr)?addr:addr+', FL';
+      const r=await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=us&q='+encodeURIComponent(q));
+      const j=await r.json();
+      if(j&&j[0]){lat=parseFloat(j[0].lat);lng=parseFloat(j[0].lon);}
+    }catch(e){}
+  }
+  if(lat==null||isNaN(lat)||isNaN(lng)) return null;
+  d.geoLat=lat; d.geoLng=lng; d.geoAddr=addr;
+  Store.updateDeal(d.id,{geoLat:lat,geoLng:lng,geoAddr:addr})
+    .catch(e=>console.warn('[map] geo cache save failed',e));
+  return {lat,lng};
+}
+
+window._mapOpenDeal=id=>{ window.closeDealMap(); openDealModal(id); };
+
+window.closeDealMap=()=>{
+  if(window._dealMap){ try{window._dealMap.remove();}catch(e){} window._dealMap=null; }
+  document.getElementById('deal-map-overlay')?.remove();
+};
+
+window.openDealMap=async(includeClosed)=>{
+  window.closeDealMap();
+  const ov=document.createElement('div');
+  ov.id='deal-map-overlay';
+  ov.style.cssText='position:fixed;inset:0;z-index:9999;background:rgba(15,23,42,.55);display:flex;align-items:center;justify-content:center;padding:1.25rem';
+  ov.innerHTML=`
+    <div style="background:#fff;border-radius:16px;width:min(1200px,100%);height:min(85vh,100%);display:flex;flex-direction:column;overflow:hidden;box-shadow:0 24px 64px rgba(0,0,0,.35)">
+      <div style="display:flex;align-items:center;gap:.9rem;padding:.75rem 1.1rem;border-bottom:1px solid #e5e7eb;flex-wrap:wrap">
+        <h3 style="font-weight:700;font-size:1.05rem;color:#111827;margin:0">🗺️ Deal Map</h3>
+        <span id="deal-map-status" style="font-size:.78rem;color:#6b7280"></span>
+        <label style="margin-left:auto;display:flex;align-items:center;gap:.35rem;font-size:.78rem;color:#374151;cursor:pointer;white-space:nowrap">
+          <input type="checkbox" ${includeClosed?'checked':''} onchange="openDealMap(this.checked)"> Include closed / lost
+        </label>
+        <button onclick="closeDealMap()" style="background:#f3f4f6;border:none;border-radius:8px;padding:.4rem .8rem;font-weight:700;cursor:pointer;color:#374151">✕ Close</button>
+      </div>
+      <div id="deal-map-canvas" style="flex:1;min-height:200px"></div>
+      <div id="deal-map-legend" style="padding:.5rem 1.1rem;border-top:1px solid #e5e7eb;display:flex;gap:1rem;flex-wrap:wrap;font-size:.72rem;color:#374151"></div>
+    </div>`;
+  ov.addEventListener('click',e=>{ if(e.target===ov) window.closeDealMap(); });
+  document.body.appendChild(ov);
+  const status=t=>{ const el=document.getElementById('deal-map-status'); if(el) el.textContent=t; };
+  status('Loading map…');
+  try{ await _loadLeaflet(); }catch(e){ status('⚠️ '+e.message); return; }
+  if(!document.getElementById('deal-map-canvas')) return; // closed while loading
+
+  // Same deal set as the board, minus deals with no address
+  const all=visibleDeals().filter(d=>(d.propertyAddress||'').trim());
+  const deals=includeClosed ? all : all.filter(d=>{
+    const s=STAGE_ALIAS[d.stage]||d.stage||'';
+    return !isLostStage(s)&&!isWonStage(s);
+  });
+
+  const map=L.map('deal-map-canvas').setView([27.95,-82.45],8); // Tampa Bay default
+  window._dealMap=map;
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+    {maxZoom:19,attribution:'© OpenStreetMap contributors'}).addTo(map);
+  setTimeout(()=>{ try{map.invalidateSize();}catch(e){} },150);
+
+  // Legend (only stages actually on the map)
+  const stagesUsed=[...new Set(deals.map(d=>STAGE_ALIAS[d.stage]||d.stage||'—'))];
+  const legendEl=document.getElementById('deal-map-legend');
+  if(legendEl) legendEl.innerHTML=stagesUsed.map(s=>
+    `<span style="display:flex;align-items:center;gap:.3rem"><span style="width:10px;height:10px;border-radius:50%;background:${_mapStageColor(s)};display:inline-block;border:1px solid #fff;box-shadow:0 0 0 1px rgba(0,0,0,.15)"></span>${_mapEsc(s)}</span>`).join('');
+
+  const fmt$=n=>n?'$'+Math.round(n).toLocaleString():'';
+  const bounds=[];
+  const plot=(d,ll)=>{
+    const stage=STAGE_ALIAS[d.stage]||d.stage||'';
+    const color=_mapStageColor(stage);
+    const m=L.circleMarker([ll.lat,ll.lng],{radius:9,color:'#fff',weight:2,fillColor:color,fillOpacity:.95}).addTo(map);
+    const price=fmt$(d.purchasePrice||d.contractPrice||d.listedPrice||d.suggestedPrice||0);
+    m.bindPopup(`<div style="font-family:Inter,sans-serif;min-width:210px">
+      ${d.primaryPhotoUrl?`<img src="${_mapEsc(d.primaryPhotoUrl)}" style="width:100%;height:92px;object-fit:cover;border-radius:8px;margin-bottom:.4rem" onerror="this.remove()">`:''}
+      <div style="font-weight:700;font-size:.9rem;margin-bottom:.15rem">${_mapEsc(d.projectName||d.propertyAddress||'Unnamed')}</div>
+      <div style="font-size:.75rem;color:#6b7280">${_mapEsc(d.propertyAddress)}</div>
+      <div style="font-size:.72rem;margin:.35rem 0"><span style="background:${color};color:#fff;border-radius:99px;padding:.12rem .55rem;font-weight:600">${_mapEsc(stage)}</span>${price?` <strong style="margin-left:.3rem">${price}</strong>`:''}</div>
+      ${d.advisorName?`<div style="font-size:.72rem;color:#6b7280;margin-bottom:.45rem">${_mapEsc(d.advisorName)}</div>`:''}
+      <button onclick="window._mapOpenDeal('${_mapEsc(d.id)}')" style="width:100%;background:#1d4ed8;color:#fff;border:none;border-radius:8px;padding:.45rem;font-weight:700;cursor:pointer;font-size:.78rem">Open Deal Card →</button>
+    </div>`);
+    bounds.push([ll.lat,ll.lng]);
+  };
+  const fit=()=>{ if(bounds.length){ try{map.fitBounds(bounds,{padding:[40,40],maxZoom:13});}catch(e){} } };
+
+  // 1) Pins with cached coordinates appear instantly
+  const cached=deals.filter(d=>typeof d.geoLat==='number'&&typeof d.geoLng==='number'&&d.geoAddr===(d.propertyAddress||'').trim());
+  const todo=deals.filter(d=>!cached.includes(d));
+  cached.forEach(d=>plot(d,{lat:d.geoLat,lng:d.geoLng}));
+  fit();
+
+  // 2) Geocode the rest (3 at a time), pinning as results arrive
+  let done=cached.length; const failed=[];
+  if(todo.length) status(`Locating ${todo.length} new address${todo.length!==1?'es':''}…`);
+  let i=0;
+  const worker=async()=>{
+    while(i<todo.length){
+      const d=todo[i++];
+      if(!window._dealMap) return;          // map was closed
+      const ll=await _mapGeocode(d);
+      if(!window._dealMap) return;
+      if(ll){ plot(d,ll); fit(); } else failed.push(d.projectName||d.propertyAddress);
+      done++;
+      status(`${done}/${deals.length} located${failed.length?` · ${failed.length} not found`:''}`);
+    }
+  };
+  await Promise.all([worker(),worker(),worker()]);
+  if(!window._dealMap) return;
+  status(`${bounds.length} of ${deals.length} deal${deals.length!==1?'s':''} pinned`+
+    (failed.length?` · couldn't locate: ${failed.slice(0,4).join(', ')}${failed.length>4?` +${failed.length-4} more`:''}`:''));
 };
 
 </script>
