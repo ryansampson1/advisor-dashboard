@@ -5451,7 +5451,15 @@ function scheduleReRender(src){
     const inlineEditorOpen = !!document.querySelector(
       '[id^="se-"]:not(.hidden),[id^="pe-"]:not(.hidden)'
     );
-    if(!modalOpen && !inlineEditorOpen){ renderCurrentView(); checkListingRenewalReminders(); }
+    // Skip if the user is actively typing in a field (e.g. scorecard inputs) — don't wipe their entry
+    const typing = ['INPUT','SELECT','TEXTAREA'].includes(document.activeElement?.tagName)
+      && document.getElementById('main-content')?.contains(document.activeElement);
+    if(!modalOpen && !inlineEditorOpen && !typing){
+      // Preserve scroll position across live-sync re-renders so the page doesn't jump to top
+      const _sx=window.scrollX, _sy=window.scrollY;
+      renderCurrentView(); checkListingRenewalReminders();
+      requestAnimationFrame(()=>window.scrollTo(_sx,_sy));
+    }
     _updateNavBadges();
     _checkNewTaskNotif();
     // Show a subtle live-sync indicator
@@ -6841,7 +6849,7 @@ function renderCurrentView(){
     commissions:viewMyCommissions,
     splits:viewSplits,automations:viewAutomations,users:viewUsers,leaderboard:viewLeaderboard,
     manageStages:viewManageStages,officeManagers:viewOfficeManagers,officeOverview:viewOfficeOverview,
-    eos:()=>viewEOS('rocks'),comps:viewComps,drive:viewDrive,documents:viewDocuments,hr:viewHR,crm:viewCRM};
+    eos:()=>viewEOS(window._eosSub||'rocks'),comps:viewComps,drive:viewDrive,documents:viewDocuments,hr:viewHR,crm:viewCRM};
   try {
     (map[currentView]||viewBoard)();
   } catch(e) {
@@ -17562,6 +17570,7 @@ function eosSave(key,val){
 }
 
 function viewEOS(sub='rocks'){
+  window._eosSub = sub; // remember active sub-tab so live-sync re-renders don't reset to Rocks
   if(activeChart){ activeChart.destroy(); activeChart=null; }
   const uid=currentUser.uid, isAdmin=currentUser.isAdmin;
   const effectiveAdminGlobal = isAdmin && !adminViewAsAdvisor && !staffViewMode;
@@ -18967,7 +18976,7 @@ function viewEOS(sub='rocks'){
       const _co=_md.filter(d=>/under.?contract/i.test(d.stage||'')&&_inPW(d));
       const _wi=allProfiles[uid]?.weeklyInputs?.[_wk]||{};
       const _ne=_wi.networkEvent||''; const _dp=_wi.driveProperties||'';
-      const _pts=[_qp>=10?10:0,Math.max(0,10-_od*2),(_dt+_ot)===0?10:Math.min(10,Math.round(_dt/(_dt+_ot)*10)),_pr.reduce((s,d)=>s+_sp(d,1),0),_lo.reduce((s,d)=>s+_sp(d,5),0),_po.reduce((s,d)=>s+_sp(d,5),0),_li.reduce((s,d)=>s+_sp(d,10),0),_co.reduce((s,d)=>s+_sp(d,10),0),_ne==='yes'?10:0,_dp==='yes'?10:0];
+      const _pts=[_qp>=10?10:0,Math.max(0,10-_od*2),(_dt+_ot)===0?10:Math.min(10,Math.round(_dt/(_dt+_ot)*10)),_pr.reduce((s,d)=>s+_sp(d,1),0),_lo.reduce((s,d)=>s+_sp(d,5),0),_po.reduce((s,d)=>s+_sp(d,5),0),_li.reduce((s,d)=>s+_sp(d,10),0),_co.reduce((s,d)=>s+_sp(d,20),0),_ne==='yes'?10:0,_dp==='yes'?10:0];
       _sc=Math.round(_pts.reduce((a,b)=>a+b,0)); _gObj=_gr(_sc); _ttl='📊 My Weekly Scorecard';
       // Editable Yes/No cell — current week is in progress, so the advisor logs these here.
       const _mcYN=(lbl,field,val)=>`<div class="bg-gray-50 rounded-xl p-2.5 text-center min-w-0">
