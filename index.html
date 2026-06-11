@@ -1325,8 +1325,11 @@ const APP_CONFIG = {
   // (see the eos onSnapshot handler). Keeping them out of this public file
   // prevents exposing staff emails in the GitHub source code.
   // These arrays are populated within seconds of login — do not hardcode here.
-  adminEmails: ["ryan@thedirtdog.com", "docs@thedirtdog.com", "chris@thedirtdog.com", "jack@thedirtdog.com", "michael@thedirtdog.com", "ai@bakemorepies.com"],  // baseline admins — Firestore can ADD more but never remove these (prevents auth-gate lockout)
-  superAdminEmails: ["ryan@thedirtdog.com","ai@bakemorepies.com"],
+  adminEmails: [],          // loaded from Firestore eos/settings at login (preloaded in onAuthChange before the auth gate)
+  superAdminEmails: [],     // loaded from Firestore eos/settings at login
+  // Last-resort bootstrap so the two super-admins can never be locked out if Firestore is unreachable.
+  // Values are SHA-256 of the lowercased email — plaintext addresses are intentionally kept OUT of this public source.
+  bootstrapSuperAdminHashes: ["ff39435318d07547558cfb5045eb6de98739f5d557fb474158dc35ff22075242","3f8a3dee7347cc1c3b1d24bf86b17653329a49334b72d8545360d79939b459aa"],
   allowedAdvisorEmails: [],   // empty = allow any authenticated Google user
   // Office managers — managed via the Admin → Office Managers UI (stored in Firestore/localStorage).
   // This array is the bootstrap fallback if the DB entry hasn't loaded yet.
@@ -7258,6 +7261,15 @@ window.setMailchimpConfig = async ({apiKey, listId, categoryName}) => {
 window.switchView = id => {
   currentView=id;
   if(id==='hr') { localStorage.setItem('hr_headlines_seen', Date.now()); _updateNavBadges(); }
+  // Calendar tab: open Google Calendar immediately in a new tab (this runs inside the
+  // tab-click gesture, so the popup isn't blocked). The rendered view stays as a fallback.
+  if(id==='calendar'){
+    const email = (currentUser && currentUser.email) || '';
+    const gcalUrl = email
+      ? 'https://calendar.google.com/calendar/u/0/r?authuser=' + encodeURIComponent(email)
+      : 'https://calendar.google.com/calendar/r';
+    window.open(gcalUrl, '_blank', 'noopener');
+  }
   renderCurrentView(); updateTabs();
 };
 window.setOfficeFilter = v => { adminOfficeFilter=v; renderCurrentView(); };
@@ -11095,7 +11107,7 @@ function viewCalendar(){
           <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="#e8291c" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
         </div>
         <h3 class="text-lg font-bold text-gray-800 mb-1.5">Google Calendar</h3>
-        <p class="text-sm text-gray-500 mb-6 leading-relaxed">Open your full, interactive Google Calendar${email?` for <span class="font-medium text-gray-700">${email}</span>`:''} in a new tab.</p>
+        <p class="text-sm text-gray-500 mb-6 leading-relaxed">Your Google Calendar${email?` for <span class="font-medium text-gray-700">${email}</span>`:''} should have opened in a new tab. If your browser blocked the pop-up, use the button below.</p>
         <button onclick="window._openGoogleCalendar()" class="brand-btn text-sm px-6 py-3 rounded-xl font-semibold inline-flex items-center gap-2">
           Open Google Calendar
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M7 17L17 7M17 7H8M17 7v9"/></svg>
@@ -17815,7 +17827,7 @@ window.editStageGate = i => {
           <div>
             <label class="block text-xs font-medium text-gray-600 mb-1">Recipients <span class="text-gray-400">(comma-separated)</span></label>
             <input id="gate-emails" type="text" value="${gate.notifyEmails||''}"
-              placeholder="ryan@thedirtdog.com, advisor@firm.com"
+              placeholder="name@yourcompany.com, advisor@firm.com"
               class="w-full border rounded-lg px-3 py-2 text-sm outline-none"/>
           </div>
           <div>
@@ -22774,6 +22786,29 @@ async function init(){
         currentUser=null; renderLoginScreen(); return;
       }
       const email=fbUser.email||'';
+      // Load admin/super-admin lists from Firestore BEFORE the gate, so a remembered
+      // session isn't denied while the post-login eos listener is still loading them.
+      try{
+        const {doc:_d, getDoc:_g}=_fbFns;
+        const _ss=await _g(_d(_fbDb,'eos','settings'));
+        if(_ss.exists()){
+          const _p=_ss.data()||{};
+          if(Array.isArray(_p.adminEmails))      APP_CONFIG.adminEmails      = Array.from(new Set([...(APP_CONFIG.adminEmails||[]), ..._p.adminEmails.map(x=>(x||'').toLowerCase())]));
+          if(Array.isArray(_p.superAdminEmails)) APP_CONFIG.superAdminEmails = Array.from(new Set([...(APP_CONFIG.superAdminEmails||[]), ..._p.superAdminEmails.map(x=>(x||'').toLowerCase())]));
+        }
+      }catch(_e){ console.warn('[auth] admin-list preload failed',_e); }
+      // Safety net: if Firestore was unreachable, admit the two bootstrap super-admins via email hash (no plaintext in source).
+      try{
+        if(!isAdminEmail(email) && Array.isArray(APP_CONFIG.bootstrapSuperAdminHashes) && APP_CONFIG.bootstrapSuperAdminHashes.length && window.crypto?.subtle){
+          const _buf=await crypto.subtle.digest('SHA-256', new TextEncoder().encode((email||'').toLowerCase()));
+          const _hex=[...new Uint8Array(_buf)].map(b=>b.toString(16).padStart(2,'0')).join('');
+          if(APP_CONFIG.bootstrapSuperAdminHashes.includes(_hex)){
+            const _le=(email||'').toLowerCase();
+            if(!APP_CONFIG.adminEmails.map(e=>e.toLowerCase()).includes(_le))      APP_CONFIG.adminEmails.push(_le);
+            if(!APP_CONFIG.superAdminEmails.map(e=>e.toLowerCase()).includes(_le)) APP_CONFIG.superAdminEmails.push(_le);
+          }
+        }
+      }catch(_e){ console.warn('[auth] bootstrap hash check failed',_e); }
       // Approved-users gate: always enforced (admins bypass)
       if(!isAdminEmail(email)){
         try{
