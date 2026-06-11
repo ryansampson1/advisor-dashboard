@@ -1321,8 +1321,12 @@ const APP_CONFIG = {
     messagingSenderId: "458253707783",
     appId:             "1:458253707783:web:8c86e4bfd2a371ae67d8a2",
   },
-  adminEmails: ["ryan@thedirtdog.com", "docs@thedirtdog.com", "chris@thedirtdog.com", "jack@thedirtdog.com", "michael@thedirtdog.com", "ai@bakemorepies.com"],
-  superAdminEmails: ["ryan@thedirtdog.com","ai@bakemorepies.com"],  // Only super admins can edit automations & stages
+  // Admin/superAdmin emails are loaded from Firestore eos/settings at runtime
+  // (see the eos onSnapshot handler). Keeping them out of this public file
+  // prevents exposing staff emails in the GitHub source code.
+  // These arrays are populated within seconds of login — do not hardcode here.
+  adminEmails: [],
+  superAdminEmails: [],
   allowedAdvisorEmails: [],   // empty = allow any authenticated Google user
   // Office managers — managed via the Admin → Office Managers UI (stored in Firestore/localStorage).
   // This array is the bootstrap fallback if the DB entry hasn't loaded yet.
@@ -1757,8 +1761,8 @@ async function ensureSoldAutomations(){
      config:{assignToEmail:'krissy@thedirtdog.com', dueDays:'5',
              taskTitle:'Order closing gift for client — {address}',
              taskDesc:'Order a closing gift for the client on {address}. Buyer: {buyer}. Check with {advisor_name} for preference or use the standard gift package.'}},
-    {id:'auto-12', _v:2, stage:'Sold', type:'assign_task', active:true,
-     config:{assignToEmail:'marketing@thedirtdog.com', dueDays:'7', skipForBuyer:true,
+    {id:'auto-12', _v:3, stage:'Sold', type:'assign_task', active:true,
+     config:{assignToEmail:'krissy@thedirtdog.com', dueDays:'7', skipForBuyer:true,
              taskTitle:'Mark as Sold on Eshenbaugh Report + remove from Available Land — {address}',
              taskDesc:'1. Update the Eshenbaugh Land Report to mark {address} as SOLD.\n2. Remove from the Available Land inventory list.\n3. Add sale details: {price}, {close_date}, {county} County, {acres} acres.'}},
     {id:'auto-15', _v:1, stage:'Sold', type:'sold_wire_confirm', active:true, config:{}},
@@ -3679,6 +3683,166 @@ const gateFiles     = {};  // `${dealId}__${stage}__${fieldId}` → { name }
 const stageFiles    = {};  // `${dealId}__${type}` → { name, size, dataUrl } — LOI / PSA / closing-statement
 const photoFiles    = {};  // dealId → { name, dataUrl } — primary card photo (session-scoped)
 
+// ── Multi-LOI working state ──────────────────────────────────────────────
+// A deal can collect several LOIs; advisors rank them and pick ONE winner
+// when the card moves to "Signed LOI/Contract Drafting" or Due Diligence.
+// loiDrafts[dealKey] = [{ id, buyer, price, rank, fileName, fileUrl, dataUrl?, fileSize? }]
+const loiDrafts  = {};   // dealKey → array of LOI rows (session-scoped working copy)
+const loiWinner  = {};   // dealKey → winning LOI id (session-scoped working copy)
+// Stages that require choosing the single winning LOI
+function isLoiWinnerStage(s){ return /signed\s*loi|contract\s*drafting|due.?diligence/i.test(s||''); }
+function _newLoiId(){ return 'loi_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6); }
+// Get (and lazily seed) the working LOI array for a deal. Seeds from deal.lois,
+// or migrates a legacy single LOI (loiBuyer/loiPrice/loiUrl/loiFileName).
+function getLoiDraft(dealKey){
+  if(loiDrafts[dealKey]) return loiDrafts[dealKey];
+  const deal = (dealKey==='new') ? null : (typeof allDeals!=='undefined' ? allDeals.find(d=>d.id===dealKey) : null);
+  let arr = [];
+  if(deal && Array.isArray(deal.lois) && deal.lois.length){
+    arr = deal.lois.map(l=>({...l}));
+    if(deal.selectedLoiId) loiWinner[dealKey] = deal.selectedLoiId;
+  } else if(deal && (deal.loiBuyer||deal.loiPrice||deal.loiUrl||deal.loiFileName)){
+    const lid = _newLoiId();
+    arr = [{ id:lid, buyer:deal.loiBuyer||'', price:deal.loiPrice||'', rank:1,
+             fileName:deal.loiFileName||'', fileUrl:deal.loiUrl||'' }];
+    if(deal.selectedLoiId) loiWinner[dealKey] = deal.selectedLoiId;
+    else loiWinner[dealKey] = lid; // legacy single LOI is implicitly the winner
+  }
+  loiDrafts[dealKey] = arr;
+  return arr;
+}
+// Build the inner HTML for the #loi-manager container.
+function renderLoiManagerHtml(dealKey){
+  const arr = getLoiDraft(dealKey).slice().sort((a,b)=>((+a.rank||999)-(+b.rank||999)));
+  const winId = loiWinner[dealKey] || null;
+  const esc = s => (s==null?'':String(s)).replace(/"/g,'&quot;');
+  const rows = arr.map(l=>{
+    const isWin = l.id===winId;
+    const fileLbl = l.fileName ? '✅ '+l.fileName : '📎 Upload LOI';
+    return `
+    <div class="loi-row grid grid-cols-12 gap-2 items-center rounded-lg border ${isWin?'border-amber-400 bg-amber-50':'border-gray-200 bg-white'} px-2 py-2">
+      <div class="col-span-1">
+        <input type="number" min="1" value="${esc(l.rank)}" title="Rank (1 = best)"
+          class="w-full border rounded px-1.5 py-1 text-sm text-center outline-none focus:ring-2 focus:ring-sky-300"
+          oninput="updateLoiField('${dealKey}','${l.id}','rank',this.value)"/>
+      </div>
+      <div class="col-span-4">
+        <input type="text" value="${esc(l.buyer)}" placeholder="Buyer / Company"
+          class="w-full border rounded px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-sky-300"
+          oninput="updateLoiField('${dealKey}','${l.id}','buyer',this.value)"/>
+      </div>
+      <div class="col-span-3">
+        <input type="number" value="${esc(l.price)}" placeholder="Offer $"
+          class="w-full border rounded px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-sky-300"
+          oninput="updateLoiField('${dealKey}','${l.id}','price',this.value)"/>
+      </div>
+      <div class="col-span-3 flex items-center gap-1">
+        <button type="button" title="${isWin?'Winning LOI':'Mark as winner'}"
+          onclick="setLoiWinner('${dealKey}','${l.id}')"
+          class="shrink-0 text-base leading-none ${isWin?'opacity-100':'opacity-30 hover:opacity-70'}">🏆</button>
+        <label class="flex-1 cursor-pointer text-xs truncate ${l.fileName?'text-green-700 font-medium':'text-gray-400'}"
+          title="${esc(l.fileName)||'Upload LOI document'}">
+          <input type="file" accept=".pdf,.doc,.docx" class="hidden"
+            onchange="handleLoiRowFile(event,'${dealKey}','${l.id}')"/>
+          ${fileLbl}
+        </label>
+        <button type="button" title="Remove" onclick="removeLoiRow('${dealKey}','${l.id}')"
+          class="shrink-0 text-gray-300 hover:text-red-500 text-sm">✕</button>
+      </div>
+    </div>`;
+  }).join('');
+  const header = arr.length ? `
+    <div class="grid grid-cols-12 gap-2 px-2 text-[10px] font-bold text-gray-400 uppercase tracking-wide">
+      <div class="col-span-1 text-center">Rank</div>
+      <div class="col-span-4">Buyer</div>
+      <div class="col-span-3">Offer&nbsp;$</div>
+      <div class="col-span-3">🏆 / Doc</div>
+    </div>` : '';
+  const empty = arr.length ? '' : `<div class="text-xs text-gray-400 px-2 py-1">No LOIs yet — add each offer, rank 1 = best. Pick 🏆 winner before moving to Signed LOI / Due Diligence.</div>`;
+  return `
+    ${header}
+    <div class="space-y-1.5">${rows}${empty}</div>
+    <button type="button" onclick="addLoiRow('${dealKey}')"
+      class="mt-1 inline-flex items-center gap-1 text-xs font-semibold px-2.5 py-1.5 rounded-lg border border-sky-200 bg-white text-sky-700 hover:bg-sky-50 transition-colors">
+      ＋ Add LOI
+    </button>`;
+}
+window.refreshLoiManager = (dealKey) => {
+  const el = document.getElementById('loi-manager');
+  if(el) el.innerHTML = renderLoiManagerHtml(dealKey);
+};
+window.updateLoiField = (dealKey, id, field, value) => {
+  const row = getLoiDraft(dealKey).find(r=>r.id===id); if(!row) return;
+  row[field] = value;
+};
+window.addLoiRow = (dealKey) => {
+  const arr = getLoiDraft(dealKey);
+  const nextRank = arr.length ? Math.max(...arr.map(r=>+r.rank||0))+1 : 1;
+  arr.push({ id:_newLoiId(), buyer:'', price:'', rank:nextRank, fileName:'', fileUrl:'' });
+  window.refreshLoiManager(dealKey);
+};
+window.removeLoiRow = (dealKey, id) => {
+  const arr = getLoiDraft(dealKey);
+  const i = arr.findIndex(r=>r.id===id); if(i>=0) arr.splice(i,1);
+  if(loiWinner[dealKey]===id) loiWinner[dealKey]=null;
+  window.refreshLoiManager(dealKey);
+};
+window.setLoiWinner = (dealKey, id) => { loiWinner[dealKey]=id; window.refreshLoiManager(dealKey); };
+window.handleLoiRowFile = (ev, dealKey, id) => {
+  const f = ev.target.files[0]; if(!f) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    const row = getLoiDraft(dealKey).find(r=>r.id===id); if(!row) return;
+    row.fileName=f.name; row.fileSize=f.size; row.dataUrl=e.target.result; row.fileUrl='';
+    window.refreshLoiManager(dealKey);
+  };
+  reader.readAsDataURL(f);
+};
+// Winner picker modal — forces choosing one LOI when entering a winner stage.
+window.openLoiPickerModal = (dealKey, stage, onConfirm) => {
+  const arr = getLoiDraft(dealKey).slice().sort((a,b)=>((+a.rank||999)-(+b.rank||999)));
+  const winId = loiWinner[dealKey] || (arr[0] && arr[0].id) || null;
+  const esc = s => (s==null?'':String(s)).replace(/</g,'&lt;');
+  const fmtP = p => (p===''||p==null)?'—':('$'+Number(p).toLocaleString());
+  document.getElementById('loi-picker-overlay')?.remove();
+  const ov = document.createElement('div');
+  ov.id='loi-picker-overlay';
+  ov.style.cssText='position:fixed;inset:0;z-index:9000;background:rgba(15,23,42,.55);display:flex;align-items:center;justify-content:center;padding:16px';
+  ov.innerHTML = `
+    <div style="background:#fff;border-radius:16px;max-width:520px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,.3);overflow:hidden">
+      <div style="padding:18px 20px;border-bottom:1px solid #eef2f7">
+        <div style="font-size:15px;font-weight:700;color:#0f172a">🏆 Choose the winning LOI</div>
+        <div style="font-size:12px;color:#64748b;margin-top:2px">Moving to <b>${esc(stage)}</b> — only one LOI goes to contract.</div>
+      </div>
+      <div style="padding:12px 16px;max-height:50vh;overflow-y:auto" id="loi-picker-list">
+        ${arr.map(l=>`
+          <label style="display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid ${l.id===winId?'#fbbf24':'#e5e7eb'};background:${l.id===winId?'#fffbeb':'#fff'};border-radius:10px;margin-bottom:8px;cursor:pointer">
+            <input type="radio" name="loi-pick" value="${l.id}" ${l.id===winId?'checked':''} style="width:16px;height:16px"/>
+            <span style="display:inline-flex;width:22px;height:22px;align-items:center;justify-content:center;background:#e0f2fe;color:#0369a1;border-radius:6px;font-size:11px;font-weight:700">#${esc(l.rank)||'?'}</span>
+            <span style="flex:1;min-width:0">
+              <span style="display:block;font-size:13px;font-weight:600;color:#0f172a;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(l.buyer)||'(no buyer name)'}</span>
+              <span style="display:block;font-size:12px;color:#64748b">${fmtP(l.price)}${l.fileName?' · 📎 '+esc(l.fileName):''}</span>
+            </span>
+          </label>`).join('') || '<div style="font-size:13px;color:#64748b;padding:8px">No LOIs to choose from.</div>'}
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;padding:14px 18px;border-top:1px solid #eef2f7">
+        <button type="button" id="loi-picker-cancel" style="padding:8px 14px;border-radius:9px;border:1px solid #e5e7eb;background:#fff;font-size:13px;font-weight:600;color:#475569;cursor:pointer">Cancel</button>
+        <button type="button" id="loi-picker-confirm" style="padding:8px 16px;border-radius:9px;border:none;background:#0f172a;color:#fff;font-size:13px;font-weight:700;cursor:pointer">Confirm winner</button>
+      </div>
+    </div>`;
+  document.body.appendChild(ov);
+  ov.querySelector('#loi-picker-cancel').onclick = () => ov.remove();
+  ov.addEventListener('click', e => { if(e.target===ov) ov.remove(); });
+  ov.querySelector('#loi-picker-confirm').onclick = () => {
+    const sel = ov.querySelector('input[name="loi-pick"]:checked');
+    if(!sel){ showToast('Select an LOI first','warning'); return; }
+    loiWinner[dealKey] = sel.value;
+    ov.remove();
+    window.refreshLoiManager(dealKey);
+    if(typeof onConfirm==='function') onConfirm();
+  };
+};
+
 // ── Primary photo upload handlers ────────────────────────────────────────
 function _readPhotoFile(file){
   if(!file || !file.type.startsWith('image/')) return;
@@ -5019,10 +5183,6 @@ function renderStageFields(stage, data={}){
             "handleListingSelect(event)",
             "handleListingDrop(event)",
             lfName,'Listing Agreement')}
-          ${fileZone('loi-upload-zone','sf-loi-file','loi-upload-label',
-            "handleStageFileSelect(event,'loi')",
-            "handleStageFileDrop(event,'loi')",
-            loiName,'LOI')}
           ${fileZone('psa-upload-zone','sf-psa-file','psa-upload-label',
             "handleStageFileSelect(event,'psa')",
             "handleStageFileDrop(event,'psa')",
@@ -5032,6 +5192,15 @@ function renderStageFields(stage, data={}){
             "handleStageFileDrop(event,'closing-statement')",
             csName,'Closing Statement')}
         </div>`, stage)}
+    </div>
+
+    <!-- ①b LETTERS OF INTENT (multiple, ranked) ──────────────────── -->
+    <div>
+      <div class="flex items-center justify-between mb-2">
+        <div class="text-xs font-bold text-gray-400 uppercase tracking-widest">Letters of Intent (LOIs)</div>
+        <div class="text-[10px] text-gray-400">Rank 1 = best · 🏆 = goes to contract</div>
+      </div>
+      <div id="loi-manager" class="space-y-1.5">${renderLoiManagerHtml(dealKey)}</div>
     </div>
 
     <!-- ② PROJECT & PROPERTY ────────────────────────────────────── -->
@@ -5563,6 +5732,9 @@ const FB = {
           if(payload.mailchimpListId)       APP_CONFIG.mailchimp.listId       = payload.mailchimpListId;
           if(payload.mailchimpCategoryName) APP_CONFIG.mailchimp.categoryName = payload.mailchimpCategoryName;
           if(payload.mailchimpLastSync)     APP_CONFIG.mailchimp.lastSync     = payload.mailchimpLastSync;
+          // Load admin/superAdmin email lists from Firestore so they're never exposed in source code
+          if(Array.isArray(payload.adminEmails))      APP_CONFIG.adminEmails      = payload.adminEmails;
+          if(Array.isArray(payload.superAdminEmails)) APP_CONFIG.superAdminEmails = payload.superAdminEmails;
           eosCache[docId] = payload.data;
         } else {
           eosCache[docId] = payload.data;
@@ -6952,6 +7124,7 @@ function renderShell(){
     {id:'officeOverview',label:'🏢 My Office',      manager:true},
     {id:'manageStages',  label:'🗂 Stages',         admin:true},
     {id:'officeManagers',label:'🏢 Offices',        admin:true},
+    {id:'approvedUsers', label:'🔐 Access',          admin:true},
     {id:'eos',           label:'🧭 EOS',            always:true},
     {id:'comps',         label:'🗺 Comps',          advisor:true, staff:true},
     {id:'drive',         label:'📁 Drive',          always:true},
@@ -7104,7 +7277,7 @@ function renderCurrentView(){
   const map={board:viewBoard,tasks:viewTasks,calendar:viewCalendar,dashboard:viewDashboard,projection:viewProjection,
     commissions:viewMyCommissions,
     splits:viewSplits,automations:viewAutomations,users:viewUsers,leaderboard:viewLeaderboard,
-    manageStages:viewManageStages,officeManagers:viewOfficeManagers,officeOverview:viewOfficeOverview,
+    manageStages:viewManageStages,officeManagers:viewOfficeManagers,approvedUsers:viewApprovedUsers,officeOverview:viewOfficeOverview,
     eos:()=>viewEOS(window._eosSub||'rocks'),comps:viewComps,drive:viewDrive,documents:viewDocuments,hr:viewHR,crm:viewCRM,leads:viewLeads};
   try {
     (map[currentView]||viewBoard)();
@@ -7439,6 +7612,14 @@ function renderCard(deal){
     docNames.push(stageFiles[`${deal.id}__psa`]?.name || deal.psaFileName);
   if(stageFiles[`${deal.id}__closing-statement`]?.name || deal.closingStatementFileName)
     docNames.push(stageFiles[`${deal.id}__closing-statement`]?.name || deal.closingStatementFileName);
+
+  // ── Multi-LOI pill — show count + winner on cards with 2+ LOIs ──
+  const _loiCount = Array.isArray(deal.lois) ? deal.lois.length : 0;
+  if(_loiCount > 1){
+    const _win = deal.lois.find(l=>l.id===deal.selectedLoiId);
+    const _winLbl = _win ? (_win.buyer || ('Rank #'+(_win.rank||'?'))) : 'no winner yet';
+    docNames.unshift(`📄 ${_loiCount} LOIs · 🏆 ${_winLbl}`);
+  }
 
   const fileRow = docNames.length
     ? `<div class="flex flex-wrap gap-1 mt-1">
@@ -8551,6 +8732,72 @@ window._dealLogActivity = async (dealId, type, data = {}) => {
   } catch(e){ console.warn('[dealLogActivity] cross-log setup error', e); }
 };
 
+// ── Log a stage change to the deal activity feed ─────────────────────────────
+window._logStageChange = async (dealId, fromStage, toStage) => {
+  if (!dealId || !toStage || !_fbDb || !_fbFns) return;
+  try {
+    const { collection, addDoc } = _fbFns;
+    await addDoc(collection(_fbDb, 'deals', dealId, 'activities'), {
+      type: 'stage_change',
+      fromStage: fromStage || '',
+      toStage,
+      createdAt: Date.now(),
+      createdBy: currentUser?.uid || '',
+      createdByName: currentUser?.displayName || currentUser?.name || '',
+      body: fromStage ? `Moved from ${fromStage} → ${toStage}` : `Stage set to ${toStage}`,
+    });
+  } catch(e) { console.warn('[logStageChange]', e); }
+};
+
+// ── Log an attachment upload + AI term summary to the deal activity feed ──────
+window._logAttachmentActivity = async (dealId, fileObj, docType, downloadUrl) => {
+  if (!dealId || !fileObj?.dataUrl || !_fbDb || !_fbFns) return;
+  const typeLabels = { loi: 'LOI', psa: 'PSA', closing: 'Closing Statement', listing: 'Listing Agreement', contract: 'Contract' };
+  const label = typeLabels[docType] || docType;
+  let summary = '';
+  try {
+    let docText = '';
+    const ext = (fileObj.name || '').split('.').pop().toLowerCase();
+    if (ext === 'pdf' && typeof pdfjsLib !== 'undefined') {
+      const resp = await fetch(fileObj.dataUrl);
+      const buf  = await resp.arrayBuffer();
+      const pdf  = await pdfjsLib.getDocument({ data: buf }).promise;
+      const pages = [];
+      for (let i = 1; i <= Math.min(pdf.numPages, 10); i++) {
+        const pg = await pdf.getPage(i);
+        const tc = await pg.getTextContent();
+        pages.push(tc.items.map(s => s.str).join(' '));
+      }
+      docText = pages.join('\n\n');
+    } else if ((ext === 'docx' || ext === 'doc') && typeof mammoth !== 'undefined') {
+      const resp = await fetch(fileObj.dataUrl);
+      const buf  = await resp.arrayBuffer();
+      const result = await mammoth.extractRawText({ arrayBuffer: buf });
+      docText = result.value;
+    }
+    if (docText.trim().length > 100) {
+      const aiKey = '_attachSummary_' + dealId + '_' + Date.now();
+      const prompt = `You are reviewing a real estate ${label}. Extract ONLY these key terms and return them as plain text lines (no markdown, no JSON, no extra commentary):\nBuyer: [name/entity or N/A]\nPrice: [purchase or offer price or N/A]\nDeposit: [earnest money amount and due date or N/A]\nClose Date: [proposed closing date or N/A]\nDD Period: [due diligence/inspection end date or N/A]\n\nBe concise. Only include what is actually stated in the document.`;
+      const ai = await callAIAssistant(docText.slice(0, 8000), prompt, aiKey).catch(() => null);
+      if (ai) summary = ai.trim();
+    }
+  } catch(aiErr) { console.warn('[logAttachment] AI summary failed:', aiErr); }
+  try {
+    const { collection, addDoc } = _fbFns;
+    await addDoc(collection(_fbDb, 'deals', dealId, 'activities'), {
+      type: 'attachment',
+      attachmentType: docType,
+      attachmentLabel: label,
+      attachmentName: fileObj.name || '',
+      attachmentUrl: downloadUrl || '',
+      createdAt: Date.now(),
+      createdBy: currentUser?.uid || '',
+      createdByName: currentUser?.displayName || currentUser?.name || '',
+      body: summary || `${label} uploaded: ${fileObj.name || ''}`,
+    });
+  } catch(e) { console.warn('[logAttachmentActivity]', e); }
+};
+
 // ── Load + render property activity feed (Firestore sub-collection + legacy deal.notes) ──
 window._propLoadActivities = async (dealId, feedElId) => {
   const feedEl = document.getElementById(feedElId || ('prop-act-feed-' + dealId));
@@ -8584,12 +8831,17 @@ window._propLoadActivities = async (dealId, feedElId) => {
       const snap = await getDocs(q);
       snap.forEach(docSnap => {
         const a = { id: docSnap.id, ...docSnap.data() };
-        const icon   = a.type === 'call'    ? '📞'
-                     : a.type === 'meeting' ? '📅'
-                     : a.type === 'email'   ? '📧' : '📝';
-        const title  = a.type === 'call'    ? '📞 Call'
-                     : a.type === 'meeting' ? `📅 ${a.meetingTitle || 'Meeting'}`
-                     : a.type === 'email'   ? `📧 Email${a.gmailFrom ? ' · ' + a.gmailFrom.replace(/<.*>/,'').trim() : ''}`
+        const icon   = a.type === 'call'         ? '📞'
+                     : a.type === 'meeting'      ? '📅'
+                     : a.type === 'email'        ? '📧'
+                     : a.type === 'stage_change' ? '🔄'
+                     : a.type === 'attachment'   ? '📎'
+                     : '📝';
+        const title  = a.type === 'call'         ? '📞 Call'
+                     : a.type === 'meeting'      ? `📅 ${a.meetingTitle || 'Meeting'}`
+                     : a.type === 'email'        ? `📧 Email${a.gmailFrom ? ' · ' + a.gmailFrom.replace(/<.*>/,'').trim() : ''}`
+                     : a.type === 'stage_change' ? `🔄 Stage → ${a.toStage || ''}`
+                     : a.type === 'attachment'   ? `📎 ${a.attachmentLabel || 'File'} Uploaded${a.attachmentName ? ' · ' + a.attachmentName : ''}`
                      : '📝 Note';
         const meta   = a.type === 'call'    && a.callDate    ? ` · ${a.callDate}${a.callDuration ? ` (${a.callDuration} min)` : ''}`
                      : a.type === 'meeting' && a.meetingDate ? ` · ${a.meetingDate}`
@@ -8821,6 +9073,16 @@ window._pdwUploadAttachment = async (dealId, file) => {
       await Store.updateDeal(dealId, { dealAttachments: updated, updatedAt: Date.now() });
       if (deal) deal.dealAttachments = updated;
       showToast(`✅ ${file.name} attached`, 'success', 3000);
+      // Log attachment to activity feed with AI summary (fire-and-forget)
+      const _fn = file.name.toLowerCase();
+      const _docType = /\bloi\b|letter.of.intent/i.test(_fn) ? 'loi'
+                     : /\bpsa\b|purchase.sale|purchase.and.sale/i.test(_fn) ? 'psa'
+                     : /closing.statement|settlement.statement|hud/i.test(_fn) ? 'closing'
+                     : /listing.agr|listing.agreement/i.test(_fn) ? 'listing'
+                     : 'document';
+      const _reader = new FileReader();
+      _reader.onload = e => window._logAttachmentActivity(dealId, {name: file.name, dataUrl: e.target.result}, _docType, url);
+      _reader.readAsDataURL(file);
       // Auto-file to Drive (non-blocking)
       if (deal?.driveUrl || deal?.driveFolderId) window._autoFileToDrive(deal, file, file.name).catch(()=>{});
     }
@@ -9449,6 +9711,7 @@ window.handleDrop = (ev,newStage) => {
   };
   Store.updateDeal(id,upd).then(()=>{
     Object.assign(deal,upd);
+    window._logStageChange(id, oldStage, newStage);
     fireAutomations(deal,oldStage);
     // ── Buyer Opportunities: fire first follow-up task on drag-to-stage ──
     if(newStage==='Buyer Opportunities' && oldStage!=='Buyer Opportunities'){
@@ -9633,6 +9896,7 @@ async function _doContractCancelled(dealId, deal, reason){
   };
   await Store.updateDeal(dealId, upd);
   Object.assign(deal, upd);
+  window._logStageChange(dealId, deal.stage, 'Listing');
   // Fire contract terminated automations (pass a synthetic stage so autoStageMatches works)
   await handleContractTerminatedAutomation({...deal, stage:'Contract Terminated'});
   viewBoard();
@@ -9658,6 +9922,7 @@ async function _doLostListing(dealId, deal, reason, answers){
   };
   await Store.updateDeal(dealId, upd);
   Object.assign(deal, upd);
+  window._logStageChange(dealId, oldStage, 'Lost / Terminated');
   const addr = deal.propertyAddress||deal.projectName||'property';
   const dueDate = n=>{ const d=new Date(); d.setDate(d.getDate()+n); return d.toISOString().slice(0,10); };
   await _fireLostListingTasks(deal, answers, addr, dueDate);
@@ -9681,6 +9946,7 @@ async function _doLostProposal(dealId, deal, reason){
   };
   await Store.updateDeal(dealId, upd);
   Object.assign(deal, upd);
+  window._logStageChange(dealId, oldStage, 'Lost / Terminated');
   viewBoard();
   showToast('✅ Lost Proposal logged','info',3000);
 }
@@ -14136,8 +14402,8 @@ const _CRM_OUTREACH_SYNC_DATE = '2026-06-11';
 const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-06-10_0","emailDate":"2026-06-10","emailSubject":"Re: LoopNet Lead for 1.91 ac Commercial Hwy 441 Eustis","attachmentNames":["Coney Island Eustis OM.pdf","231481TOPO.pdf","Administrative Site Plan.pdf"],"recipientEmail":"bmatz@lmdevelopment.com","recipientName":"Brian Matz","recipientFirstName":"Brian","recipientLastName":"Matz","companyName":"Lmdevelopment","propertyHint":"Coney Island Eustis","matchedDealId":null,"imported":false,"skipped":false}];
 
 // ── Gmail Sync ───────────────────────────────────────────────────────
-let _GMAIL_SYNC_DATE = '2026-06-07';
-let _GMAIL_SYNC_DATA = [{"email":"3alanchung@gmail.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":""},{"email":"418@dcscontractingllc.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Dcscontractingllc"},{"email":"abustamante@bks-partners.com","nameRaw":"Andrea Bustamante","firstName":"Andrea","lastName":"Bustamante","phone":"813-984-3218","companyHint":"Bks-partners"},{"email":"acamp@chanceydesign.com","nameRaw":"Alecia Camp","firstName":"Alecia","lastName":"Camp","phone":"813.739.6123","companyHint":"Chanceydesign"},{"email":"achapman@valley.com","nameRaw":"Andrea Chapman","firstName":"Andrea","lastName":"Chapman","phone":"727-450-1623","companyHint":"Valley"},{"email":"aielloturner@aol.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":""},{"email":"alane@chanceydesign.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Chanceydesign"},{"email":"alec.morris@armstronghomes.net","nameRaw":"Alec Morris","firstName":"Alec","lastName":"Morris","phone":"609-661-3466","companyHint":"Armstronghomes"},{"email":"alex@thedirtdog.com","nameRaw":"Alexander Ward","firstName":"Alexander","lastName":"Ward","phone":"813.287.8787","companyHint":"Thedirtdog"},{"email":"alex@wearescout.com","nameRaw":"Alexander Tylke","firstName":"Alexander","lastName":"Tylke","phone":"813-591-5770","companyHint":"Wearescout"},{"email":"andrew@thedirtdog.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Thedirtdog"},{"email":"aravi@ripcofl.com","nameRaw":"Ari Ravi","firstName":"Ari","lastName":"Ravi","phone":"727-452-6864","companyHint":"Ripcofl"},{"email":"austin@ontargetclaims.com","nameRaw":"Austin Hofmeister","firstName":"Austin","lastName":"Hofmeister","phone":"","companyHint":"Ontargetclaims"},{"email":"austin@thedirtdog.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Thedirtdog"},{"email":"ayesha.jihad@troutman.com","nameRaw":"Ayesha Jihad","firstName":"Ayesha","lastName":"Jihad","phone":"","companyHint":"Troutman"},{"email":"barbara@wilhitelaw.net","nameRaw":"Barbara Wilhite","firstName":"Barbara","lastName":"Wilhite","phone":"727-278-1335","companyHint":"Wilhitelaw"},{"email":"bcash@westbaytampa.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Westbaytampa"},{"email":"bennettsfl@gmail.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":""},{"email":"bharnick@raysbaseball.com","nameRaw":"Brandon Harnick","firstName":"Brandon","lastName":"Harnick","phone":"727-342-5773","companyHint":"Raysbaseball"},{"email":"bheisler@dosp.org","nameRaw":"Bruce Heisler","firstName":"Bruce","lastName":"Heisler","phone":"813-431-5693","companyHint":"Dosp"},{"email":"bill@elcland.com","nameRaw":"Bill Eshenbaugh","firstName":"Bill","lastName":"Eshenbaugh","phone":"","companyHint":"Elcland"},{"email":"bill@thedirtdog.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Thedirtdog"},{"email":"bleblanc@westbaytampa.com","nameRaw":"Brian LeBlanc","firstName":"Brian","lastName":"LeBlanc","phone":"615-772-3822","companyHint":"Westbaytampa"},{"email":"blombardo@monin.com","nameRaw":"Bill Lombardo","firstName":"Bill","lastName":"Lombardo","phone":"727.461.3033","companyHint":"Monin"},{"email":"bobby.mckinsey@streamrealty.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Streamrealty"},{"email":"brad.hutton@franklinst.com","nameRaw":"Brad Hutton","firstName":"Brad","lastName":"Hutton","phone":"813.793.8492","companyHint":"Franklinst"},{"email":"brad8955@gmail.com","nameRaw":"Brad Morris","firstName":"Brad","lastName":"Morris","phone":"561-289-4451","companyHint":"Gmail"},{"email":"brenda@westchasetitle.com","nameRaw":"Brenda Rojas","firstName":"Brenda","lastName":"Rojas","phone":"","companyHint":"Westchasetitle"},{"email":"bsmith3@drhorton.com","nameRaw":"Braden Smith","firstName":"Braden","lastName":"Smith","phone":"850-324-7416","companyHint":"Drhorton"},{"email":"calvin.p@flightdeals.businessclass.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Flightdeals"},{"email":"ccarr@savills.us","nameRaw":"Charlie Carr","firstName":"Charlie","lastName":"Carr","phone":"262-339-3087","companyHint":"Savills"},{"email":"ccarter@maurycarter.com","nameRaw":"Conrad Carter","firstName":"Conrad","lastName":"Carter","phone":"","companyHint":"Maurycarter"},{"email":"chad.baldwin@streamrealty.com","nameRaw":"Chad Baldwin","firstName":"Chad","lastName":"Baldwin","phone":"","companyHint":"Streamrealty"},{"email":"charles.margiotta@inlightre.com","nameRaw":"Charles Margiotta","firstName":"Charles","lastName":"Margiotta","phone":"","companyHint":"Inlightre"},{"email":"charper@foley.com","nameRaw":"David Harper","firstName":"David","lastName":"Harper","phone":"","companyHint":"Foley"},{"email":"chase@thedirtdog.com","nameRaw":"Chase Collier","firstName":"Chase","lastName":"Collier","phone":"813.287.8787","companyHint":"Thedirtdog"},{"email":"chelsea.hardy@dreamfindershomes.com","nameRaw":"Chelsea Hardy","firstName":"Chelsea","lastName":"Hardy","phone":"","companyHint":"Dreamfindershomes"},{"email":"chelsey.dunn@dyatech.com","nameRaw":"Chelsey Dunn","firstName":"Chelsey","lastName":"Dunn","phone":"601-914-0533","companyHint":"Dyatech"},{"email":"chris@armstronghomes.net","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Armstronghomes"},{"email":"chris@thedirtdog.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Thedirtdog"},{"email":"chughes@chanceydesign.com","nameRaw":"Cameron Hughes","firstName":"Cameron","lastName":"Hughes","phone":"850.685.6212","companyHint":"Chanceydesign"},{"email":"claface@ripaconstruction.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Ripaconstruction"},{"email":"clay.golden@streamrealty.com","nameRaw":"Clay Golden","firstName":"Clay","lastName":"Golden","phone":"","companyHint":"Streamrealty"},{"email":"clayton@brcrlaw.com","nameRaw":"Clayton Bricklemyer","firstName":"Clayton","lastName":"Bricklemyer","phone":"813.957.7227","companyHint":"Brcrlaw"},{"email":"clogan@solidrockpg.com","nameRaw":"Chris Logan","firstName":"Chris","lastName":"Logan","phone":"813-576-0333","companyHint":"Solidrockpg"},{"email":"closingtime@westchasetitle.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Westchasetitle"},{"email":"colin.seal@meritagehomes.com","nameRaw":"Colin Seal","firstName":"Colin","lastName":"Seal","phone":"813-857-6390","companyHint":"Meritagehomes"},{"email":"comalley@tollbrothers.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Tollbrothers"},{"email":"cordes@bakemorepies.com","nameRaw":"Cordes Owen","firstName":"Cordes","lastName":"Owen","phone":"","companyHint":"Bakemorepies"},{"email":"cresta@elmstreetaccounting.com","nameRaw":"Cresta Shafer","firstName":"Cresta","lastName":"Shafer","phone":"","companyHint":"Elmstreetaccounting"},{"email":"dadams@adamscorp.com","nameRaw":"Doug Adams","firstName":"Doug","lastName":"Adams","phone":"813-626-4128","companyHint":"Adamscorp"},{"email":"dan@omnipotential.com","nameRaw":"Dan Spinosa","firstName":"Dan","lastName":"Spinosa","phone":"302-242-9036","companyHint":"Omnipotential"},{"email":"dante@terrasologroup.com","nameRaw":"Dante Fraiegari","firstName":"Dante","lastName":"Fraiegari","phone":"","companyHint":"Terrasologroup"},{"email":"dave@sandsig.com","nameRaw":"David Wirgler","firstName":"David","lastName":"Wirgler","phone":"512.766.2711","companyHint":"Sandsig"},{"email":"daveo@marketingdepartmentinc.com","nameRaw":"Dave Olsson","firstName":"Dave","lastName":"Olsson","phone":"","companyHint":"Marketingdepartmentinc"},{"email":"david@ghgdevelopment.com","nameRaw":"David Gryboski","firstName":"David","lastName":"Gryboski","phone":"","companyHint":"Ghgdevelopment"},{"email":"dcijbaugh@gmail.com","nameRaw":"Jack Baugh","firstName":"Jack","lastName":"Baugh","phone":"","companyHint":"Gmail"},{"email":"defisher@valley.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Valley"},{"email":"devon.quist@dominiuminc.com","nameRaw":"Devon Quist","firstName":"Devon","lastName":"Quist","phone":"","companyHint":"Dominiuminc"},{"email":"dilan@themjwgroup.com","nameRaw":"Dilan Jay","firstName":"Dilan","lastName":"Jay","phone":"","companyHint":"Themjwgroup"},{"email":"dion@dcscustomhomes.com","nameRaw":"Dion Stoltzfoos","firstName":"Dion","lastName":"Stoltzfoos","phone":"813.417.3466","companyHint":"Dcscustomhomes"},{"email":"dlennon@mccullaghandscott.com","nameRaw":"David Lennon","firstName":"David","lastName":"Lennon","phone":"813-344-8603","companyHint":"Mccullaghandscott"},{"email":"dmullins@tollbrothers.com","nameRaw":"Davis Mullins","firstName":"Davis","lastName":"Mullins","phone":"727-348-7606","companyHint":"Tollbrothers"},{"email":"docs@thedirtdog.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Thedirtdog"},{"email":"dori@redstoneinvestments.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Redstoneinvestments"},{"email":"dpowe@revealingtruth.org","nameRaw":"Deborah Powe","firstName":"Deborah","lastName":"Powe","phone":"813-354-1135","companyHint":"Revealingtruth"},{"email":"dqminn@gmail.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":""},{"email":"dr.rattan@gmail.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":""},{"email":"drew.nelson@pultegroup.com","nameRaw":"Drew Nelson","firstName":"Drew","lastName":"Nelson","phone":"407-460-1008","companyHint":"Pultegroup"},{"email":"dsutton@land.com","nameRaw":"David Sutton","firstName":"David","lastName":"Sutton","phone":"407-773-1059","companyHint":"Land"},{"email":"edmon.rakipi@meritagehomes.com","nameRaw":"Edmon Rakipi","firstName":"Edmon","lastName":"Rakipi","phone":"813-386-8757","companyHint":"Meritagehomes"},{"email":"elyse.rock@icloud.com","nameRaw":"Elyse Rock","firstName":"Elyse","lastName":"Rock","phone":"727-219-3529","companyHint":"Icloud"},{"email":"englisht@hillspafl.gov","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Hillspafl"},{"email":"eric.cotton@ci.tampa.fl.us","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Ci"},{"email":"eric.cotton@tampagov.net","nameRaw":"Eric Cotton","firstName":"Eric","lastName":"Cotton","phone":"813-274-7510","companyHint":"Tampagov"},{"email":"eric@bounat.com","nameRaw":"Eric Merlau","firstName":"Eric","lastName":"Merlau","phone":"813.906.8310","companyHint":"Bounat"},{"email":"evelyn@westchasetitle.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Westchasetitle"},{"email":"f.bianchi@verizon.net","nameRaw":"","firstName":"","lastName":"","phone":"727-488-6076","companyHint":"Verizon"},{"email":"fema-fi-appeals@fema.dhs.gov","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Fema"},{"email":"geoffrey.furey@franklinst.com","nameRaw":"Geoffrey Furey","firstName":"Geoffrey","lastName":"Furey","phone":"813-503-8619","companyHint":"Franklinst"},{"email":"gilem@epchc.org","nameRaw":"Michael Gile","firstName":"Michael","lastName":"Gile","phone":"813-627-2600","companyHint":"Epchc"},{"email":"gisdept@hcpafl.org","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Hcpafl"},{"email":"glogerconstruction@gmail.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":""},{"email":"greyreed@ashtongray.com","nameRaw":"","firstName":"","lastName":"","phone":"214-725-4886","companyHint":"Ashtongray"},{"email":"gthurlow@rahdertlaw.com","nameRaw":"George Thurlow","firstName":"George","lastName":"Thurlow","phone":"727-823-4191","companyHint":"Rahdertlaw"},{"email":"hdavari@chanceydesign.com","nameRaw":"Heidi Davari","firstName":"Heidi","lastName":"Davari","phone":"","companyHint":"Chanceydesign"},{"email":"hserafin@chanceydesign.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Chanceydesign"},{"email":"hsmith@brandproperties.com","nameRaw":"Hamp Smith","firstName":"Hamp","lastName":"Smith","phone":"678-350-3704","companyHint":"Brandproperties"},{"email":"info@exclusiveresorts.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Exclusiveresorts"},{"email":"jack@thedirtdog.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Thedirtdog"},{"email":"jason.mitchell@equitasmg.com","nameRaw":"Jason Mitchell","firstName":"Jason","lastName":"Mitchell","phone":"423-803-2910","companyHint":"Equitasmg"},{"email":"jbutton@valley.com","nameRaw":"Justin Button","firstName":"Justin","lastName":"Button","phone":"","companyHint":"Valley"},{"email":"jenni@redstoneinvestments.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Redstoneinvestments"},{"email":"jfm13318@gmail.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":""},{"email":"jim.erb@nm.com","nameRaw":"James Erb","firstName":"James","lastName":"Erb","phone":"813-426-1048","companyHint":"Nm"},{"email":"jim.kovacs@colliers.com","nameRaw":"Jim Kovacs","firstName":"Jim","lastName":"Kovacs","phone":"","companyHint":"Colliers"},{"email":"jimnormanmd@gmail.com","nameRaw":"Jim Norman","firstName":"Jim","lastName":"Norman","phone":"","companyHint":"Gmail"},{"email":"jkokolakis@jkokolakis.com","nameRaw":"Joseph Kokolakis","firstName":"Joseph","lastName":"Kokolakis","phone":"727-942-2211","companyHint":"Jkokolakis"},{"email":"jksampson@me.com","nameRaw":"Julie Sampson","firstName":"Julie","lastName":"Sampson","phone":"","companyHint":""},{"email":"jlevy@redstoneinvestments.com","nameRaw":"Jon Levy","firstName":"Jon","lastName":"Levy","phone":"813-254-6200","companyHint":"Redstoneinvestments"},{"email":"jlmcmullen1948@gmail.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":""},{"email":"joanndiaz33@gmail.com","nameRaw":"Jo Ann Diaz","firstName":"Jo","lastName":"Ann Diaz","phone":"813-928-9360","companyHint":"Gmail"},{"email":"joci@westchasetitle.com","nameRaw":"Joci Trevisan","firstName":"Joci","lastName":"Trevisan","phone":"813-490-5212","companyHint":"Westchasetitle"},{"email":"john.austin.mcwilliams@gmail.com","nameRaw":"Austin McWilliams","firstName":"Austin","lastName":"McWilliams","phone":"407.710.7374","companyHint":"Gmail"},{"email":"john.jackson@cushwake.com","nameRaw":"John Jackson","firstName":"John","lastName":"Jackson","phone":"","companyHint":"Cushwake"},{"email":"john@burpeecommercial.com","nameRaw":"","firstName":"","lastName":"","phone":"727-828-9498","companyHint":"Burpeecommercial"},{"email":"johnanthonybasile@gmail.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":""},{"email":"johnathan@lemacon.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Lemacon"},{"email":"johng@bgains.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Bgains"},{"email":"jon.fincher@compass.com","nameRaw":"Jon Fincher","firstName":"Jon","lastName":"Fincher","phone":"","companyHint":"Compass"},{"email":"joneill@lee-associates.com","nameRaw":"Jackson ONeill","firstName":"Jackson","lastName":"ONeill","phone":"813.701.7948","companyHint":"Lee-associates"},{"email":"josh@thedirtdog.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Thedirtdog"},{"email":"jrbrown@olympus-capital.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Olympus-Capital"},{"email":"jrobinson@streamrealty.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Streamrealty"},{"email":"jschilling@ddadevelopment.com","nameRaw":"John Schilling","firstName":"John","lastName":"Schilling","phone":"813-215-2981","companyHint":"Ddadevelopment"},{"email":"jschwartz@redstoneinvestments.com","nameRaw":"Jon Schwartz","firstName":"Jon","lastName":"Schwartz","phone":"813-300-2339","companyHint":"Redstoneinvestments"},{"email":"jsuskauer@westbaytampa.com","nameRaw":"John Suskauer","firstName":"John","lastName":"Suskauer","phone":"","companyHint":"Westbaytampa"},{"email":"jtatem@harbertrealty.com","nameRaw":"Jessica Tatem","firstName":"Jessica","lastName":"Tatem","phone":"904-510-5406","companyHint":"Harbertrealty"},{"email":"jtoner@bakemorepies.com","nameRaw":"John Toner","firstName":"John","lastName":"Toner","phone":"","companyHint":"Bakemorepies"},{"email":"justin@rocwell.com","nameRaw":"Justin Basil","firstName":"Justin","lastName":"Basil","phone":"813.251.0544","companyHint":"Rocwell"},{"email":"kami.corbett@hwhlaw.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Hwhlaw"},{"email":"kathleen.bonesz@ryancompanies.com","nameRaw":"Kathleen Bonesz","firstName":"Kathleen","lastName":"Bonesz","phone":"714.651.7583","companyHint":"Ryancompanies"},{"email":"kathleen@thedirtdog.com","nameRaw":"Kathleen Rutland","firstName":"Kathleen","lastName":"Rutland","phone":"321-279-5448","companyHint":"Thedirtdog"},{"email":"kayla@haventitle.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Haventitle"},{"email":"kbarksdale.partner@exclusiveresorts.com","nameRaw":"Katherine Barksdale","firstName":"Katherine","lastName":"Barksdale","phone":"","companyHint":"Exclusiveresorts"},{"email":"kbramhall@stro.com","nameRaw":"Kevin Bramhall","firstName":"Kevin","lastName":"Bramhall","phone":"561 308-0704","companyHint":"Stro"},{"email":"kc.tenukas@cushwake.com","nameRaw":"KC Tenukas","firstName":"KC","lastName":"Tenukas","phone":"813-504-8545","companyHint":"Cushwake"},{"email":"kdolhi@tollbrothers.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Tollbrothers"},{"email":"kendalljones@ashtongray.com","nameRaw":"","firstName":"","lastName":"","phone":"813-449-2625","companyHint":"Ashtongray"},{"email":"khennigan@mstarproperties.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Mstarproperties"},{"email":"kmorales@thepaynelaw.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Thepaynelaw"},{"email":"krissy@thedirtdog.com","nameRaw":"Kristina Chutz","firstName":"Kristina","lastName":"Chutz","phone":"813.287.8787","companyHint":"Thedirtdog"},{"email":"kristi@haventitle.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Haventitle"},{"email":"kylelarsen@regencycenters.com","nameRaw":"Kyle Larsen","firstName":"Kyle","lastName":"Larsen","phone":"","companyHint":"Regencycenters"},{"email":"lauren@floridaretailpartners.com","nameRaw":"Lauren Ferry","firstName":"Lauren","lastName":"Ferry","phone":"629 813-251-3333","companyHint":"Floridaretailpartners"},{"email":"leads@loopnet.com","nameRaw":"","firstName":"","lastName":"","phone":"852-456-0003","companyHint":"Loopnet"},{"email":"lfranks@tollbrothers.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Tollbrothers"},{"email":"lgarner@exclusiveresorts.com","nameRaw":"Lauren Garner","firstName":"Lauren","lastName":"Garner","phone":"303-493-6229","companyHint":"Exclusiveresorts"},{"email":"lharris@westbaytampa.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Westbaytampa"},{"email":"lkatzman@ripaconstruction.com","nameRaw":"Lori Katzman","firstName":"Lori","lastName":"Katzman","phone":"727-686-3932","companyHint":"Ripaconstruction"},{"email":"luis.chap@icloud.com","nameRaw":"Luis Chaparro","firstName":"Luis","lastName":"Chaparro","phone":"813-416-7596","companyHint":"Icloud"},{"email":"luke.maidhoff@fastsigns.com","nameRaw":"Luke Maidhoff","firstName":"Luke","lastName":"Maidhoff","phone":"727-474-3772","companyHint":"Fastsigns"},{"email":"lwilloughby@ripaconstruction.com","nameRaw":"Lauran Willoughby","firstName":"Lauran","lastName":"Willoughby","phone":"","companyHint":"Ripaconstruction"},{"email":"mark@sellatampabayhome.com","nameRaw":"Mark Cravens","firstName":"Mark","lastName":"Cravens","phone":"813-361-0399","companyHint":"Sellatampabayhome"},{"email":"markkercherrealty@gmail.com","nameRaw":"Mark Kercher","firstName":"Mark","lastName":"Kercher","phone":"941.748.1000","companyHint":"Gmail"},{"email":"matt.murphy@smeds.org","nameRaw":"Matt Murphy","firstName":"Matt","lastName":"Murphy","phone":"","companyHint":"Smeds"},{"email":"matt.obrien@banyanland.net","nameRaw":"Matt OBrien","firstName":"Matt","lastName":"OBrien","phone":"","companyHint":"Banyanland"},{"email":"matt@thefeldmancompanies.com","nameRaw":"Matthew Beggs","firstName":"Matthew","lastName":"Beggs","phone":"786-477-5848","companyHint":"Thefeldmancompanies"},{"email":"mattyetzer@mwfproperties.com","nameRaw":"Matt Yetzer","firstName":"Matt","lastName":"Yetzer","phone":"813.499.9612","companyHint":"Mwfproperties"},{"email":"mbrooks@brcrlaw.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Brcrlaw"},{"email":"mburrows@practicerealestategroup.com","nameRaw":"Max Burrows","firstName":"Max","lastName":"Burrows","phone":"903.380","companyHint":"Practicerealestategroup"},{"email":"mdrewett@blackfinpartners.com","nameRaw":"Max Drewett","firstName":"Max","lastName":"Drewett","phone":"","companyHint":"Blackfinpartners"},{"email":"melanie@darkmoss.com","nameRaw":"Melanie Rivera","firstName":"Melanie","lastName":"Rivera","phone":"813-515-3781","companyHint":"Darkmoss"},{"email":"michael.barry@buildout.com","nameRaw":"Michael Barry","firstName":"Michael","lastName":"Barry","phone":"","companyHint":"Buildout"},{"email":"michael.candiotti@gmlaw.com","nameRaw":"Michael Candiotti","firstName":"Michael","lastName":"Candiotti","phone":"407-692-9113","companyHint":"Gmlaw"},{"email":"michael@thedirtdog.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Thedirtdog"},{"email":"michele.motleydeguenther@tampagov.net","nameRaw":"Michele MotleyDeGuenther","firstName":"Michele","lastName":"MotleyDeGuenther","phone":"","companyHint":"Tampagov"},{"email":"mike@bounat.com","nameRaw":"Michael Farley","firstName":"Michael","lastName":"Farley","phone":"813.906.8310","companyHint":"Bounat"},{"email":"mikek@caxcars.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Caxcars"},{"email":"mikek@consumerautoxchange.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Consumerautoxchange"},{"email":"mkass@kasslaw.com","nameRaw":"Michael Kass","firstName":"Michael","lastName":"Kass","phone":"813-405-2700","companyHint":"Kasslaw"},{"email":"mkastren12@gmail.com","nameRaw":"Maria Kastrenakes","firstName":"Maria","lastName":"Kastrenakes","phone":"","companyHint":""},{"email":"mmacon@mstarproperties.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Mstarproperties"},{"email":"mmetheny@westbaytampa.com","nameRaw":"Mark Metheny","firstName":"Mark","lastName":"Metheny","phone":"813-363-1495","companyHint":"Westbaytampa"},{"email":"moushumi.design@gmail.com","nameRaw":"Moushumi Ganguli","firstName":"Moushumi","lastName":"Ganguli","phone":"305-725-2344","companyHint":"Gmail"},{"email":"mpalmer@riselearningfl.org","nameRaw":"Melissa Palmer","firstName":"Melissa","lastName":"Palmer","phone":"813-785-5549","companyHint":"Riselearningfl"},{"email":"mperera1257@gmail.com","nameRaw":"Marisela Perera","firstName":"Marisela","lastName":"Perera","phone":"","companyHint":""},{"email":"mtaylor@redstonecommercial.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Redstonecommercial"},{"email":"mw@edenliving.com","nameRaw":"Mike Weinch","firstName":"Mike","lastName":"Weinch","phone":"202-821-9654","companyHint":"Edenliving"},{"email":"nate@wearescout.com","nameRaw":"Nate Cinal","firstName":"Nate","lastName":"Cinal","phone":"813-421-2673","companyHint":"Wearescout"},{"email":"neha@bufirm.com","nameRaw":"Neha Patel","firstName":"Neha","lastName":"Patel","phone":"813-337-7880","companyHint":"Bufirm"},{"email":"neilkhant@gmail.com","nameRaw":"Neil Khant","firstName":"Neil","lastName":"Khant","phone":"813-390-6082","companyHint":"Gmail"},{"email":"nick@bounat.com","nameRaw":"","firstName":"","lastName":"","phone":"813.906.8310","companyHint":"Bounat"},{"email":"nick@thedirtdog.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Thedirtdog"},{"email":"noeramos8746@gmail.com","nameRaw":"Noe Ramos","firstName":"Noe","lastName":"Ramos","phone":"813-609-9903","companyHint":""},{"email":"obaez@foley.com","nameRaw":"Odette Baez","firstName":"Odette","lastName":"Baez","phone":"813-225-4175","companyHint":"Foley"},{"email":"pamwilliamssf@icloud.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":""},{"email":"pat.kelly@franklinst.com","nameRaw":"Patrick Kelly","firstName":"Patrick","lastName":"Kelly","phone":"","companyHint":"Franklinst"},{"email":"pat@thedirtdog.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Thedirtdog"},{"email":"patrick@patrickturtleinc.com","nameRaw":"","firstName":"","lastName":"","phone":"813-340-6894","companyHint":"Patrickturtleinc"},{"email":"pcalvert@redstoneinvestments.com","nameRaw":"Preston Calvert","firstName":"Preston","lastName":"Calvert","phone":"","companyHint":"Redstoneinvestments"},{"email":"pcristyingling@pascocountyfl.net","nameRaw":"Patty Crist Yingling","firstName":"Patty","lastName":"Crist Yingling","phone":"727-355-7336","companyHint":"Pascocountyfl"},{"email":"perry@grumanlaw.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Grumanlaw"},{"email":"pitcher@verizon.net","nameRaw":"Bruce Pitcher","firstName":"Bruce","lastName":"Pitcher","phone":"727-244-4591","companyHint":"Verizon"},{"email":"pmdante@gmail.com","nameRaw":"Dante Fraiegari","firstName":"Dante","lastName":"Fraiegari","phone":"","companyHint":"Gmail"},{"email":"rahlquist@mvpholdings.com","nameRaw":"Robin Ahlquist","firstName":"Robin","lastName":"Ahlquist","phone":"634 813-321-7775","companyHint":"Mvpholdings"},{"email":"randysimmons@rrsimmons.com","nameRaw":"Randy Simmons","firstName":"Randy","lastName":"Simmons","phone":"","companyHint":"Rrsimmons"},{"email":"rbasham@mvpholdings.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Mvpholdings"},{"email":"rda263@gmail.com","nameRaw":"Richard Anderson","firstName":"Richard","lastName":"Anderson","phone":"","companyHint":"Gmail"},{"email":"reservations@cheapflightsfares.com","nameRaw":"","firstName":"","lastName":"","phone":"+1-216-345-5722","companyHint":"Cheapflightsfares"},{"email":"richie@thedirtdog.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Thedirtdog"},{"email":"rick.eckhard@hklaw.com","nameRaw":"Rick Eckhard","firstName":"Rick","lastName":"Eckhard","phone":"813-227-6417","companyHint":"Hklaw"},{"email":"rick@flyluxury.com","nameRaw":"Rick Foster","firstName":"Rick","lastName":"Foster","phone":"(645)-241-5855","companyHint":"Flyluxury"},{"email":"rkert@brcrlaw.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Brcrlaw"},{"email":"rlazala@raysbaseball.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Raysbaseball"},{"email":"rolfe@arnhym.com","nameRaw":"Rolfe Arnhym","firstName":"Rolfe","lastName":"Arnhym","phone":"813-505-7411","companyHint":"Arnhym"},{"email":"roy@gpiregroup.com","nameRaw":"Roy A","firstName":"Roy","lastName":"A","phone":"","companyHint":"Gpiregroup"},{"email":"rs@rocwelldev.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Rocwelldev"},{"email":"rsacchi@ripaconstruction.com","nameRaw":"Richard Sacchi","firstName":"Richard","lastName":"Sacchi","phone":"727-488-1718","companyHint":"Ripaconstruction"},{"email":"rwright3@fldesign.com","nameRaw":"Robert Wright","firstName":"Robert","lastName":"Wright","phone":"800-532-1047","companyHint":"Fldesign"},{"email":"ryan@elcland.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Elcland"},{"email":"ryan@hassetthometeam.com","nameRaw":"Ryan Schlenker","firstName":"Ryan","lastName":"Schlenker","phone":"813-855-4982","companyHint":"Hassetthometeam"},{"email":"ryan@snyderlawgroup.com","nameRaw":"Ryan Snyder","firstName":"Ryan","lastName":"Snyder","phone":"941-747-3456","companyHint":"Snyderlawgroup"},{"email":"ryang@glogerconstruction.com","nameRaw":"Ryan Gloger","firstName":"Ryan","lastName":"Gloger","phone":"","companyHint":"Glogerconstruction"},{"email":"ryanw@falconegroup.info","nameRaw":"Ryan Williams","firstName":"Ryan","lastName":"Williams","phone":"","companyHint":"Falconegroup"},{"email":"sales@vystarcu.org","nameRaw":"Shane Sale","firstName":"Shane","lastName":"Sale","phone":"","companyHint":"Vystarcu"},{"email":"sean.strickler@pultegroup.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Pultegroup"},{"email":"sean@dcscontractingllc.com","nameRaw":"","firstName":"","lastName":"","phone":"813.406.1244","companyHint":"Dcscontractingllc"},{"email":"sean@realm-cap.com","nameRaw":"Sean Lance","firstName":"Sean","lastName":"Lance","phone":"813-240-1888","companyHint":"Realm-cap"},{"email":"shannonmsampson@gmail.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":""},{"email":"shaun.rogozinski@pultegroup.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Pultegroup"},{"email":"shawn8633@gmail.com","nameRaw":"Ishon Morris","firstName":"Ishon","lastName":"Morris","phone":"352-844-2479","companyHint":"Gmail"},{"email":"simmons3@gmail.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":""},{"email":"skriebel@apcompanies.com","nameRaw":"Scott Kriebel","firstName":"Scott","lastName":"Kriebel","phone":"615-306-3800","companyHint":"Apcompanies"},{"email":"ssierra@sierrainvestmentgroup.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Sierrainvestmentgroup"},{"email":"stan@stanrutstein.com","nameRaw":"Stan Rutstein","firstName":"Stan","lastName":"Rutstein","phone":"941-539-8313","companyHint":"Stanrutstein"},{"email":"steve.wright@bbgi.com","nameRaw":"Stephen Wright","firstName":"Stephen","lastName":"Wright","phone":"","companyHint":"Bbgi"},{"email":"stuart.tapley@suncoastrooferssupply.com","nameRaw":"Stuart Tapley","firstName":"Stuart","lastName":"Tapley","phone":"813-394-6907","companyHint":"Suncoastrooferssupply"},{"email":"support@telzio.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Telzio"},{"email":"tampa@thedirtdog.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Thedirtdog"},{"email":"team@thedirtdog.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Thedirtdog"},{"email":"tripp@bayridgecommercial.com","nameRaw":"Tripp Brown","firstName":"Tripp","lastName":"Brown","phone":"615-483-3480","companyHint":"Bayridgecommercial"},{"email":"tsimpson@brookfieldkolter.com","nameRaw":"Troy Simpson","firstName":"Troy","lastName":"Simpson","phone":"813-944-8404","companyHint":"Brookfieldkolter"},{"email":"ttrela35@gmail.com","nameRaw":"Thomas Trela","firstName":"Thomas","lastName":"Trela","phone":"","companyHint":"Gmail"},{"email":"tyler.lohmiller@ryancompanies.com","nameRaw":"Tyler Lohmiller","firstName":"Tyler","lastName":"Lohmiller","phone":"","companyHint":"Ryancompanies"},{"email":"tyler@thedirtdog.com","nameRaw":"Tyler Woody","firstName":"Tyler","lastName":"Woody","phone":"813.287.8787","companyHint":"Thedirtdog"},{"email":"updates@go.seminoles.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Go"},{"email":"urijman@gmail.com","nameRaw":"Uri Man","firstName":"Uri","lastName":"Man","phone":"561-213-9696","companyHint":"Gmail"},{"email":"vincent.crisci@gmail.com","nameRaw":"Vincent Crisci","firstName":"Vincent","lastName":"Crisci","phone":"","companyHint":""},{"email":"vioko@aol.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":""},{"email":"walterlandandproperties2@gmail.com","nameRaw":"Walter Clamser","firstName":"Walter","lastName":"Clamser","phone":"852-456-0003","companyHint":""},{"email":"weswolk@gmail.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":""},{"email":"william.becker@nm.com","nameRaw":"William Becker","firstName":"William","lastName":"Becker","phone":"","companyHint":"Nm"},{"email":"woodyhughes@forestar.com","nameRaw":"Woody Hughes","firstName":"Woody","lastName":"Hughes","phone":"","companyHint":"Forestar"},{"email":"wyeager012@gmail.com","nameRaw":"Bill Yeager","firstName":"Bill","lastName":"Yeager","phone":"","companyHint":""},{"email":"zgrundt@raysbaseball.com","nameRaw":"","firstName":"","lastName":"","phone":"","companyHint":"Raysbaseball"},{"email":"zrecon2@gmail.com","nameRaw":"Michel Regignano","firstName":"Michel","lastName":"Regignano","phone":"703 625-8495","companyHint":""}];
+let _GMAIL_SYNC_DATE;  // set at runtime by crmGmailSync; blank = never synced this session
+let _GMAIL_SYNC_DATA = [];  // per-user: populated at runtime from the signed-in account's Gmail. Do NOT bake a shared snapshot here — it leaks one user's contacts to everyone.
 
 // ── CRM Outreach Import Logic ─────────────────────────────────────────────────
 window._crmOutreachCheckDone = false;
@@ -16771,6 +17037,118 @@ window.removeOfficeManager = i => {
   eosSave('officeManagers', updated);
   showToast('Manager removed','info');
   viewOfficeManagers();
+};
+
+/* =======================================================
+   VIEW: APPROVED USERS (admin)
+   Controls who can sign in with Google. Admins always bypass.
+   ======================================================= */
+let _approvedUsers = null; // null = not loaded yet
+
+async function _loadApprovedUsers(){
+  if(!DEMO_MODE && _fbDb && _fbFns){
+    const {doc,getDoc}=_fbFns;
+    const snap = await getDoc(doc(_fbDb,'eos','approvedUsers'));
+    _approvedUsers = snap.exists() ? (snap.data().emails||[]) : [];
+  } else {
+    _approvedUsers = _approvedUsers || [];
+  }
+  return _approvedUsers;
+}
+
+function _saveApprovedUsers(list){
+  _approvedUsers = list;
+  if(DEMO_MODE) return;
+  const {doc,setDoc}=_fbFns;
+  setDoc(doc(_fbDb,'eos','approvedUsers'),{emails:list})
+    .catch(e=>console.error('[approvedUsers] save failed',e));
+}
+
+async function viewApprovedUsers(){
+  setContent('<div class="max-w-xl"><p class="text-sm text-gray-400">Loading…</p></div>');
+  await _loadApprovedUsers();
+  const list = _approvedUsers || [];
+  const adminEmails = APP_CONFIG.adminEmails || [];
+
+  setContent(`
+    <div class="max-w-xl">
+      <h2 class="text-xl font-bold text-gray-800 mb-1">🔐 Approved Users</h2>
+      <p class="text-sm text-gray-500 mb-6">
+        Only email addresses on this list can sign in. Admins always have access regardless of this list.
+        Anyone not listed will see "Access denied" when they try to log in.
+      </p>
+
+      <!-- Admin emails (always allowed, read-only) -->
+      <div class="bg-white rounded-2xl border p-5 mb-5">
+        <h3 class="font-semibold text-gray-700 mb-1">Admin Accounts <span class="text-xs font-normal text-gray-400">(always allowed)</span></h3>
+        <div class="space-y-2 mt-3">
+          ${adminEmails.map(e=>`
+            <div class="flex items-center gap-3 bg-gray-50 rounded-xl px-4 py-3">
+              <div class="flex-1 text-sm font-medium text-gray-700">${e}</div>
+              <span class="text-xs px-2 py-1 rounded-full font-semibold text-white bg-red-500">Admin</span>
+            </div>`).join('')}
+        </div>
+      </div>
+
+      <!-- Approved users list -->
+      <div class="bg-white rounded-2xl border p-5 mb-5">
+        <h3 class="font-semibold text-gray-700 mb-3">Approved Users</h3>
+        ${list.length===0
+          ? '<p class="text-sm text-gray-400">No approved users yet. Add emails below.</p>'
+          : `<div class="space-y-2">
+              ${list.map((e,i)=>`
+                <div class="flex items-center gap-3 bg-gray-50 rounded-xl px-4 py-3">
+                  <div class="flex-1 text-sm text-gray-800">${e}</div>
+                  <button onclick="removeApprovedUser(${i})" class="text-red-400 hover:text-red-600 text-sm font-bold" title="Remove access">✕</button>
+                </div>`).join('')}
+            </div>`}
+      </div>
+
+      <!-- Add user -->
+      <div class="bg-white rounded-2xl border p-5">
+        <h3 class="font-semibold text-gray-700 mb-3">Grant Access</h3>
+        <div class="flex gap-2">
+          <input id="au-email" type="email" placeholder="advisor@email.com"
+            class="flex-1 border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-red-300"/>
+          <button onclick="addApprovedUser()" class="brand-btn px-5 py-2 rounded-lg text-sm font-semibold whitespace-nowrap">
+            Add
+          </button>
+        </div>
+      </div>
+
+      <div class="mt-4 bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-800">
+        <strong>Note:</strong> Changes take effect immediately. If someone is already logged in and you remove them, they'll be blocked on their next sign-in. Their data is not deleted.
+      </div>
+    </div>
+  `);
+
+  document.getElementById('au-email')?.addEventListener('keydown', e=>{
+    if(e.key==='Enter') window.addApprovedUser();
+  });
+}
+
+window.addApprovedUser = async () => {
+  const email = document.getElementById('au-email')?.value.trim().toLowerCase();
+  if(!email){ showToast('Enter an email address','error'); return; }
+  await _loadApprovedUsers();
+  if((_approvedUsers||[]).map(e=>e.toLowerCase()).includes(email)){
+    showToast('That email is already approved','warning'); return;
+  }
+  if((APP_CONFIG.adminEmails||[]).map(e=>e.toLowerCase()).includes(email)){
+    showToast('Admin emails always have access','info'); return;
+  }
+  const updated = [...(_approvedUsers||[]), email];
+  _saveApprovedUsers(updated);
+  showToast(`${email} approved`,'success');
+  viewApprovedUsers();
+};
+
+window.removeApprovedUser = async i => {
+  await _loadApprovedUsers();
+  const updated = (_approvedUsers||[]).filter((_,j)=>j!==i);
+  _saveApprovedUsers(updated);
+  showToast('Access removed','info');
+  viewApprovedUsers();
 };
 
 /* =======================================================
@@ -19915,6 +20293,9 @@ function _notifyParcelOwner(matchedDeal, newDeal){
 
 window.openDealModal = (id, defaultStage) => {
   editingDealId = id||null;
+  // Reset LOI working state so the manager re-seeds from saved deal data
+  delete loiDrafts['new']; delete loiWinner['new'];
+  if(id){ delete loiDrafts[id]; delete loiWinner[id]; }
   const modal=document.getElementById('deal-modal');
   const titleEl=document.getElementById('deal-modal-title');
   const stageBadge=document.getElementById('deal-modal-stage-badge');
@@ -20321,6 +20702,20 @@ window.handleDealSubmit = async ev => {
   // (built-in stage templates use sf-* IDs, not gf-* IDs, so gf- elements won't exist)
   const sf = collectStageFields();
 
+  // ── Multi-LOI: require choosing the winning LOI when entering Signed LOI / DD ──
+  // Only forces a choice on the transition INTO a winner stage, when 2+ LOIs exist
+  // and no winner has been marked yet. A single LOI is auto-selected silently.
+  {
+    const _loiArr = getLoiDraft(fileKey);
+    const _enteringWinnerStage = isLoiWinnerStage(stage) && !isLoiWinnerStage(existDealForAdv?.stage||'');
+    if(_loiArr.length === 1 && !loiWinner[fileKey]) loiWinner[fileKey] = _loiArr[0].id;
+    if(_enteringWinnerStage && _loiArr.length > 1 && !loiWinner[fileKey]){
+      showToast('Choose which LOI is going to contract','warning',5000);
+      openLoiPickerModal(fileKey, stage, () => { document.getElementById('deal-form')?.requestSubmit(); });
+      return;
+    }
+  }
+
   // ── Parcel ID required on NEW deals only ────────────────────────────────
   if(!id){
     const _pPrimary = (document.getElementById('f-folio')?.value||'').trim();
@@ -20445,12 +20840,16 @@ window.handleDealSubmit = async ev => {
     } catch(e) { console.warn('[uploadDealFile]', e); return null; }
   };
   const _uploadId = id || ('new_'+Date.now());
+  // Capture file refs before Promise.all so we can log attachment activities after upload
+  const _snapLoi = stageFiles[`${fileKey}__loi`];
+  const _snapPsa = stageFiles[`${fileKey}__psa`];
+  const _snapCs  = stageFiles[`${fileKey}__closing-statement`];
   const [lfUrl, cfUrl, loiUploadUrl, psaUploadUrl, csUploadUrl, photoUploadUrl] = await Promise.all([
     _uploadDealFile(lfData, _uploadId, 'listing'),
     _uploadDealFile(cfData, _uploadId, 'contract'),
-    _uploadDealFile(stageFiles[`${fileKey}__loi`],               _uploadId, 'loi'),
-    _uploadDealFile(stageFiles[`${fileKey}__psa`],               _uploadId, 'psa'),
-    _uploadDealFile(stageFiles[`${fileKey}__closing-statement`], _uploadId, 'closing'),
+    _uploadDealFile(_snapLoi, _uploadId, 'loi'),
+    _uploadDealFile(_snapPsa, _uploadId, 'psa'),
+    _uploadDealFile(_snapCs,  _uploadId, 'closing'),
     (async()=>{
       if(!photoData?.dataUrl || !_fbStorage) return null;
       try{
@@ -20464,6 +20863,35 @@ window.handleDealSubmit = async ev => {
       }catch(e){console.warn('[uploadPhoto]',e);return null;}
     })(),
   ]);
+  // ── Multi-LOI: upload any newly attached LOI files, build the lois[] array ──
+  // Determines the winner (explicit pick → existing selection → top-ranked) and
+  // syncs the legacy single-LOI fields so existing automations keep working.
+  let _loisToSave = null, _winnerObj = null, _winnerId = null;
+  {
+    const _draft = getLoiDraft(fileKey);
+    if(_draft.length){
+      _loisToSave = [];
+      for(const l of _draft){
+        let url = l.fileUrl || '';
+        if(l.dataUrl && _fbStorage){
+          const u = await _uploadDealFile({dataUrl:l.dataUrl, name:l.fileName}, _uploadId, 'loi');
+          if(u) url = u;
+        }
+        _loisToSave.push({
+          id: l.id,
+          buyer: (l.buyer||'').trim(),
+          price: (l.price===''||l.price==null) ? '' : (Number(l.price)||l.price),
+          rank:  (l.rank===''||l.rank==null) ? null : (Number(l.rank)||null),
+          fileName: l.fileName || '',
+          fileUrl: url,
+        });
+      }
+      _loisToSave.sort((a,b)=>((a.rank??999)-(b.rank??999)));
+      _winnerId = loiWinner[fileKey] || existDealForAdv?.selectedLoiId ||
+                  (_loisToSave.length===1 ? _loisToSave[0].id : null);
+      _winnerObj = _winnerId ? _loisToSave.find(l=>l.id===_winnerId) : null;
+    }
+  }
   // Use hidden fields first; fall back to stage-specific fields so price/commission
   // entered in stage sections (e.g. Sold gate, Due Diligence inline) always produce revenue
   // ── Deal type & lease fields ─────────────────────────────────────────────
@@ -20568,6 +20996,15 @@ window.handleDealSubmit = async ev => {
       return r;
     })(),
     ...(inlineGateData?{gateData:{[stage]:inlineGateData}}:{}),
+    // ── Multi-LOI: persist the ranked LOI list, winner id, and sync legacy fields ──
+    ...(_loisToSave ? {lois:_loisToSave} : {}),
+    ...(_winnerId ? {selectedLoiId:_winnerId} : {}),
+    ...(_winnerObj ? {
+      loiBuyer: _winnerObj.buyer || sf.loiBuyer || '',
+      ...((_winnerObj.price!==''&&_winnerObj.price!=null) ? {loiPrice:_winnerObj.price} : {}),
+      ...(_winnerObj.fileUrl  ? {loiUrl:_winnerObj.fileUrl}      : {}),
+      ...(_winnerObj.fileName ? {loiFileName:_winnerObj.fileName} : {}),
+    } : {}),
   };
   // First-entry timestamps — set on first transition, never overwrite
   const existDeal = allDeals.find(d=>d.id===id);
@@ -20598,6 +21035,13 @@ window.handleDealSubmit = async ev => {
       _applyColumnOrder(window._pendingDropOrder); window._pendingDropOrder=null;
     }
     if(oldStage!==stage) fireAutomations(existing,oldStage);
+    if(oldStage!==stage) window._logStageChange(id, oldStage, stage);
+    // ── Log attachment uploads to activity feed ──────────────────────────
+    if(loiUploadUrl && _snapLoi) window._logAttachmentActivity(id, _snapLoi, 'loi', loiUploadUrl);
+    if(psaUploadUrl && _snapPsa) window._logAttachmentActivity(id, _snapPsa, 'psa', psaUploadUrl);
+    if(csUploadUrl  && _snapCs)  window._logAttachmentActivity(id, _snapCs,  'closing', csUploadUrl);
+    if(lfUrl && lfData)          window._logAttachmentActivity(id, lfData,   'listing', lfUrl);
+    if(cfUrl && cfData)          window._logAttachmentActivity(id, cfData,   'contract', cfUrl);
     // ── Structured Drive workflow on stage change ──────────────────────────
     // Capture files synchronously NOW before async cleanup runs later
     const _driveSnap = {
@@ -20630,6 +21074,7 @@ window.handleDealSubmit = async ev => {
     }
     // Clear session-cached files for this deal after successful save
     ['loi','psa','closing-statement'].forEach(t => delete stageFiles[`${fileKey}__${t}`]);
+    delete loiDrafts[fileKey]; delete loiWinner[fileKey];
     delete contractFiles[fileKey];
     delete listingFiles[fileKey];
     Object.keys(gateFiles).forEach(k => { if(k.startsWith(fileKey+'__')) delete gateFiles[k]; });
@@ -20653,6 +21098,12 @@ window.handleDealSubmit = async ev => {
     if(!allDeals.find(d=>d.id===newId)) allDeals.push(newDeal);
     if(_parcelDupMatch) _notifyParcelOwner(_parcelDupMatch, newDeal);   // warn + notify original advisor
     fireAutomations(newDeal,null);
+    // ── Log attachment uploads for new deal ──────────────────────────────
+    if(loiUploadUrl && _snapLoi) window._logAttachmentActivity(newId, _snapLoi, 'loi', loiUploadUrl);
+    if(psaUploadUrl && _snapPsa) window._logAttachmentActivity(newId, _snapPsa, 'psa', psaUploadUrl);
+    if(csUploadUrl  && _snapCs)  window._logAttachmentActivity(newId, _snapCs,  'closing', csUploadUrl);
+    if(lfUrl && lfData)          window._logAttachmentActivity(newId, lfData,   'listing', lfUrl);
+    if(cfUrl && cfData)          window._logAttachmentActivity(newId, cfData,   'contract', cfUrl);
     // ── Structured Drive workflow on new deal create ───────────────────────
     const _driveSnapNew = {
       loi: stageFiles[`${fileKey}__loi`] || stageFiles[`new__loi`],
@@ -20679,6 +21130,7 @@ window.handleDealSubmit = async ev => {
     _crmAutoCreateContactsFromDeal(newDeal).catch(e=>console.warn('[CRM auto-contact]',e));
     // Clear session-cached files for this deal after successful save
     ['loi','psa','closing-statement'].forEach(t => delete stageFiles[`${fileKey}__${t}`]);
+    delete loiDrafts[fileKey]; delete loiWinner[fileKey];
     delete contractFiles[fileKey];
     delete listingFiles[fileKey];
     Object.keys(gateFiles).forEach(k => { if(k.startsWith(fileKey+'__')) delete gateFiles[k]; });
@@ -22322,9 +22774,21 @@ async function init(){
         currentUser=null; renderLoginScreen(); return;
       }
       const email=fbUser.email||'';
-      if(APP_CONFIG.allowedAdvisorEmails?.length && !isAllowedEmail(email) && !isAdminEmail(email)){
-        showToast('Access denied — contact your admin','error');
-        await FB.signOut(); return;
+      // Approved-users gate: always enforced (admins bypass)
+      if(!isAdminEmail(email)){
+        try{
+          const {doc:_doc, getDoc:_getDoc}=_fbFns;
+          const _snap = await _getDoc(_doc(_fbDb,'eos','approvedUsers'));
+          const _approved = _snap.exists() ? (_snap.data().emails||[]) : [];
+          if(!_approved.map(e=>e.toLowerCase()).includes(email.toLowerCase())){
+            showToast('Access denied — contact your admin to request access','error');
+            await FB.signOut(); return;
+          }
+        }catch(e){
+          console.warn('[auth] approvedUsers check failed',e);
+          showToast('Could not verify access — try again','error');
+          await FB.signOut(); return;
+        }
       }
       const mgr = detectOfficeManager(email);
       currentUser={uid:fbUser.uid,name:fbUser.displayName||email,email,
