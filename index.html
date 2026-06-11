@@ -6958,6 +6958,7 @@ function renderShell(){
     {id:'documents',     label:'📄 Documents',      admin:true},
     {id:'hr',            label:'👥 HR',             always:true},
     {id:'crm',           label:'🤝 CRM',            crm:true},
+    {id:'leads',         label:'🎯 Leads',          advisor:true, admin:true, manager:true},
   ].filter(n=>{
     if(sv){ // staff view: always tabs + staff-flagged tabs + manager tabs (for office managers) + CRM if enabled
       if(n.always) return true;
@@ -7104,7 +7105,7 @@ function renderCurrentView(){
     commissions:viewMyCommissions,
     splits:viewSplits,automations:viewAutomations,users:viewUsers,leaderboard:viewLeaderboard,
     manageStages:viewManageStages,officeManagers:viewOfficeManagers,officeOverview:viewOfficeOverview,
-    eos:()=>viewEOS(window._eosSub||'rocks'),comps:viewComps,drive:viewDrive,documents:viewDocuments,hr:viewHR,crm:viewCRM};
+    eos:()=>viewEOS(window._eosSub||'rocks'),comps:viewComps,drive:viewDrive,documents:viewDocuments,hr:viewHR,crm:viewCRM,leads:viewLeads};
   try {
     (map[currentView]||viewBoard)();
   } catch(e) {
@@ -21574,6 +21575,574 @@ window.sendHRAIMessage = async function(){
 };
 
 /* =======================================================
+   LEADS — AI OUTREACH AGENT (ELC Lead Gen Program)
+   New 'leads' Firestore collection + mini-pipeline + Claude/Gemini-powered
+   research, outreach drafting, cadence scheduling, and call scripts.
+   ======================================================= */
+const LEAD_STATUSES = ['New','Researching','Outreach','Engaged','Qualified'];
+const LEAD_TERMINAL = ['Promoted','Dead'];
+const LEAD_STATUS_COLORS = {
+  'New':        {hdr:'bg-gray-200',   col:'bg-gray-50',   txt:'text-gray-700'},
+  'Researching':{hdr:'bg-amber-100',  col:'bg-amber-50',  txt:'text-amber-700'},
+  'Outreach':   {hdr:'bg-sky-100',    col:'bg-sky-50',    txt:'text-sky-700'},
+  'Engaged':    {hdr:'bg-violet-100', col:'bg-violet-50', txt:'text-violet-700'},
+  'Qualified':  {hdr:'bg-green-100',  col:'bg-green-50',  txt:'text-green-700'},
+};
+// The 7 target profiles from the ELC Lead Gen Program (elc-lead-gen-program.pdf)
+const LEAD_PROFILES = {
+  'family-landowner':      {label:'Long-Held Family Landowner', side:'Seller', signals:['Owner age 65+ with no apparent successor','Recent death in family / probate filing','New road or utility infrastructure nearby','Ag exemption applied to developable land','Recent rezoning of neighboring parcel']},
+  'developer-disposition': {label:'Developer Disposition',      side:'Seller', signals:['Entitled land held 18+ months without vertical start','Developer pivoting product type (e.g. MF to BTR)','Lender maturity extension or default notice','New equity partner brought in (often signals exit)','Company HQ out of state — local asset non-core']},
+  'corporate-owner':       {label:'Corporate Real Property Owner', side:'Seller', signals:['Business relocation or consolidation news','Church or school enrollment decline','Hospital or utility system M&A activity','Parking lots / excess acreage near growth nodes','Corporate leadership change / new CFO']},
+  'estate-probate':        {label:'Estate & Probate Seller',    side:'Seller', signals:['Hillsborough / Pinellas / Orange probate filing','Property ownership transfer to estate or trust','Multiple new owners on deed (heir split)','Delinquent taxes on inherited parcel','Estate attorney referral']},
+  'homebuilder':           {label:'National / Regional Homebuilder', side:'Buyer', signals:['Pipeline running <18 months of lots','New division or market entry announcement','Recent lot purchases in a specific submarket','Land acquisition VP hire or change','Earnings call citing specific FL markets']},
+  'mf-btr-developer':      {label:'Multifamily / BTR Developer', side:'Buyer', signals:['Prior project delivering / lease-up near complete','Fund capital raise completed / deployment pressure','Tampa comp cap rates in their buy range','Site plan application activity in submarket','JV or equity partner announcement']},
+  '1031-investor':         {label:'1031 Exchange Investor',     side:'Seller & Buyer', signals:['Recently closed sale of NNN, MF, or industrial asset','Qualified Intermediary (QI) referral','CPA or estate attorney referral at tax season','Selling a non-land RE asset ELC can list','Land parcel with NNN lease as replacement']},
+};
+// Condensed playbook injected into every AI prompt as domain knowledge
+const LEADGEN_PLAYBOOK = `ELC // DIRT DOG LEAD GEN PROGRAM (Eshenbaugh Land Company, Tampa & Orlando).
+Mission: identify, prioritize, and convert the highest-value land seller and buyer leads across Florida's Gulf Coast and I-4 Corridor.
+ADVISOR PRIORITY RULE: always lead with the Seller side — a listed property creates two revenue events (seller rep fee + buyer rep fee), and buyers who surface through ELC listings become the next listing leads.
+THE 7 TARGET PROFILES:
+1. Long-Held Family Landowners (SELLER): families with 20-50+ yr ownership of 10+ acre parcels on the urban fringe; 2nd/3rd generation, land-rich/cash-poor, approaching estate planning; Tampa growth corridor is consuming their land's adjacency value. Tone: patient, respectful of legacy, educational — never pushy.
+2. Developer Disposition Candidates (SELLER): developers holding entitled/partially improved land they can't or won't develop on current timelines; rising carry costs or pivots create motivated sellers; they know the game — they need a trusted broker, not education. Tone: peer-to-peer, numbers-forward, direct.
+3. Corporate Real Property Owners (SELLER): businesses, utilities, churches, hospitals holding surplus land incidental to operations; off-market, under-managed; rarely thinking about selling until someone shows them what it's worth. Tone: professional, value-discovery framing ("what your land is worth today").
+4. Estate & Probate Sellers (SELLER): heirs inheriting land they didn't seek; personal representatives on estate timelines; motivated by simplicity, speed, fairness among heirs — NOT maximizing value. Tone is everything: empathetic, zero pressure, process- and fairness-oriented. NEVER automated-sounding.
+5. National & Regional Homebuilders (BUYER): D.R. Horton, Lennar, Taylor Morrison, Toll Brothers + 30+ regionals assembling land in Hillsborough, Pasco, Manatee, Polk, Lake counties; land acq teams with quarterly lot quotas; they need ELC's off-market access and local entitlement knowledge. Tone: concise, deal-specific, submarket data up front.
+6. Multifamily & BTR Developers (BUYER): apartment/BTR/active-adult developers targeting Westshore, South Howard, New Tampa, Wesley Chapel, Lakeland; IRR-driven, move fast when sites check out; ELC's entitlement-timing advisory is the differentiator. Tone: sharp, IRR/basis-aware, time-sensitive.
+7. 1031 Exchange Investors (SELLER & BUYER): selling appreciated income property, need replacement asset within 45/180-day deadlines; motivated, pre-qualified, flexible on price if timeline works. Tone: deadline-aware, solution-framing.
+OUTREACH CADENCE: initial personalized email (Day 0), follow-up Day 3 (short, add one new piece of value/context), Day 7 (different angle — comp, zoning change, or market signal), Day 10 (graceful close: "I'll leave it here — when timing is right, we're the land specialists"). Stop immediately on any reply.
+WHAT THE AI MUST NOT DO: never fake having personally walked the property; never invent specific comps, prices, or names; never apply pressure on probate/estate leads; emails must read like the individual advisor wrote them — plain, warm, no marketing-speak, no buzzwords, 120-180 words max for initial, under 80 for follow-ups. Sign-off is the advisor's name, Eshenbaugh Land Company / The Dirt Dog.`;
+
+let allLeads = [];
+window._leadsFilter = window._leadsFilter || 'active'; // 'active' | 'mine' | 'all-states'
+function bootLeads(){
+  if(window._leadsReady) return;
+  window._leadsReady = true;
+  const {collection, onSnapshot, query, orderBy} = _fbFns;
+  onSnapshot(query(collection(_fbDb,'leads'), orderBy('createdAt','desc')), snap=>{
+    allLeads = snap.docs.map(d=>({id:d.id,...d.data()}));
+    if(currentView==='leads') viewLeads();
+    const panelId = window._openLeadId;
+    if(panelId && document.getElementById('lead-panel')) renderLeadPanel(panelId);
+  });
+}
+function _leadEsc(s){ return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function _leadById(id){ return allLeads.find(l=>l.id===id); }
+async function _leadUpdate(id, data){
+  const {doc, updateDoc} = _fbFns;
+  await updateDoc(doc(_fbDb,'leads',id), {...data, updatedAt:Date.now()});
+}
+async function _leadLog(id, text){
+  const lead=_leadById(id); if(!lead) return;
+  const log=(lead.activityLog||[]).slice(-49);
+  log.push({at:Date.now(), by:currentUser?.name||'system', text});
+  await _leadUpdate(id, {activityLog:log});
+}
+function _leadVisible(l){
+  const mine = l.advisorUid===currentUser.uid || !l.advisorUid;
+  if(currentUser.isAdmin || currentUser.isOfficeManager) {
+    return window._leadsFilter==='mine' ? mine : true;
+  }
+  return mine;
+}
+
+// ── Stateless AI call (Gemini via the live Cloudflare proxy) ────────────────
+async function leadAI(systemPrompt, userText, maxTokens=1800){
+  const proxyUrl = APP_CONFIG.ai?.geminiProxyUrl || '';
+  if(!proxyUrl) throw new Error('No AI proxy configured (APP_CONFIG.ai.geminiProxyUrl).');
+  const payload = {
+    system_instruction:{parts:[{text:systemPrompt}]},
+    contents:[{role:'user',parts:[{text:userText}]}],
+    generationConfig:{maxOutputTokens:maxTokens},
+  };
+  const resp = await fetch(proxyUrl,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});
+  if(!resp.ok){ const t=await resp.text().catch(()=>''); throw new Error('AI service error '+resp.status+': '+t.slice(0,150)); }
+  const data = await resp.json();
+  return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+}
+function _leadAIParseJSON(raw){
+  // Tolerant JSON extraction (model may wrap in ```json fences)
+  const m = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+  const txt = (m?m[1]:raw).trim();
+  const start = txt.indexOf('{'); const end = txt.lastIndexOf('}');
+  return JSON.parse(txt.slice(start, end+1));
+}
+function _leadContextBlock(lead){
+  const prof = LEAD_PROFILES[lead.profileType] || {};
+  const adv  = allProfiles[lead.advisorUid] || {};
+  return `LEAD DETAILS:
+- Contact: ${lead.name||'(unknown)'}${lead.company?' — '+lead.company:''}${lead.title?' ('+lead.title+')':''}
+- Email: ${lead.email||'(none)'} | Phone: ${lead.phone||'(none)'}
+- Target profile: ${prof.label||lead.profileType||'(unset)'} (${prof.side||''} side)
+- Property: ${lead.propertyAddress||'(none)'}${lead.county?', '+lead.county+' County':''}${lead.acreage?', ~'+lead.acreage+' acres':''}${lead.landType?', '+lead.landType:''}
+- Parcel ID: ${lead.parcelId||'(none)'}
+- Trigger signals observed: ${(lead.triggerSignals||[]).join('; ')||'(none recorded)'}
+- Source: ${lead.source||'manual'}${lead.inboundMessage?'\n- Inbound message from lead: "'+lead.inboundMessage+'"':''}
+- Advisor: ${lead.advisorName||currentUser.name}${adv.office?' ('+adv.office+' office)':''}
+- Notes: ${lead.notes||'(none)'}`;
+}
+
+// ── The agent: research → outreach draft → cadence pre-drafts ──────────────
+async function runLeadAgent(leadId){
+  const lead = _leadById(leadId); if(!lead) return;
+  try {
+    await _leadUpdate(leadId, {status:'Researching', agentError:null});
+    showToast('🤖 Agent researching '+(lead.name||'lead')+'…','info');
+
+    // 1. Research brief
+    const research = await leadAI(
+      LEADGEN_PLAYBOOK+`\nYou are the lead-research analyst for an ELC land advisor. Using the lead details and your knowledge of the Tampa Bay / I-4 Corridor land market, produce a tight research brief the advisor can absorb in 60 seconds. Sections: WHO THEY ARE (2-3 sentences), WHY NOW (tie to their trigger signals + profile motivations), SUBMARKET CONTEXT (what's happening around this property/county — growth corridors, recent activity patterns; if you don't have specifics say what the advisor should pull up), ANGLE (the single best hook for first contact), WATCH-OUTS (anything to avoid saying). Plain text, no markdown headers beyond the section labels in caps. Never invent specific comps, sale prices, or named transactions.`,
+      _leadContextBlock(lead), 1200);
+
+    // 2. Outreach email + full cadence, drafted in one pass as JSON
+    const draftRaw = await leadAI(
+      LEADGEN_PLAYBOOK+`\nYou are ghost-writing outreach for advisor ${lead.advisorName||currentUser.name} at Eshenbaugh Land Company. Using the research brief and lead details, write the full 4-touch email cadence. Respond with ONLY a JSON object, no commentary:
+{"subject":"<initial email subject — specific, no clickbait, mention the property/area>",
+ "body":"<initial email, 120-180 words, plain text, reads like the advisor personally wrote it>",
+ "followups":[
+  {"day":3,"subject":"<Re: same thread subject>","body":"<under 80 words, one new piece of value>"},
+  {"day":7,"subject":"<Re: same thread subject>","body":"<under 80 words, different angle>"},
+  {"day":10,"subject":"<Re: same thread subject>","body":"<under 80 words, graceful close>"}]}
+Rules: no placeholder brackets left unfilled except [ADVISOR PHONE] which the advisor fills in; sign with the advisor's first name; for estate/probate leads be extra gentle and slower-paced; never claim to have walked the property or cite invented comps.`,
+      'RESEARCH BRIEF:\n'+research+'\n\n'+_leadContextBlock(lead), 2000);
+    const draft = _leadAIParseJSON(draftRaw);
+
+    const steps = [
+      {day:0, label:'Initial outreach', status:'pending', subject:draft.subject||'', body:draft.body||''},
+      ...(draft.followups||[]).map(f=>({day:f.day, label:'Day '+f.day+' follow-up', status:'pending', subject:f.subject||('Re: '+(draft.subject||'')), body:f.body||''})),
+    ];
+    await _leadUpdate(leadId, {
+      research, researchAt:Date.now(),
+      emailDraft:{subject:draft.subject||'', body:draft.body||''}, draftAt:Date.now(),
+      cadence:{active:false, steps, nextDueAt:null, lastSentAt:null},
+      status:'Outreach',
+    });
+    await _leadLog(leadId,'AI agent completed research + drafted 4-touch cadence');
+
+    // Task for the advisor to review & send
+    const assignee = lead.advisorUid || currentUser.uid;
+    const assigneeProfile = allProfiles[assignee] || {};
+    await FB.createTask({
+      title:'🎯 Review & send outreach — '+(lead.name||lead.propertyAddress||'new lead'),
+      description:'The AI agent researched this lead and drafted the outreach email + follow-up cadence. Open the Leads tab to review, tweak, and send with one click.',
+      assignedTo:assignee, assignedToName:assigneeProfile.name||lead.advisorName||currentUser.name, assignedToEmail:assigneeProfile.email||lead.advisorEmail||currentUser.email,
+      dueDate:new Date().toISOString().slice(0,10), status:'pending', taskType:'lead-outreach',
+      createdBy:currentUser.uid, createdAt:Date.now(),
+    }).catch(e=>console.warn('[lead task]',e));
+    showToast('✅ Agent done — outreach drafted for '+(lead.name||'lead'),'success');
+  } catch(e){
+    console.error('[runLeadAgent]', e);
+    await _leadUpdate(leadId, {status:'New', agentError:String(e.message||e)}).catch(()=>{});
+    showToast('Agent failed: '+(e.message||e),'error',6000);
+  }
+}
+window.runLeadAgent = runLeadAgent;
+
+// ── Call script assistant ───────────────────────────────────────────────────
+async function generateLeadCallScript(leadId){
+  const lead=_leadById(leadId); if(!lead) return;
+  const btn=document.getElementById('lead-script-btn'); if(btn){btn.disabled=true;btn.textContent='Writing script…';}
+  try {
+    const script = await leadAI(
+      LEADGEN_PLAYBOOK+`\nYou are the call-prep coach for an ELC land advisor about to dial this lead. Write a practical phone script the advisor can glance at during the call. Format in plain text:
+OPENER (the first 15 seconds — natural, names the property/area, gives them an easy out)
+IF THEY ENGAGE (3-4 discovery questions in the order to ask them, tuned to this profile's motivations)
+LIKELY OBJECTIONS (the 2-3 most likely for this profile, each with a one-line response)
+VOICEMAIL (under 30 seconds)
+CLOSE (the single next-step ask)
+Keep it conversational — the advisor closes on motivation and trust, not pitch. For estate/probate: lead with condolences-adjacent warmth, zero urgency.`,
+      (lead.research?'RESEARCH BRIEF:\n'+lead.research+'\n\n':'')+_leadContextBlock(lead), 1400);
+    await _leadUpdate(leadId,{callScript:script, callScriptAt:Date.now()});
+    await _leadLog(leadId,'Call script generated');
+  } catch(e){ showToast('Script failed: '+(e.message||e),'error'); }
+  if(btn){btn.disabled=false;btn.textContent='🔄 Regenerate script';}
+}
+window.generateLeadCallScript = generateLeadCallScript;
+
+// ── Outreach sending (EmailJS one-click; Gmail-compose fallback) ────────────
+function _leadEmailJSReady(){
+  const c=APP_CONFIG.emailjs;
+  return !!(c?.publicKey && c.publicKey!=='YOUR_EMAILJS_PUBLIC_KEY');
+}
+async function _leadMarkStepSent(leadId, stepIdx, via){
+  const lead=_leadById(leadId); if(!lead?.cadence) return;
+  const steps=[...lead.cadence.steps];
+  steps[stepIdx]={...steps[stepIdx], status:'sent', sentAt:Date.now(), via};
+  // Next pending step's due date
+  const next=steps.find(s=>s.status==='pending');
+  const base=Date.now();
+  const sentDay=steps[stepIdx].day||0;
+  const nextDueAt=next ? base + Math.max(1,(next.day - sentDay))*24*60*60*1000 : null;
+  await _leadUpdate(leadId,{cadence:{...lead.cadence, steps, active:!!next, nextDueAt, lastSentAt:base}});
+  await _leadLog(leadId, steps[stepIdx].label+' sent ('+via+')'+(next?' — next: '+next.label:' — cadence complete'));
+}
+async function sendLeadStep(leadId, stepIdx){
+  const lead=_leadById(leadId); if(!lead) return;
+  const step=lead.cadence?.steps?.[stepIdx]; if(!step) return;
+  if(!lead.email){ showToast('Lead has no email address','error'); return; }
+  // Pull any in-panel edits before sending
+  const subjEl=document.getElementById('lead-edit-subject-'+stepIdx);
+  const bodyEl=document.getElementById('lead-edit-body-'+stepIdx);
+  const subject=(subjEl?subjEl.value:step.subject)||step.subject;
+  const body=(bodyEl?bodyEl.value:step.body)||step.body;
+  if(subjEl||bodyEl){ // persist edits
+    const steps=[...lead.cadence.steps]; steps[stepIdx]={...steps[stepIdx],subject,body};
+    await _leadUpdate(leadId,{cadence:{...lead.cadence,steps}});
+  }
+  const advisorEmail=lead.advisorEmail||currentUser.email;
+  const advisorName =lead.advisorName ||currentUser.name;
+  if(_leadEmailJSReady()){
+    try {
+      const c=APP_CONFIG.emailjs;
+      await window.emailjs.send(c.serviceId, c.templateId, {
+        to_email:lead.email, subject, message:body,
+        advisor_name:advisorName, property_address:lead.propertyAddress||'',
+        reply_to:advisorEmail, from_name:advisorName,
+      });
+      await _leadMarkStepSent(leadId, stepIdx, 'emailjs');
+      if(lead.status==='Outreach' && stepIdx===0) await _leadUpdate(leadId,{firstOutreachAt:Date.now()});
+      showToast('✉️ Sent to '+lead.email,'success');
+      return;
+    } catch(e){
+      console.error('[lead emailjs]',e);
+      showToast('Auto-send failed — opening Gmail instead','warning',5000);
+    }
+  }
+  // Fallback: Gmail compose, advisor sends manually, then confirms
+  const url='https://mail.google.com/mail/?view=cm&fs=1&to='+encodeURIComponent(lead.email)
+    +'&su='+encodeURIComponent(subject)+'&body='+encodeURIComponent(body);
+  window.open(url,'_blank');
+  setTimeout(async ()=>{
+    if(confirm('Mark "'+step.label+'" as sent to '+lead.email+'?')){
+      await _leadMarkStepSent(leadId, stepIdx, 'gmail-manual');
+    }
+  }, 800);
+}
+window.sendLeadStep = sendLeadStep;
+async function toggleLeadCadence(leadId){
+  const lead=_leadById(leadId); if(!lead?.cadence) return;
+  const active=!lead.cadence.active;
+  await _leadUpdate(leadId,{cadence:{...lead.cadence, active}});
+  await _leadLog(leadId, active?'Cadence resumed':'Cadence paused');
+}
+window.toggleLeadCadence = toggleLeadCadence;
+async function markLeadReplied(leadId){
+  const lead=_leadById(leadId); if(!lead) return;
+  await _leadUpdate(leadId,{status:'Engaged', replyDetectedAt:Date.now(), repliedVia:'manual',
+    cadence:lead.cadence?{...lead.cadence, active:false}:null});
+  await _leadLog(leadId,'Reply received — cadence stopped, moved to Engaged');
+  showToast('🎉 Lead engaged — cadence stopped','success');
+}
+window.markLeadReplied = markLeadReplied;
+
+// ── Status moves / promote / dead ───────────────────────────────────────────
+async function setLeadStatus(leadId, status){
+  await _leadUpdate(leadId,{status});
+  await _leadLog(leadId,'Status → '+status);
+}
+window.setLeadStatus = setLeadStatus;
+async function promoteLeadToDeal(leadId){
+  const lead=_leadById(leadId); if(!lead) return;
+  if(!confirm('Promote this lead to a Prospect-stage deal on the board?')) return;
+  const prof=LEAD_PROFILES[lead.profileType]||{};
+  const isBuyer=(prof.side||'').toLowerCase()==='buyer';
+  const dealId = await FB.createDeal({
+    propertyAddress: lead.propertyAddress || ((lead.name||'Lead')+' — property TBD'),
+    stage:'Prospect', probability:10,
+    advisorUid: lead.advisorUid||currentUser.uid,
+    advisorEmail: lead.advisorEmail||currentUser.email,
+    advisorName: lead.advisorName||currentUser.name,
+    county: lead.county||'', landType: lead.landType||'',
+    parcelId: lead.parcelId||'', acreage: lead.acreage||'',
+    [isBuyer?'buyer':'seller']: lead.name||'',
+    notes:'Promoted from Leads tab ('+(prof.label||lead.profileType||'lead')+').'
+      +(lead.research?'\n\n— AI RESEARCH BRIEF —\n'+lead.research:''),
+    stageHistory:[{stage:'Prospect', at:Date.now(), by:currentUser.name}],
+    createdAt:Date.now(), createdBy:currentUser.uid,
+  });
+  await _leadUpdate(leadId,{status:'Promoted', promotedDealId:dealId,
+    cadence:lead.cadence?{...lead.cadence,active:false}:null});
+  await _leadLog(leadId,'Promoted to deal '+dealId);
+  showToast('🚀 Promoted to Prospect — see the Deals board','success');
+  closeLeadPanel();
+}
+window.promoteLeadToDeal = promoteLeadToDeal;
+async function markLeadDead(leadId){
+  const lead=_leadById(leadId); if(!lead) return;
+  const reason=prompt('Mark lead dead — reason? (optional)')||'';
+  await _leadUpdate(leadId,{status:'Dead', deadReason:reason,
+    cadence:lead.cadence?{...lead.cadence,active:false}:null});
+  await _leadLog(leadId,'Marked dead'+(reason?': '+reason:''));
+  closeLeadPanel();
+}
+window.markLeadDead = markLeadDead;
+
+// ── Create lead ─────────────────────────────────────────────────────────────
+async function createLead(data, runAgent){
+  const {collection, addDoc} = _fbFns;
+  const ref = await addDoc(collection(_fbDb,'leads'), {
+    ...data,
+    status:'New', source:data.source||'manual',
+    advisorUid:data.advisorUid||currentUser.uid,
+    advisorEmail:data.advisorEmail||currentUser.email,
+    advisorName:data.advisorName||currentUser.name,
+    activityLog:[{at:Date.now(), by:currentUser?.name||'system', text:'Lead created'}],
+    createdAt:Date.now(), createdBy:currentUser?.uid||'', updatedAt:Date.now(),
+  });
+  if(runAgent) runLeadAgent(ref.id); // fire and forget — status updates live
+  return ref.id;
+}
+
+// ── VIEW: LEADS ─────────────────────────────────────────────────────────────
+function viewLeads(){
+  bootLeads();
+  const isMgr = currentUser.isAdmin || currentUser.isOfficeManager;
+  const visible = allLeads.filter(_leadVisible);
+  const active  = visible.filter(l=>!LEAD_TERMINAL.includes(l.status));
+  const showTerminal = window._leadsFilter==='all-states';
+  const fmtD = ts => ts? new Date(ts).toLocaleDateString('en-US',{month:'short',day:'numeric'}) : '';
+
+  // Stats
+  const dueFollowups = active.filter(l=>l.cadence?.active && l.cadence.nextDueAt && l.cadence.nextDueAt<=Date.now()).length;
+  const awaitingReply= active.filter(l=>l.cadence?.active).length;
+  const engaged7d    = visible.filter(l=>l.replyDetectedAt && l.replyDetectedAt>Date.now()-7*864e5).length;
+
+  const card = l => {
+    const prof=LEAD_PROFILES[l.profileType]||{};
+    const cad=l.cadence;
+    const due=cad?.active && cad.nextDueAt && cad.nextDueAt<=Date.now();
+    const sent=(cad?.steps||[]).filter(s=>s.status==='sent').length;
+    return `<div onclick="openLeadPanel('${l.id}')" class="bg-white rounded-lg border border-gray-200 p-3 mb-2 cursor-pointer hover:shadow-md transition" style="border-left:3px solid ${prof.side==='Buyer'?'#0ea5e9':prof.side==='Seller'?'#16a34a':'#8b5cf6'}">
+      <div class="flex justify-between items-start gap-1">
+        <div class="font-semibold text-sm text-gray-800">${_leadEsc(l.name||l.propertyAddress||'Unnamed lead')}</div>
+        ${l.source==='inbound-web'?'<span title="Inbound from thedirtdog.com" class="text-xs">🌐</span>':''}
+      </div>
+      ${l.propertyAddress&&l.name?`<div class="text-xs text-gray-500 mt-0.5">${_leadEsc(l.propertyAddress)}</div>`:''}
+      <div class="flex flex-wrap gap-1 mt-1.5 items-center">
+        ${prof.label?`<span class="text-[10px] px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-600">${prof.label}</span>`:''}
+        ${cad?.active?`<span class="text-[10px] px-1.5 py-0.5 rounded-full ${due?'bg-red-100 text-red-700 font-semibold':'bg-sky-100 text-sky-700'}">${due?'⏰ follow-up due':'✉️ '+sent+'/'+(cad.steps||[]).length+' sent'}</span>`:''}
+        ${l.replyDetectedAt?`<span class="text-[10px] px-1.5 py-0.5 rounded-full bg-violet-100 text-violet-700">💬 replied</span>`:''}
+        ${l.agentError?`<span class="text-[10px] px-1.5 py-0.5 rounded-full bg-red-100 text-red-700" title="${_leadEsc(l.agentError)}">⚠️ agent failed</span>`:''}
+        ${l.status==='Researching'?`<span class="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700">🤖 working…</span>`:''}
+      </div>
+      ${isMgr&&window._leadsFilter!=='mine'?`<div class="text-[10px] text-gray-400 mt-1">${_leadEsc(l.advisorName||'Unassigned')}</div>`:''}
+    </div>`;
+  };
+
+  const cols = LEAD_STATUSES.map(st=>{
+    const c=LEAD_STATUS_COLORS[st];
+    const items=active.filter(l=>l.status===st);
+    return `<div class="rounded-xl ${c.col} border border-gray-200 flex flex-col" style="min-width:240px">
+      <div class="${c.hdr} ${c.txt} rounded-t-xl px-3 py-2 text-xs font-bold flex justify-between">
+        <span>${st}</span><span>${items.length}</span>
+      </div>
+      <div class="p-2 flex-1 overflow-y-auto" style="max-height:calc(100vh - 290px)">
+        ${items.map(card).join('')||'<div class="text-xs text-gray-400 text-center py-4">—</div>'}
+      </div>
+    </div>`;
+  }).join('');
+
+  const terminalRows = showTerminal ? visible.filter(l=>LEAD_TERMINAL.includes(l.status)).map(l=>
+    `<div onclick="openLeadPanel('${l.id}')" class="flex justify-between items-center bg-white border border-gray-200 rounded-lg px-3 py-2 mb-1 cursor-pointer hover:shadow-sm text-sm">
+      <span>${l.status==='Promoted'?'🚀':'💀'} ${_leadEsc(l.name||l.propertyAddress||'Lead')}</span>
+      <span class="text-xs text-gray-400">${l.status} ${fmtD(l.updatedAt)}</span>
+    </div>`).join('') : '';
+
+  setContent(`
+    <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+      <div>
+        <h1 class="text-xl font-bold text-gray-800">🎯 Leads — AI Outreach Agent</h1>
+        <div class="text-xs text-gray-500 mt-0.5">Powered by the ELC Lead Gen Program · ${active.length} active lead${active.length===1?'':'s'}</div>
+      </div>
+      <div class="flex items-center gap-2 flex-wrap">
+        ${isMgr?`<select onchange="window._leadsFilter=this.value;viewLeads()" class="text-xs border rounded-lg px-2 py-1.5 bg-white">
+          <option value="active" ${window._leadsFilter==='active'?'selected':''}>All advisors</option>
+          <option value="mine" ${window._leadsFilter==='mine'?'selected':''}>My leads</option>
+          <option value="all-states" ${window._leadsFilter==='all-states'?'selected':''}>+ Promoted & Dead</option>
+        </select>`:`<button onclick="window._leadsFilter=window._leadsFilter==='all-states'?'active':'all-states';viewLeads()" class="text-xs border rounded-lg px-2 py-1.5 bg-white hover:bg-gray-50">${window._leadsFilter==='all-states'?'Hide':'Show'} closed</button>`}
+        <button onclick="openNewLeadModal()" class="text-sm font-semibold bg-gray-900 text-white rounded-lg px-4 py-2 hover:bg-gray-700">+ New Lead</button>
+      </div>
+    </div>
+    <div class="grid grid-cols-2 md:grid-cols-3 gap-3 mb-4">
+      <div class="bg-white rounded-xl border border-gray-200 p-3"><div class="text-2xl font-bold ${dueFollowups?'text-red-600':'text-gray-800'}">${dueFollowups}</div><div class="text-xs text-gray-500">Follow-ups due now</div></div>
+      <div class="bg-white rounded-xl border border-gray-200 p-3"><div class="text-2xl font-bold text-sky-600">${awaitingReply}</div><div class="text-xs text-gray-500">Active cadences</div></div>
+      <div class="bg-white rounded-xl border border-gray-200 p-3"><div class="text-2xl font-bold text-violet-600">${engaged7d}</div><div class="text-xs text-gray-500">Replies this week</div></div>
+    </div>
+    <div class="flex gap-3 overflow-x-auto pb-4" style="align-items:flex-start">${cols}</div>
+    ${showTerminal?`<div class="mt-2"><div class="text-xs font-bold text-gray-500 mb-2">PROMOTED & DEAD</div>${terminalRows||'<div class="text-xs text-gray-400">None yet</div>'}</div>`:''}
+  `);
+}
+window.viewLeads = viewLeads;
+
+// ── Lead detail panel (slide-over) ──────────────────────────────────────────
+window.closeLeadPanel = function(){
+  document.getElementById('lead-panel')?.remove();
+  document.getElementById('lead-panel-backdrop')?.remove();
+  window._openLeadId=null;
+};
+window.openLeadPanel = function(id){
+  closeLeadPanel();
+  window._openLeadId=id;
+  const backdrop=document.createElement('div');
+  backdrop.id='lead-panel-backdrop';
+  backdrop.className='fixed inset-0 bg-black/20 z-40';
+  backdrop.onclick=closeLeadPanel;
+  const panel=document.createElement('div');
+  panel.id='lead-panel';
+  panel.className='fixed top-0 right-0 h-full bg-white shadow-2xl z-50 overflow-y-auto';
+  panel.style.cssText='width:min(620px,100vw);';
+  document.body.appendChild(backdrop);
+  document.body.appendChild(panel);
+  renderLeadPanel(id);
+};
+function renderLeadPanel(id){
+  const panel=document.getElementById('lead-panel'); if(!panel) return;
+  const l=_leadById(id); if(!l){ closeLeadPanel(); return; }
+  const prof=LEAD_PROFILES[l.profileType]||{};
+  const cad=l.cadence;
+  const fmt=ts=>ts?new Date(ts).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}):'';
+  const nextPendingIdx=(cad?.steps||[]).findIndex(s=>s.status==='pending');
+
+  const stepHtml=(s,i)=>{
+    const isNext=i===nextPendingIdx;
+    const editable=isNext && s.status==='pending';
+    return `<div class="border rounded-lg p-3 mb-2 ${s.status==='sent'?'bg-green-50 border-green-200':isNext?'bg-white border-sky-300':'bg-gray-50 border-gray-200'}">
+      <div class="flex justify-between items-center mb-1">
+        <span class="text-xs font-bold ${s.status==='sent'?'text-green-700':isNext?'text-sky-700':'text-gray-500'}">${s.status==='sent'?'✅':isNext?'▶️':'·'} ${s.label}</span>
+        <span class="text-[10px] text-gray-400">${s.status==='sent'?fmt(s.sentAt)+(s.via?' · '+s.via:''):isNext&&cad.nextDueAt?'due '+fmt(cad.nextDueAt):''}</span>
+      </div>
+      ${editable?`
+        <input id="lead-edit-subject-${i}" class="w-full text-xs border rounded px-2 py-1.5 mb-1 font-semibold" value="${_leadEsc(s.subject)}">
+        <textarea id="lead-edit-body-${i}" class="w-full text-xs border rounded px-2 py-1.5" rows="7">${_leadEsc(s.body)}</textarea>
+        <button onclick="sendLeadStep('${l.id}',${i})" class="mt-1.5 w-full bg-gray-900 text-white text-sm font-semibold rounded-lg py-2 hover:bg-gray-700">✉️ ${_leadEmailJSReady()?'Send now':'Open in Gmail'} — ${_leadEsc(l.email||'no email!')}</button>`
+      :`<div class="text-xs text-gray-600 font-semibold">${_leadEsc(s.subject)}</div>
+        <div class="text-xs text-gray-500 whitespace-pre-wrap mt-0.5" style="max-height:80px;overflow:hidden">${_leadEsc(s.body)}</div>`}
+    </div>`;
+  };
+
+  panel.innerHTML=`
+    <div class="sticky top-0 bg-gray-900 text-white px-5 py-4 flex justify-between items-start z-10">
+      <div>
+        <div class="font-bold text-lg">${_leadEsc(l.name||l.propertyAddress||'Lead')}</div>
+        <div class="text-xs text-gray-300 mt-0.5">${prof.label||''} ${prof.side?'· '+prof.side+' side':''} · ${_leadEsc(l.advisorName||'Unassigned')}</div>
+        <div class="flex gap-1 mt-2 flex-wrap">${[...LEAD_STATUSES,...(LEAD_TERMINAL.includes(l.status)?[l.status]:[])].map(st=>
+          `<span onclick="setLeadStatus('${l.id}','${st}')" class="text-[10px] px-2 py-0.5 rounded-full cursor-pointer ${l.status===st?'bg-white text-gray-900 font-bold':'bg-white/15 text-white/70 hover:bg-white/30'}">${st}</span>`).join('')}
+        </div>
+      </div>
+      <button onclick="closeLeadPanel()" class="text-gray-300 hover:text-white text-xl leading-none">✕</button>
+    </div>
+    <div class="px-5 py-4">
+      <div class="grid grid-cols-2 gap-2 text-xs mb-4">
+        <div><span class="text-gray-400">Email</span><br>${_leadEsc(l.email||'—')}</div>
+        <div><span class="text-gray-400">Phone</span><br>${l.phone?`<a href="tel:${_leadEsc(l.phone)}" class="text-blue-600">${_leadEsc(l.phone)}</a>`:'—'}</div>
+        <div><span class="text-gray-400">Company</span><br>${_leadEsc(l.company||'—')}</div>
+        <div><span class="text-gray-400">Property</span><br>${_leadEsc(l.propertyAddress||'—')}${l.county?'<br>'+_leadEsc(l.county)+' County':''}${l.acreage?' · ~'+_leadEsc(l.acreage)+' ac':''}</div>
+        ${l.parcelId?`<div><span class="text-gray-400">Parcel</span><br>${_leadEsc(l.parcelId)}</div>`:''}
+        ${(l.triggerSignals||[]).length?`<div class="col-span-2"><span class="text-gray-400">Trigger signals</span><br>${l.triggerSignals.map(s=>'<span class="inline-block bg-amber-50 text-amber-700 rounded px-1.5 py-0.5 mr-1 mt-1">'+_leadEsc(s)+'</span>').join('')}</div>`:''}
+        ${l.inboundMessage?`<div class="col-span-2"><span class="text-gray-400">Inbound message</span><br><span class="italic">"${_leadEsc(l.inboundMessage)}"</span></div>`:''}
+        ${l.notes?`<div class="col-span-2"><span class="text-gray-400">Notes</span><br>${_leadEsc(l.notes)}</div>`:''}
+      </div>
+
+      <div class="flex gap-2 mb-4 flex-wrap">
+        ${l.status==='New'||l.agentError?`<button onclick="runLeadAgent('${l.id}')" class="text-xs bg-amber-500 text-white font-semibold rounded-lg px-3 py-1.5 hover:bg-amber-600">🤖 ${l.agentError?'Retry agent':'Run AI agent'}</button>`:''}
+        ${cad?`<button onclick="toggleLeadCadence('${l.id}')" class="text-xs border rounded-lg px-3 py-1.5 hover:bg-gray-50">${cad.active?'⏸ Pause cadence':'▶️ Resume cadence'}</button>`:''}
+        ${!l.replyDetectedAt&&cad?`<button onclick="markLeadReplied('${l.id}')" class="text-xs border border-violet-300 text-violet-700 rounded-lg px-3 py-1.5 hover:bg-violet-50">💬 They replied</button>`:''}
+        <button onclick="promoteLeadToDeal('${l.id}')" class="text-xs bg-green-600 text-white font-semibold rounded-lg px-3 py-1.5 hover:bg-green-700">🚀 Promote to Deal</button>
+        ${l.status!=='Dead'?`<button onclick="markLeadDead('${l.id}')" class="text-xs border border-red-200 text-red-600 rounded-lg px-3 py-1.5 hover:bg-red-50">💀 Dead</button>`:''}
+      </div>
+
+      ${l.status==='Researching'?'<div class="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-700 mb-4">🤖 The agent is researching this lead and drafting outreach — this panel updates live (usually under a minute).</div>':''}
+      ${l.agentError?`<div class="bg-red-50 border border-red-200 rounded-lg p-3 text-xs text-red-700 mb-4">⚠️ Agent error: ${_leadEsc(l.agentError)}</div>`:''}
+
+      ${l.research?`<details class="mb-4" open>
+        <summary class="text-xs font-bold text-gray-700 cursor-pointer mb-1">🔍 AI RESEARCH BRIEF <span class="font-normal text-gray-400">${fmt(l.researchAt)}</span></summary>
+        <div class="bg-gray-50 border border-gray-200 rounded-lg p-3 text-xs text-gray-700 whitespace-pre-wrap">${_leadEsc(l.research)}</div>
+      </details>`:''}
+
+      ${cad?`<div class="mb-4">
+        <div class="text-xs font-bold text-gray-700 mb-1.5">✉️ OUTREACH CADENCE ${cad.active?'<span class="text-green-600">· active</span>':'<span class="text-gray-400">· paused</span>'}</div>
+        ${(cad.steps||[]).map(stepHtml).join('')}
+        <div class="text-[10px] text-gray-400 mt-1">Follow-ups auto-send overnight from ${_leadEsc(l.advisorEmail||'the advisor')}'s mailbox if no reply is detected. Pause anytime.</div>
+      </div>`:''}
+
+      <div class="mb-4">
+        <div class="text-xs font-bold text-gray-700 mb-1.5">📞 CALL SCRIPT</div>
+        ${l.callScript?`<div class="bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-gray-800 whitespace-pre-wrap mb-1.5">${_leadEsc(l.callScript)}</div>`:''}
+        <button id="lead-script-btn" onclick="generateLeadCallScript('${l.id}')" class="text-xs border rounded-lg px-3 py-1.5 hover:bg-gray-50">${l.callScript?'🔄 Regenerate script':'📞 Generate call script'}</button>
+      </div>
+
+      ${(l.activityLog||[]).length?`<details class="mb-6">
+        <summary class="text-xs font-bold text-gray-500 cursor-pointer">ACTIVITY (${l.activityLog.length})</summary>
+        <div class="mt-1">${[...l.activityLog].reverse().map(a=>`<div class="text-[11px] text-gray-500 border-b border-gray-100 py-1"><span class="text-gray-400">${fmt(a.at)} · ${_leadEsc(a.by)}</span> — ${_leadEsc(a.text)}</div>`).join('')}</div>
+      </details>`:''}
+    </div>`;
+}
+
+// ── New Lead modal ──────────────────────────────────────────────────────────
+window.openNewLeadModal = function(){
+  document.getElementById('new-lead-modal')?.remove();
+  const isMgr=currentUser.isAdmin||currentUser.isOfficeManager;
+  const advisorOpts=Object.entries(allProfiles).map(([uid,p])=>`<option value="${uid}" ${uid===currentUser.uid?'selected':''}>${_leadEsc(p.name||p.email)}</option>`).join('');
+  const wrap=document.createElement('div');
+  wrap.id='new-lead-modal';
+  wrap.className='fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4';
+  wrap.innerHTML=`<div class="bg-white rounded-xl shadow-2xl w-full overflow-y-auto" style="max-width:560px;max-height:92vh">
+    <div class="bg-gray-900 text-white px-5 py-3 rounded-t-xl flex justify-between items-center">
+      <span class="font-bold">🎯 New Lead</span>
+      <button onclick="document.getElementById('new-lead-modal').remove()" class="text-gray-300 hover:text-white">✕</button>
+    </div>
+    <form id="new-lead-form" class="px-5 py-4 grid grid-cols-2 gap-3 text-sm">
+      <label class="col-span-2 text-xs font-semibold text-gray-600">Target profile
+        <select name="profileType" class="w-full border rounded-lg px-2 py-1.5 mt-1" onchange="window._nlSignals(this.value)">
+          ${Object.entries(LEAD_PROFILES).map(([k,p])=>`<option value="${k}">${p.label} (${p.side})</option>`).join('')}
+        </select>
+      </label>
+      <label class="text-xs font-semibold text-gray-600">Contact name<input name="name" class="w-full border rounded-lg px-2 py-1.5 mt-1" placeholder="Jane Smith"></label>
+      <label class="text-xs font-semibold text-gray-600">Company<input name="company" class="w-full border rounded-lg px-2 py-1.5 mt-1"></label>
+      <label class="text-xs font-semibold text-gray-600">Email<input name="email" type="email" class="w-full border rounded-lg px-2 py-1.5 mt-1"></label>
+      <label class="text-xs font-semibold text-gray-600">Phone<input name="phone" class="w-full border rounded-lg px-2 py-1.5 mt-1"></label>
+      <label class="col-span-2 text-xs font-semibold text-gray-600">Property address<input name="propertyAddress" class="w-full border rounded-lg px-2 py-1.5 mt-1" placeholder="15302 Amberly Dr, Tampa"></label>
+      <label class="text-xs font-semibold text-gray-600">County<input name="county" class="w-full border rounded-lg px-2 py-1.5 mt-1" placeholder="Hillsborough"></label>
+      <label class="text-xs font-semibold text-gray-600">Parcel ID<input name="parcelId" class="w-full border rounded-lg px-2 py-1.5 mt-1"></label>
+      <label class="text-xs font-semibold text-gray-600">Acreage<input name="acreage" class="w-full border rounded-lg px-2 py-1.5 mt-1" placeholder="12.5"></label>
+      <label class="text-xs font-semibold text-gray-600">Land type<input name="landType" class="w-full border rounded-lg px-2 py-1.5 mt-1" placeholder="Residential dev"></label>
+      <div class="col-span-2 text-xs font-semibold text-gray-600">Trigger signals<div id="nl-signals" class="mt-1 grid gap-1"></div></div>
+      <label class="col-span-2 text-xs font-semibold text-gray-600">Notes<textarea name="notes" rows="2" class="w-full border rounded-lg px-2 py-1.5 mt-1"></textarea></label>
+      ${isMgr?`<label class="col-span-2 text-xs font-semibold text-gray-600">Assign to advisor<select name="advisorUid" class="w-full border rounded-lg px-2 py-1.5 mt-1">${advisorOpts}</select></label>`:''}
+      <label class="col-span-2 flex items-center gap-2 text-xs font-semibold text-gray-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+        <input type="checkbox" name="runAgent" checked> 🤖 Run the AI agent now (research + draft outreach & cadence)
+      </label>
+      <button type="submit" class="col-span-2 bg-gray-900 text-white font-semibold rounded-lg py-2.5 hover:bg-gray-700">Create lead</button>
+    </form>
+  </div>`;
+  document.body.appendChild(wrap);
+  window._nlSignals=function(profKey){
+    const sig=LEAD_PROFILES[profKey]?.signals||[];
+    document.getElementById('nl-signals').innerHTML=sig.map(s=>
+      `<label class="flex items-center gap-2 font-normal text-gray-600"><input type="checkbox" name="signal" value="${_leadEsc(s)}"> ${_leadEsc(s)}</label>`).join('');
+  };
+  window._nlSignals(Object.keys(LEAD_PROFILES)[0]);
+  document.getElementById('new-lead-form').onsubmit=async e=>{
+    e.preventDefault();
+    const f=e.target;
+    const data={
+      profileType:f.profileType.value, name:f.name.value.trim(), company:f.company.value.trim(),
+      email:f.email.value.trim(), phone:f.phone.value.trim(),
+      propertyAddress:f.propertyAddress.value.trim(), county:f.county.value.trim(),
+      parcelId:f.parcelId.value.trim(), acreage:f.acreage.value.trim(), landType:f.landType.value.trim(),
+      notes:f.notes.value.trim(),
+      triggerSignals:[...f.querySelectorAll('input[name=signal]:checked')].map(c=>c.value),
+    };
+    if(f.advisorUid){ data.advisorUid=f.advisorUid.value; const p=allProfiles[data.advisorUid]||{}; data.advisorName=p.name||''; data.advisorEmail=p.email||''; }
+    const runAgent=f.runAgent.checked;
+    document.getElementById('new-lead-modal').remove();
+    const id=await createLead(data, runAgent);
+    showToast('Lead created'+(runAgent?' — agent running':''),'success');
+    openLeadPanel(id);
+  };
+};
+
+/* =======================================================
    AI ASSISTANT — shared helper + global chat widget
    ======================================================= */
 const _aiHistory = { _hrHistory:[], _globalHistory:[] };
@@ -21761,6 +22330,7 @@ async function init(){
       // Without this, allContacts is empty until the CRM tab is opened, causing
       // the duplicate-check to miss existing contacts and create fresh duplicates.
       bootCRM();
+      bootLeads();
       _startCalendarReminders();
       // Auto-migrate pending profile → real UID on first login
       await FB.migratePendingProfile(fbUser.uid, fbUser.email||'').catch(e=>console.warn('[pending-migrate]',e));
@@ -23681,6 +24251,7 @@ window.mobileMoreMenu = function(){
     {id:'splits',label:'⚖️ Splits'},{id:'users',label:'👤 Users'},
     {id:'automations',label:'⚡ Automations'},{id:'leaderboard',label:'🏆 Leaderboard'},
     {id:'eos',label:'🧭 EOS'},{id:'drive',label:'📁 Drive'},
+    {id:'leads',label:'🎯 Leads'},
   ];
   sheet.innerHTML = items.map(i =>
     `<button onclick="mobileTab('${i.id}');document.getElementById('mobile-more-sheet')?.remove()"
