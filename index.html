@@ -672,7 +672,7 @@ body { background: var(--bg); }
 /* ── KPI band: hero goal card + stat cards ── */
 .kpi-band {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
   gap: .8rem;
   margin-bottom: 1.4rem;
 }
@@ -7226,33 +7226,49 @@ function viewBoard(){
     const kpiCard = (label, value, sub, color, iconKey, names) =>
       _kpiCardHtml(label, value, sub, color, _kpiIcons[iconKey||'pipeline']||_kpiIcons.pipeline, {names});
 
-    const goalColor  = qPct>=100?'var(--brand-teal)':'var(--brand-red)';
-    const barTrack   = '<div class="bar-track" style="margin-top:.5rem"><div class="bar-fill" style="width:'+qPct+'%;background:'+goalColor+'"></div></div>';
-
     const getName = d => d.projectName || d.propertyAddress || d.name || 'Unnamed';
     // Only show per-deal tooltips in advisor view (firm-wide would be too many names)
     const tipNames = (arr) => isFirmView ? [] : arr.map(getName);
     const avgListingPrice = listDeals.length
       ? Math.round(listDeals.reduce((s,d)=>s+(d.listedPrice||d.purchasePrice||0),0)/listDeals.length)
       : 0;
-    const qGoalSub = isFirmView
-      ? fmt$(qVol)+' of '+fmt$(Q_GOAL)+' firm goal'
-      : fmt$(qVol)+' of '+fmt$(Q_GOAL);
-    kpiBar = '<div style="display:flex;gap:.75rem;flex-wrap:wrap;margin-bottom:1.5rem">'
-      + kpiCard('Under Contract',    fmt$(ucVol),      ucDeals.length+' deal'+(ucDeals.length!==1?'s':''),                            'var(--brand-red)',   'contract', tipNames(ucDeals))
-      + kpiCard('Available Listings',fmt$(listVol),    listDeals.length+' listing'+(listDeals.length!==1?'s':''),                      'var(--brand-teal)', 'listing',  tipNames(listDeals))
-      + kpiCard('Avg Listing Price',  avgListingPrice>0?fmt$(avgListingPrice):'—', listDeals.length+' active listing'+(listDeals.length!==1?'s':''), '#059669', 'listing', tipNames(listDeals))
-      + '<div class="kpi-card" style="border-bottom:3px solid '+goalColor+';flex:1;min-width:160px">'
-        + '<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:.75rem">'
+
+    // ── Closed Won this year — celebrate the wins (display only) ──
+    const _cyr = now.getFullYear();
+    const wonYTDDeals = kpiDeals.filter(d=>{
+      if(!isWonStage(d.stage||'')) return false;
+      const yr = d.closeDate ? new Date(d.closeDate+'T12:00:00').getFullYear()
+        : new Date(d.stageEnteredAt||d.updatedAt||d.createdAt||0).getFullYear();
+      return yr === _cyr;
+    });
+    const wonYTDVol = wonYTDDeals.reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||0), 0);
+
+    // ── Hero goal card: goal-gradient meter, "to go" framing ──
+    const goalColor  = qPct>=100 ? '#059669' : 'var(--brand-teal)';
+    const remaining  = Math.max(Q_GOAL - qVol, 0);
+    const heroSub    = qPct>=100
+      ? '<strong style="color:#059669">Goal surpassed</strong> — '+fmt$(qVol)+' secured against '+fmt$(Q_GOAL)
+      : '<strong style="color:var(--ink)">'+fmt$(remaining)+' to go</strong> — '+fmt$(qVol)+' already secured';
+    const kpiHero = '<div class="kpi-card kpi-hero" style="border-bottom:4px solid '+goalColor+'">'
+      + '<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:.55rem">'
         + '<div class="kpi-label">'+qLabel+' Goal'+(isFirmView?' — Firm':' — Mine')+'</div>'
-        + '<div class="kpi-icon" style="background:color-mix(in srgb,'+goalColor+' 12%,transparent);color:'+goalColor+'">' + _kpiIcons.goal + '</div>'
-        + '</div>'
-        + '<div class="kpi-value">'+qPct+'%</div>'
-        + barTrack
-        + '<div class="kpi-sub" style="margin-top:.4rem">'+qGoalSub+'</div>'
+        + '<span class="kpi-hero-badge" style="color:'+goalColor+'">'+qDeals.length+' deal'+(qDeals.length!==1?'s':'')+' counting</span>'
       + '</div>'
-      + kpiCard('Open Tasks',          openTasks,        isFirmView?'firm-wide to-do items':'to-do items',                            '#D97706',           'tasks')
+      + '<div style="display:flex;align-items:baseline;gap:.6rem;flex-wrap:wrap">'
+        + '<div class="kpi-hero-pct" style="color:'+goalColor+'">'+qPct+'%</div>'
+        + '<div class="kpi-hero-of">of '+fmt$(Q_GOAL)+(isFirmView?' firm goal':'')+'</div>'
+      + '</div>'
+      + '<div class="kpi-meter"><div class="kpi-meter-fill" style="width:'+qPct+'%'+(qPct>=100?';background:linear-gradient(90deg,#059669,#10B981)':'')+'"></div><i style="left:25%"></i><i style="left:50%"></i><i style="left:75%"></i></div>'
+      + '<div class="kpi-sub" style="margin-top:.5rem">'+heroSub+'</div>'
+    + '</div>';
+
+    kpiBar = '<div class="kpi-band">'
+      + kpiHero
+      + kpiCard('Closed In '+_cyr,     wonYTDVol>0?fmt$(wonYTDVol):'—', wonYTDDeals.length>0?wonYTDDeals.length+' deal'+(wonYTDDeals.length!==1?'s':'')+' won — keep going':'first close of the year is up for grabs', '#059669', 'goal', tipNames(wonYTDDeals))
+      + kpiCard('Under Contract',      fmt$(ucVol),      ucDeals.length+' deal'+(ucDeals.length!==1?'s':'')+' in motion',              'var(--brand-red)',   'contract', tipNames(ucDeals))
       + kpiCard('Closings This Year',  fmt$(closingVol), closingDeals.length+' deal'+(closingDeals.length!==1?'s':'')+' thru year-end','#4F46E5',           'calendar', tipNames(closingDeals))
+      + kpiCard('Available Listings',  fmt$(listVol),    listDeals.length+' listing'+(listDeals.length!==1?'s':'')+(avgListingPrice>0?' · avg '+fmtM$(avgListingPrice):''), 'var(--brand-teal)', 'listing',  tipNames(listDeals))
+      + kpiCard('Open Tasks',          openTasks,        isFirmView?'firm-wide to-do items':'to-do items',                            '#D97706',           'tasks')
       + kpiCard(nextYear+' Pipeline',  fmt$(nyVol),      nyDeals.length+' deal'+(nyDeals.length!==1?'s':'')+' closing '+nextYear,     'var(--brand-black)','pipeline',  tipNames(nyDeals))
       + (beyondDeals.length ? kpiCard(nextYear+'+ Pipeline', fmt$(beyondVol), beyondDeals.length+' deal'+(beyondDeals.length!==1?'s':'')+' closing '+String(nextYear+1)+'+', '#7C3AED', 'pipeline', tipNames(beyondDeals)) : '')
       + '</div>';
@@ -7289,14 +7305,14 @@ function viewBoard(){
       </div>
       <div style="display:flex;align-items:center;gap:.75rem;flex-wrap:wrap">
         <div id="deal-search-wrap" style="position:relative">
-          <input id="deal-search-input" type="text" autocomplete="off" placeholder="🔍 Search deals…"
+          <input id="deal-search-input" type="text" autocomplete="off" placeholder="Search deals…"
             oninput="_dealSearch(this.value)" onfocus="_dealSearch(this.value)" onkeydown="_dealSearchKey(event)"
             style="font-size:.85rem;padding:.45rem .7rem;border:1px solid #d1d5db;border-radius:.5rem;background:#fff;color:#111;outline:none;width:220px"/>
           <div id="deal-search-results" style="display:none;position:absolute;top:calc(100% + 4px);left:0;width:320px;max-height:340px;overflow-y:auto;background:#fff;border:1px solid #e5e7eb;border-radius:.6rem;box-shadow:0 12px 32px rgba(0,0,0,.14);z-index:60"></div>
         </div>
         ${_advisorFilterDropdown}
-        <button onclick="window.openDealMap()" class="border border-green-200 rounded-lg px-3 py-2 text-sm text-green-700 hover:bg-green-50 whitespace-nowrap font-semibold" title="See every deal pinned on a map">🗺️ Map</button>
-        <button onclick="window._propGmailSyncAll()" class="border border-blue-200 rounded-lg px-3 py-2 text-sm text-blue-600 hover:bg-blue-50 whitespace-nowrap font-semibold" title="Scan Gmail for emails about all active properties (last 30 days)">📧 Gmail Sync${typeof _PROP_GMAIL_SYNC_DATE!=='undefined'?` <span class="font-normal text-xs text-blue-400">(${_PROP_GMAIL_SYNC_DATE})</span>`:''}</button>
+        <button onclick="window.openDealMap()" class="ghost-btn" title="See every deal pinned on a map"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:inline;vertical-align:-2px;margin-right:.35rem"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z"/><circle cx="12" cy="10" r="3"/></svg>Map</button>
+        <button onclick="window._propGmailSyncAll()" class="ghost-btn" title="Scan Gmail for emails about all active properties (last 30 days)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:inline;vertical-align:-2px;margin-right:.35rem"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>Gmail Sync${typeof _PROP_GMAIL_SYNC_DATE!=='undefined'?` <span class="font-normal text-xs" style="color:#9CA3AF">(${_PROP_GMAIL_SYNC_DATE})</span>`:''}</button>
         <button onclick="openDealModal(null)" class="brand-btn px-5 py-2.5 text-sm font-semibold transition">+ Add Deal</button>
       </div>
     </div>
@@ -7369,12 +7385,15 @@ function viewBoard(){
             : '';
         return `
           <div style="min-width:240px;width:240px;flex-shrink:0;display:flex;flex-direction:column;">
-            <div class="${sc.hdr} ${sc.txt} col-hdr-sticky rounded-t-xl px-3 py-2 flex items-center justify-between">
-              <span class="${sc.txt} font-semibold text-xs uppercase tracking-wide">${stage}</span>
-              <div class="flex items-center gap-2">
-                <span class="${sc.txt} text-xs opacity-70">${allSd.length}</span>
-                ${addBtn}
+            <div class="${sc.hdr} ${sc.txt} col-hdr-sticky rounded-t-xl px-3 py-2">
+              <div class="flex items-center justify-between">
+                <span class="${sc.txt} stage-name font-semibold text-xs uppercase tracking-wide">${stage}</span>
+                <div class="flex items-center gap-2">
+                  <span class="${sc.txt} text-xs opacity-70">${allSd.length}</span>
+                  ${addBtn}
+                </div>
               </div>
+              ${total>0?`<div class="stage-total">${fmtM$(total)}</div>`:''}
             </div>
             <div class="kanban-col ${sc.col} rounded-b-xl p-2 space-y-2" style="flex:1;"
               data-stage="${stage}"
@@ -7570,7 +7589,7 @@ function renderCard(deal){
       <!-- Title row -->
       <div class="flex items-start gap-1 mb-2 min-w-0">
         <div class="flex-1 min-w-0 text-xs font-semibold text-gray-800 leading-snug" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">${title}</div>
-        <button data-action="edit-deal" data-deal-id="${deal.id}" data-stage="${st.replace(/"/g,'&quot;')}" class="text-gray-300 hover:text-blue-500 shrink-0 text-sm leading-none ml-1" title="Edit">✏️</button>
+        <button data-action="edit-deal" data-deal-id="${deal.id}" data-stage="${st.replace(/"/g,'&quot;')}" class="text-gray-300 hover:text-gray-600 shrink-0 leading-none ml-1" title="Edit"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
       </div>
 
       ${currentUser.isAdmin?`<div class="text-xs text-blue-500 mb-1.5 font-medium" style="white-space:normal;line-height:1.4">${
@@ -7604,7 +7623,7 @@ function renderCard(deal){
           : '';
       })()}
       <div class="flex items-center justify-between mt-1.5 gap-1">
-        ${st==='Proposal Outstanding'?`<span class="text-xs text-amber-600 font-semibold">📅 ${days}d in stage</span>`:
+        ${st==='Proposal Outstanding'?`<span class="text-xs text-amber-600 font-semibold">${days}d in stage</span>`:
           deal.driveUrl?`<a href="${deal.driveUrl}" target="_blank" rel="noopener"
             onclick="event.stopPropagation()"
             title="Open Google Drive folder"
@@ -7612,7 +7631,7 @@ function renderCard(deal){
             <svg width="11" height="10" viewBox="0 0 87.3 78" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0"><path d="m6.6 66.85 3.85 6.65c.8 1.4 1.95 2.5 3.3 3.3l13.75-23.8h-27.5c0 1.55.4 3.1 1.2 4.5z" fill="#0066da"/><path d="m43.65 25-13.75-23.8c-1.35.8-2.5 1.9-3.3 3.3l-25.4 44a9.06 9.06 0 0 0 -1.2 4.5h27.5z" fill="#00ac47"/><path d="m73.55 76.8c1.35-.8 2.5-1.9 3.3-3.3l1.6-2.75 7.65-13.25c.8-1.4 1.2-2.95 1.2-4.5h-27.502l5.852 11.5z" fill="#ea4335"/><path d="m43.65 25 13.75-23.8c-1.35-.8-2.9-1.2-4.5-1.2h-18.5c-1.6 0-3.15.45-4.5 1.2z" fill="#00832d"/><path d="m59.8 53h-32.3l-13.75 23.8c1.35.8 2.9 1.2 4.5 1.2h50.8c1.6 0 3.15-.45 4.5-1.2z" fill="#2684fc"/><path d="m73.4 26.5-12.7-22c-.8-1.4-1.95-2.5-3.3-3.3l-13.75 23.8 16.15 28h27.45c0-1.55-.4-3.1-1.2-4.5z" fill="#ffba00"/></svg>
             Drive
           </a>`:'<span></span>'}
-        <span class="text-xs ${dayCls} px-1.5 py-0.5 rounded-full font-medium">⏱ ${days}d</span>
+        <span class="text-xs ${dayCls} px-1.5 py-0.5 rounded-full font-medium" title="${days} days in stage">${days}d</span>
       </div>
     </div>`;
 }
@@ -8980,7 +8999,7 @@ function viewBoardStaff(){
         return `
           <div style="${_colStyle}">
             <div class="${sc.hdr} ${sc.txt} col-hdr-sticky rounded-t-xl px-3 py-2 flex items-center justify-between">
-              <span class="${sc.txt} font-semibold text-xs uppercase tracking-wide">${stage}</span>
+              <span class="${sc.txt} stage-name font-semibold text-xs uppercase tracking-wide">${stage}</span>
               <span class="${sc.txt} text-xs opacity-70">${sd.length}</span>
             </div>
             <div class="kanban-col ${sc.col} rounded-b-xl p-2 space-y-2" style="flex:1;">
