@@ -21876,6 +21876,17 @@ async function markLeadDead(leadId){
   closeLeadPanel();
 }
 window.markLeadDead = markLeadDead;
+async function claimLead(leadId){
+  const lead=_leadById(leadId); if(!lead) return;
+  if(lead.advisorUid && lead.advisorUid!==currentUser.uid){ showToast('Already claimed by '+(lead.advisorName||'another advisor'),'warning'); return; }
+  await _leadUpdate(leadId,{advisorUid:currentUser.uid, advisorName:currentUser.name, advisorEmail:currentUser.email});
+  await _leadLog(leadId,'Claimed by '+currentUser.name);
+  showToast('🙋 Lead claimed — it\'s yours','success');
+  if(!lead.research && lead.status==='New' && confirm('Run the AI agent now? (research + outreach draft + cadence)')){
+    runLeadAgent(leadId);
+  }
+}
+window.claimLead = claimLead;
 
 // ── Create lead ─────────────────────────────────────────────────────────────
 async function createLead(data, runAgent){
@@ -21915,7 +21926,7 @@ function viewLeads(){
     return `<div onclick="openLeadPanel('${l.id}')" class="bg-white rounded-lg border border-gray-200 p-3 mb-2 cursor-pointer hover:shadow-md transition" style="border-left:3px solid ${prof.side==='Buyer'?'#0ea5e9':prof.side==='Seller'?'#16a34a':'#8b5cf6'}">
       <div class="flex justify-between items-start gap-1">
         <div class="font-semibold text-sm text-gray-800">${_leadEsc(l.name||l.propertyAddress||'Unnamed lead')}</div>
-        ${l.source==='inbound-web'?'<span title="Inbound from thedirtdog.com" class="text-xs">🌐</span>':''}
+        ${l.source==='inbound-web'?'<span title="Inbound from thedirtdog.com" class="text-xs">🌐</span>':''}${l.source==='discovery'?'<span title="Auto-discovered by the AI lead miner" class="text-xs">🛰</span>':''}
       </div>
       ${l.propertyAddress&&l.name?`<div class="text-xs text-gray-500 mt-0.5">${_leadEsc(l.propertyAddress)}</div>`:''}
       <div class="flex flex-wrap gap-1 mt-1.5 items-center">
@@ -21924,6 +21935,7 @@ function viewLeads(){
         ${l.replyDetectedAt?`<span class="text-[10px] px-1.5 py-0.5 rounded-full bg-violet-100 text-violet-700">💬 replied</span>`:''}
         ${l.agentError?`<span class="text-[10px] px-1.5 py-0.5 rounded-full bg-red-100 text-red-700" title="${_leadEsc(l.agentError)}">⚠️ agent failed</span>`:''}
         ${l.status==='Researching'?`<span class="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700">🤖 working…</span>`:''}
+        ${!l.advisorUid?`<span class="text-[10px] px-1.5 py-0.5 rounded-full bg-yellow-100 text-yellow-800 font-semibold">🙋 unclaimed</span>`:''}
       </div>
       ${isMgr&&window._leadsFilter!=='mine'?`<div class="text-[10px] text-gray-400 mt-1">${_leadEsc(l.advisorName||'Unassigned')}</div>`:''}
     </div>`;
@@ -22044,6 +22056,7 @@ function renderLeadPanel(id){
       </div>
 
       <div class="flex gap-2 mb-4 flex-wrap">
+        ${!l.advisorUid?`<button onclick="claimLead('${l.id}')" class="text-xs bg-yellow-500 text-gray-900 font-bold rounded-lg px-3 py-1.5 hover:bg-yellow-400">🙋 Claim this lead</button>`:''}
         ${l.status==='New'||l.agentError?`<button onclick="runLeadAgent('${l.id}')" class="text-xs bg-amber-500 text-white font-semibold rounded-lg px-3 py-1.5 hover:bg-amber-600">🤖 ${l.agentError?'Retry agent':'Run AI agent'}</button>`:''}
         ${cad?`<button onclick="toggleLeadCadence('${l.id}')" class="text-xs border rounded-lg px-3 py-1.5 hover:bg-gray-50">${cad.active?'⏸ Pause cadence':'▶️ Resume cadence'}</button>`:''}
         ${!l.replyDetectedAt&&cad?`<button onclick="markLeadReplied('${l.id}')" class="text-xs border border-violet-300 text-violet-700 rounded-lg px-3 py-1.5 hover:bg-violet-50">💬 They replied</button>`:''}
