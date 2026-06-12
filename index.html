@@ -25051,6 +25051,20 @@ function _siExtractBody(payload){
   }
   return (body||'').replace(/\r/g,'').trim();
 }
+function _siExtractAttachments(payload){
+  // Walk the MIME tree for real file attachments (named parts with an attachmentId).
+  // Inline images without a filename are skipped.
+  const out=[];
+  const walk=(p)=>{
+    if(!p) return;
+    if(p.filename && p.body && p.body.attachmentId){
+      out.push({ filename:p.filename, mimeType:p.mimeType||'application/octet-stream', attachmentId:p.body.attachmentId, size:(p.body.size||0) });
+    }
+    if(p.parts){ for(const c of p.parts) walk(c); }
+  };
+  walk(payload);
+  return out;
+}
 function _siParse(msg){
   const headers = (msg.payload && msg.payload.headers) || [];
   const h = (n)=>{ const x=headers.find(x=>x.name.toLowerCase()===n); return x?x.value:''; };
@@ -25070,6 +25084,7 @@ function _siParse(msg){
     messageId: h('message-id'),
     snippet: msg.snippet || '',
     body: _siExtractBody(msg.payload),
+    attachments: _siExtractAttachments(msg.payload),
     unread: (msg.labelIds||[]).includes('UNREAD')
   };
 }
@@ -25325,6 +25340,52 @@ window._siJunkById = async function(emailId){
   }catch(err){ console.error('[smart-inbox] junk failed', err); showToast('Could not mark as junk: '+err.message,'error'); }
 };
 
+// Fetch an email's file attachments from Gmail and save them onto the property card
+// (deal.dealAttachments), mirroring the drawer's manual-upload storage path. Idempotent:
+// skips any attachment already saved from the same Gmail message.
+window._siSaveEmailAttachments = async function(dealId, email){
+  try{
+    const atts = (email && email.attachments) || [];
+    if(!atts.length) return 0;
+    if(!_fbStorage || !_fbFns){ console.warn('[smart-inbox] storage not ready — skipping attachments'); return 0; }
+    const token = _siGmailToken(); if(!token) return 0;
+    const { ref: fbRef, uploadBytes, getDownloadURL } = _fbFns;
+    const deal = (allDeals||[]).find(d=>d.id===dealId);
+    let existing = (deal && deal.dealAttachments) ? deal.dealAttachments.slice() : [];
+    let added = 0;
+    for(const att of atts){
+      if(!att.attachmentId || !att.filename) continue;
+      if(existing.some(a=>a.gmailId===email.id && a.gmailAttachmentId===att.attachmentId)) continue; // already saved
+      try{
+        const r = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/'+email.id+'/attachments/'+att.attachmentId,{ headers:{Authorization:'Bearer '+token} });
+        if(r.status===401){ _siDisconnect(); showToast('Gmail session expired — reconnect','warning'); return added; }
+        if(!r.ok) throw new Error('Gmail attachment '+r.status);
+        const j = await r.json();
+        const b64 = (j.data||'').replace(/-/g,'+').replace(/_/g,'/');
+        const bin = atob(b64);
+        const bytes = new Uint8Array(bin.length);
+        for(let k=0;k<bin.length;k++) bytes[k]=bin.charCodeAt(k);
+        const blob = new Blob([bytes], { type: att.mimeType || 'application/octet-stream' });
+        const safeName = att.filename.replace(/[^a-zA-Z0-9._-]/g,'_');
+        const storePath = 'dealDocs/'+dealId+'/email_'+Date.now()+'_'+safeName;
+        const snap = await uploadBytes(fbRef(_fbStorage, storePath), blob);
+        const url = await getDownloadURL(snap.ref);
+        existing.push({
+          name: att.filename, url, uploadedAt: Date.now(),
+          uploadedBy: (currentUser && (currentUser.displayName||currentUser.name||currentUser.email))||'',
+          source:'email', gmailId: email.id, gmailAttachmentId: att.attachmentId
+        });
+        added++;
+      }catch(ae){ console.warn('[smart-inbox] attachment save failed:', att.filename, ae); }
+    }
+    if(added){
+      await Store.updateDeal(dealId, { dealAttachments: existing, updatedAt: Date.now() });
+      if(deal) deal.dealAttachments = existing;
+    }
+    return added;
+  }catch(e){ console.warn('[smart-inbox] save attachments failed', e); return 0; }
+};
+
 window._siManualLink = async function(){
   const sel=document.getElementById('si-link-deal'); if(!sel||!sel.value) return;
   const dealId=sel.value;
@@ -25334,9 +25395,11 @@ window._siManualLink = async function(){
       body:(e.body||e.snippet||''), gmailId:e.id, gmailSubject:e.subject, gmailFrom:e.fromEmail, gmailDate:e.date, autoLogged:false
     });
     const addr=_siDealAddr(dealId).split(',')[0]||'property';
-    st.log.unshift({ kind:'attach', msg:'Linked email to '+addr });
+    let _na=0; try{ _na=await window._siSaveEmailAttachments(dealId, e); }catch(_){}
+    st.log.unshift({ kind:'attach', msg:'Linked email to '+addr+(_na?(' · '+_na+' attachment'+(_na!==1?'s':'')):'') });
     const lw=document.getElementById('si-log'); if(lw) lw.outerHTML=_siLogHtml();
-    showToast('Linked email to '+addr,'success');
+    showToast('Linked email to '+addr+(_na?(' · '+_na+' file'+(_na!==1?'s':'')+' saved'):''),'success');
+    try{ _siRefreshDealFeed(dealId); }catch(_){}
     sel.value='';
   }catch(err){ console.error('[smart-inbox] manual link failed', err); showToast('Could not link: '+err.message,'error'); }
 };
@@ -25643,6 +25706,7 @@ window._siConfirm = async function(i){
       if(_newId){
         try{ await window._dealLogActivity(_newId,'note',{ body:'Property created from Smart Inbox email: '+email.subject }); }catch(_){}
         try{ await window._dealLogActivity(_newId,'email',{ body:(email.body||email.snippet||''), gmailId:email.id, gmailSubject:email.subject, gmailFrom:email.fromEmail, gmailDate:email.date, autoLogged:false }); }catch(_){}
+        let _na=0; try{ _na=await window._siSaveEmailAttachments(_newId, email); }catch(_){}
         try{ _siRefreshDealFeed(_newId); }catch(_){}
       }
       msg = 'Created property “'+address+'”';
@@ -25657,8 +25721,9 @@ window._siConfirm = async function(i){
         gmailDate: email.date,
         autoLogged: false
       });
+      let _na=0; try{ _na=await window._siSaveEmailAttachments(dealId, email); }catch(_){}
       try{ _siRefreshDealFeed(dealId); }catch(_){}
-      msg = 'Attached email to '+(_siDealAddr(dealId).split(',')[0]||'property');
+      msg = 'Attached email to '+(_siDealAddr(dealId).split(',')[0]||'property')+(_na?(' · '+_na+' file'+(_na!==1?'s':'')+' saved'):'');
       const newStage=_siVal('si-f-'+i+'-stage');
       const _deal=(allDeals||[]).find(d=>d.id===dealId);
       if(newStage && _deal && _deal.stage!==newStage){
