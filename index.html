@@ -5869,6 +5869,23 @@ const FB = {
   async createTask(data){
     const {collection, addDoc} = _fbFns;
     const ref = await addDoc(collection(_fbDb,'tasks'), data);
+    // Record the task in the linked property's activity history (so every task tied to a
+    // property shows under Activity & Notes — inbox, drawer, and automations alike).
+    if(data.dealId){
+      try {
+        await addDoc(collection(_fbDb,'deals',data.dealId,'activities'), {
+          type: 'task',
+          body: 'Task: ' + (data.title||'') + (data.assignedToName ? ' — assigned to ' + data.assignedToName : '') + (data.dueDate ? ' (due ' + data.dueDate + ')' : ''),
+          taskId: ref.id,
+          taskTitle: data.title || '',
+          assignedToName: data.assignedToName || '',
+          dueDate: data.dueDate || '',
+          createdAt: Date.now(),
+          createdBy: data.createdBy || (typeof currentUser!=='undefined' && currentUser ? currentUser.uid : '') || '',
+          createdByName: data.createdByName || (typeof currentUser!=='undefined' && currentUser ? (currentUser.name||'') : '') || ''
+        });
+      } catch(e){ console.warn('[createTask] activity log failed', e); }
+    }
     return ref.id;
   },
   async updateTask(id, data){
@@ -8959,12 +8976,14 @@ window._propLoadActivities = async (dealId, feedElId) => {
         const icon   = a.type === 'call'         ? '📞'
                      : a.type === 'meeting'      ? '📅'
                      : a.type === 'email'        ? '📧'
+                     : a.type === 'task'         ? '✅'
                      : a.type === 'stage_change' ? '🔄'
                      : a.type === 'attachment'   ? '📎'
                      : '📝';
         const title  = a.type === 'call'         ? '📞 Call'
                      : a.type === 'meeting'      ? `📅 ${a.meetingTitle || 'Meeting'}`
                      : a.type === 'email'        ? `📧 Email${a.gmailFrom ? ' · ' + a.gmailFrom.replace(/<.*>/,'').trim() : ''}`
+                     : a.type === 'task'         ? `✅ Task${a.assignedToName ? ' · ' + a.assignedToName : ''}${a.dueDate ? ' · due ' + a.dueDate : ''}`
                      : a.type === 'stage_change' ? `🔄 Stage → ${a.toStage || ''}`
                      : a.type === 'attachment'   ? `📎 ${a.attachmentLabel || 'File'} Uploaded${a.attachmentName ? ' · ' + a.attachmentName : ''}`
                      : '📝 Note';
@@ -25097,6 +25116,9 @@ window._siOpenMail = function(id){
         '<select id="si-link-deal" style="'+_btn+'">'+_dealOpts+'</select>'+
         '<button id="si-link-btn" onclick="_siManualLink()" style="'+_btn+'">Link</button>'+
         '<span id="si-link-ai" style="font-size:.72rem;color:#0f766e;display:none">✨ AI-selected — confirm or change</span>'+
+        '<span style="flex:1"></span>'+
+        '<button onclick="_siJunk()" title="Report as junk / move to Spam" style="'+_btn+';color:#b45309">🚫 Junk</button>'+
+        '<button onclick="_siTrash()" title="Delete — move to Trash" style="'+_btn+';color:#b91c1c">🗑 Trash</button>'+
       '</div>'+
       '<div id="si-reply" style="display:none;padding:.8rem 1.3rem;border-bottom:1px solid #f1f1f1;background:#fff">'+
         '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.45rem"><div id="si-reply-mode" style="font-size:.78rem;color:#111827;font-weight:700">Reply</div>'+
@@ -25246,6 +25268,53 @@ window._siMoveById = async function(emailId, labelId){
       const ai=document.getElementById('si-ai-body'); if(ai) ai.innerHTML='<div style="color:#9ca3af;font-size:.85rem;text-align:center;padding:1.5rem">Open an email to analyze it.</div>'+_siLogHtml();
     }
   }catch(err){ console.error('[smart-inbox] move failed', err); showToast('Could not move: '+err.message,'error'); }
+};
+
+// remove a message from the local inbox list + reset reader/AI panes if it was open
+function _siRemoveFromInbox(id){
+  const st=window._siState;
+  const wasOpen = st.selected===id;
+  st.emails=st.emails.filter(x=>x.id!==id);
+  if(wasOpen) st.selected=null;
+  _siRenderList();
+  if(wasOpen){
+    const reader=document.getElementById('si-reader');
+    if(reader) reader.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#9ca3af;text-align:center;padding:2rem">Select an email to read it and see AI-suggested actions.</div>';
+    const ai=document.getElementById('si-ai-body'); if(ai) ai.innerHTML='<div style="color:#9ca3af;font-size:.85rem;text-align:center;padding:1.5rem">Open an email to analyze it.</div>'+_siLogHtml();
+  }
+}
+
+window._siTrash = function(){ const st=window._siState; if(st.selected) _siTrashById(st.selected); };
+window._siTrashById = async function(emailId){
+  if(!emailId) return;
+  const token=_siGmailToken(); if(!token){ _siDisconnect(); return; }
+  const st=window._siState; const e=st.emails.find(x=>x.id===emailId); if(!e) return;
+  try{
+    const r=await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/'+e.id+'/trash',{
+      method:'POST', headers:{Authorization:'Bearer '+token}
+    });
+    if(r.status===401){ _siDisconnect(); showToast('Gmail session expired — reconnect','warning'); return; }
+    if(!r.ok) throw new Error('Gmail trash '+r.status);
+    showToast('Moved to Trash ✓','success');
+    _siRemoveFromInbox(e.id);
+  }catch(err){ console.error('[smart-inbox] trash failed', err); showToast('Could not delete: '+err.message,'error'); }
+};
+
+window._siJunk = function(){ const st=window._siState; if(st.selected) _siJunkById(st.selected); };
+window._siJunkById = async function(emailId){
+  if(!emailId) return;
+  const token=_siGmailToken(); if(!token){ _siDisconnect(); return; }
+  const st=window._siState; const e=st.emails.find(x=>x.id===emailId); if(!e) return;
+  try{
+    const r=await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/'+e.id+'/modify',{
+      method:'POST', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
+      body:JSON.stringify({ addLabelIds:['SPAM'], removeLabelIds:['INBOX'] })
+    });
+    if(r.status===401){ _siDisconnect(); showToast('Gmail session expired — reconnect','warning'); return; }
+    if(!r.ok) throw new Error('Gmail modify '+r.status);
+    showToast('Reported as junk ✓','success');
+    _siRemoveFromInbox(e.id);
+  }catch(err){ console.error('[smart-inbox] junk failed', err); showToast('Could not mark as junk: '+err.message,'error'); }
 };
 
 window._siManualLink = async function(){
@@ -25421,7 +25490,7 @@ window._siConfirm = async function(i){
     if(s.kind==='create'){
       const address=_siVal('si-f-'+i+'-address');
       if(!address){ showToast('Property address is required','error'); return; }
-      await Store.createDeal({
+      const _newId = await Store.createDeal({
         propertyAddress: address,
         county: _siVal('si-f-'+i+'-county'),
         folioNumber: _siVal('si-f-'+i+'-parcel'),
@@ -25436,6 +25505,12 @@ window._siConfirm = async function(i){
         createdBy: currentUser.uid,
         source: 'smart-inbox'
       });
+      // record creation + the source email on the new property's history
+      if(_newId){
+        try{ await window._dealLogActivity(_newId,'note',{ body:'Property created from Smart Inbox email: '+email.subject }); }catch(_){}
+        try{ await window._dealLogActivity(_newId,'email',{ body:'Inbound email: '+email.subject, gmailId:email.id, gmailSubject:email.subject, gmailFrom:email.fromEmail, gmailDate:email.date, autoLogged:false }); }catch(_){}
+        _siRefreshDealFeed(_newId);
+      }
       msg = 'Created property “'+address+'”';
     } else if(s.kind==='attach'){
       const dealId=_siVal('si-f-'+i+'-dealId');
@@ -25448,6 +25523,7 @@ window._siConfirm = async function(i){
         gmailDate: email.date,
         autoLogged: false
       });
+      _siRefreshDealFeed(dealId);
       msg = 'Attached email to '+(_siDealAddr(dealId).split(',')[0]||'property');
       const newStage=_siVal('si-f-'+i+'-stage');
       const _deal=(allDeals||[]).find(d=>d.id===dealId);
@@ -25482,6 +25558,7 @@ window._siConfirm = async function(i){
         createdByName: currentUser.name||''
       });
       msg = 'Created task “'+title+'”';
+      if(dealId) _siRefreshDealFeed(dealId);
     }
     st.log.unshift({ kind:s.kind, msg:msg });
     st.suggestions = st.suggestions.filter(x=>x._i!==i);
