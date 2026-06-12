@@ -8393,9 +8393,10 @@ window._pdwGmailLog = async (dealId) => {
         }
       }catch(_){}
     }
-    const body = fullBody || e.snippet || e.subject;
+    const body = await window._emailLogBody({id:e.id, subject:e.subject, from:e.from, body:fullBody, snippet:e.snippet});
     await window._dealLogActivity(dealId, 'email', {
       body,
+      aiSummary: true,
       gmailId: e.id,
       gmailSubject: e.subject,
       gmailFrom: e.from,
@@ -8431,7 +8432,12 @@ window._dealEmailCleanup = async (dealId) => {
           if(r.ok){
             const msg = await r.json();
             const full = _siExtractBody(msg.payload);
-            if(full && full.length > (keep.body||'').length){ try{ await updateDoc(doc(_fbDb,'deals',dealId,'activities',keep.id), { body: full }); expanded++; }catch(_){} }
+            const hMap = {}; (msg.payload?.headers||[]).forEach(h=>{ hMap[h.name]=h.value; });
+            // Replace any not-yet-summarized body (raw/truncated legacy entries) with a clean AI summary
+            if(full && !keep.aiSummary){
+              const summary = await window._emailLogBody({id:gid, subject:(keep.gmailSubject||hMap['Subject']||''), from:(keep.gmailFrom||hMap['From']||''), body:full, snippet:keep.body});
+              if(summary){ try{ await updateDoc(doc(_fbDb,'deals',dealId,'activities',keep.id), { body: summary, aiSummary: true }); expanded++; }catch(_){} }
+            }
             const atts = _siExtractAttachments(msg.payload);
             if(atts.length){ try{ files += await window._siSaveEmailAttachments(dealId, {id:gid, attachments:atts}, token); }catch(_){} }
           }
@@ -8513,6 +8519,13 @@ window._pgaSummarizeEmail = async (email) => {
     if(summary) window._pgaSummaryCache[email.id] = summary;
     return summary;
   } catch(e){ return null; }
+};
+
+// What to store as an email activity's body: an AI summary of the message.
+// Falls back to the cleaned full text (then snippet/subject) if the summary call fails.
+window._emailLogBody = async (email) => {
+  try { const s = await window._pgaSummarizeEmail(email); if(s) return s; } catch(_){}
+  return (email && (email.body || email.snippet || email.subject)) || '';
 };
 
 // Pre-generate summaries for a list of emails in the background (5 at a time)
@@ -8875,10 +8888,9 @@ window._pgaNextPage = async (logSelected) => {
       // Note: Firestore rules must allow authenticated users to write to any deal's activities
       // (update the /deals/{dealId}/activities rule to: allow write: if request.auth != null)
       try {
-        const summary = window._pgaSummaryCache[e.id] || null;
-        const body = summary || e.snippet || e.subject;
+        const body = await window._emailLogBody(e);
         await window._dealLogActivity(dealId, 'email', {
-          body, gmailId: e.id, gmailSubject: e.subject, gmailFrom: e.from, gmailDate: e.dateStr,
+          body, aiSummary: true, gmailId: e.id, gmailSubject: e.subject, gmailFrom: e.from, gmailDate: e.dateStr,
         });
         const senderEmail = window._pgaExtractEmail(e.from);
         if(senderEmail) senderMap[senderEmail] = dealId;
@@ -8931,6 +8943,7 @@ window._dealLogActivity = async (dealId, type, data = {}) => {
     ...( data.meetingTitle ? {meetingTitle: data.meetingTitle} : {} ),
     ...( data.meetingDate  ? {meetingDate: data.meetingDate}   : {} ),
     ...( data.gmailId      ? {gmailId: data.gmailId, gmailSubject: data.gmailSubject||'', gmailFrom: data.gmailFrom||'', gmailDate: data.gmailDate||''} : {} ),
+    ...( data.aiSummary    ? {aiSummary: true} : {} ),
   };
   // Write to deal sub-collection
   await addDoc(collection(_fbDb, 'deals', dealId, 'activities'), activity);
@@ -9067,7 +9080,7 @@ window._propLoadActivities = async (dealId, feedElId) => {
                      : a.type === 'meeting' && a.meetingDate ? ` · ${a.meetingDate}`
                      : a.type === 'email'   && a.gmailDate   ? ` · ${a.gmailDate}` : '';
         const tsStr  = a.createdAt ? new Date(a.createdAt).toLocaleString() : '';
-        activities.push({ ts: a.createdAt || 0, tsStr, icon, text: a.body || '', title, meta, createdByName: a.createdByName || '', type: a.type, gmailSubject: a.gmailSubject||'' });
+        activities.push({ ts: a.createdAt || 0, tsStr, icon, text: a.body || '', title, meta, createdByName: a.createdByName || '', type: a.type, gmailSubject: a.gmailSubject||'', gmailId: a.gmailId||'', aiSummary: !!a.aiSummary });
       });
     } catch (e) { /* sub-collection may not exist yet — that's fine */ }
   }
@@ -9087,6 +9100,7 @@ window._propLoadActivities = async (dealId, feedElId) => {
         ${a.title ? `<div style="font-size:.68rem;font-weight:600;color:#6b7280;text-transform:uppercase;letter-spacing:.04em;margin-bottom:.1rem">${a.title}${a.meta || ''}</div>` : ''}
         ${a.type==='email' && a.gmailSubject ? `<div style="font-size:.75rem;font-weight:600;color:#374151;margin-bottom:.15rem">${a.gmailSubject.replace(/</g,'&lt;')}</div>` : ''}
         <div style="color:#1f2937;line-height:1.45;font-size:.8rem;white-space:pre-wrap;word-break:break-word">${(a.text || '').replace(/</g, '&lt;') || '<em style="color:#9ca3af">No notes</em>'}</div>
+        ${a.type==='email' && (a.aiSummary || a.gmailId) ? `<div style="font-size:.68rem;color:#9ca3af;margin-top:.2rem">${a.aiSummary ? '✨ AI summary' : ''}${a.aiSummary && a.gmailId ? ' · ' : ''}${a.gmailId ? `<a href="https://mail.google.com/mail/u/0/#all/${a.gmailId}" target="_blank" rel="noopener" style="color:#2563eb;text-decoration:none">Open full email in Gmail ↗</a>` : ''}</div>` : ''}
         <div style="font-size:.7rem;color:#9ca3af;margin-top:.15rem">${a.tsStr}${a.createdByName ? ' · ' + a.createdByName : ''}</div>
       </div>
     </div>`).join('');
@@ -15465,8 +15479,8 @@ window._execPropertyLog = async () => {
     const m = msgs.find(x=>x.id===mid);
     const dealId = dealMap[mid];
     if(!m||!dealId) continue;
-    const body = `📧 **${m.subject}**\nFrom: ${m.from}\nDate: ${m.dateStr}\n\n${m.body || m.snippet}`;
-    await window._dealLogActivity(dealId,'email',{body, gmailId:m.id, gmailSubject:m.subject, gmailFrom:m.from, gmailDate:m.dateStr});
+    const body = await window._emailLogBody({id:m.id, subject:m.subject, from:m.from, body:m.body, snippet:m.snippet});
+    await window._dealLogActivity(dealId,'email',{body, aiSummary:true, gmailId:m.id, gmailSubject:m.subject, gmailFrom:m.from, gmailDate:m.dateStr});
     count++;
   }
   showToast(`✅ Logged ${count} email${count!==1?'s':''} across properties`,'success',5000);
@@ -25178,20 +25192,6 @@ function _siExtractInlineImages(payload){
   walk(payload);
   return out;
 }
-function _siExtractAttachments(payload){
-  // Walk the MIME tree for real file attachments (named parts with an attachmentId).
-  // Inline images without a filename are skipped.
-  const out=[];
-  const walk=(p)=>{
-    if(!p) return;
-    if(p.filename && p.body && p.body.attachmentId){
-      out.push({ filename:p.filename, mimeType:p.mimeType||'application/octet-stream', attachmentId:p.body.attachmentId, size:(p.body.size||0) });
-    }
-    if(p.parts){ for(const c of p.parts) walk(c); }
-  };
-  walk(payload);
-  return out;
-}
 function _siParse(msg){
   const headers = (msg.payload && msg.payload.headers) || [];
   const h = (n)=>{ const x=headers.find(x=>x.name.toLowerCase()===n); return x?x.value:''; };
@@ -25570,8 +25570,9 @@ window._siManualLink = async function(){
   const dealId=sel.value;
   const st=window._siState; const e=st.emails.find(x=>x.id===st.selected); if(!e) return;
   try{
+    const _sum = await window._emailLogBody({id:e.id, subject:e.subject, from:e.from, body:e.body, snippet:e.snippet});
     await window._dealLogActivity(dealId, 'email', {
-      body:(e.body||e.snippet||''), gmailId:e.id, gmailSubject:e.subject, gmailFrom:e.fromEmail, gmailDate:e.date, autoLogged:false
+      body:_sum, aiSummary:true, gmailId:e.id, gmailSubject:e.subject, gmailFrom:e.fromEmail, gmailDate:e.date, autoLogged:false
     });
     const addr=_siDealAddr(dealId).split(',')[0]||'property';
     _siRememberMatch(e.id, dealId);
@@ -25904,7 +25905,7 @@ window._siConfirm = async function(i){
       // record creation + the source email on the new property's history
       if(_newId){
         try{ await window._dealLogActivity(_newId,'note',{ body:'Property created from Smart Inbox email: '+email.subject }); }catch(_){}
-        try{ await window._dealLogActivity(_newId,'email',{ body:(email.body||email.snippet||''), gmailId:email.id, gmailSubject:email.subject, gmailFrom:email.fromEmail, gmailDate:email.date, autoLogged:false }); }catch(_){}
+        try{ const _sum=await window._emailLogBody({id:email.id, subject:email.subject, from:email.from, body:email.body, snippet:email.snippet}); await window._dealLogActivity(_newId,'email',{ body:_sum, aiSummary:true, gmailId:email.id, gmailSubject:email.subject, gmailFrom:email.fromEmail, gmailDate:email.date, autoLogged:false }); }catch(_){}
         let _na=0; try{ _na=await window._siSaveEmailAttachments(_newId, email); }catch(_){}
         try{ _siRefreshDealFeed(_newId); }catch(_){}
       }
@@ -25912,8 +25913,10 @@ window._siConfirm = async function(i){
     } else if(s.kind==='attach'){
       const dealId=_siVal('si-f-'+i+'-dealId');
       if(!dealId){ showToast('Pick a property to attach to','error'); return; }
+      const _sum = await window._emailLogBody({id:email.id, subject:email.subject, from:email.from, body:email.body, snippet:email.snippet});
       await window._dealLogActivity(dealId, 'email', {
-        body: (email.body||email.snippet||''),
+        body: _sum,
+        aiSummary: true,
         gmailId: email.id,
         gmailSubject: email.subject,
         gmailFrom: email.fromEmail,
