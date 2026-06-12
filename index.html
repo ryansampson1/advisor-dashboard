@@ -25038,10 +25038,19 @@ function _siParse(msg){
     fromEmail: fromEmail,
     subject: h('subject') || '(no subject)',
     date: (h('date')||'').replace(/\s*\(.*\)$/,''),
+    toRaw: h('to'),
+    ccRaw: h('cc'),
+    messageId: h('message-id'),
     snippet: msg.snippet || '',
     body: _siExtractBody(msg.payload),
     unread: (msg.labelIds||[]).includes('UNREAD')
   };
+}
+// extract bare email addresses from a header value, lowercased + de-duped
+function _siEmails(str){
+  const out=[]; const re=/[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/g; let m;
+  while((m=re.exec(str||''))){ const a=m[0].toLowerCase(); if(out.indexOf(a)<0) out.push(a); }
+  return out;
 }
 
 function _siRenderList(){
@@ -25074,7 +25083,7 @@ window._siOpenMail = function(id){
   const reader = document.getElementById('si-reader');
   if(reader){
     var _btn='border:1px solid #e5e7eb;background:#fff;border-radius:7px;padding:.4rem .7rem;font-size:.78rem;font-weight:600;cursor:pointer';
-    var _dealOpts='<option value="">🔗 Link to property…</option>'+visibleDeals().map(function(d){return '<option value="'+d.id+'">'+_siEsc((d.propertyAddress||'').split(',')[0])+'</option>';}).join('');
+    var _dealOpts=_siDealOptionList(null, '🔗 Link to property…');
     reader.innerHTML =
       '<div style="padding:1.1rem 1.3rem .8rem;border-bottom:1px solid #e5e7eb">'+
         '<h1 style="font-size:1.05rem;font-weight:800;margin:0 0 .5rem">'+_siEsc(e.subject)+'</h1>'+
@@ -25082,16 +25091,22 @@ window._siOpenMail = function(id){
         '<a href="https://mail.google.com/mail/u/0/#inbox/'+e.id+'" target="_blank" rel="noopener" style="font-size:.74rem;color:var(--brand-teal,#00B2A9)">Open in Gmail ↗</a>'+
       '</div>'+
       '<div style="display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;padding:.6rem 1.3rem;border-bottom:1px solid #f1f1f1;background:#FAFAFB">'+
-        '<button onclick="_siToggleReply()" style="'+_btn+'">↩ Reply</button>'+
+        '<button onclick="_siCompose(\'reply\')" style="'+_btn+'">↩ Reply</button>'+
+        '<button onclick="_siCompose(\'all\')" style="'+_btn+'">↩↩ Reply all</button>'+
+        '<button onclick="_siCompose(\'forward\')" style="'+_btn+'">➡ Forward</button>'+
         '<select id="si-link-deal" style="'+_btn+'">'+_dealOpts+'</select>'+
         '<button id="si-link-btn" onclick="_siManualLink()" style="'+_btn+'">Link</button>'+
         '<span id="si-link-ai" style="font-size:.72rem;color:#0f766e;display:none">✨ AI-selected — confirm or change</span>'+
       '</div>'+
       '<div id="si-reply" style="display:none;padding:.8rem 1.3rem;border-bottom:1px solid #f1f1f1;background:#fff">'+
-        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.4rem"><div style="font-size:.74rem;color:#6b7280">Reply to <b>'+_siEsc(e.fromEmail)+'</b></div>'+
-        '<button onclick="_siAiDraftReply()" style="border:0;background:#E6F7F5;color:#0f766e;border-radius:6px;padding:.25rem .55rem;font-size:.72rem;font-weight:700;cursor:pointer">✨ Draft with AI</button></div>'+
-        '<textarea id="si-reply-body" placeholder="Write your reply…" style="width:100%;border:1px solid #e5e7eb;border-radius:7px;padding:.5rem;font-size:.84rem;min-height:96px;resize:vertical;font-family:inherit"></textarea>'+
-        '<div style="display:flex;gap:.5rem;margin-top:.5rem"><button onclick="_siSendReply()" style="background:var(--brand-red,#DA291C);color:#fff;border:0;border-radius:7px;padding:.45rem .9rem;font-size:.8rem;font-weight:700;cursor:pointer">Send reply</button>'+
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.45rem"><div id="si-reply-mode" style="font-size:.78rem;color:#111827;font-weight:700">Reply</div>'+
+        '<button id="si-reply-ai" onclick="_siAiDraftReply()" style="border:0;background:#E6F7F5;color:#0f766e;border-radius:6px;padding:.25rem .55rem;font-size:.72rem;font-weight:700;cursor:pointer">✨ Draft with AI</button></div>'+
+        '<div style="display:flex;flex-direction:column;gap:.3rem;margin-bottom:.4rem">'+
+          '<div style="display:flex;align-items:center;gap:.4rem"><label style="font-size:.7rem;color:#6b7280;width:28px">To</label><input id="si-reply-to" style="flex:1;border:1px solid #e5e7eb;border-radius:6px;padding:.35rem .5rem;font-size:.8rem"></div>'+
+          '<div style="display:flex;align-items:center;gap:.4rem"><label style="font-size:.7rem;color:#6b7280;width:28px">Cc</label><input id="si-reply-cc" placeholder="(optional)" style="flex:1;border:1px solid #e5e7eb;border-radius:6px;padding:.35rem .5rem;font-size:.8rem"></div>'+
+        '</div>'+
+        '<textarea id="si-reply-body" placeholder="Write your message…" style="width:100%;border:1px solid #e5e7eb;border-radius:7px;padding:.5rem;font-size:.84rem;min-height:120px;resize:vertical;font-family:inherit"></textarea>'+
+        '<div style="display:flex;gap:.5rem;margin-top:.5rem"><button onclick="_siSendReply()" style="background:var(--brand-red,#DA291C);color:#fff;border:0;border-radius:7px;padding:.45rem .9rem;font-size:.8rem;font-weight:700;cursor:pointer">Send</button>'+
         '<button onclick="_siToggleReply()" style="'+_btn+'">Cancel</button></div>'+
       '</div>'+
       '<div style="padding:1.1rem 1.3rem;line-height:1.6;white-space:pre-wrap;font-size:.86rem;color:#1f2937">'+_siEsc(e.body)+'</div>';
@@ -25112,9 +25127,41 @@ window._siLoadLabels = async function(){
 };
 
 window._siToggleReply = function(){
-  const box=document.getElementById('si-reply'); if(!box) return;
-  box.style.display = box.style.display==='none' ? 'block' : 'none';
-  if(box.style.display==='block'){ const ta=document.getElementById('si-reply-body'); if(ta) ta.focus(); }
+  const box=document.getElementById('si-reply'); if(box) box.style.display='none';
+};
+
+window._siCompose = function(mode){
+  const st=window._siState; const e=st.emails.find(x=>x.id===st.selected); if(!e) return;
+  st.composeMode=mode;
+  const box=document.getElementById('si-reply'); if(box) box.style.display='block';
+  const toI=document.getElementById('si-reply-to');
+  const ccI=document.getElementById('si-reply-cc');
+  const ta=document.getElementById('si-reply-body');
+  const lbl=document.getElementById('si-reply-mode');
+  const aiBtn=document.getElementById('si-reply-ai');
+  const me=((currentUser&&currentUser.email)||'').toLowerCase();
+  if(mode==='all'){
+    if(lbl) lbl.textContent='Reply all';
+    if(toI) toI.value=e.fromEmail;
+    const others=_siEmails((e.toRaw||'')+', '+(e.ccRaw||'')).filter(a=>a!==me && a!==e.fromEmail.toLowerCase());
+    if(ccI) ccI.value=others.join(', ');
+    if(ta) ta.value='';
+    if(aiBtn) aiBtn.style.display='';
+  } else if(mode==='forward'){
+    if(lbl) lbl.textContent='Forward';
+    if(toI) toI.value='';
+    if(ccI) ccI.value='';
+    if(ta) ta.value='\n\n---------- Forwarded message ----------\nFrom: '+e.from+' <'+e.fromEmail+'>\nDate: '+e.date+'\nSubject: '+e.subject+'\nTo: '+(e.toRaw||'')+'\n\n'+(e.body||e.snippet||'');
+    if(aiBtn) aiBtn.style.display='none';
+  } else {
+    if(lbl) lbl.textContent='Reply';
+    if(toI) toI.value=e.fromEmail;
+    if(ccI) ccI.value='';
+    if(ta) ta.value='';
+    if(aiBtn) aiBtn.style.display='';
+  }
+  const focusEl = (mode==='forward') ? toI : ta;
+  if(focusEl) focusEl.focus();
 };
 
 window._siAiDraftReply = async function(){
@@ -25133,10 +25180,15 @@ window._siAiDraftReply = async function(){
   finally{ ta.disabled=false; ta.focus(); }
 };
 
-function _siRfc822(to, subject, bodyText, inReplyToId){
-  const headers=['To: '+to,'Subject: '+subject,'Content-Type: text/plain; charset="UTF-8"','MIME-Version: 1.0'];
-  if(inReplyToId) headers.push('In-Reply-To: '+inReplyToId,'References: '+inReplyToId);
-  const raw=headers.join('\r\n')+'\r\n\r\n'+bodyText;
+function _siRfc822(opts){
+  const headers=[];
+  headers.push('To: '+(opts.to||''));
+  if(opts.cc) headers.push('Cc: '+opts.cc);
+  headers.push('Subject: '+(opts.subject||''));
+  headers.push('Content-Type: text/plain; charset="UTF-8"');
+  headers.push('MIME-Version: 1.0');
+  if(opts.inReplyTo){ headers.push('In-Reply-To: '+opts.inReplyTo); headers.push('References: '+opts.inReplyTo); }
+  const raw=headers.join('\r\n')+'\r\n\r\n'+(opts.body||'');
   // base64url
   return btoa(unescape(encodeURIComponent(raw))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
 }
@@ -25144,18 +25196,26 @@ function _siRfc822(to, subject, bodyText, inReplyToId){
 window._siSendReply = async function(){
   const token=_siGmailToken(); if(!token){ _siDisconnect(); return; }
   const st=window._siState; const e=st.emails.find(x=>x.id===st.selected); if(!e) return;
+  const mode=st.composeMode||'reply';
+  const toVal=(((document.getElementById('si-reply-to')||{}).value)||'').trim();
+  const ccVal=(((document.getElementById('si-reply-cc')||{}).value)||'').trim();
   const ta=document.getElementById('si-reply-body'); const bodyText=ta?ta.value.trim():'';
-  if(!bodyText){ showToast('Write a reply first','error'); return; }
-  const subject = /^re:/i.test(e.subject) ? e.subject : 'Re: '+e.subject;
-  const raw=_siRfc822(e.fromEmail, subject, bodyText, e.id);
+  if(!toVal){ showToast('Add a recipient in the To field','error'); return; }
+  if(!bodyText){ showToast('Write a message first','error'); return; }
+  const isFwd=(mode==='forward');
+  const subject = isFwd ? (/^fwd:/i.test(e.subject)?e.subject:'Fwd: '+e.subject)
+                        : (/^re:/i.test(e.subject)?e.subject:'Re: '+e.subject);
+  const raw=_siRfc822({ to:toVal, cc:ccVal, subject:subject, body:bodyText, inReplyTo: isFwd?null:(e.messageId||null) });
+  const payload={ raw:raw };
+  if(!isFwd && e.threadId) payload.threadId=e.threadId;
   try{
     const r=await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send',{
       method:'POST', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
-      body:JSON.stringify({ raw:raw, threadId:e.threadId })
+      body:JSON.stringify(payload)
     });
     if(r.status===401){ _siDisconnect(); showToast('Gmail session expired — reconnect','warning'); return; }
     if(!r.ok) throw new Error('Gmail send '+r.status);
-    showToast('Reply sent ✓','success');
+    showToast((isFwd?'Forwarded ✓':'Sent ✓'),'success');
     _siToggleReply(); if(ta) ta.value='';
   }catch(err){ console.error('[smart-inbox] send failed', err); showToast('Could not send: '+err.message,'error'); }
 };
@@ -25239,6 +25299,12 @@ window._siAnalyze = async function(email){
 };
 
 function _siDealAddr(id){ const d=(allDeals||[]).find(x=>x.id===id); return d?(d.projectName||d.propertyAddress||''):''; }
+function _siDealLabel(d){ return (d.projectName||d.propertyAddress||'Untitled deal'); }
+function _siDealsSorted(){ return visibleDeals().slice().sort((a,b)=>_siDealLabel(a).localeCompare(_siDealLabel(b), undefined, {numeric:true, sensitivity:'base'})); }
+function _siDealOptionList(sel, placeholder){
+  return (placeholder!=null?'<option value="">'+placeholder+'</option>':'')+
+    _siDealsSorted().map(function(d){ return '<option value="'+d.id+'"'+(sel===d.id?' selected':'')+'>'+_siEsc(_siDealLabel(d))+'</option>'; }).join('');
+}
 function _siProfileOptions(sel){
   const list = Object.values(allProfiles||{}).filter(p=>p&&p.email).sort((a,b)=>(a.name||'').localeCompare(b.name||''));
   const me = currentUser ? currentUser.email : '';
@@ -25247,8 +25313,7 @@ function _siProfileOptions(sel){
   return opts;
 }
 function _siDealSelect(id, sel){
-  const deals = visibleDeals();
-  return '<select id="'+id+'">'+deals.map(d=>'<option value="'+d.id+'"'+(sel===d.id?' selected':'')+'>'+_siEsc((d.propertyAddress||'').split(',')[0])+'</option>').join('')+'</select>';
+  return '<select id="'+id+'">'+_siDealOptionList(sel, null)+'</select>';
 }
 
 function _siRenderSuggestions(email){
@@ -25329,7 +25394,7 @@ function _siSuggHtml(s){
     fields += inp('si-f-'+i+'-title','Task title', f.title||s.title);
     fields += '<div style="display:flex;flex-direction:column;gap:.2rem;margin-bottom:.5rem"><label style="font-size:.7rem;color:#6b7280;font-weight:600">Assign to</label><select id="si-f-'+i+'-assignee">'+_siProfileOptions(f.assignedToEmail)+'</select></div>';
     fields += inp('si-f-'+i+'-due','Due date', _siDateStr(parseInt(f.dueInDays!=null?f.dueInDays:2)));
-    fields += '<div style="display:flex;flex-direction:column;gap:.2rem;margin-bottom:.5rem"><label style="font-size:.7rem;color:#6b7280;font-weight:600">Link to property (optional)</label><select id="si-f-'+i+'-dealId"><option value="">— none —</option>'+visibleDeals().map(d=>'<option value="'+d.id+'"'+((f.dealId||window._siState.matchedDealId)===d.id?' selected':'')+'>'+_siEsc((d.propertyAddress||'').split(',')[0])+'</option>').join('')+'</select></div>';
+    fields += '<div style="display:flex;flex-direction:column;gap:.2rem;margin-bottom:.5rem"><label style="font-size:.7rem;color:#6b7280;font-weight:600">Link to property (optional)</label><select id="si-f-'+i+'-dealId">'+_siDealOptionList(f.dealId||window._siState.matchedDealId, '— none —')+'</select></div>';
     fields += ta('si-f-'+i+'-desc','Notes', f.desc||'');
   }
   return '<div id="si-sugg-'+i+'" style="background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:.8rem;margin-bottom:.7rem">'+
@@ -25419,9 +25484,8 @@ window._siConfirm = async function(i){
       msg = 'Created task “'+title+'”';
     }
     st.log.unshift({ kind:s.kind, msg:msg });
-    if(card){ card.style.background='#ECFDF5'; card.style.borderColor='#a7f3d0';
-      const btns=card.querySelector('div:last-child'); if(btns) btns.innerHTML='<div style="color:#047857;font-size:.78rem;font-weight:700">✓ Applied — saved to Terra</div>';
-    }
+    st.suggestions = st.suggestions.filter(x=>x._i!==i);
+    if(card) card.remove();
     showToast(msg,'success');
     const lw=document.getElementById('si-log'); if(lw) lw.outerHTML=_siLogHtml();
   } catch(e){
@@ -25431,8 +25495,10 @@ window._siConfirm = async function(i){
 };
 
 window._siDismiss = function(i){
+  const st=window._siState;
+  st.suggestions = st.suggestions.filter(x=>x._i!==i);
   const card = document.getElementById('si-sugg-'+i);
-  if(card){ card.style.opacity='.5'; const btns=card.querySelector('div:last-child'); if(btns) btns.innerHTML='<div style="color:#9ca3af;font-size:.78rem;font-weight:600">Dismissed</div>'; }
+  if(card) card.remove();
 };
 
 function _siLogHtml(){
