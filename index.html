@@ -25334,15 +25334,21 @@ window._siManualLink = async function(){
 };
 
 window._siAnalyze = async function(email){
+  window._siState.meeting = null;
   const body = document.getElementById('si-ai-body');
   if(body) body.innerHTML = '<div style="color:#6b7280;font-size:.85rem;display:flex;align-items:center;gap:.5rem;padding:.5rem"><span class="animate-spin" style="width:14px;height:14px;border:2px solid #d1d5db;border-top-color:var(--brand-teal,#00B2A9);border-radius:50%;display:inline-block"></span> Claude is reading this email…</div>';
   const deals = visibleDeals().map(d=>({ id:d.id, address:d.propertyAddress||'', county:d.county||'', parcel:d.folioNumber||d.parcelId||'', stage:d.stage||'' }));
   const sys = 'You are Terra\'s inbox assistant for a commercial land brokerage. Given one email and the advisor\'s existing properties, propose actions a coordinator would take. Only propose what the email clearly supports. Prefer attaching to an existing property over creating a new one when an address or parcel matches. Newsletters/marketing/no-action emails should return an empty suggestions array. Return ONLY valid JSON, no prose, no code fences.';
+  const _now=new Date();
+  const _todayStr=_now.getFullYear()+'-'+String(_now.getMonth()+1).padStart(2,'0')+'-'+String(_now.getDate()).padStart(2,'0');
+  const _weekday=_now.toLocaleDateString(undefined,{weekday:'long'});
   const user =
     'EMAIL:\nFrom: '+email.from+' <'+email.fromEmail+'>\nSubject: '+email.subject+'\nBody:\n'+(email.body||email.snippet).slice(0,6000)+
     '\n\nEXISTING PROPERTIES (JSON):\n'+JSON.stringify(deals.slice(0,200))+
+    '\n\nTODAY: '+_todayStr+' ('+_weekday+'). Resolve relative dates like "Thursday" or "tomorrow" against this.'+
     '\n\nReturn JSON of this exact shape:\n'+
-    '{"matchedDealId": "<id or null>", "suggestions": [ {"kind":"create|attach|task", "confidence":0.0, "title":"short label", "why":"one sentence", "fields": { } } ] }\n'+
+    '{"matchedDealId": "<id or null>", "meeting": {"requested": false, "date": null, "start": null, "end": null, "label": null}, "suggestions": [ {"kind":"create|attach|task", "confidence":0.0, "title":"short label", "why":"one sentence", "fields": { } } ] }\n'+
+    'Set meeting.requested true ONLY if the email proposes or asks to meet, call, or schedule at a specific day and/or time. meeting.date = "YYYY-MM-DD" of the proposed day (null if none). meeting.start/end = 24h "HH:MM" local time (null if no specific time). meeting.label = short human description (e.g. "Call Thursday at 2pm").\n'+
     'Field conventions:\n'+
     '- create: {"address","county","parcel","acreage","stage","seller"}\n'+
     '- attach: {"dealId"}\n'+
@@ -25360,6 +25366,7 @@ window._siAnalyze = async function(email){
     try { parsed = JSON.parse(text); } catch(pe){ throw new Error('Could not parse AI response'); }
     window._siState.suggestions = (parsed.suggestions||[]).map((s,i)=>{ s._i=i; return s; });
     window._siState.matchedDealId = parsed.matchedDealId || null;
+    window._siState.meeting = (parsed.meeting && parsed.meeting.requested) ? parsed.meeting : null;
     _siRenderSuggestions(email);
   } catch(e){
     console.error('[smart-inbox] analyze failed', e);
@@ -25392,9 +25399,11 @@ function _siRenderSuggestions(email){
   if(!body) return;
   let html = '';
   if(st.matchedDealId){ const a=_siDealAddr(st.matchedDealId); if(a) html += '<div style="background:#E6F7F5;border:1px solid #99e2dc;border-radius:8px;padding:.5rem .65rem;font-size:.78rem;margin-bottom:.7rem">🔗 Matched existing property: <b style="color:#0f766e">'+_siEsc(a.split(',')[0])+'</b></div>'; }
+  if(st.meeting){ html += '<div id="si-avail" style="background:#fff;border:1px solid #e5e7eb;border-left:3px solid var(--brand-teal,#00B2A9);border-radius:8px;padding:.6rem .7rem;font-size:.8rem;margin-bottom:.7rem"><div style="color:#6b7280;font-size:.78rem">📅 Checking your availability…</div></div>'; }
   if(!st.suggestions.length){ html += '<div style="background:#fff;border:1px dashed #e5e7eb;border-radius:10px;padding:1.1rem;text-align:center;color:#6b7280;font-size:.83rem">No actions suggested for this email. Use the chat box below to tell the AI what to do.</div>'; }
   st.suggestions.forEach((s)=>{ html += _siSuggHtml(s); });
   body.innerHTML = html + _siLogHtml();
+  if(st.meeting) _siCheckAvailability();
   // AI auto-selects the matched property in the reader's Link dropdown (user can confirm or correct)
   if(st.matchedDealId){
     const sel=document.getElementById('si-link-deal');
@@ -25404,6 +25413,84 @@ function _siRenderSuggestions(email){
     }
   }
 }
+
+function _siCalToken(){
+  const t=sessionStorage.getItem('gcal_token');
+  const exp=parseInt(sessionStorage.getItem('gcal_token_exp')||'0');
+  return (t && Date.now()<exp) ? t : null;
+}
+function _siFmtTime(d){ return d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'}); }
+
+window._siConnectCalendar = async function(){
+  if(!_fbFns || !_fbAuth){ showToast('Not signed in','error'); return; }
+  const { GoogleAuthProvider, signInWithPopup } = _fbFns;
+  const provider = new GoogleAuthProvider();
+  provider.addScope('https://www.googleapis.com/auth/calendar.events');
+  try{
+    const result = await signInWithPopup(_fbAuth, provider);
+    const cred = GoogleAuthProvider.credentialFromResult(result);
+    if(cred && cred.accessToken){
+      sessionStorage.setItem('gcal_token', cred.accessToken);
+      sessionStorage.setItem('gcal_token_exp', String(Date.now()+3600*1000));
+      showToast('Calendar connected ✓','success');
+      _siCheckAvailability();
+    } else { showToast('Calendar permission not granted','error'); }
+  }catch(e){ showToast('Calendar permission not granted','error'); }
+};
+
+function _siFreeWindows(startMs, endMs, busy){
+  const sorted=busy.slice().filter(b=>b.e>startMs && b.s<endMs).sort((a,b)=>a.s-b.s);
+  const free=[]; let cursor=startMs;
+  for(const b of sorted){ const bs=Math.max(b.s,startMs); if(bs>cursor) free.push({s:cursor,e:bs}); cursor=Math.max(cursor,Math.min(b.e,endMs)); }
+  if(cursor<endMs) free.push({s:cursor,e:endMs});
+  return free.filter(w=>w.e-w.s>=15*60000);
+}
+
+window._siCheckAvailability = async function(){
+  const st=window._siState; const m=st.meeting; const el=document.getElementById('si-avail');
+  if(!m || !el) return;
+  if(!m.date){ el.innerHTML='<div style="font-size:.8rem;color:#374151">📅 <b>'+_siEsc(m.label||'Meeting request')+'</b><div style="color:#6b7280;font-size:.75rem;margin-top:.2rem">Couldn\'t pin down a specific date to check your calendar.</div></div>'; return; }
+  const token=_siCalToken();
+  if(!token){
+    el.innerHTML='<div style="font-size:.8rem;color:#374151">📅 <b>'+_siEsc(m.label||'Meeting request')+'</b><div style="color:#6b7280;font-size:.75rem;margin:.25rem 0 .45rem">Connect your Google Calendar to check your availability for this.</div><button onclick="_siConnectCalendar()" style="background:var(--brand-teal,#00B2A9);color:#fff;border:0;border-radius:6px;padding:.35rem .6rem;font-size:.74rem;font-weight:700;cursor:pointer">Connect Calendar</button></div>';
+    return;
+  }
+  const p=m.date.split('-').map(Number);
+  const dayStart=new Date(p[0],p[1]-1,p[2],8,0,0);
+  const dayEnd=new Date(p[0],p[1]-1,p[2],18,0,0);
+  try{
+    const resp=await window._calApiReq('POST','/freeBusy',{ timeMin:dayStart.toISOString(), timeMax:dayEnd.toISOString(), items:[{id:'primary'}] });
+    const busy=(((resp||{}).calendars||{}).primary||{}).busy||[];
+    const busyMs=busy.map(b=>({s:new Date(b.start).getTime(),e:new Date(b.end).getTime()}));
+    const dayLabel=new Date(p[0],p[1]-1,p[2]).toLocaleDateString(undefined,{weekday:'long',month:'short',day:'numeric'});
+    let verdict='';
+    if(m.start){
+      const sp=m.start.split(':').map(Number);
+      const reqS=new Date(p[0],p[1]-1,p[2],sp[0],sp[1]||0).getTime();
+      const ep=m.end?m.end.split(':').map(Number):null;
+      const reqE=ep?new Date(p[0],p[1]-1,p[2],ep[0],ep[1]||0).getTime():(reqS+3600000);
+      const conflict=busyMs.find(b=>b.s<reqE && b.e>reqS);
+      verdict=conflict
+        ? '<div style="color:#b91c1c;font-size:.8rem;font-weight:600;margin:.3rem 0">⛔ Conflict at that time ('+_siFmtTime(new Date(conflict.s))+'–'+_siFmtTime(new Date(conflict.e))+').</div>'
+        : '<div style="color:#047857;font-size:.8rem;font-weight:600;margin:.3rem 0">✅ You\'re free at '+_siFmtTime(new Date(reqS))+'.</div>';
+    }
+    const free=_siFreeWindows(dayStart.getTime(), dayEnd.getTime(), busyMs);
+    const freeStr=free.length? free.map(w=>_siFmtTime(new Date(w.s))+'–'+_siFmtTime(new Date(w.e))).join(', ') : 'no open windows in business hours';
+    el.innerHTML='<div style="font-size:.8rem;color:#374151"><b>📅 '+_siEsc(m.label||('Meeting on '+dayLabel))+'</b>'+verdict+
+      '<div style="color:#6b7280;font-size:.75rem;margin-top:.2rem"><b>'+dayLabel+'</b> — open: '+_siEsc(freeStr)+'</div>'+
+      '<button onclick="_siDraftAvailability()" style="margin-top:.45rem;background:#E6F7F5;color:#0f766e;border:0;border-radius:6px;padding:.3rem .55rem;font-size:.72rem;font-weight:700;cursor:pointer">✨ Reply with my availability</button></div>';
+    window._siAvailText='On '+dayLabel+' I\'m available '+freeStr+'.';
+  }catch(err){
+    if(/expired|401/i.test(err.message||'')){ el.innerHTML='<div style="font-size:.8rem;color:#374151">📅 Calendar session expired. <button onclick="_siConnectCalendar()" style="background:var(--brand-teal,#00B2A9);color:#fff;border:0;border-radius:6px;padding:.3rem .55rem;font-size:.72rem;font-weight:700;cursor:pointer">Reconnect</button></div>'; }
+    else { el.innerHTML='<div style="font-size:.78rem;color:#6b7280">📅 Couldn\'t check availability: '+_siEsc(err.message||String(err))+'</div>'; }
+  }
+};
+
+window._siDraftAvailability = function(){
+  _siCompose('reply');
+  const ta=document.getElementById('si-reply-body');
+  if(ta){ const txt=(window._siAvailText||'')+' Let me know what works best and I\'ll send an invite.'; ta.value=(ta.value?ta.value+'\n\n':'')+txt; ta.focus(); }
+};
 
 window._siChat = async function(){
   const input=document.getElementById('si-chat-input');
