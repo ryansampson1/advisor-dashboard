@@ -25395,6 +25395,7 @@ window._siManualLink = async function(){
       body:(e.body||e.snippet||''), gmailId:e.id, gmailSubject:e.subject, gmailFrom:e.fromEmail, gmailDate:e.date, autoLogged:false
     });
     const addr=_siDealAddr(dealId).split(',')[0]||'property';
+    _siRememberMatch(e.id, dealId);
     let _na=0; try{ _na=await window._siSaveEmailAttachments(dealId, e); }catch(_){}
     st.log.unshift({ kind:'attach', msg:'Linked email to '+addr+(_na?(' · '+_na+' attachment'+(_na!==1?'s':'')):'') });
     const lw=document.getElementById('si-log'); if(lw) lw.outerHTML=_siLogHtml();
@@ -25442,7 +25443,10 @@ window._siAnalyze = async function(email){
     let parsed;
     try { parsed = JSON.parse(text); } catch(pe){ throw new Error('Could not parse AI response'); }
     window._siState.suggestions = (parsed.suggestions||[]).map((s,i)=>{ s._i=i; return s; });
-    window._siState.matchedDealId = (_prior && _prior.length) ? _prior[0].id : (parsed.matchedDealId || null);
+    const _remembered = _siRecallMatch(email.id);
+    const _rememberedValid = (_remembered && _siDealAddr(_remembered)) ? _remembered : null;
+    // precedence: the user's own remembered pick > prior link on record > AI's fresh guess
+    window._siState.matchedDealId = _rememberedValid || ((_prior && _prior.length) ? _prior[0].id : (parsed.matchedDealId || null));
     window._siState.meeting = (parsed.meeting && parsed.meeting.requested) ? parsed.meeting : null;
     _siRenderSuggestions(email);
   } catch(e){
@@ -25454,10 +25458,26 @@ window._siAnalyze = async function(email){
 function _siDealAddr(id){ const d=(allDeals||[]).find(x=>x.id===id); return d?(d.projectName||d.propertyAddress||''):''; }
 function _siRefreshDealFeed(dealId){ try{ if(typeof window._propLoadActivities==='function' && document.getElementById('prop-act-feed-'+dealId)) window._propLoadActivities(dealId,'prop-act-feed-'+dealId); }catch(_){} }
 
+// Remember the user's per-email property choice (survives navigating away + reloads),
+// so re-opening the same email keeps THEIR pick instead of re-guessing.
+function _siLinkMem(){ try{ return JSON.parse(localStorage.getItem('si_link_mem')||'{}'); }catch(_){ return {}; } }
+function _siRememberMatch(gmailId, dealId){
+  if(!gmailId) return;
+  window._siMemCache = window._siMemCache || {};
+  if(dealId) window._siMemCache[gmailId]=dealId; else delete window._siMemCache[gmailId];
+  try{ const m=_siLinkMem(); if(dealId) m[gmailId]=dealId; else delete m[gmailId]; localStorage.setItem('si_link_mem', JSON.stringify(m)); }catch(_){}
+}
+function _siRecallMatch(gmailId){
+  if(!gmailId) return null;
+  if(window._siMemCache && window._siMemCache[gmailId]) return window._siMemCache[gmailId];
+  try{ return _siLinkMem()[gmailId]||null; }catch(_){ return null; }
+}
+
 // User can correct the AI's property match — flows to the reader Link dropdown and any open attach card
 window._siSetMatch = function(dealId){
   const st=window._siState;
   st.matchedDealId = dealId||null;
+  _siRememberMatch(st.selected, dealId||null);
   const link=document.getElementById('si-link-deal'); if(link) link.value = dealId||'';
   const hint=document.getElementById('si-link-ai'); if(hint) hint.style.display='none';
   (st.suggestions||[]).forEach(function(s){ if(s.kind==='attach'){ const el=document.getElementById('si-f-'+s._i+'-dealId'); if(el) el.value=dealId||''; } });
@@ -25721,6 +25741,7 @@ window._siConfirm = async function(i){
         gmailDate: email.date,
         autoLogged: false
       });
+      _siRememberMatch(email.id, dealId);
       let _na=0; try{ _na=await window._siSaveEmailAttachments(dealId, email); }catch(_){}
       try{ _siRefreshDealFeed(dealId); }catch(_){}
       msg = 'Attached email to '+(_siDealAddr(dealId).split(',')[0]||'property')+(_na?(' · '+_na+' file'+(_na!==1?'s':'')+' saved'):'');
