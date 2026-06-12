@@ -5132,11 +5132,18 @@ function renderStageFields(stage, data={}){
   // req=true forces required; req omitted → auto-detect from reqFields set
   const inp = (id,label,type,ph,val='',req,extra='') => {
     const isReq = req===true || (req!==false && reqFields.has(id));
+    let typeAttr = type, extraAttr = extra, dispVal = (val==null?'':val);
+    // 'money' = comma-grouped currency field (text input, not number, so commas render)
+    if(type==='money'){
+      typeAttr = 'text';
+      extraAttr = `inputmode="numeric" oninput="window._fmtMoneyInput(this)" ${extra}`;
+      dispVal = window._fmtMoneyStr ? window._fmtMoneyStr(dispVal) : dispVal;
+    }
     return `
     <div>
       <label class="block text-xs font-semibold ${isReq?'text-red-600':'text-gray-500'} uppercase tracking-wide mb-1">${label}${isReq?' <span class="text-red-500">*</span>':''}</label>
-      <input id="${id}" type="${type}" placeholder="${ph}" value="${val||''}" ${isReq?'required':''}
-        class="w-full border ${isReq?'border-red-200 bg-red-50/30':'border-gray-300'} rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-red-300" ${extra}/>
+      <input id="${id}" type="${typeAttr}" placeholder="${ph}" value="${dispVal||''}" ${isReq?'required':''}
+        class="w-full border ${isReq?'border-red-200 bg-red-50/30':'border-gray-300'} rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-red-300" ${extraAttr}/>
     </div>`;
   };
   const sel = (id,label,opts,val='') => {
@@ -5280,10 +5287,10 @@ function renderStageFields(stage, data={}){
     <div>
       <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">Pricing</div>
       <div class="grid grid-cols-2 gap-3">
-        ${inp('sf-purchase-price','Purchase / Contract Price ($)','number','0',price||'')}
-        ${inp('sf-listed-price','Listed / Asking Price ($)','number','0',data.listedPrice||'')}
-        ${inp('sf-loi-price','LOI Offer Price ($)','number','0',data.loiPrice||'')}
-        ${inp('sf-earnest-money','Earnest Money Deposit ($)','number','0',data.earnestMoney||'')}
+        ${inp('sf-purchase-price','Purchase / Contract Price ($)','money','0',price||'')}
+        ${inp('sf-listed-price','Listed / Asking Price ($)','money','0',data.listedPrice||'')}
+        ${inp('sf-loi-price','LOI Offer Price ($)','money','0',data.loiPrice||'')}
+        ${inp('sf-earnest-money','Earnest Money Deposit ($)','money','0',data.earnestMoney||'')}
       </div>
     </div>
 
@@ -5388,7 +5395,7 @@ function renderStageFields(stage, data={}){
       <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">Listing Details</div>
       <div class="grid grid-cols-2 gap-3">
         ${inp('sf-listing-term','Listing Term','text','e.g. 12 months',data.listingTerm||'')}
-        ${inp('sf-proposed-price','Proposed Price ($)','number','',data.proposedPrice||'')}
+        ${inp('sf-proposed-price','Proposed Price ($)','money','',data.proposedPrice||'')}
         ${sel('sf-ready-websites','Ready for Websites?',[{v:'',l:'— Select —'},{v:'yes',l:'Yes'},{v:'no',l:'Not Yet'}],data.readyForWebsites||'')}
         ${sel('sf-sign','Order Sign?',[{v:'yes',l:'Yes — Order Sign'},{v:'no',l:'No Sign Needed'}],data.sign||'yes')}
       </div>
@@ -7197,6 +7204,7 @@ function renderShell(){
     {id:'hr',            label:'👥 HR',             always:true},
     {id:'crm',           label:'🤝 CRM',            crm:true},
     {id:'leads',         label:'🎯 Leads',          advisor:true, admin:true, manager:true},
+    {id:'inbox',         label:'📥 Inbox',          advisor:true, admin:true, manager:true},
     {id:'earthnotes',    label:'🌎 EarthNotes',     always:true},
   ].filter(n=>{
     if(sv){ // staff view: always tabs + staff-flagged tabs + manager tabs (for office managers) + CRM if enabled
@@ -7366,7 +7374,7 @@ function renderCurrentView(){
     commissions:viewMyCommissions,
     splits:viewSplits,automations:viewAutomations,users:viewUsers,leaderboard:viewLeaderboard,
     manageStages:viewManageStages,officeManagers:viewOfficeManagers,approvedUsers:viewApprovedUsers,officeOverview:viewOfficeOverview,
-    eos:()=>viewEOS(window._eosSub||'rocks'),comps:viewComps,drive:viewDrive,documents:viewDocuments,hr:viewHR,crm:viewCRM,leads:viewLeads,earthnotes:viewEarthNotes};
+    eos:()=>viewEOS(window._eosSub||'rocks'),comps:viewComps,drive:viewDrive,documents:viewDocuments,hr:viewHR,crm:viewCRM,leads:viewLeads,inbox:viewSmartInbox,earthnotes:viewEarthNotes};
   try {
     (map[currentView]||viewBoard)();
   } catch(e) {
@@ -20723,9 +20731,36 @@ window.syncCoAdvisor = sel => {
   row.querySelector('.ca-name').value  = opt.dataset.name||'';
 };
 
+// ── Currency input comma formatting ──
+// Returns a comma-grouped string (keeps up to 2 decimals). Used for initial render.
+function _fmtMoneyStr(v){
+  if(v==null) return '';
+  let raw = String(v).replace(/[^0-9.]/g,'');
+  if(raw==='') return '';
+  const hasDot = raw.indexOf('.')!==-1;
+  let [i,d] = raw.split('.');
+  i = (i||'').replace(/^0+(?=\d)/,'');
+  const iFmt = i ? i.replace(/\B(?=(\d{3})+(?!\d))/g,',') : '';
+  return hasDot ? (iFmt||'0')+'.'+(d||'').slice(0,2) : iFmt;
+}
+// Live formatter bound to oninput; reformats with commas and keeps the caret sensible.
+function _fmtMoneyInput(el){
+  if(!el) return;
+  const before = el.value;
+  const sel = el.selectionStart ?? before.length;
+  const digitsLeft = (before.slice(0,sel).match(/[0-9]/g)||[]).length;
+  const out = _fmtMoneyStr(before);
+  el.value = out;
+  let pos=0, seen=0;
+  while(pos<out.length && seen<digitsLeft){ if(/[0-9]/.test(out[pos])) seen++; pos++; }
+  try{ el.setSelectionRange(pos,pos); }catch(e){}
+}
+window._fmtMoneyStr = _fmtMoneyStr;
+window._fmtMoneyInput = _fmtMoneyInput;
+
 function collectStageFields(){
   const g  = id => document.getElementById(id)?.value||'';
-  const gf = id => parseFloat(g(id))||0;
+  const gf = id => parseFloat(String(g(id)).replace(/,/g,''))||0;
   return {
     // Proposal / Prospect
     // NOTE: projectName is intentionally NOT collected here. The project/marketing
@@ -24811,6 +24846,386 @@ window.openDealMap=async(includeClosed)=>{
     (approxCount?` · ${approxCount} approximate (dashed pins)`:'')+
     (failed.length?` · couldn't locate: ${failed.slice(0,4).join(', ')}${failed.length>4?` +${failed.length-4} more`:''}`:''));
 };
+
+/* ===== SMART_INBOX_BLOCK_START ===== */
+/* =======================================================
+   VIEW: SMART INBOX  (AI-assisted email → property / task / attach)
+   Added elc-v281. Per-advisor Gmail (read-only), human-confirmed actions.
+   Reuses: Store.createDeal / Store.createTask, window._dealLogActivity
+   (activity schema already carries gmailId/gmailSubject/gmailFrom/gmailDate),
+   _aiPost (claude-sonnet-4-6), visibleDeals(), allProfiles, showToast.
+   ======================================================= */
+const SI_GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
+window._siState = { emails:[], selected:null, suggestions:[], log:[], analyzing:false };
+
+function _siEsc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function _siGmailToken(){
+  const t = sessionStorage.getItem('gmail_token');
+  const exp = parseInt(sessionStorage.getItem('gmail_token_exp')||'0');
+  if(!t || Date.now() > exp) return null;
+  return t;
+}
+function _siDateStr(n){ const d=new Date(); d.setDate(d.getDate()+(n||0)); return d.toISOString().slice(0,10); }
+
+window._siConnectGmail = async function(){
+  if(!_fbFns || !_fbAuth){ showToast('Not signed in','error'); return; }
+  const { GoogleAuthProvider, signInWithPopup } = _fbFns;
+  const provider = new GoogleAuthProvider();
+  provider.addScope(SI_GMAIL_SCOPE);
+  try {
+    const result = await signInWithPopup(_fbAuth, provider);
+    const cred = GoogleAuthProvider.credentialFromResult(result);
+    if(cred?.accessToken){
+      sessionStorage.setItem('gmail_token', cred.accessToken);
+      sessionStorage.setItem('gmail_token_exp', String(Date.now() + 3600*1000));
+      showToast('Gmail connected ✓','success');
+      window._siState.emails = [];
+      viewSmartInbox();
+    } else {
+      showToast('Gmail token not returned — try again','error');
+    }
+  } catch(e){ showToast('Gmail permission not granted','error'); }
+};
+
+window._siDisconnect = function(){
+  sessionStorage.removeItem('gmail_token');
+  sessionStorage.removeItem('gmail_token_exp');
+  window._siState = { emails:[], selected:null, suggestions:[], log:[], analyzing:false };
+  viewSmartInbox();
+};
+
+function viewSmartInbox(){
+  if(activeChart){ try{ activeChart.destroy(); }catch(e){} activeChart=null; }
+  const token = _siGmailToken();
+  if(!token){
+    setContent(
+      '<div style="max-width:540px;margin:3rem auto;text-align:center;padding:2.2rem;background:#fff;border:1px solid #e5e7eb;border-radius:14px">'+
+      '<div style="font-size:2.4rem">📥</div>'+
+      '<h2 style="font-size:1.3rem;font-weight:800;margin:.5rem 0 .35rem">Smart Inbox</h2>'+
+      '<p style="color:#6b7280;font-size:.92rem;line-height:1.55;margin-bottom:1.3rem">Connect your Gmail and Terra will read your inbox and suggest <b>properties</b>, <b>tasks</b>, and <b>email attachments</b> — which you confirm before anything is saved. Terra reads only your own mailbox, in your browser.</p>'+
+      '<button onclick="_siConnectGmail()" style="background:var(--brand-red,#DA291C);color:#fff;border:0;border-radius:9px;padding:.72rem 1.4rem;font-weight:700;cursor:pointer;font-size:.95rem">Connect Gmail</button>'+
+      '<p style="color:#9ca3af;font-size:.72rem;margin-top:1.1rem">Read-only access · message bodies are never stored on our servers</p>'+
+      '</div>'
+    );
+    return;
+  }
+  setContent(
+    '<div style="display:grid;grid-template-columns:320px 1fr 380px;height:calc(100vh - 90px);border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;background:#fff">'+
+      '<div id="si-list" style="overflow-y:auto;border-right:1px solid #e5e7eb">'+
+        '<div style="position:sticky;top:0;background:#fff;border-bottom:1px solid #e5e7eb;padding:.8rem .9rem;z-index:2;display:flex;justify-content:space-between;align-items:center">'+
+          '<div><div style="font-weight:800;font-size:.95rem">Inbox</div><div id="si-sub" style="color:#6b7280;font-size:.74rem">Loading…</div></div>'+
+          '<button onclick="_siLoadInbox()" title="Refresh" style="border:1px solid #e5e7eb;background:#fff;border-radius:7px;padding:.3rem .5rem;cursor:pointer;font-size:.8rem">↻</button>'+
+        '</div>'+
+        '<div id="si-mails"></div>'+
+      '</div>'+
+      '<div id="si-reader" style="overflow-y:auto;border-right:1px solid #e5e7eb">'+
+        '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#9ca3af;text-align:center;padding:2rem">Select an email to read it and see AI-suggested actions.</div>'+
+      '</div>'+
+      '<div id="si-ai" style="overflow-y:auto;background:#FAFAFB">'+
+        '<div style="position:sticky;top:0;background:#FAFAFB;border-bottom:1px solid #e5e7eb;padding:.85rem;z-index:2">'+
+          '<div style="font-weight:800;font-size:.95rem">🤖 AI Actions</div>'+
+          '<div style="color:#6b7280;font-size:.74rem;margin-top:.2rem">Claude reads the open email and proposes actions. Nothing saves until you confirm.</div>'+
+        '</div>'+
+        '<div id="si-ai-body" style="padding:.85rem"><div style="color:#9ca3af;font-size:.85rem;text-align:center;padding:1.5rem">Open an email to analyze it.</div></div>'+
+      '</div>'+
+    '</div>'
+  );
+  if(!window._siState.emails.length) _siLoadInbox();
+  else { _siRenderList(); }
+}
+
+window._siLoadInbox = async function(){
+  const token = _siGmailToken();
+  if(!token){ viewSmartInbox(); return; }
+  const sub = document.getElementById('si-sub');
+  const mails = document.getElementById('si-mails');
+  if(sub) sub.textContent = 'Loading…';
+  try {
+    const listResp = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages?labelIds=INBOX&maxResults=20', { headers:{ Authorization:'Bearer '+token } });
+    if(listResp.status===401){ _siDisconnect(); showToast('Gmail session expired — reconnect','warning'); return; }
+    if(!listResp.ok) throw new Error('Gmail list '+listResp.status);
+    const list = await listResp.json();
+    const ids = (list.messages||[]).map(m=>m.id);
+    const msgs = await Promise.all(ids.map(id =>
+      fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/'+id+'?format=full', { headers:{ Authorization:'Bearer '+token } })
+        .then(r=>r.ok?r.json():null).catch(()=>null)
+    ));
+    window._siState.emails = msgs.filter(Boolean).map(_siParse);
+    _siRenderList();
+  } catch(e){
+    console.error('[smart-inbox] load failed', e);
+    if(mails) mails.innerHTML = '<div style="padding:1rem;color:#b91c1c;font-size:.82rem">Could not load inbox: '+_siEsc(e.message)+'</div>';
+    if(sub) sub.textContent = 'Error';
+  }
+};
+
+function _siB64(data){
+  try { return decodeURIComponent(escape(atob((data||'').replace(/-/g,'+').replace(/_/g,'/')))); }
+  catch(e){ try { return atob((data||'').replace(/-/g,'+').replace(/_/g,'/')); } catch(_){ return ''; } }
+}
+function _siExtractBody(payload){
+  if(!payload) return '';
+  // Prefer text/plain; walk parts recursively
+  const walk = (p)=>{
+    if(!p) return '';
+    if(p.mimeType==='text/plain' && p.body?.data) return _siB64(p.body.data);
+    if(p.parts){ for(const c of p.parts){ const t=walk(c); if(t) return t; } }
+    return '';
+  };
+  let body = walk(payload);
+  if(!body && payload.body?.data) body = _siB64(payload.body.data);
+  if(!body){ // fall back to first text/html stripped
+    const walkHtml=(p)=>{ if(!p) return ''; if(p.mimeType==='text/html'&&p.body?.data) return _siB64(p.body.data); if(p.parts){ for(const c of p.parts){ const t=walkHtml(c); if(t) return t; } } return ''; };
+    const html=walkHtml(payload);
+    if(html) body = html.replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim();
+  }
+  return (body||'').replace(/\r/g,'').trim();
+}
+function _siParse(msg){
+  const headers = (msg.payload && msg.payload.headers) || [];
+  const h = (n)=>{ const x=headers.find(x=>x.name.toLowerCase()===n); return x?x.value:''; };
+  const fromRaw = h('from');
+  const m = fromRaw.match(/^(.*?)<(.+?)>/);
+  const fromName = m ? m[1].replace(/"/g,'').trim() : fromRaw;
+  const fromEmail = m ? m[2].trim() : fromRaw;
+  return {
+    id: msg.id,
+    threadId: msg.threadId,
+    from: fromName || fromEmail,
+    fromEmail: fromEmail,
+    subject: h('subject') || '(no subject)',
+    date: (h('date')||'').replace(/\s*\(.*\)$/,''),
+    snippet: msg.snippet || '',
+    body: _siExtractBody(msg.payload),
+    unread: (msg.labelIds||[]).includes('UNREAD')
+  };
+}
+
+function _siRenderList(){
+  const st = window._siState;
+  const sub = document.getElementById('si-sub');
+  const wrap = document.getElementById('si-mails');
+  if(!wrap) return;
+  const unread = st.emails.filter(e=>e.unread).length;
+  if(sub) sub.textContent = st.emails.length+' messages · '+unread+' unread';
+  if(!st.emails.length){ wrap.innerHTML = '<div style="padding:1rem;color:#9ca3af;font-size:.85rem">Inbox is empty.</div>'; return; }
+  wrap.innerHTML = st.emails.map(e=>{
+    const sel = st.selected===e.id;
+    return '<div onclick="_siOpenMail(\''+e.id+'\')" style="padding:.7rem .85rem;border-bottom:1px solid #f1f1f1;cursor:pointer;'+(sel?'background:#E6F7F5;border-left:3px solid var(--brand-teal,#00B2A9);padding-left:calc(.85rem - 3px)':'')+'">'+
+      '<div style="display:flex;justify-content:space-between;gap:.5rem">'+
+        '<div style="font-size:.84rem;'+(e.unread?'font-weight:700':'')+';overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+(e.unread?'<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--brand-teal,#00B2A9);margin-right:5px"></span>':'')+_siEsc(e.from)+'</div>'+
+      '</div>'+
+      '<div style="font-size:.82rem;margin-top:.15rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+_siEsc(e.subject)+'</div>'+
+      '<div style="color:#9ca3af;font-size:.76rem;margin-top:.12rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+_siEsc(e.snippet)+'</div>'+
+    '</div>';
+  }).join('');
+}
+
+window._siOpenMail = function(id){
+  const st = window._siState;
+  st.selected = id;
+  const e = st.emails.find(x=>x.id===id);
+  if(!e) return;
+  e.unread = false;
+  _siRenderList();
+  const reader = document.getElementById('si-reader');
+  if(reader){
+    reader.innerHTML =
+      '<div style="padding:1.1rem 1.3rem .8rem;border-bottom:1px solid #e5e7eb">'+
+        '<h1 style="font-size:1.05rem;font-weight:800;margin:0 0 .5rem">'+_siEsc(e.subject)+'</h1>'+
+        '<div style="color:#6b7280;font-size:.76rem;line-height:1.5"><b>'+_siEsc(e.from)+'</b> &lt;'+_siEsc(e.fromEmail)+'&gt;<br>'+_siEsc(e.date)+'</div>'+
+        '<a href="https://mail.google.com/mail/u/0/#inbox/'+e.id+'" target="_blank" rel="noopener" style="font-size:.74rem;color:var(--brand-teal,#00B2A9)">Open in Gmail ↗</a>'+
+      '</div>'+
+      '<div style="padding:1.1rem 1.3rem;line-height:1.6;white-space:pre-wrap;font-size:.86rem;color:#1f2937">'+_siEsc(e.body)+'</div>';
+  }
+  _siAnalyze(e);
+};
+
+window._siAnalyze = async function(email){
+  const body = document.getElementById('si-ai-body');
+  if(body) body.innerHTML = '<div style="color:#6b7280;font-size:.85rem;display:flex;align-items:center;gap:.5rem;padding:.5rem"><span class="animate-spin" style="width:14px;height:14px;border:2px solid #d1d5db;border-top-color:var(--brand-teal,#00B2A9);border-radius:50%;display:inline-block"></span> Claude is reading this email…</div>';
+  const deals = visibleDeals().map(d=>({ id:d.id, address:d.propertyAddress||'', county:d.county||'', parcel:d.folioNumber||d.parcelId||'', stage:d.stage||'' }));
+  const sys = 'You are Terra\'s inbox assistant for a commercial land brokerage. Given one email and the advisor\'s existing properties, propose actions a coordinator would take. Only propose what the email clearly supports. Prefer attaching to an existing property over creating a new one when an address or parcel matches. Newsletters/marketing/no-action emails should return an empty suggestions array. Return ONLY valid JSON, no prose, no code fences.';
+  const user =
+    'EMAIL:\nFrom: '+email.from+' <'+email.fromEmail+'>\nSubject: '+email.subject+'\nBody:\n'+(email.body||email.snippet).slice(0,6000)+
+    '\n\nEXISTING PROPERTIES (JSON):\n'+JSON.stringify(deals.slice(0,200))+
+    '\n\nReturn JSON of this exact shape:\n'+
+    '{"matchedDealId": "<id or null>", "suggestions": [ {"kind":"create|attach|task", "confidence":0.0, "title":"short label", "why":"one sentence", "fields": { } } ] }\n'+
+    'Field conventions:\n'+
+    '- create: {"address","county","parcel","acreage","stage","seller"}\n'+
+    '- attach: {"dealId"}\n'+
+    '- task: {"title","assignedToEmail","dueInDays","desc","dealId"}\n'+
+    'Use the advisor\'s own email for assignedToEmail unless the email clearly implies ops/admin. dueInDays is an integer.';
+  try {
+    const resp = await _aiPost({ model:'claude-sonnet-4-6', max_tokens:1500, system:sys, messages:[{ role:'user', content:user }] });
+    if(!resp.ok) throw new Error('Claude '+resp.status);
+    const data = await resp.json();
+    let text = (data.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('\n').trim();
+    text = text.replace(/^```(?:json)?/i,'').replace(/```$/,'').trim();
+    const first = text.indexOf('{'); const last = text.lastIndexOf('}');
+    if(first>=0 && last>first) text = text.slice(first, last+1);
+    let parsed;
+    try { parsed = JSON.parse(text); } catch(pe){ throw new Error('Could not parse AI response'); }
+    window._siState.suggestions = (parsed.suggestions||[]).map((s,i)=>{ s._i=i; return s; });
+    window._siState.matchedDealId = parsed.matchedDealId || null;
+    _siRenderSuggestions(email);
+  } catch(e){
+    console.error('[smart-inbox] analyze failed', e);
+    if(body) body.innerHTML = '<div style="background:#fff;border:1px dashed #e5e7eb;border-radius:10px;padding:1rem;text-align:center;color:#6b7280;font-size:.83rem">AI couldn\'t structure a suggestion for this email.<br><span style="font-size:.72rem;color:#9ca3af">'+_siEsc(e.message)+'</span></div>'+_siLogHtml();
+  }
+};
+
+function _siDealAddr(id){ const d=(allDeals||[]).find(x=>x.id===id); return d?(d.projectName||d.propertyAddress||''):''; }
+function _siProfileOptions(sel){
+  const list = Object.values(allProfiles||{}).filter(p=>p&&p.email).sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+  const me = currentUser ? currentUser.email : '';
+  let opts = '<option value="'+_siEsc(me)+'"'+((!sel||sel===me)?' selected':'')+'>'+_siEsc((currentUser&&currentUser.name)||me)+' (you)</option>';
+  opts += list.filter(p=>p.email!==me).map(p=>'<option value="'+_siEsc(p.email)+'"'+(sel===p.email?' selected':'')+'>'+_siEsc(p.name||p.email)+'</option>').join('');
+  return opts;
+}
+function _siDealSelect(id, sel){
+  const deals = visibleDeals();
+  return '<select id="'+id+'">'+deals.map(d=>'<option value="'+d.id+'"'+(sel===d.id?' selected':'')+'>'+_siEsc((d.propertyAddress||'').split(',')[0])+'</option>').join('')+'</select>';
+}
+
+function _siRenderSuggestions(email){
+  const st = window._siState;
+  const body = document.getElementById('si-ai-body');
+  if(!body) return;
+  let html = '';
+  if(st.matchedDealId){ const a=_siDealAddr(st.matchedDealId); if(a) html += '<div style="background:#E6F7F5;border:1px solid #99e2dc;border-radius:8px;padding:.5rem .65rem;font-size:.78rem;margin-bottom:.7rem">🔗 Matched existing property: <b style="color:#0f766e">'+_siEsc(a.split(',')[0])+'</b></div>'; }
+  if(!st.suggestions.length){ html += '<div style="background:#fff;border:1px dashed #e5e7eb;border-radius:10px;padding:1.1rem;text-align:center;color:#6b7280;font-size:.83rem">No actions suggested for this email.</div>'; }
+  st.suggestions.forEach((s)=>{ html += _siSuggHtml(s); });
+  body.innerHTML = html + _siLogHtml();
+}
+
+function _siSuggHtml(s){
+  const i = s._i;
+  const f = s.fields || {};
+  const badge = { create:['➕ Create property','#FDECEA','#DA291C'], attach:['🔗 Attach to property','#E6F7F5','#0f766e'], task:['✅ Create task','#ECFDF5','#047857'] }[s.kind] || ['Action','#eee','#333'];
+  const conf = Math.round((s.confidence||0)*100);
+  let fields='';
+  const inp=(id,label,val)=>'<div style="display:flex;flex-direction:column;gap:.2rem;margin-bottom:.5rem"><label style="font-size:.7rem;color:#6b7280;font-weight:600">'+label+'</label><input id="'+id+'" value="'+_siEsc(val)+'" style="border:1px solid #e5e7eb;border-radius:6px;padding:.35rem .5rem;font-size:.82rem"></div>';
+  const ta=(id,label,val)=>'<div style="display:flex;flex-direction:column;gap:.2rem;margin-bottom:.5rem"><label style="font-size:.7rem;color:#6b7280;font-weight:600">'+label+'</label><textarea id="'+id+'" style="border:1px solid #e5e7eb;border-radius:6px;padding:.35rem .5rem;font-size:.82rem;min-height:42px;resize:vertical">'+_siEsc(val)+'</textarea></div>';
+  if(s.kind==='create'){
+    fields += inp('si-f-'+i+'-address','Property address (required)', f.address||'');
+    fields += inp('si-f-'+i+'-county','County', f.county||'');
+    fields += inp('si-f-'+i+'-parcel','Parcel / folio', f.parcel||'');
+    fields += inp('si-f-'+i+'-acreage','Acreage', f.acreage||'');
+    fields += '<div style="display:flex;flex-direction:column;gap:.2rem;margin-bottom:.5rem"><label style="font-size:.7rem;color:#6b7280;font-weight:600">Stage</label><select id="si-f-'+i+'-stage">'+['Prospect','Buyer Opportunities','Listing'].map(o=>'<option'+((f.stage||'Prospect')===o?' selected':'')+'>'+o+'</option>').join('')+'</select></div>';
+    fields += inp('si-f-'+i+'-seller','Seller / contact', f.seller||email.from);
+  } else if(s.kind==='attach'){
+    fields += '<div style="display:flex;flex-direction:column;gap:.2rem;margin-bottom:.5rem"><label style="font-size:.7rem;color:#6b7280;font-weight:600">Property</label>'+_siDealSelect('si-f-'+i+'-dealId', f.dealId||window._siState.matchedDealId)+'</div>';
+  } else if(s.kind==='task'){
+    fields += inp('si-f-'+i+'-title','Task title', f.title||s.title);
+    fields += '<div style="display:flex;flex-direction:column;gap:.2rem;margin-bottom:.5rem"><label style="font-size:.7rem;color:#6b7280;font-weight:600">Assign to</label><select id="si-f-'+i+'-assignee">'+_siProfileOptions(f.assignedToEmail)+'</select></div>';
+    fields += inp('si-f-'+i+'-due','Due date', _siDateStr(parseInt(f.dueInDays!=null?f.dueInDays:2)));
+    fields += '<div style="display:flex;flex-direction:column;gap:.2rem;margin-bottom:.5rem"><label style="font-size:.7rem;color:#6b7280;font-weight:600">Link to property (optional)</label><select id="si-f-'+i+'-dealId"><option value="">— none —</option>'+visibleDeals().map(d=>'<option value="'+d.id+'"'+((f.dealId||window._siState.matchedDealId)===d.id?' selected':'')+'>'+_siEsc((d.propertyAddress||'').split(',')[0])+'</option>').join('')+'</select></div>';
+    fields += ta('si-f-'+i+'-desc','Notes', f.desc||'');
+  }
+  return '<div id="si-sugg-'+i+'" style="background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:.8rem;margin-bottom:.7rem">'+
+    '<span style="display:inline-block;font-size:.66rem;font-weight:800;text-transform:uppercase;letter-spacing:.4px;padding:.18rem .5rem;border-radius:999px;background:'+badge[1]+';color:'+badge[2]+'">'+badge[0]+'</span>'+
+    '<h4 style="margin:.5rem 0 .25rem;font-size:.88rem">'+_siEsc(s.title)+'</h4>'+
+    '<div style="color:#6b7280;font-size:.76rem;line-height:1.45;margin-bottom:.5rem">'+_siEsc(s.why||'')+'</div>'+
+    '<div style="font-size:.7rem;color:#6b7280;display:flex;align-items:center;gap:.4rem;margin-bottom:.5rem">confidence '+conf+'% <span style="height:5px;border-radius:3px;background:#eee;flex:1;overflow:hidden"><span style="display:block;height:100%;width:'+conf+'%;background:var(--brand-teal,#00B2A9)"></span></span></div>'+
+    '<div style="border-top:1px dashed #e5e7eb;padding-top:.55rem">'+fields+'</div>'+
+    '<div style="display:flex;gap:.5rem;margin-top:.3rem"><button onclick="_siConfirm('+i+')" style="background:var(--brand-teal,#00B2A9);color:#fff;border:0;border-radius:6px;padding:.4rem .7rem;font-size:.78rem;font-weight:700;cursor:pointer">Confirm</button>'+
+    '<button onclick="_siDismiss('+i+')" style="background:#fff;border:1px solid #e5e7eb;color:#374151;border-radius:6px;padding:.4rem .7rem;font-size:.78rem;font-weight:600;cursor:pointer">Dismiss</button></div>'+
+  '</div>';
+}
+
+function _siVal(id){ const el=document.getElementById(id); return el?el.value.trim():''; }
+
+window._siConfirm = async function(i){
+  const st = window._siState;
+  const s = st.suggestions.find(x=>x._i===i);
+  const email = st.emails.find(x=>x.id===st.selected);
+  if(!s || !email) return;
+  const card = document.getElementById('si-sugg-'+i);
+  try {
+    let msg='';
+    if(s.kind==='create'){
+      const address=_siVal('si-f-'+i+'-address');
+      if(!address){ showToast('Property address is required','error'); return; }
+      await Store.createDeal({
+        propertyAddress: address,
+        county: _siVal('si-f-'+i+'-county'),
+        folioNumber: _siVal('si-f-'+i+'-parcel'),
+        acreage: _siVal('si-f-'+i+'-acreage'),
+        stage: _siVal('si-f-'+i+'-stage')||'Prospect',
+        seller: _siVal('si-f-'+i+'-seller'),
+        advisorUid: currentUser.uid,
+        advisorEmail: currentUser.email,
+        advisorName: currentUser.name||'',
+        probability: 10,
+        createdAt: Date.now(),
+        createdBy: currentUser.uid,
+        source: 'smart-inbox'
+      });
+      msg = 'Created property “'+address+'”';
+    } else if(s.kind==='attach'){
+      const dealId=_siVal('si-f-'+i+'-dealId');
+      if(!dealId){ showToast('Pick a property to attach to','error'); return; }
+      await window._dealLogActivity(dealId, 'email', {
+        body: 'Inbound email: '+email.subject,
+        gmailId: email.id,
+        gmailSubject: email.subject,
+        gmailFrom: email.fromEmail,
+        gmailDate: email.date,
+        autoLogged: false
+      });
+      msg = 'Attached email to '+(_siDealAddr(dealId).split(',')[0]||'property');
+    } else if(s.kind==='task'){
+      const title=_siVal('si-f-'+i+'-title');
+      if(!title){ showToast('Task title is required','error'); return; }
+      const assigneeEmail=_siVal('si-f-'+i+'-assignee');
+      const prof = Object.values(allProfiles||{}).find(p=>p&&p.email===assigneeEmail);
+      const uid = (prof && (prof.uid||Object.keys(allProfiles).find(k=>allProfiles[k]===prof))) || currentUser.uid;
+      const dealId=_siVal('si-f-'+i+'-dealId');
+      await Store.createTask({
+        title: title,
+        description: _siVal('si-f-'+i+'-desc'),
+        assignedTo: uid,
+        assignedToName: (prof&&prof.name)||currentUser.name||'',
+        assignedToEmail: assigneeEmail||currentUser.email,
+        dealId: dealId||'',
+        dealAddress: dealId?_siDealAddr(dealId):'',
+        dueDate: _siVal('si-f-'+i+'-due'),
+        status: 'pending',
+        taskType: 'inbox',
+        gmailUrl: 'https://mail.google.com/mail/u/0/#inbox/'+email.id,
+        createdAt: Date.now(),
+        createdBy: currentUser.uid,
+        createdByName: currentUser.name||''
+      });
+      msg = 'Created task “'+title+'”';
+    }
+    st.log.unshift({ kind:s.kind, msg:msg });
+    if(card){ card.style.background='#ECFDF5'; card.style.borderColor='#a7f3d0';
+      const btns=card.querySelector('div:last-child'); if(btns) btns.innerHTML='<div style="color:#047857;font-size:.78rem;font-weight:700">✓ Applied — saved to Terra</div>';
+    }
+    showToast(msg,'success');
+    const lw=document.getElementById('si-log'); if(lw) lw.outerHTML=_siLogHtml();
+  } catch(e){
+    console.error('[smart-inbox] confirm failed', e);
+    showToast('Could not save: '+e.message,'error');
+  }
+};
+
+window._siDismiss = function(i){
+  const card = document.getElementById('si-sugg-'+i);
+  if(card){ card.style.opacity='.5'; const btns=card.querySelector('div:last-child'); if(btns) btns.innerHTML='<div style="color:#9ca3af;font-size:.78rem;font-weight:600">Dismissed</div>'; }
+};
+
+function _siLogHtml(){
+  const log = window._siState.log;
+  if(!log || !log.length) return '<div id="si-log"></div>';
+  const ic={ create:'➕', attach:'🔗', task:'✅' };
+  return '<div id="si-log"><div style="font-size:.7rem;color:#6b7280;text-transform:uppercase;letter-spacing:.4px;margin:1rem 0 .5rem">Applied this session</div>'+
+    log.map(l=>'<div style="font-size:.76rem;color:#374151;padding:.4rem .6rem;background:#fff;border:1px solid #e5e7eb;border-radius:7px;margin-bottom:.35rem">'+(ic[l.kind]||'•')+' '+_siEsc(l.msg)+'</div>').join('')+'</div>';
+}
+
+/* ===== SMART_INBOX_BLOCK_END ===== */
 
 </script>
 
