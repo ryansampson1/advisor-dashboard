@@ -592,8 +592,8 @@ body {
 
 /* ── Property Detail Drawer ──────────────────────────────────────── */
 #prop-detail-drawer {
-  position: fixed; top: 0; right: 0; bottom: 0;
-  width: min(480px, 100vw);
+  position: fixed; top: 0; right: 0; bottom: 0; left: 0;
+  width: 100vw;
   background: #fff;
   box-shadow: -4px 0 32px rgba(0,0,0,.18);
   z-index: 9999;
@@ -953,7 +953,7 @@ body { background: var(--bg); }
       <button onclick="closePropertyDetail()" style="background:none;border:none;font-size:1.4rem;color:#9ca3af;cursor:pointer;line-height:1;padding:.2rem">&times;</button>
     </div>
   </div>
-  <div id="pdw-body" style="flex:1;overflow-y:auto;"></div>
+  <div id="pdw-body" style="flex:1;overflow-y:auto;width:100%;max-width:1100px;margin:0 auto"></div>
 </div>
 
 <!-- Quick-edit modal: inline date/price editing for DD, Rezoning, Closing cards -->
@@ -8843,7 +8843,15 @@ window._pgaNextPage = async (logSelected) => {
 // ── Deal activity logger: writes to deals/{dealId}/activities + cross-logs to linked contacts ──
 window._dealLogActivity = async (dealId, type, data = {}) => {
   if (!_fbDb || !_fbFns) { alert('Not connected to database.'); return; }
-  const {collection, addDoc} = _fbFns;
+  const {collection, addDoc, query, where, getDocs} = _fbFns;
+  // Dedup: never log the same Gmail message twice on one property. Re-opening or
+  // re-reading an email should be a no-op if it's already on the card's history.
+  if (data.gmailId) {
+    try {
+      const dup = await getDocs(query(collection(_fbDb, 'deals', dealId, 'activities'), where('gmailId', '==', data.gmailId)));
+      if (!dup.empty) { return dup.docs[0].id; }
+    } catch(e){ console.warn('[dealLogActivity] dedup check failed (continuing)', e); }
+  }
   const activity = {
     type,
     createdAt: Date.now(),
@@ -25323,7 +25331,7 @@ window._siManualLink = async function(){
   const st=window._siState; const e=st.emails.find(x=>x.id===st.selected); if(!e) return;
   try{
     await window._dealLogActivity(dealId, 'email', {
-      body:'Inbound email: '+e.subject, gmailId:e.id, gmailSubject:e.subject, gmailFrom:e.fromEmail, gmailDate:e.date, autoLogged:false
+      body:(e.body||e.snippet||''), gmailId:e.id, gmailSubject:e.subject, gmailFrom:e.fromEmail, gmailDate:e.date, autoLogged:false
     });
     const addr=_siDealAddr(dealId).split(',')[0]||'property';
     st.log.unshift({ kind:'attach', msg:'Linked email to '+addr });
@@ -25342,10 +25350,16 @@ window._siAnalyze = async function(email){
   const _now=new Date();
   const _todayStr=_now.getFullYear()+'-'+String(_now.getMonth()+1).padStart(2,'0')+'-'+String(_now.getDate()).padStart(2,'0');
   const _weekday=_now.toLocaleDateString(undefined,{weekday:'long'});
+  let _prior=[];
+  try{ _prior = await _siFindPriorLinks(email.id); }catch(_){}
+  window._siState.priorLinks=_prior;
+  const _priorTxt = _prior.length
+    ? '\n\nALREADY LINKED: This exact email is already attached to property "'+_prior[0].name+'" (id '+_prior[0].id+'). Set matchedDealId to that id and do NOT match a different property; only suggest new actions that make sense given it is already on that property.'
+    : '';
   const user =
     'EMAIL:\nFrom: '+email.from+' <'+email.fromEmail+'>\nSubject: '+email.subject+'\nBody:\n'+(email.body||email.snippet).slice(0,6000)+
     '\n\nEXISTING PROPERTIES (JSON):\n'+JSON.stringify(deals.slice(0,200))+
-    '\n\nTODAY: '+_todayStr+' ('+_weekday+'). Resolve relative dates like "Thursday" or "tomorrow" against this.'+
+    '\n\nTODAY: '+_todayStr+' ('+_weekday+'). Resolve relative dates like "Thursday" or "tomorrow" against this.'+_priorTxt+
     '\n\nReturn JSON of this exact shape:\n'+
     '{"matchedDealId": "<id or null>", "meeting": {"requested": false, "date": null, "start": null, "end": null, "label": null}, "suggestions": [ {"kind":"create|attach|task", "confidence":0.0, "title":"short label", "why":"one sentence", "fields": { } } ] }\n'+
     'Set meeting.requested true ONLY if the email proposes or asks to meet, call, or schedule at a specific day and/or time. meeting.date = "YYYY-MM-DD" of the proposed day (null if none). meeting.start/end = 24h "HH:MM" local time (null if no specific time). meeting.label = short human description (e.g. "Call Thursday at 2pm").\n'+
@@ -25365,7 +25379,7 @@ window._siAnalyze = async function(email){
     let parsed;
     try { parsed = JSON.parse(text); } catch(pe){ throw new Error('Could not parse AI response'); }
     window._siState.suggestions = (parsed.suggestions||[]).map((s,i)=>{ s._i=i; return s; });
-    window._siState.matchedDealId = parsed.matchedDealId || null;
+    window._siState.matchedDealId = (_prior && _prior.length) ? _prior[0].id : (parsed.matchedDealId || null);
     window._siState.meeting = (parsed.meeting && parsed.meeting.requested) ? parsed.meeting : null;
     _siRenderSuggestions(email);
   } catch(e){
@@ -25376,6 +25390,31 @@ window._siAnalyze = async function(email){
 
 function _siDealAddr(id){ const d=(allDeals||[]).find(x=>x.id===id); return d?(d.projectName||d.propertyAddress||''):''; }
 function _siRefreshDealFeed(dealId){ try{ if(typeof window._propLoadActivities==='function' && document.getElementById('prop-act-feed-'+dealId)) window._propLoadActivities(dealId,'prop-act-feed-'+dealId); }catch(_){} }
+
+// User can correct the AI's property match — flows to the reader Link dropdown and any open attach card
+window._siSetMatch = function(dealId){
+  const st=window._siState;
+  st.matchedDealId = dealId||null;
+  const link=document.getElementById('si-link-deal'); if(link) link.value = dealId||'';
+  const hint=document.getElementById('si-link-ai'); if(hint) hint.style.display='none';
+  (st.suggestions||[]).forEach(function(s){ if(s.kind==='attach'){ const el=document.getElementById('si-f-'+s._i+'-dealId'); if(el) el.value=dealId||''; } });
+};
+
+// Best-effort: has this Gmail message already been linked to a property? (reads the gmailId
+// stamped on deal activities). Requires a collection-group read on 'activities'; degrades silently.
+async function _siFindPriorLinks(gmailId){
+  try{
+    if(!_fbDb || !_fbFns || !_fbFns.collectionGroup || !gmailId) return [];
+    const { collectionGroup, query, where, getDocs } = _fbFns;
+    const snap = await getDocs(query(collectionGroup(_fbDb,'activities'), where('gmailId','==', gmailId)));
+    const ids=[];
+    snap.forEach(function(d){
+      const grand = d.ref && d.ref.parent && d.ref.parent.parent && d.ref.parent.parent.parent;
+      if(grand && grand.id==='deals'){ const did=d.ref.parent.parent.id; if(ids.indexOf(did)<0) ids.push(did); }
+    });
+    return ids.map(function(id){ return { id:id, name:_siDealAddr(id) }; }).filter(function(x){ return x.name; });
+  }catch(e){ console.warn('[smart-inbox] prior-link lookup failed', e); return []; }
+}
 function _siDealLabel(d){ return (d.projectName||d.propertyAddress||'Untitled deal'); }
 function _siDealsSorted(){ return visibleDeals().slice().sort((a,b)=>_siDealLabel(a).localeCompare(_siDealLabel(b), undefined, {numeric:true, sensitivity:'base'})); }
 function _siDealOptionList(sel, placeholder){
@@ -25398,7 +25437,14 @@ function _siRenderSuggestions(email){
   const body = document.getElementById('si-ai-body');
   if(!body) return;
   let html = '';
-  if(st.matchedDealId){ const a=_siDealAddr(st.matchedDealId); if(a) html += '<div style="background:#E6F7F5;border:1px solid #99e2dc;border-radius:8px;padding:.5rem .65rem;font-size:.78rem;margin-bottom:.7rem">🔗 Matched existing property: <b style="color:#0f766e">'+_siEsc(a.split(',')[0])+'</b></div>'; }
+  const _pl = st.priorLinks||[];
+  if(st.matchedDealId || _pl.length){
+    const priorNote = _pl.length ? '<div style="color:#0f766e;font-size:.72rem;margin-top:.35rem">✓ This email was previously linked to '+_siEsc(_pl.map(x=>x.name).join(', '))+'</div>' : '';
+    html += '<div style="background:#E6F7F5;border:1px solid #99e2dc;border-radius:8px;padding:.5rem .65rem;font-size:.78rem;margin-bottom:.7rem">'+
+      '<div style="display:flex;align-items:center;gap:.4rem;flex-wrap:wrap">🔗 <span style="font-weight:600;color:#0f766e">Matched property:</span>'+
+      '<select id="si-match-select" onchange="_siSetMatch(this.value)" style="border:1px solid #99e2dc;border-radius:6px;padding:.2rem .4rem;font-size:.76rem;background:#fff;max-width:210px">'+_siDealOptionList(st.matchedDealId,'— none —')+'</select></div>'+
+      priorNote+'</div>';
+  }
   if(st.meeting){ html += '<div id="si-avail" style="background:#fff;border:1px solid #e5e7eb;border-left:3px solid var(--brand-teal,#00B2A9);border-radius:8px;padding:.6rem .7rem;font-size:.8rem;margin-bottom:.7rem"><div style="color:#6b7280;font-size:.78rem">📅 Checking your availability…</div></div>'; }
   if(!st.suggestions.length){ html += '<div style="background:#fff;border:1px dashed #e5e7eb;border-radius:10px;padding:1.1rem;text-align:center;color:#6b7280;font-size:.83rem">No actions suggested for this email. Use the chat box below to tell the AI what to do.</div>'; }
   st.suggestions.forEach((s)=>{ html += _siSuggHtml(s); });
@@ -25596,7 +25642,7 @@ window._siConfirm = async function(i){
       // record creation + the source email on the new property's history
       if(_newId){
         try{ await window._dealLogActivity(_newId,'note',{ body:'Property created from Smart Inbox email: '+email.subject }); }catch(_){}
-        try{ await window._dealLogActivity(_newId,'email',{ body:'Inbound email: '+email.subject, gmailId:email.id, gmailSubject:email.subject, gmailFrom:email.fromEmail, gmailDate:email.date, autoLogged:false }); }catch(_){}
+        try{ await window._dealLogActivity(_newId,'email',{ body:(email.body||email.snippet||''), gmailId:email.id, gmailSubject:email.subject, gmailFrom:email.fromEmail, gmailDate:email.date, autoLogged:false }); }catch(_){}
         try{ _siRefreshDealFeed(_newId); }catch(_){}
       }
       msg = 'Created property “'+address+'”';
@@ -25604,7 +25650,7 @@ window._siConfirm = async function(i){
       const dealId=_siVal('si-f-'+i+'-dealId');
       if(!dealId){ showToast('Pick a property to attach to','error'); return; }
       await window._dealLogActivity(dealId, 'email', {
-        body: 'Inbound email: '+email.subject,
+        body: (email.body||email.snippet||''),
         gmailId: email.id,
         gmailSubject: email.subject,
         gmailFrom: email.fromEmail,
