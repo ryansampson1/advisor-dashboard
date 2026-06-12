@@ -24911,7 +24911,12 @@ function viewSmartInbox(){
     return;
   }
   setContent(
-    '<div style="display:grid;grid-template-columns:320px 1fr 380px;height:calc(100vh - 90px);border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;background:#fff">'+
+    '<div style="display:grid;grid-template-columns:172px 280px 1fr 360px;height:calc(100vh - 90px);border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;background:#fff">'+
+      '<div id="si-folders" style="overflow-y:auto;border-right:1px solid #e5e7eb;background:#FAFAFB;display:flex;flex-direction:column">'+
+        '<div style="position:sticky;top:0;background:#FAFAFB;border-bottom:1px solid #e5e7eb;padding:.8rem .8rem;z-index:2;font-weight:800;font-size:.9rem">Folders</div>'+
+        '<div id="si-folder-list" style="padding:.4rem;flex:1"></div>'+
+        '<button onclick="_siNewFolder()" style="margin:.5rem;border:1px dashed #cbd5e1;background:#fff;border-radius:8px;padding:.5rem;font-size:.78rem;font-weight:600;color:#374151;cursor:pointer">＋ New folder</button>'+
+      '</div>'+
       '<div id="si-list" style="overflow-y:auto;border-right:1px solid #e5e7eb">'+
         '<div style="position:sticky;top:0;background:#fff;border-bottom:1px solid #e5e7eb;padding:.8rem .9rem;z-index:2;display:flex;justify-content:space-between;align-items:center">'+
           '<div><div style="font-weight:800;font-size:.95rem">Inbox</div><div id="si-sub" style="color:#6b7280;font-size:.74rem">Loading…</div></div>'+
@@ -24920,14 +24925,21 @@ function viewSmartInbox(){
         '<div id="si-mails"></div>'+
       '</div>'+
       '<div id="si-reader" style="overflow-y:auto;border-right:1px solid #e5e7eb">'+
-        '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#9ca3af;text-align:center;padding:2rem">Select an email to read it and see AI-suggested actions.</div>'+
+        '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#9ca3af;text-align:center;padding:2rem">Select an email to read it and see AI-suggested actions.<br>Tip: drag any email onto a folder on the left to file it.</div>'+
       '</div>'+
-      '<div id="si-ai" style="overflow-y:auto;background:#FAFAFB">'+
-        '<div style="position:sticky;top:0;background:#FAFAFB;border-bottom:1px solid #e5e7eb;padding:.85rem;z-index:2">'+
+      '<div id="si-ai" style="background:#FAFAFB;display:flex;flex-direction:column;overflow:hidden">'+
+        '<div style="background:#FAFAFB;border-bottom:1px solid #e5e7eb;padding:.85rem;flex:0 0 auto">'+
           '<div style="font-weight:800;font-size:.95rem">🤖 AI Actions</div>'+
           '<div style="color:#6b7280;font-size:.74rem;margin-top:.2rem">Claude reads the open email and proposes actions. Nothing saves until you confirm.</div>'+
         '</div>'+
-        '<div id="si-ai-body" style="padding:.85rem"><div style="color:#9ca3af;font-size:.85rem;text-align:center;padding:1.5rem">Open an email to analyze it.</div></div>'+
+        '<div id="si-ai-body" style="padding:.85rem;flex:1;overflow-y:auto"><div style="color:#9ca3af;font-size:.85rem;text-align:center;padding:1.5rem">Open an email to analyze it.</div></div>'+
+        '<div style="border-top:1px solid #e5e7eb;background:#fff;padding:.6rem;flex:0 0 auto">'+
+          '<div style="font-size:.7rem;color:#6b7280;margin-bottom:.35rem">Tell the AI what to do with this email</div>'+
+          '<div style="display:flex;gap:.4rem">'+
+            '<input id="si-chat-input" placeholder="e.g. draft a task for Krissy to order a survey" onkeydown="if(event.key===\'Enter\')_siChat()" style="flex:1;border:1px solid #e5e7eb;border-radius:8px;padding:.45rem .6rem;font-size:.8rem">'+
+            '<button onclick="_siChat()" style="background:var(--brand-teal,#00B2A9);color:#fff;border:0;border-radius:8px;padding:.45rem .7rem;font-size:.8rem;font-weight:700;cursor:pointer">Send</button>'+
+          '</div>'+
+        '</div>'+
       '</div>'+
     '</div>'
   );
@@ -24935,6 +24947,35 @@ function viewSmartInbox(){
   if(!window._siState.emails.length) _siLoadInbox();
   else { _siRenderList(); }
 }
+
+function _siRenderFolders(){
+  const wrap=document.getElementById('si-folder-list'); if(!wrap) return;
+  const labels=window._siState.labels||[];
+  if(!labels.length){ wrap.innerHTML='<div style="color:#9ca3af;font-size:.74rem;padding:.5rem">No folders yet. Create one below.</div>'; return; }
+  wrap.innerHTML=labels.map(function(l){
+    return '<div ondragover="event.preventDefault();this.style.background=\'#E6F7F5\'" ondragleave="this.style.background=\'\'" ondrop="this.style.background=\'\';_siDrop(event,\''+l.id+'\')" '+
+      'style="display:flex;align-items:center;gap:.4rem;padding:.45rem .55rem;border-radius:7px;font-size:.8rem;color:#374151;cursor:default;margin-bottom:.15rem" '+
+      'title="Drag an email here to file it">📁 <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+_siEsc(l.name)+'</span></div>';
+  }).join('');
+}
+
+window._siNewFolder = async function(){
+  const token=_siGmailToken(); if(!token){ _siDisconnect(); return; }
+  const name=(window.prompt('New folder name:')||'').trim(); if(!name) return;
+  try{
+    const r=await fetch('https://gmail.googleapis.com/gmail/v1/users/me/labels',{
+      method:'POST', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
+      body:JSON.stringify({ name:name, labelListVisibility:'labelShow', messageListVisibility:'show' })
+    });
+    if(r.status===401){ _siDisconnect(); showToast('Gmail session expired — reconnect','warning'); return; }
+    if(!r.ok){ const t=await r.text(); throw new Error(r.status===409?'A folder with that name already exists':('Gmail '+r.status)); }
+    showToast('Folder “'+name+'” created ✓','success');
+    await _siLoadLabels();
+  }catch(err){ console.error('[smart-inbox] new folder failed', err); showToast('Could not create folder: '+err.message,'error'); }
+};
+
+window._siDragStart = function(ev, id){ try{ ev.dataTransfer.setData('text/plain', id); ev.dataTransfer.effectAllowed='move'; }catch(e){} window._siDragId=id; };
+window._siDrop = function(ev, labelId){ ev.preventDefault(); let id=''; try{ id=ev.dataTransfer.getData('text/plain'); }catch(e){} id=id||window._siDragId; if(id) _siMoveById(id, labelId); };
 
 window._siLoadInbox = async function(){
   const token = _siGmailToken();
@@ -25013,7 +25054,7 @@ function _siRenderList(){
   if(!st.emails.length){ wrap.innerHTML = '<div style="padding:1rem;color:#9ca3af;font-size:.85rem">Inbox is empty.</div>'; return; }
   wrap.innerHTML = st.emails.map(e=>{
     const sel = st.selected===e.id;
-    return '<div onclick="_siOpenMail(\''+e.id+'\')" style="padding:.7rem .85rem;border-bottom:1px solid #f1f1f1;cursor:pointer;'+(sel?'background:#E6F7F5;border-left:3px solid var(--brand-teal,#00B2A9);padding-left:calc(.85rem - 3px)':'')+'">'+
+    return '<div draggable="true" ondragstart="_siDragStart(event,\''+e.id+'\')" onclick="_siOpenMail(\''+e.id+'\')" style="padding:.7rem .85rem;border-bottom:1px solid #f1f1f1;cursor:pointer;'+(sel?'background:#E6F7F5;border-left:3px solid var(--brand-teal,#00B2A9);padding-left:calc(.85rem - 3px)':'')+'">'+
       '<div style="display:flex;justify-content:space-between;gap:.5rem">'+
         '<div style="font-size:.84rem;'+(e.unread?'font-weight:700':'')+';overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+(e.unread?'<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--brand-teal,#00B2A9);margin-right:5px"></span>':'')+_siEsc(e.from)+'</div>'+
       '</div>'+
@@ -25033,7 +25074,6 @@ window._siOpenMail = function(id){
   const reader = document.getElementById('si-reader');
   if(reader){
     var _btn='border:1px solid #e5e7eb;background:#fff;border-radius:7px;padding:.4rem .7rem;font-size:.78rem;font-weight:600;cursor:pointer';
-    var _labelOpts='<option value="">📁 Move to folder…</option>'+(window._siState.labels||[]).map(function(l){return '<option value="'+l.id+'">'+_siEsc(l.name)+'</option>';}).join('');
     var _dealOpts='<option value="">🔗 Link to property…</option>'+visibleDeals().map(function(d){return '<option value="'+d.id+'">'+_siEsc((d.propertyAddress||'').split(',')[0])+'</option>';}).join('');
     reader.innerHTML =
       '<div style="padding:1.1rem 1.3rem .8rem;border-bottom:1px solid #e5e7eb">'+
@@ -25043,8 +25083,9 @@ window._siOpenMail = function(id){
       '</div>'+
       '<div style="display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;padding:.6rem 1.3rem;border-bottom:1px solid #f1f1f1;background:#FAFAFB">'+
         '<button onclick="_siToggleReply()" style="'+_btn+'">↩ Reply</button>'+
-        '<select id="si-link-deal" style="'+_btn+'" onchange="_siManualLink()">'+_dealOpts+'</select>'+
-        '<select id="si-move-label" style="'+_btn+'" onchange="_siMove(this.value)">'+_labelOpts+'</select>'+
+        '<select id="si-link-deal" style="'+_btn+'">'+_dealOpts+'</select>'+
+        '<button id="si-link-btn" onclick="_siManualLink()" style="'+_btn+'">Link</button>'+
+        '<span id="si-link-ai" style="font-size:.72rem;color:#0f766e;display:none">✨ AI-selected — confirm or change</span>'+
       '</div>'+
       '<div id="si-reply" style="display:none;padding:.8rem 1.3rem;border-bottom:1px solid #f1f1f1;background:#fff">'+
         '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.4rem"><div style="font-size:.74rem;color:#6b7280">Reply to <b>'+_siEsc(e.fromEmail)+'</b></div>'+
@@ -25066,6 +25107,7 @@ window._siLoadLabels = async function(){
     const d=await r.json();
     // user-created folders only (skip Gmail system labels like INBOX/SENT/CATEGORY_*)
     window._siState.labels=(d.labels||[]).filter(l=>l.type==='user').sort((a,b)=>a.name.localeCompare(b.name));
+    _siRenderFolders();
   }catch(e){ console.warn('[smart-inbox] labels load failed', e); }
 };
 
@@ -25118,10 +25160,12 @@ window._siSendReply = async function(){
   }catch(err){ console.error('[smart-inbox] send failed', err); showToast('Could not send: '+err.message,'error'); }
 };
 
-window._siMove = async function(labelId){
-  if(!labelId) return;
+window._siMove = function(labelId){ const st=window._siState; if(st.selected) _siMoveById(st.selected, labelId); };
+
+window._siMoveById = async function(emailId, labelId){
+  if(!emailId || !labelId) return;
   const token=_siGmailToken(); if(!token){ _siDisconnect(); return; }
-  const st=window._siState; const e=st.emails.find(x=>x.id===st.selected); if(!e) return;
+  const st=window._siState; const e=st.emails.find(x=>x.id===emailId); if(!e) return;
   const lbl=(st.labels||[]).find(l=>l.id===labelId);
   try{
     const r=await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/'+e.id+'/modify',{
@@ -25131,12 +25175,16 @@ window._siMove = async function(labelId){
     if(r.status===401){ _siDisconnect(); showToast('Gmail session expired — reconnect','warning'); return; }
     if(!r.ok) throw new Error('Gmail modify '+r.status);
     showToast('Moved to '+(lbl?lbl.name:'folder')+' ✓','success');
-    // drop from local inbox list and clear reader
-    st.emails=st.emails.filter(x=>x.id!==e.id); st.selected=null;
+    // drop from local inbox list
+    const wasOpen = st.selected===e.id;
+    st.emails=st.emails.filter(x=>x.id!==e.id);
+    if(wasOpen) st.selected=null;
     _siRenderList();
-    const reader=document.getElementById('si-reader');
-    if(reader) reader.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#9ca3af;text-align:center;padding:2rem">Select an email to read it and see AI-suggested actions.</div>';
-    const ai=document.getElementById('si-ai-body'); if(ai) ai.innerHTML='<div style="color:#9ca3af;font-size:.85rem;text-align:center;padding:1.5rem">Open an email to analyze it.</div>'+_siLogHtml();
+    if(wasOpen){
+      const reader=document.getElementById('si-reader');
+      if(reader) reader.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#9ca3af;text-align:center;padding:2rem">Select an email to read it and see AI-suggested actions.</div>';
+      const ai=document.getElementById('si-ai-body'); if(ai) ai.innerHTML='<div style="color:#9ca3af;font-size:.85rem;text-align:center;padding:1.5rem">Open an email to analyze it.</div>'+_siLogHtml();
+    }
   }catch(err){ console.error('[smart-inbox] move failed', err); showToast('Could not move: '+err.message,'error'); }
 };
 
@@ -25209,10 +25257,54 @@ function _siRenderSuggestions(email){
   if(!body) return;
   let html = '';
   if(st.matchedDealId){ const a=_siDealAddr(st.matchedDealId); if(a) html += '<div style="background:#E6F7F5;border:1px solid #99e2dc;border-radius:8px;padding:.5rem .65rem;font-size:.78rem;margin-bottom:.7rem">🔗 Matched existing property: <b style="color:#0f766e">'+_siEsc(a.split(',')[0])+'</b></div>'; }
-  if(!st.suggestions.length){ html += '<div style="background:#fff;border:1px dashed #e5e7eb;border-radius:10px;padding:1.1rem;text-align:center;color:#6b7280;font-size:.83rem">No actions suggested for this email.</div>'; }
+  if(!st.suggestions.length){ html += '<div style="background:#fff;border:1px dashed #e5e7eb;border-radius:10px;padding:1.1rem;text-align:center;color:#6b7280;font-size:.83rem">No actions suggested for this email. Use the chat box below to tell the AI what to do.</div>'; }
   st.suggestions.forEach((s)=>{ html += _siSuggHtml(s); });
   body.innerHTML = html + _siLogHtml();
+  // AI auto-selects the matched property in the reader's Link dropdown (user can confirm or correct)
+  if(st.matchedDealId){
+    const sel=document.getElementById('si-link-deal');
+    if(sel && (allDeals||[]).some(d=>d.id===st.matchedDealId)){
+      sel.value=st.matchedDealId;
+      const hint=document.getElementById('si-link-ai'); if(hint) hint.style.display='inline';
+    }
+  }
 }
+
+window._siChat = async function(){
+  const input=document.getElementById('si-chat-input');
+  const instruction=input?input.value.trim():'';
+  if(!instruction) return;
+  const st=window._siState; const email=st.emails.find(x=>x.id===st.selected);
+  if(!email){ showToast('Open an email first','error'); return; }
+  if(input){ input.value=''; input.disabled=true; }
+  const body=document.getElementById('si-ai-body');
+  if(body){ const note=document.createElement('div'); note.style.cssText='color:#6b7280;font-size:.8rem;display:flex;align-items:center;gap:.5rem;padding:.4rem 0'; note.innerHTML='<span class="animate-spin" style="width:13px;height:13px;border:2px solid #d1d5db;border-top-color:var(--brand-teal,#00B2A9);border-radius:50%;display:inline-block"></span> Thinking about: '+_siEsc(instruction); body.appendChild(note); body.scrollTop=body.scrollHeight; }
+  const deals = visibleDeals().map(d=>({ id:d.id, address:d.propertyAddress||'', county:d.county||'', parcel:d.folioNumber||d.parcelId||'', stage:d.stage||'' }));
+  const sys='You are Terra\'s inbox assistant for a commercial land brokerage. The advisor will give an instruction about what to do with the open email. Turn it into one or more confirmable actions. Return ONLY valid JSON, no prose, no code fences.';
+  const usr='EMAIL:\nFrom: '+email.from+' <'+email.fromEmail+'>\nSubject: '+email.subject+'\nBody:\n'+(email.body||email.snippet).slice(0,6000)+
+    '\n\nEXISTING PROPERTIES (JSON):\n'+JSON.stringify(deals.slice(0,200))+
+    '\n\nADVISOR INSTRUCTION: '+instruction+
+    '\n\nReturn JSON: {"suggestions":[{"kind":"create|attach|task","confidence":0.0,"title":"short label","why":"one sentence","fields":{}}]}\n'+
+    'Field conventions: create {"address","county","parcel","acreage","stage","seller"}; attach {"dealId","stage"}; task {"title","assignedToEmail","dueInDays","desc","dealId"}. If the instruction asks for something none of these kinds can do, return a single task suggestion describing the follow-up.';
+  try{
+    const resp=await _aiPost({ model:'claude-sonnet-4-6', max_tokens:1200, system:sys, messages:[{ role:'user', content:usr }] });
+    if(!resp.ok) throw new Error('Claude '+resp.status);
+    const data=await resp.json();
+    let text=(data.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('\n').trim();
+    text=text.replace(/^```(?:json)?/i,'').replace(/```$/,'').trim();
+    const a=text.indexOf('{'), b2=text.lastIndexOf('}'); if(a>=0&&b2>a) text=text.slice(a,b2+1);
+    const parsed=JSON.parse(text);
+    const base=st.suggestions.reduce((m,s)=>Math.max(m,s._i),-1)+1;
+    const added=(parsed.suggestions||[]).map((s,k)=>{ s._i=base+k; return s; });
+    if(!added.length){ showToast('AI had no action for that','info'); }
+    st.suggestions=st.suggestions.concat(added);
+    _siRenderSuggestions(email);
+  }catch(err){
+    console.error('[smart-inbox] chat failed', err);
+    showToast('AI chat failed: '+err.message,'error');
+    _siRenderSuggestions(email);
+  }finally{ if(input){ input.disabled=false; input.focus(); } }
+};
 
 function _siSuggHtml(s){
   const i = s._i;
