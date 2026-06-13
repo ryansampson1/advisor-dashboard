@@ -8945,6 +8945,13 @@ window._dealLogActivity = async (dealId, type, data = {}) => {
       if (!dup.empty) { return dup.docs[0].id; }
     } catch(e){ console.warn('[dealLogActivity] dedup check failed (continuing)', e); }
   }
+  // Dedup: never log the same Google Calendar event twice on one property.
+  if (data.gcalEventId) {
+    try {
+      const dup = await getDocs(query(collection(_fbDb, 'deals', dealId, 'activities'), where('gcalEventId', '==', data.gcalEventId)));
+      if (!dup.empty) { return dup.docs[0].id; }
+    } catch(e){ console.warn('[dealLogActivity] gcal dedup check failed (continuing)', e); }
+  }
   const activity = {
     type,
     createdAt: Date.now(),
@@ -8955,6 +8962,7 @@ window._dealLogActivity = async (dealId, type, data = {}) => {
     ...( data.callDuration ? {callDuration: data.callDuration} : {} ),
     ...( data.meetingTitle ? {meetingTitle: data.meetingTitle} : {} ),
     ...( data.meetingDate  ? {meetingDate: data.meetingDate}   : {} ),
+    ...( data.gcalEventId  ? {gcalEventId: data.gcalEventId}   : {} ),
     ...( data.gmailId      ? {gmailId: data.gmailId, gmailSubject: data.gmailSubject||'', gmailFrom: data.gmailFrom||'', gmailDate: data.gmailDate||''} : {} ),
     ...( data.aiSummary    ? {aiSummary: true} : {} ),
   };
@@ -11373,6 +11381,9 @@ function viewCalendar(){
           New Meeting
         </button>
         <button onclick="window._calShowUpcoming()" class="text-sm px-3 py-2 rounded-xl border border-gray-200 hover:bg-gray-50 font-medium text-gray-700">Upcoming</button>
+        <button onclick="window._calBackfillMeetingLinks()" class="text-sm px-3 py-2 rounded-xl border border-gray-200 hover:bg-gray-50 font-medium text-gray-700 flex items-center gap-1.5" title="Match meetings to properties and log them to history">
+          🔗 Link to properties
+        </button>
         <button onclick="window._openGoogleCalendar()" class="text-sm px-3 py-2 rounded-xl border border-gray-200 hover:bg-gray-50 font-medium text-gray-500 flex items-center gap-1.5" title="Open in Google Calendar">
           Open in Google
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M7 17L17 7M17 7H8M17 7v9"/></svg>
@@ -11452,14 +11463,17 @@ window._calRenderGrid = async function(){
         const data = await window._calApiReq('GET', '/calendars/primary/events?' + params);
         const evs = (data.items || [])
           .filter(e => e.status !== 'cancelled')
-          .map(e => ({
-            id: e.id,
-            title: e.summary || '(no title)',
-            start: e.start?.dateTime || e.start?.date,
-            end:   e.end?.dateTime   || e.end?.date,
-            allDay: !e.start?.dateTime,
-            extendedProps: { desc: e.description || '' },
-          }));
+          .map(e => {
+            const dealId = e.extendedProperties?.private?.elcDealId || '';
+            return {
+              id: e.id,
+              title: (dealId ? '🔗 ' : '') + (e.summary || '(no title)'),
+              start: e.start?.dateTime || e.start?.date,
+              end:   e.end?.dateTime   || e.end?.date,
+              allDay: !e.start?.dateTime,
+              extendedProps: { desc: e.description || '', dealId },
+            };
+          });
         success(evs);
       } catch(err){
         showToast(err.message || 'Could not load calendar events', 'error');
@@ -11514,6 +11528,180 @@ async function _calPersistMove(arg){
   }
 }
 
+// ── Link meetings to CRM properties ──────────────────────────────────────────
+// Build <option>s for the property picker, sorted by label, with selectedId chosen.
+window._calDealOptions = function(selectedId){
+  const deals = (typeof visibleDeals === 'function' ? visibleDeals() : (allDeals || []));
+  const opts = deals.slice().sort((a,b)=>{
+    const la=(a.projectName||a.propertyAddress||a.address||'').toLowerCase();
+    const lb=(b.projectName||b.propertyAddress||b.address||'').toLowerCase();
+    return la<lb?-1:la>lb?1:0;
+  }).map(d=>{
+    const label=(d.projectName||d.propertyAddress||d.address||'(unnamed property)').replace(/</g,'&lt;');
+    return `<option value="${d.id}" ${d.id===selectedId?'selected':''}>${label}</option>`;
+  }).join('');
+  return `<option value="">— Not linked —</option>` + opts;
+};
+
+// Suggest a property from a list/CSV of attendee emails by matching CRM contacts
+// (email / email2) to their linkedDeals. Returns {dealId,label,contactName} or null.
+window._calSuggestDealFromAttendees = function(emails){
+  const arr = Array.isArray(emails) ? emails : String(emails||'').split(',');
+  const norm = arr.map(e=>String(e).trim().toLowerCase()).filter(Boolean);
+  if(!norm.length) return null;
+  const contacts = (typeof allContacts !== 'undefined' ? allContacts : []);
+  const dealCount = {}; let firstContactName = '';
+  norm.forEach(addr=>{
+    const c = contacts.find(x=>x && ((x.email||'').toLowerCase()===addr || (x.email2||'').toLowerCase()===addr));
+    if(c){
+      if(!firstContactName) firstContactName = c.name || [c.firstName,c.lastName].filter(Boolean).join(' ').trim() || c.email || '';
+      (c.linkedDeals||[]).forEach(id=>{ dealCount[id]=(dealCount[id]||0)+1; });
+    }
+  });
+  const ids = Object.keys(dealCount);
+  if(!ids.length) return null;
+  const visible = (typeof visibleDeals === 'function' ? visibleDeals() : (allDeals || []));
+  const visibleIds = new Set(visible.map(d=>d.id));
+  ids.sort((a,b)=>dealCount[b]-dealCount[a]);
+  const best = ids.find(id=>visibleIds.has(id));
+  if(!best) return null;
+  const deal = visible.find(d=>d.id===best);
+  return { dealId: best, label: deal ? (deal.projectName||deal.propertyAddress||deal.address||'') : '', contactName: firstContactName };
+};
+
+// Create-or-update the single 'meeting' activity for a calendar event on a deal.
+window._dealUpsertMeetingActivity = async function(dealId, eventId, data){
+  if(!dealId || !eventId || !_fbDb || !_fbFns) return;
+  const { collection, query, where, getDocs, updateDoc, doc } = _fbFns;
+  try {
+    const existing = await getDocs(query(collection(_fbDb,'deals',dealId,'activities'), where('gcalEventId','==',eventId)));
+    if(!existing.empty){
+      await updateDoc(doc(_fbDb,'deals',dealId,'activities',existing.docs[0].id), {
+        meetingTitle: data.meetingTitle || 'Meeting',
+        meetingDate:  data.meetingDate  || '',
+        body:         data.body || '',
+      });
+      return existing.docs[0].id;
+    }
+  } catch(e){ console.warn('[mtgUpsert] lookup failed, creating new', e); }
+  // New entry via the standard logger (also cross-logs to linked CRM contacts)
+  return window._dealLogActivity(dealId, 'meeting', {
+    meetingTitle: data.meetingTitle || 'Meeting',
+    meetingDate:  data.meetingDate  || '',
+    body:         data.body || '',
+    gcalEventId:  eventId,
+  });
+};
+
+// Remove the meeting activity for a calendar event from a deal (used on unlink/delete/relink).
+window._dealRemoveMeetingActivity = async function(dealId, eventId){
+  if(!dealId || !eventId || !_fbDb || !_fbFns) return;
+  const { collection, query, where, getDocs, deleteDoc, doc } = _fbFns;
+  try {
+    const snap = await getDocs(query(collection(_fbDb,'deals',dealId,'activities'), where('gcalEventId','==',eventId)));
+    for(const d of snap.docs){ try { await deleteDoc(doc(_fbDb,'deals',dealId,'activities',d.id)); } catch(_){} }
+  } catch(e){ console.warn('[mtgRemove] failed', e); }
+};
+
+// ── Backfill: propose property links for meetings created outside the dashboard ──
+window._calBackfillMeetingLinks = async function(){
+  const token = sessionStorage.getItem('gcal_token');
+  if(!token){ showToast('Enable calendar editing first','error'); return; }
+  document.getElementById('gcal-backfill-panel')?.remove();
+  const panel = document.createElement('div');
+  panel.id = 'gcal-backfill-panel';
+  panel.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9600;display:flex;align-items:center;justify-content:center;padding:1rem';
+  panel.innerHTML = `
+    <div style="background:#fff;border-radius:18px;width:100%;max-width:560px;max-height:85vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.25)">
+      <div style="padding:1.25rem 1.5rem;border-bottom:1px solid #f3f4f6;display:flex;align-items:center;justify-content:space-between">
+        <div>
+          <div style="font-weight:700;font-size:1rem;color:#1f2937">Link meetings to properties</div>
+          <div style="font-size:.75rem;color:#9ca3af;margin-top:.15rem">Suggested matches from meeting attendees · last 60 / next 30 days</div>
+        </div>
+        <button onclick="document.getElementById('gcal-backfill-panel')?.remove()" style="background:none;border:none;font-size:1.3rem;color:#9ca3af;cursor:pointer">✕</button>
+      </div>
+      <div id="gcal-backfill-list" style="flex:1;overflow-y:auto;padding:1rem 1.25rem">
+        <div style="text-align:center;color:#9ca3af;padding:2rem;font-size:.875rem">Scanning your calendar…</div>
+      </div>
+    </div>`;
+  document.body.appendChild(panel);
+  panel.addEventListener('click', e=>{ if(e.target===panel) panel.remove(); });
+  try {
+    const now = new Date();
+    const past   = new Date(now.getTime() - 60*86400000);
+    const future = new Date(now.getTime() + 30*86400000);
+    const params = new URLSearchParams({
+      timeMin: past.toISOString(), timeMax: future.toISOString(),
+      singleEvents:'true', orderBy:'startTime', maxResults:'250',
+    });
+    const data = await window._calApiReq('GET','/calendars/primary/events?'+params);
+    const events = (data.items||[]).filter(e=>e.status!=='cancelled');
+    const proposals = [];
+    events.forEach(ev=>{
+      if(ev.extendedProperties?.private?.elcDealId) return; // already linked
+      const emails = (ev.attendees||[]).filter(a=>!a.self).map(a=>a.email);
+      const s = window._calSuggestDealFromAttendees(emails);
+      if(s) proposals.push({ eventId:ev.id, title:ev.summary||'(no title)', when:ev.start?.dateTime||ev.start?.date, dealId:s.dealId, dealLabel:s.label, via:s.contactName });
+    });
+    window._calBackfillProposals = proposals;
+    const list = document.getElementById('gcal-backfill-list');
+    if(!list) return;
+    if(!proposals.length){
+      list.innerHTML = '<div style="text-align:center;color:#9ca3af;padding:2rem;font-size:.875rem">No unlinked meetings matched a property. ✓</div>';
+      return;
+    }
+    list.innerHTML = `<div style="display:flex;justify-content:flex-end;margin-bottom:.6rem"><button onclick="window._calBackfillConfirmAll()" style="background:#DA291C;color:#fff;border:none;border-radius:8px;padding:.4rem .85rem;font-size:.75rem;font-weight:600;cursor:pointer">Link all (${proposals.length})</button></div>` +
+      proposals.map((p,i)=>_calBackfillRow(p,i)).join('');
+  } catch(e){
+    const list = document.getElementById('gcal-backfill-list');
+    if(list) list.innerHTML = `<div style="text-align:center;color:#ef4444;padding:2rem;font-size:.875rem">${(e.message||'Scan failed').replace(/</g,'&lt;')}</div>`;
+  }
+};
+
+function _calBackfillRow(p, i){
+  const dt = p.when ? new Date(p.when) : null;
+  const whenStr = dt ? dt.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) : '';
+  const dealOptions = window._calDealOptions(p.dealId);
+  return `<div id="gcal-bf-row-${i}" style="border:1px solid #f3f4f6;border-radius:12px;padding:.85rem 1rem;margin-bottom:.6rem">
+    <div style="font-weight:600;font-size:.85rem;color:#1f2937">${(p.title||'').replace(/</g,'&lt;')}</div>
+    <div style="font-size:.72rem;color:#9ca3af;margin-bottom:.5rem">${whenStr}${p.via?` · matched via ${String(p.via).replace(/</g,'&lt;')}`:''}</div>
+    <select id="gcal-bf-deal-${i}" style="width:100%;border:1.5px solid #e5e7eb;border-radius:8px;padding:.45rem .6rem;font-size:.8rem;outline:none;margin-bottom:.5rem;box-sizing:border-box">${dealOptions}</select>
+    <div style="display:flex;gap:.5rem">
+      <button onclick="window._calBackfillConfirm(${i})" style="flex:1;background:#059669;color:#fff;border:none;border-radius:7px;padding:.4rem;font-size:.75rem;font-weight:600;cursor:pointer">Link</button>
+      <button onclick="window._calBackfillSkip(${i})" style="background:#f3f4f6;border:none;border-radius:7px;padding:.4rem .85rem;font-size:.75rem;font-weight:600;color:#374151;cursor:pointer">Skip</button>
+    </div>
+  </div>`;
+}
+
+window._calBackfillConfirm = async function(i){
+  const p = (window._calBackfillProposals||[])[i];
+  if(!p) return;
+  const dealId = document.getElementById('gcal-bf-deal-'+i)?.value || '';
+  if(!dealId){ showToast('Pick a property first','error'); return; }
+  const row = document.getElementById('gcal-bf-row-'+i);
+  try {
+    await window._calApiReq('PATCH', `/calendars/primary/events/${p.eventId}`, { extendedProperties:{ private:{ elcDealId: dealId } } });
+    const dt = p.when ? new Date(p.when) : null;
+    const meetingDate = dt ? dt.toISOString().slice(0,10) : '';
+    await window._dealUpsertMeetingActivity(dealId, p.eventId, { meetingTitle:p.title, meetingDate, body:'' });
+    if(row){ row.style.opacity=.6; row.innerHTML='<div style="font-size:.8rem;color:#059669;font-weight:600;padding:.3rem 0">✓ Linked to property</div>'; }
+    if(window._calRefetch) window._calRefetch();
+  } catch(e){ showToast(e.message||'Could not link','error'); }
+};
+
+window._calBackfillSkip = function(i){
+  const row = document.getElementById('gcal-bf-row-'+i);
+  if(row) row.remove();
+};
+
+window._calBackfillConfirmAll = async function(){
+  const props = window._calBackfillProposals || [];
+  for(let i=0;i<props.length;i++){
+    if(document.getElementById('gcal-bf-row-'+i)) await window._calBackfillConfirm(i);
+  }
+  showToast('Linking complete ✓','success');
+};
+
 // ── Calendar API helpers ─────────────────────────────────────────────────────
 window._calApiReq = async function(method, path, body){
   const token = sessionStorage.getItem('gcal_token');
@@ -11537,9 +11725,15 @@ window._calShowNewEvent = function(prefill={}){
   const defStart = prefill.start || roundUp.toTimeString().slice(0,5);
   const endMs = new Date('1970-01-01T'+defStart).getTime() + 3600000;
   const defEnd = prefill.end || new Date(endMs).toTimeString().slice(0,5);
+  let suggestedDealId = '', suggestLabel = '';
+  if(prefill.attendees){
+    const s = window._calSuggestDealFromAttendees(prefill.attendees);
+    if(s){ suggestedDealId = s.dealId; suggestLabel = s.contactName || s.label; }
+  }
   _calOpenEventModal({
     mode:'create', title:prefill.title||'', date:defDate,
     start:defStart, end:defEnd, desc:prefill.desc||'', attendees:prefill.attendees||'',
+    linkedDealId: prefill.dealId||'', suggestedDealId, suggestLabel,
   });
 };
 
@@ -11602,7 +11796,14 @@ window._calEditEvent = async function(eventId){
     const ev = await window._calApiReq('GET',`/calendars/primary/events/${eventId}`);
     const start = new Date(ev.start?.dateTime||ev.start?.date);
     const end   = new Date(ev.end?.dateTime  ||ev.end?.date);
-    const attendeeEmails = (ev.attendees||[]).filter(a=>!a.self).map(a=>a.email).join(', ');
+    const attendeeArr = (ev.attendees||[]).filter(a=>!a.self).map(a=>a.email);
+    const attendeeEmails = attendeeArr.join(', ');
+    const linkedDealId = ev.extendedProperties?.private?.elcDealId || '';
+    let suggestedDealId = '', suggestLabel = '';
+    if(!linkedDealId){
+      const s = window._calSuggestDealFromAttendees(attendeeArr);
+      if(s){ suggestedDealId = s.dealId; suggestLabel = s.contactName || s.label; }
+    }
     _calOpenEventModal({
       mode:'edit', eventId,
       title: ev.summary||'',
@@ -11611,6 +11812,7 @@ window._calEditEvent = async function(eventId){
       end:   end.toTimeString().slice(0,5),
       desc:  ev.description||'',
       attendees: attendeeEmails,
+      linkedDealId, suggestedDealId, suggestLabel,
     });
   } catch(e){ showToast(e.message,'error'); }
 };
@@ -11629,6 +11831,12 @@ window._calRescheduleEvent = function(eventId, title){
 function _calOpenEventModal(opts){
   document.getElementById('gcal-event-modal')?.remove();
   const isEdit = opts.mode==='edit', isMove = opts.mode==='move';
+  const _preselectDeal = opts.linkedDealId || opts.suggestedDealId || '';
+  const _dealOptions = window._calDealOptions(_preselectDeal);
+  const _usedSuggestion = !opts.linkedDealId && !!opts.suggestedDealId;
+  const _suggestHint = _usedSuggestion
+    ? `<span style="font-weight:400;text-transform:none;color:#059669"> · suggested${opts.suggestLabel?` from ${String(opts.suggestLabel).replace(/</g,'&lt;')}`:''}</span>`
+    : '';
   const m = document.createElement('div');
   m.id='gcal-event-modal';
   m.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9500;display:flex;align-items:center;justify-content:center;padding:1rem';
@@ -11670,6 +11878,14 @@ function _calOpenEventModal(opts){
         <input id="cev-attendees" type="text" value="${(opts.attendees||'').replace(/"/g,'&quot;')}" placeholder="colleague@example.com, another@example.com"
           style="width:100%;border:1.5px solid #e5e7eb;border-radius:8px;padding:.55rem .75rem;font-size:.875rem;outline:none;box-sizing:border-box"
           onfocus="this.style.borderColor='#DA291C'" onblur="this.style.borderColor='#e5e7eb'"/>
+      </div>
+      <div style="margin-bottom:.85rem">
+        <label style="font-size:.72rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:#6b7280;display:block;margin-bottom:.3rem">Link to property${_suggestHint}</label>
+        <select id="cev-deal"
+          style="width:100%;border:1.5px solid #e5e7eb;border-radius:8px;padding:.55rem .75rem;font-size:.875rem;outline:none;box-sizing:border-box;background:#fff"
+          onfocus="this.style.borderColor='#DA291C'" onblur="this.style.borderColor='#e5e7eb'">${_dealOptions}</select>
+        <input type="hidden" id="cev-prev-deal" value="${opts.linkedDealId||''}"/>
+        <div style="font-size:.68rem;color:#9ca3af;margin-top:.25rem">Logs this meeting to the property's Activity &amp; Notes history.</div>
       </div>
       <div style="margin-bottom:1.25rem">
         <label style="font-size:.72rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:#6b7280;display:block;margin-bottom:.3rem">Description</label>
@@ -11714,21 +11930,43 @@ window._calSaveEvent = async function(mode, eventId){
       const desc      = (document.getElementById('cev-desc')?.value||'').trim();
       const rawEmails = (document.getElementById('cev-attendees')?.value||'');
       const attendees = rawEmails.split(',').map(e=>e.trim()).filter(Boolean).map(email=>({email}));
+      const dealId     = (document.getElementById('cev-deal')?.value||'');
+      const prevDealId = (document.getElementById('cev-prev-deal')?.value||'');
       if(!title){ showToast('Title is required','error'); if(btn){btn.disabled=false;btn.textContent=mode==='edit'?'Save Changes':'Create Meeting';} return; }
       const body = {
         summary: title,
         description: desc||undefined,
         start:{dateTime:startDt, timeZone:tz},
         end:  {dateTime:endDt,   timeZone:tz},
+        // Tag the event with the linked property so the link survives edits and
+        // can be recognised by the calendar grid and the backfill matcher.
+        extendedProperties: { private: { elcDealId: dealId || '' } },
         ...(attendees.length ? {attendees, guestsCanInviteOthers:false} : {}),
       };
+      let effId = eventId;
       if(mode==='edit'){
         await window._calApiReq('PATCH', `/calendars/primary/events/${eventId}`, body);
         showToast('Meeting updated ✓','success');
       } else {
-        await window._calApiReq('POST', '/calendars/primary/events?sendNotifications=true', body);
+        const created = await window._calApiReq('POST', '/calendars/primary/events?sendNotifications=true', body);
+        effId = created?.id || '';
         showToast('Meeting created ✓','success');
       }
+      // Record the meeting in the linked property's history (and unlink the old one if it changed).
+      try {
+        const attendeesLine = attendees.length ? `\nAttendees: ${attendees.map(a=>a.email).join(', ')}` : '';
+        const bodyText = ((desc||'') + attendeesLine).trim();
+        if(dealId && effId){
+          await window._dealUpsertMeetingActivity(dealId, effId, { meetingTitle:title, meetingDate:date, body:bodyText });
+        }
+        if(prevDealId && prevDealId!==dealId && effId){
+          await window._dealRemoveMeetingActivity(prevDealId, effId);
+        }
+        // Refresh the property drawer feed if it's open on the linked deal.
+        if(dealId && typeof window._propLoadActivities==='function' && document.getElementById('pdw-activity-feed')){
+          window._propLoadActivities(dealId, 'pdw-activity-feed');
+        }
+      } catch(err){ console.warn('[cal link] activity log failed', err); }
     }
     document.getElementById('gcal-event-modal')?.remove();
     document.getElementById('gcal-upcoming-panel')?.remove();
@@ -11744,7 +11982,11 @@ window._calSaveEvent = async function(mode, eventId){
 window._calDeleteEvent = async function(eventId){
   if(!confirm('Delete this meeting? This cannot be undone.')) return;
   try {
+    // Look up any linked property first so we can clean its history after deletion.
+    let linkedDealId = '';
+    try { const ev = await window._calApiReq('GET',`/calendars/primary/events/${eventId}`); linkedDealId = ev.extendedProperties?.private?.elcDealId || ''; } catch(_){}
     await window._calApiReq('DELETE',`/calendars/primary/events/${eventId}`);
+    if(linkedDealId) await window._dealRemoveMeetingActivity(linkedDealId, eventId);
     showToast('Meeting deleted','success');
     document.getElementById('gcal-event-modal')?.remove();
     document.getElementById('gcal-upcoming-panel')?.remove();
