@@ -25122,6 +25122,7 @@ function viewSmartInbox(){
   _siLoadLabels();
   if(!window._siState.emails.length) _siLoadInbox();
   else { _siRenderList(); }
+  _siStartPolling();
 }
 
 function _siRenderFolders(){
@@ -25177,6 +25178,47 @@ window._siLoadInbox = async function(){
     if(sub) sub.textContent = 'Error';
   }
 };
+
+// ── Real-time inbox: poll Gmail for new messages and slot them in without
+// disturbing the email the advisor is currently reading. ──────────────────────
+window._siPollInbox = async function(){
+  // self-clean: if the user navigated away from the inbox, stop polling
+  if(!document.getElementById('si-mails')){ _siStopPolling(); return; }
+  const token=_siGmailToken();
+  if(!token){ _siStopPolling(); return; }
+  try{
+    const r=await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages?labelIds=INBOX&maxResults=15',{ headers:{ Authorization:'Bearer '+token } });
+    if(r.status===401){ _siStopPolling(); return; }
+    if(!r.ok) return;
+    const list=await r.json();
+    const have={}; (window._siState.emails||[]).forEach(e=>{ have[e.id]=1; });
+    const newIds=(list.messages||[]).map(m=>m.id).filter(id=>!have[id]);
+    if(!newIds.length) return;
+    const msgs=await Promise.all(newIds.map(id=>
+      fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/'+id+'?format=full',{ headers:{ Authorization:'Bearer '+token } })
+        .then(x=>x.ok?x.json():null).catch(()=>null)));
+    const fresh=msgs.filter(Boolean).map(_siParse);
+    if(!fresh.length) return;
+    // newest first; new mail goes to the top, the open/selected email is untouched
+    window._siState.emails = fresh.concat(window._siState.emails||[]);
+    _siRenderList();
+    const n=fresh.length;
+    try{ showToast(n+' new email'+(n!==1?'s':'')+' arrived','info',2500); }catch(_){}
+  }catch(_){}
+};
+function _siStopPolling(){ if(window._siPollTimer){ clearInterval(window._siPollTimer); window._siPollTimer=null; } }
+function _siStartPolling(){
+  _siStopPolling();
+  window._siPollTimer=setInterval(window._siPollInbox, 30000);
+  // refresh the moment the tab/window regains focus (registered once)
+  if(!window._siVisHooked){
+    window._siVisHooked=true;
+    document.addEventListener('visibilitychange', function(){
+      if(document.hidden || !document.getElementById('si-mails')) return;
+      _siStartPolling(); window._siPollInbox();
+    });
+  }
+}
 
 function _siB64(data){
   try { return decodeURIComponent(escape(atob((data||'').replace(/-/g,'+').replace(/_/g,'/')))); }
@@ -25395,11 +25437,25 @@ window._siRenderBody = async function(e){
   ifr.style.cssText='width:100%;border:0;display:block;background:#fff';
   ifr.srcdoc=doc;
   ifr.onload=function(){
+    function measure(){
+      try{
+        const d=ifr.contentDocument||ifr.contentWindow.document;
+        const h=Math.max(d.body.scrollHeight, d.documentElement.scrollHeight);
+        if(h>40) ifr.style.height=(h+16)+'px';
+      }catch(_){ if(!ifr.style.height) ifr.style.height='480px'; }
+    }
+    measure();
+    // The initial measure runs before remote images have downloaded, so image-heavy
+    // emails would collapse to near-zero height and clip. Re-measure as each image
+    // finishes loading, plus a few timed passes for late layout.
     try{
       const d=ifr.contentDocument||ifr.contentWindow.document;
-      const h=Math.max(d.body.scrollHeight, d.documentElement.scrollHeight);
-      ifr.style.height=(h+16)+'px';
-    }catch(_){ ifr.style.height='480px'; }
+      const imgs=d.images||[];
+      for(let k=0;k<imgs.length;k++){
+        if(!imgs[k].complete){ imgs[k].addEventListener('load',measure); imgs[k].addEventListener('error',measure); }
+      }
+    }catch(_){}
+    setTimeout(measure,400); setTimeout(measure,1200); setTimeout(measure,2600);
   };
   host.innerHTML='';
   host.appendChild(ifr);
