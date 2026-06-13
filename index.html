@@ -7382,15 +7382,8 @@ window.switchView = id => {
   payViewAdvisorUid = null; payViewAdvisorName = '';
   currentView=id;
   if(id==='hr') { localStorage.setItem('hr_headlines_seen', Date.now()); _updateNavBadges(); }
-  // Calendar tab: open Google Calendar immediately in a new tab (this runs inside the
-  // tab-click gesture, so the popup isn't blocked). The rendered view stays as a fallback.
-  if(id==='calendar'){
-    const email = (currentUser && currentUser.email) || '';
-    const gcalUrl = email
-      ? 'https://calendar.google.com/calendar/u/0/r?authuser=' + encodeURIComponent(email)
-      : 'https://calendar.google.com/calendar/r';
-    window.open(gcalUrl, '_blank', 'noopener');
-  }
+  // Calendar tab: now rendered in-app as an interactive embedded grid
+  // (see viewCalendar). No longer auto-opens Google Calendar in a new tab.
   // EarthNotes: open in a new tab on click (fires inside the click gesture so it isn't
   // pop-up blocked). Can't be iframed because its Google login refuses to be framed.
   if(id==='earthnotes'){
@@ -11327,7 +11320,11 @@ function viewCommissionForecast(){
 }
 
 /* =======================================================
-   VIEW: CALENDAR (embedded Google Calendar)
+   VIEW: CALENDAR (interactive Google Calendar, embedded)
+   Renders the signed-in advisor's primary Google Calendar inside the tab
+   using FullCalendar, reading/writing events through the Google Calendar
+   API (_calApiReq). Drag, drop, resize, click-to-edit and select-to-create
+   are all wired to write straight back to Google Calendar.
    ======================================================= */
 function viewCalendar(){
   if(activeChart){ activeChart.destroy(); activeChart=null; }
@@ -11335,40 +11332,186 @@ function viewCalendar(){
   const token = sessionStorage.getItem('gcal_token');
   const tokenExp = parseInt(sessionStorage.getItem('gcal_token_exp')||'0');
   const hasWriteToken = token && Date.now() < tokenExp;
-  // Full interactive Google Calendar, scoped to the signed-in advisor's account.
   const gcalUrl = email
     ? 'https://calendar.google.com/calendar/u/0/r?authuser=' + encodeURIComponent(email)
     : 'https://calendar.google.com/calendar/r';
   window._openGoogleCalendar = function(){ window.open(gcalUrl, '_blank', 'noopener'); };
 
+  // No write token yet → show the enable-editing card. Editing the calendar
+  // requires a Google Calendar API token (calendar.events scope).
+  if(!hasWriteToken){
+    setContent(`
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-xl font-bold text-gray-800">Calendar</h2>
+      </div>
+      <div class="bg-white rounded-2xl border flex items-center justify-center text-center" style="height:calc(100vh - 180px);">
+        <div class="max-w-md px-6">
+          <div class="mx-auto mb-5 w-16 h-16 rounded-2xl bg-red-50 flex items-center justify-center">
+            <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="#e8291c" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+          </div>
+          <h3 class="text-lg font-bold text-gray-800 mb-1.5">Connect your Google Calendar</h3>
+          <p class="text-sm text-gray-500 mb-6 leading-relaxed">Grant calendar access${email?` for <span class="font-medium text-gray-700">${email}</span>`:''} to view and edit your meetings right here — drag to reschedule, click to edit, and add events without leaving the dashboard.</p>
+          <button onclick="window._calEnableEditing()" class="brand-btn text-sm px-6 py-3 rounded-xl font-semibold inline-flex items-center gap-2">
+            Enable Calendar Editing
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+          </button>
+          <div class="mt-4">
+            <button onclick="window._openGoogleCalendar()" class="text-xs text-gray-400 hover:text-gray-600 underline">Open in Google Calendar instead</button>
+          </div>
+        </div>
+      </div>
+    `);
+    return;
+  }
+
   setContent(`
     <div class="flex items-center justify-between mb-4">
       <h2 class="text-xl font-bold text-gray-800">Calendar</h2>
       <div class="flex items-center gap-2">
-        ${hasWriteToken
-          ? `<button onclick="window._calShowNewEvent()" class="text-sm px-4 py-2 rounded-xl border border-gray-200 hover:bg-gray-50 font-medium text-gray-700 flex items-center gap-1.5">
-               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-               New Meeting
-             </button>
-             <button onclick="window._calShowUpcoming()" class="text-sm px-3 py-2 rounded-xl border border-gray-200 hover:bg-gray-50 font-medium text-gray-700">Upcoming</button>`
-          : ``
-        }
-      </div>
-    </div>
-    <div class="bg-white rounded-2xl border flex items-center justify-center text-center" style="height:calc(100vh - 180px);">
-      <div class="max-w-md px-6">
-        <div class="mx-auto mb-5 w-16 h-16 rounded-2xl bg-red-50 flex items-center justify-center">
-          <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="#e8291c" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
-        </div>
-        <h3 class="text-lg font-bold text-gray-800 mb-1.5">Google Calendar</h3>
-        <p class="text-sm text-gray-500 mb-6 leading-relaxed">Your Google Calendar${email?` for <span class="font-medium text-gray-700">${email}</span>`:''} should have opened in a new tab. If your browser blocked the pop-up, use the button below.</p>
-        <button onclick="window._openGoogleCalendar()" class="brand-btn text-sm px-6 py-3 rounded-xl font-semibold inline-flex items-center gap-2">
-          Open Google Calendar
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M7 17L17 7M17 7H8M17 7v9"/></svg>
+        <button onclick="window._calShowNewEvent()" class="text-sm px-4 py-2 rounded-xl border border-gray-200 hover:bg-gray-50 font-medium text-gray-700 flex items-center gap-1.5">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          New Meeting
+        </button>
+        <button onclick="window._calShowUpcoming()" class="text-sm px-3 py-2 rounded-xl border border-gray-200 hover:bg-gray-50 font-medium text-gray-700">Upcoming</button>
+        <button onclick="window._openGoogleCalendar()" class="text-sm px-3 py-2 rounded-xl border border-gray-200 hover:bg-gray-50 font-medium text-gray-500 flex items-center gap-1.5" title="Open in Google Calendar">
+          Open in Google
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M7 17L17 7M17 7H8M17 7v9"/></svg>
         </button>
       </div>
     </div>
+    <div class="bg-white rounded-2xl border p-3 sm:p-4" style="height:calc(100vh - 180px);">
+      <div id="gcal-fc" style="height:100%;"></div>
+    </div>
   `);
+  window._calRenderGrid();
+}
+
+// ── Interactive calendar grid (FullCalendar + Google Calendar API) ───────────
+const _GCAL_FC_SRC = 'https://cdn.jsdelivr.net/npm/fullcalendar@6.1.15/index.global.min.js';
+
+// Grant / refresh the Google Calendar API token, then re-render the grid.
+window._calEnableEditing = async function(){
+  if(!_fbFns || !_fbAuth){ showToast('Not signed in','error'); return; }
+  const { GoogleAuthProvider, signInWithPopup } = _fbFns;
+  const provider = new GoogleAuthProvider();
+  provider.addScope('https://www.googleapis.com/auth/calendar.events');
+  try {
+    const result = await signInWithPopup(_fbAuth, provider);
+    const cred = GoogleAuthProvider.credentialFromResult(result);
+    if(cred && cred.accessToken){
+      sessionStorage.setItem('gcal_token', cred.accessToken);
+      sessionStorage.setItem('gcal_token_exp', String(Date.now() + 3600*1000));
+      showToast('Calendar editing enabled ✓','success');
+      if(currentView==='calendar') viewCalendar();
+    } else {
+      showToast('Calendar permission not granted','error');
+    }
+  } catch(e){ showToast('Calendar permission not granted','error'); }
+};
+
+window._calRenderGrid = async function(){
+  const host = document.getElementById('gcal-fc');
+  if(!host) return;
+  host.innerHTML = '<div style="text-align:center;color:#9ca3af;padding:3rem;font-size:.875rem">Loading calendar…</div>';
+  try {
+    await _loadScript(_GCAL_FC_SRC);
+  } catch(e){
+    host.innerHTML = '<div style="text-align:center;color:#ef4444;padding:3rem;font-size:.875rem">Could not load the calendar library. Check your connection and try again.</div>';
+    return;
+  }
+  if(typeof FullCalendar === 'undefined' || !FullCalendar.Calendar){
+    host.innerHTML = '<div style="text-align:center;color:#ef4444;padding:3rem;font-size:.875rem">Calendar library failed to initialize.</div>';
+    return;
+  }
+  host.innerHTML = '';
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/New_York';
+
+  const cal = new FullCalendar.Calendar(host, {
+    initialView: 'timeGridWeek',
+    headerToolbar: { left:'prev,next today', center:'title', right:'dayGridMonth,timeGridWeek,timeGridDay,listWeek' },
+    height: '100%',
+    nowIndicator: true,
+    editable: true,        // enables drag + resize
+    eventStartEditable: true,
+    eventDurationEditable: true,
+    selectable: true,      // drag-select empty time to create
+    selectMirror: true,
+    dayMaxEvents: true,
+    scrollTime: '08:00:00',
+    timeZone: 'local',
+    eventColor: '#DA291C',
+    events: async (info, success, failure) => {
+      try {
+        const params = new URLSearchParams({
+          timeMin: info.start.toISOString(),
+          timeMax: info.end.toISOString(),
+          singleEvents: 'true',
+          orderBy: 'startTime',
+          maxResults: '250',
+        });
+        const data = await window._calApiReq('GET', '/calendars/primary/events?' + params);
+        const evs = (data.items || [])
+          .filter(e => e.status !== 'cancelled')
+          .map(e => ({
+            id: e.id,
+            title: e.summary || '(no title)',
+            start: e.start?.dateTime || e.start?.date,
+            end:   e.end?.dateTime   || e.end?.date,
+            allDay: !e.start?.dateTime,
+            extendedProps: { desc: e.description || '' },
+          }));
+        success(evs);
+      } catch(err){
+        showToast(err.message || 'Could not load calendar events', 'error');
+        failure(err);
+      }
+    },
+    eventClick: (arg) => {
+      arg.jsEvent.preventDefault();
+      window._calEditEvent(arg.event.id);
+    },
+    select: (arg) => {
+      const pad = n => String(n).padStart(2,'0');
+      const s = arg.start, e = arg.end;
+      const dateStr  = `${s.getFullYear()}-${pad(s.getMonth()+1)}-${pad(s.getDate())}`;
+      const startStr = arg.allDay ? '09:00' : `${pad(s.getHours())}:${pad(s.getMinutes())}`;
+      const endStr   = arg.allDay ? '10:00' : `${pad(e.getHours())}:${pad(e.getMinutes())}`;
+      window._calShowNewEvent({ date: dateStr, start: startStr, end: endStr });
+      cal.unselect();
+    },
+    eventDrop:   (arg) => _calPersistMove(arg),
+    eventResize: (arg) => _calPersistMove(arg),
+  });
+
+  window._calFcInstance = cal;
+  window._calRefetch = () => { try { cal.refetchEvents(); } catch(e){} };
+  cal.render();
+};
+
+// Persist a drag/resize back to Google Calendar; revert on failure.
+async function _calPersistMove(arg){
+  const ev = arg.event;
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/New_York';
+  try {
+    let body;
+    if(ev.allDay){
+      const pad = n => String(n).padStart(2,'0');
+      const fmt = d => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+      const endDate = ev.end || new Date(ev.start.getTime() + 86400000); // Google all-day end is exclusive
+      body = { start:{ date: fmt(ev.start) }, end:{ date: fmt(endDate) } };
+    } else {
+      const end = ev.end || new Date(ev.start.getTime() + 3600000);
+      body = {
+        start:{ dateTime: ev.start.toISOString(), timeZone: tz },
+        end:  { dateTime: end.toISOString(),      timeZone: tz },
+      };
+    }
+    await window._calApiReq('PATCH', `/calendars/primary/events/${ev.id}`, body);
+    showToast('Meeting moved ✓','success',1800);
+  } catch(e){
+    showToast(e.message || 'Could not move the meeting','error');
+    arg.revert();
+  }
 }
 
 // ── Calendar API helpers ─────────────────────────────────────────────────────
@@ -11589,9 +11732,8 @@ window._calSaveEvent = async function(mode, eventId){
     }
     document.getElementById('gcal-event-modal')?.remove();
     document.getElementById('gcal-upcoming-panel')?.remove();
-    // Reload the embedded calendar iframe to show the change
-    const iframe = document.getElementById('gcal-embed');
-    if(iframe){ const s=iframe.src; iframe.src=''; setTimeout(()=>iframe.src=s,300); }
+    // Refresh the embedded FullCalendar grid to show the change
+    if(window._calRefetch) window._calRefetch();
   } catch(e){
     console.error('[_calSaveEvent]',e);
     showToast(e.message,'error',5000);
@@ -11606,8 +11748,7 @@ window._calDeleteEvent = async function(eventId){
     showToast('Meeting deleted','success');
     document.getElementById('gcal-event-modal')?.remove();
     document.getElementById('gcal-upcoming-panel')?.remove();
-    const iframe = document.getElementById('gcal-embed');
-    if(iframe){ const s=iframe.src; iframe.src=''; setTimeout(()=>iframe.src=s,300); }
+    if(window._calRefetch) window._calRefetch();
   } catch(e){ showToast(e.message,'error'); }
 };
 
