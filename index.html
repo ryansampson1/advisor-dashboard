@@ -25652,12 +25652,90 @@ window._siManualLink = async function(){
   }catch(err){ console.error('[smart-inbox] manual link failed', err); showToast('Could not link: '+err.message,'error'); }
 };
 
+// ── Smart Inbox: deterministic match signals (people + attachments + groups) ──
+// The AI is only as good as what we hand it. Before asking Claude to match an email
+// to a property, cross-reference the email's participants against the CRM and the
+// attachment filenames against deal names — turning "guess from an address string"
+// into "here are the properties these exact people and files are already tied to."
+function _siParticipantEmails(email){
+  const all=[];
+  if(email.fromEmail) all.push(String(email.fromEmail).toLowerCase());
+  _siEmails(email.toRaw).forEach(a=>all.push(a));
+  _siEmails(email.ccRaw).forEach(a=>all.push(a));
+  const out=[]; all.forEach(a=>{ if(a && out.indexOf(a)<0) out.push(a); });
+  return out;
+}
+function _siGroupName(gid){ try{ return ((typeof allCRMGroups!=='undefined'?allCRMGroups:[]).find(x=>x.id===gid)||{}).name||''; }catch(_){ return ''; } }
+function _siContactName(c){ return c.name || [c.firstName,c.lastName].filter(Boolean).join(' ').trim() || c.email || 'Contact'; }
+// Email participants → CRM contacts (match on primary or secondary address)
+function _siContactMatches(email){
+  const parts=_siParticipantEmails(email);
+  const contacts=(typeof allContacts!=='undefined'?allContacts:[]);
+  const hits=[];
+  parts.forEach(addr=>{
+    const c=contacts.find(x=>x && ((x.email||'').toLowerCase()===addr || (x.email2||'').toLowerCase()===addr));
+    if(c && !hits.some(h=>h.contact===c)) hits.push({ addr:addr, contact:c });
+  });
+  return hits;
+}
+function _siNorm(s){ return String(s||'').toLowerCase().replace(/[_\-]+/g,' ').replace(/[^a-z0-9 ]+/g,' ').replace(/\s+/g,' ').trim(); }
+function _siNumTokens(s){ return (String(s||'').match(/\d{3,}/g)||[]); } // street numbers, parcel digits
+// Attachment filenames → existing properties (street/parcel digits + distinctive name words)
+function _siAttachmentMatches(email){
+  const atts=(email.attachments||[]); if(!atts.length) return [];
+  const deals=visibleDeals(); const out=[];
+  atts.forEach(a=>{
+    const fnNorm=_siNorm(a.filename), fnNums=_siNumTokens(a.filename);
+    let best=null;
+    deals.forEach(d=>{
+      const label=(d.projectName||d.propertyAddress||'');
+      const proj=_siNorm(d.projectName||''), addr=_siNorm(d.propertyAddress||d.address||'');
+      const addrNums=_siNumTokens(d.propertyAddress||d.address||'');
+      const parcelNums=_siNumTokens(d.folioNumber||d.parcelId||'');
+      let score=0;
+      addrNums.forEach(n=>{ if(fnNums.indexOf(n)>=0) score+=3; });
+      parcelNums.forEach(n=>{ if(fnNums.indexOf(n)>=0) score+=4; });
+      (proj+' '+addr).split(' ').filter(w=>w.length>=4).forEach(w=>{ if(fnNorm.indexOf(w)>=0) score+=2; });
+      if(score>0 && (!best||score>best.score)) best={ dealId:d.id, label:label, score:score };
+    });
+    if(best) out.push({ filename:a.filename, dealId:best.dealId, label:best.label, score:best.score });
+  });
+  return out;
+}
+// Assemble everything Claude needs for an accurate match + a deterministic best guess.
+function _siBuildMatchContext(email){
+  const cm=_siContactMatches(email), am=_siAttachmentMatches(email);
+  const contactLines=[], attachLines=[];
+  cm.forEach(h=>{
+    const c=h.contact, nm=_siContactName(c);
+    const linked=(c.linkedDeals||[]).filter(id=>_siDealAddr(id));
+    const grpNames=(c.groups||[]).map(_siGroupName).filter(Boolean);
+    let line=nm+' <'+h.addr+'>'+(c.company?(' · '+c.company):'');
+    line += linked.length
+      ? ' · LINKED PROPERTIES: '+linked.map(id=>'"'+_siDealLabel((allDeals||[]).find(d=>d.id===id)||{})+'" [id '+id+']').join(', ')
+      : ' · not linked to any property';
+    if(grpNames.length) line+=' · received marketing blasts for: '+grpNames.join(', ');
+    contactLines.push(line);
+  });
+  am.forEach(m=>attachLines.push('"'+m.filename+'" → likely "'+m.label+'" [id '+m.dealId+']'));
+  // Strongest deterministic guess: a property a linked contact points to (attachments break ties)
+  const counts={};
+  cm.forEach(h=>(h.contact.linkedDeals||[]).forEach(id=>{ if(_siDealAddr(id)) counts[id]=(counts[id]||0)+1; }));
+  am.forEach(m=>{ if(m.score>=3) counts[m.dealId]=(counts[m.dealId]||0)+1.5; });
+  const ranked=Object.keys(counts).sort((a,b)=>counts[b]-counts[a]);
+  return { contactLines, attachLines, strongDealId:(ranked[0]||null),
+           attachmentNames:(email.attachments||[]).map(a=>a.filename) };
+}
+
 window._siAnalyze = async function(email){
   window._siState.meeting = null;
   const body = document.getElementById('si-ai-body');
   if(body) body.innerHTML = '<div style="color:#6b7280;font-size:.85rem;display:flex;align-items:center;gap:.5rem;padding:.5rem"><span class="animate-spin" style="width:14px;height:14px;border:2px solid #d1d5db;border-top-color:var(--brand-teal,#00B2A9);border-radius:50%;display:inline-block"></span> Claude is reading this email…</div>';
   const deals = visibleDeals().map(d=>({ id:d.id, address:d.propertyAddress||'', county:d.county||'', parcel:d.folioNumber||d.parcelId||'', stage:d.stage||'' }));
-  const sys = 'You are Terra\'s inbox assistant for a commercial land brokerage. Given one email and the advisor\'s existing properties, propose actions a coordinator would take. Only propose what the email clearly supports. Prefer attaching to an existing property over creating a new one when an address or parcel matches. Newsletters/marketing/no-action emails should return an empty suggestions array. Return ONLY valid JSON, no prose, no code fences.';
+  const sys = 'You are Terra\'s inbox assistant for a commercial land brokerage. Given one email and the advisor\'s existing properties, propose actions a coordinator would take. Only propose what the email clearly supports.\n'+
+    'MATCHING — read carefully: the CRM MATCHES and ATTACHMENT HINTS sections are your STRONGEST, most reliable signals. If a person on this email (sender, to, or cc) is a CRM contact linked to a property, that property is almost certainly the right match — trust it over guessing from address text in the body. Prefer attaching to an existing property over creating a new one whenever the people, attachments, address, or parcel point to one. When a deterministic "MOST LIKELY PROPERTY" is given, use it as matchedDealId unless the body clearly contradicts it.\n'+
+    'PROPOSALS: if the email is a NEW listing or seller opportunity that the advisor does not yet have a property for, propose a "proposal" action (not just "create") so it can kick off the proposal workflow.\n'+
+    'Newsletters / marketing / no-action emails should return an empty suggestions array. Return ONLY valid JSON, no prose, no code fences.';
   const _now=new Date();
   const _todayStr=_now.getFullYear()+'-'+String(_now.getMonth()+1).padStart(2,'0')+'-'+String(_now.getDate()).padStart(2,'0');
   const _weekday=_now.toLocaleDateString(undefined,{weekday:'long'});
@@ -25667,15 +25745,28 @@ window._siAnalyze = async function(email){
   const _priorTxt = _prior.length
     ? '\n\nALREADY LINKED: This exact email is already attached to property "'+_prior[0].name+'" (id '+_prior[0].id+'). Set matchedDealId to that id and do NOT match a different property; only suggest new actions that make sense given it is already on that property.'
     : '';
+  const _mc = _siBuildMatchContext(email);
+  window._siState.matchCtx = _mc;
+  const _ctxTxt =
+    (_mc.contactLines.length
+      ? '\n\nCRM MATCHES (email participants found in your CRM — STRONGEST SIGNAL):\n- '+_mc.contactLines.join('\n- ')
+      : '\n\nCRM MATCHES: none of this email\'s participants are in the CRM.')+
+    (_mc.attachmentNames.length ? '\n\nATTACHMENTS ON THIS EMAIL: '+_mc.attachmentNames.join(', ') : '')+
+    (_mc.attachLines.length ? '\nATTACHMENT→PROPERTY HINTS:\n- '+_mc.attachLines.join('\n- ') : '')+
+    (_mc.strongDealId
+      ? '\n\nMOST LIKELY PROPERTY (deterministic, from the people/attachments above): id '+_mc.strongDealId+' — "'+_siDealLabel((allDeals||[]).find(d=>d.id===_mc.strongDealId)||{})+'". Use this as matchedDealId unless the email body clearly contradicts it.'
+      : '');
   const user =
-    'EMAIL:\nFrom: '+email.from+' <'+email.fromEmail+'>\nSubject: '+email.subject+'\nBody:\n'+(email.body||email.snippet).slice(0,6000)+
+    'EMAIL:\nFrom: '+email.from+' <'+email.fromEmail+'>\nTo: '+(email.toRaw||'')+(email.ccRaw?('\nCc: '+email.ccRaw):'')+'\nSubject: '+email.subject+'\nBody:\n'+(email.body||email.snippet).slice(0,6000)+
+    _ctxTxt+
     '\n\nEXISTING PROPERTIES (JSON):\n'+JSON.stringify(deals.slice(0,200))+
     '\n\nTODAY: '+_todayStr+' ('+_weekday+'). Resolve relative dates like "Thursday" or "tomorrow" against this.'+_priorTxt+
     '\n\nReturn JSON of this exact shape:\n'+
-    '{"matchedDealId": "<id or null>", "meeting": {"requested": false, "date": null, "start": null, "end": null, "label": null}, "suggestions": [ {"kind":"create|attach|task", "confidence":0.0, "title":"short label", "why":"one sentence", "fields": { } } ] }\n'+
+    '{"matchedDealId": "<id or null>", "meeting": {"requested": false, "date": null, "start": null, "end": null, "label": null}, "suggestions": [ {"kind":"create|attach|task|proposal", "confidence":0.0, "title":"short label", "why":"one sentence", "fields": { } } ] }\n'+
     'Set meeting.requested true ONLY if the email proposes or asks to meet, call, or schedule at a specific day and/or time. meeting.date = "YYYY-MM-DD" of the proposed day (null if none). meeting.start/end = 24h "HH:MM" local time (null if no specific time). meeting.label = short human description (e.g. "Call Thursday at 2pm").\n'+
     'Field conventions:\n'+
     '- create: {"address","county","parcel","acreage","stage","seller"}\n'+
+    '- proposal: {"address","county","parcel","acreage","seller","price"}  (use for a NEW listing/seller opportunity)\n'+
     '- attach: {"dealId"}\n'+
     '- task: {"title","assignedToEmail","dueInDays","desc","dealId"}\n'+
     'Use the advisor\'s own email for assignedToEmail unless the email clearly implies ops/admin. dueInDays is an integer.';
@@ -25692,8 +25783,10 @@ window._siAnalyze = async function(email){
     window._siState.suggestions = (parsed.suggestions||[]).map((s,i)=>{ s._i=i; return s; });
     const _remembered = _siRecallMatch(email.id);
     const _rememberedValid = (_remembered && _siDealAddr(_remembered)) ? _remembered : null;
-    // precedence: the user's own remembered pick > prior link on record > AI's fresh guess
-    window._siState.matchedDealId = _rememberedValid || ((_prior && _prior.length) ? _prior[0].id : (parsed.matchedDealId || null));
+    // precedence: the user's own remembered pick > prior link on record > deterministic
+    // CRM/attachment match > AI's fresh guess. (strongDealId must be a real, visible deal.)
+    const _strong = (_mc.strongDealId && _siDealAddr(_mc.strongDealId)) ? _mc.strongDealId : null;
+    window._siState.matchedDealId = _rememberedValid || ((_prior && _prior.length) ? _prior[0].id : (_strong || parsed.matchedDealId || null));
     window._siState.meeting = (parsed.meeting && parsed.meeting.requested) ? parsed.meeting : null;
     _siRenderSuggestions(email);
   } catch(e){
@@ -25878,12 +25971,18 @@ window._siChat = async function(){
   const body=document.getElementById('si-ai-body');
   if(body){ const note=document.createElement('div'); note.style.cssText='color:#6b7280;font-size:.8rem;display:flex;align-items:center;gap:.5rem;padding:.4rem 0'; note.innerHTML='<span class="animate-spin" style="width:13px;height:13px;border:2px solid #d1d5db;border-top-color:var(--brand-teal,#00B2A9);border-radius:50%;display:inline-block"></span> Thinking about: '+_siEsc(instruction); body.appendChild(note); body.scrollTop=body.scrollHeight; }
   const deals = visibleDeals().map(d=>({ id:d.id, address:d.propertyAddress||'', county:d.county||'', parcel:d.folioNumber||d.parcelId||'', stage:d.stage||'' }));
-  const sys='You are Terra\'s inbox assistant for a commercial land brokerage. The advisor will give an instruction about what to do with the open email. Turn it into one or more confirmable actions. Return ONLY valid JSON, no prose, no code fences.';
+  const _mc = window._siState.matchCtx || _siBuildMatchContext(email);
+  const _ctxTxt =
+    (_mc.contactLines && _mc.contactLines.length ? '\n\nCRM MATCHES (email participants in your CRM — strongest signal):\n- '+_mc.contactLines.join('\n- ') : '')+
+    (_mc.attachLines && _mc.attachLines.length ? '\n\nATTACHMENT→PROPERTY HINTS:\n- '+_mc.attachLines.join('\n- ') : '')+
+    (_mc.strongDealId ? '\n\nMOST LIKELY PROPERTY: id '+_mc.strongDealId : '');
+  const sys='You are Terra\'s inbox assistant for a commercial land brokerage. The advisor will give an instruction about what to do with the open email. Turn it into one or more confirmable actions. Trust the CRM MATCHES section over guessing a property from the body. Return ONLY valid JSON, no prose, no code fences.';
   const usr='EMAIL:\nFrom: '+email.from+' <'+email.fromEmail+'>\nSubject: '+email.subject+'\nBody:\n'+(email.body||email.snippet).slice(0,6000)+
+    _ctxTxt+
     '\n\nEXISTING PROPERTIES (JSON):\n'+JSON.stringify(deals.slice(0,200))+
     '\n\nADVISOR INSTRUCTION: '+instruction+
-    '\n\nReturn JSON: {"suggestions":[{"kind":"create|attach|task","confidence":0.0,"title":"short label","why":"one sentence","fields":{}}]}\n'+
-    'Field conventions: create {"address","county","parcel","acreage","stage","seller"}; attach {"dealId","stage"}; task {"title","assignedToEmail","dueInDays","desc","dealId"}. If the instruction asks for something none of these kinds can do, return a single task suggestion describing the follow-up.';
+    '\n\nReturn JSON: {"suggestions":[{"kind":"create|attach|task|proposal","confidence":0.0,"title":"short label","why":"one sentence","fields":{}}]}\n'+
+    'Field conventions: create {"address","county","parcel","acreage","stage","seller"}; proposal {"address","county","parcel","acreage","seller","price"}; attach {"dealId","stage"}; task {"title","assignedToEmail","dueInDays","desc","dealId"}. If the instruction asks for something none of these kinds can do, return a single task suggestion describing the follow-up.';
   try{
     const resp=await _aiPost({ model:'claude-sonnet-4-6', max_tokens:1200, system:sys, messages:[{ role:'user', content:usr }] });
     if(!resp.ok) throw new Error('Claude '+resp.status);
@@ -25907,7 +26006,8 @@ window._siChat = async function(){
 function _siSuggHtml(s){
   const i = s._i;
   const f = s.fields || {};
-  const badge = { create:['➕ Create property','#FDECEA','#DA291C'], attach:['🔗 Attach to property','#E6F7F5','#0f766e'], task:['✅ Create task','#ECFDF5','#047857'] }[s.kind] || ['Action','#eee','#333'];
+  const email = (window._siState.emails||[]).find(x=>x.id===window._siState.selected) || {};
+  const badge = { create:['➕ Create property','#FDECEA','#DA291C'], proposal:['📄 Create proposal','#FEF3C7','#92400e'], attach:['🔗 Attach to property','#E6F7F5','#0f766e'], task:['✅ Create task','#ECFDF5','#047857'] }[s.kind] || ['Action','#eee','#333'];
   const conf = Math.round((s.confidence||0)*100);
   let fields='';
   const inp=(id,label,val)=>'<div style="display:flex;flex-direction:column;gap:.2rem;margin-bottom:.5rem"><label style="font-size:.7rem;color:#6b7280;font-weight:600">'+label+'</label><input id="'+id+'" value="'+_siEsc(val)+'" style="border:1px solid #e5e7eb;border-radius:6px;padding:.35rem .5rem;font-size:.82rem"></div>';
@@ -25918,7 +26018,14 @@ function _siSuggHtml(s){
     fields += inp('si-f-'+i+'-parcel','Parcel / folio', f.parcel||'');
     fields += inp('si-f-'+i+'-acreage','Acreage', f.acreage||'');
     fields += '<div style="display:flex;flex-direction:column;gap:.2rem;margin-bottom:.5rem"><label style="font-size:.7rem;color:#6b7280;font-weight:600">Status / stage</label><select id="si-f-'+i+'-stage">'+(STAGES&&STAGES.length?STAGES:['Prospect','Buyer Opportunities','Listing']).map(o=>'<option'+((f.stage||'Prospect')===o?' selected':'')+'>'+_siEsc(o)+'</option>').join('')+'</select></div>';
-    fields += inp('si-f-'+i+'-seller','Seller / contact', f.seller||email.from);
+    fields += inp('si-f-'+i+'-seller','Seller / contact', f.seller||email.from||'');
+  } else if(s.kind==='proposal'){
+    fields += inp('si-f-'+i+'-address','Property address (required)', f.address||'');
+    fields += inp('si-f-'+i+'-county','County', f.county||'');
+    fields += inp('si-f-'+i+'-parcel','Parcel / folio', f.parcel||'');
+    fields += inp('si-f-'+i+'-acreage','Acreage', f.acreage||'');
+    fields += inp('si-f-'+i+'-price','Suggested price', f.price||'');
+    fields += inp('si-f-'+i+'-seller','Seller / client', f.seller||email.from||'');
   } else if(s.kind==='attach'){
     fields += '<div style="display:flex;flex-direction:column;gap:.2rem;margin-bottom:.5rem"><label style="font-size:.7rem;color:#6b7280;font-weight:600">Property</label>'+_siDealSelect('si-f-'+i+'-dealId', f.dealId||window._siState.matchedDealId)+'</div>';
     var _siStageOpts = '<option value="">— keep current status —</option>'+(STAGES||[]).map(o=>'<option'+(f.stage===o?' selected':'')+'>'+_siEsc(o)+'</option>').join('');
@@ -25936,14 +26043,18 @@ function _siSuggHtml(s){
     '<div style="color:#6b7280;font-size:.76rem;line-height:1.45;margin-bottom:.5rem">'+_siEsc(s.why||'')+'</div>'+
     '<div style="font-size:.7rem;color:#6b7280;display:flex;align-items:center;gap:.4rem;margin-bottom:.5rem">confidence '+conf+'% <span style="height:5px;border-radius:3px;background:#eee;flex:1;overflow:hidden"><span style="display:block;height:100%;width:'+conf+'%;background:var(--brand-teal,#00B2A9)"></span></span></div>'+
     '<div style="border-top:1px dashed #e5e7eb;padding-top:.55rem">'+fields+'</div>'+
-    '<div style="display:flex;gap:.5rem;margin-top:.3rem"><button onclick="_siConfirm('+i+')" style="background:var(--brand-teal,#00B2A9);color:#fff;border:0;border-radius:6px;padding:.4rem .7rem;font-size:.78rem;font-weight:700;cursor:pointer">Confirm</button>'+
+    '<div style="display:flex;gap:.5rem;margin-top:.3rem;flex-wrap:wrap">'+
+    (s.kind==='proposal'
+      ? '<button onclick="_siConfirm('+i+',\'card\')" style="background:#fff;border:1px solid var(--brand-teal,#00B2A9);color:#0f766e;border-radius:6px;padding:.4rem .7rem;font-size:.78rem;font-weight:700;cursor:pointer">Create proposal card</button>'+
+        '<button onclick="_siConfirm('+i+',\'docs\')" style="background:var(--brand-teal,#00B2A9);color:#fff;border:0;border-radius:6px;padding:.4rem .7rem;font-size:.78rem;font-weight:700;cursor:pointer">Create + generate docs</button>'
+      : '<button onclick="_siConfirm('+i+')" style="background:var(--brand-teal,#00B2A9);color:#fff;border:0;border-radius:6px;padding:.4rem .7rem;font-size:.78rem;font-weight:700;cursor:pointer">Confirm</button>')+
     '<button onclick="_siDismiss('+i+')" style="background:#fff;border:1px solid #e5e7eb;color:#374151;border-radius:6px;padding:.4rem .7rem;font-size:.78rem;font-weight:600;cursor:pointer">Dismiss</button></div>'+
   '</div>';
 }
 
 function _siVal(id){ const el=document.getElementById(id); return el?el.value.trim():''; }
 
-window._siConfirm = async function(i){
+window._siConfirm = async function(i, mode){
   const st = window._siState;
   const s = st.suggestions.find(x=>x._i===i);
   const email = st.emails.find(x=>x.id===st.selected);
@@ -25951,7 +26062,41 @@ window._siConfirm = async function(i){
   const card = document.getElementById('si-sugg-'+i);
   try {
     let msg='';
-    if(s.kind==='create'){
+    if(s.kind==='proposal'){
+      const address=_siVal('si-f-'+i+'-address');
+      if(!address){ showToast('Property address is required','error'); return; }
+      const _deal = {
+        propertyAddress: address,
+        county: _siVal('si-f-'+i+'-county'),
+        folioNumber: _siVal('si-f-'+i+'-parcel'),
+        acreage: _siVal('si-f-'+i+'-acreage'),
+        suggestedPrice: _siVal('si-f-'+i+'-price'),
+        seller: _siVal('si-f-'+i+'-seller'),
+        clientName: _siVal('si-f-'+i+'-seller'),
+        stage: 'Proposal To Do',
+        advisorUid: currentUser.uid,
+        advisorEmail: currentUser.email,
+        advisorName: currentUser.name||'',
+        probability: 10,
+        createdAt: Date.now(),
+        createdBy: currentUser.uid,
+        source: 'smart-inbox'
+      };
+      const _newId = await Store.createDeal(_deal);
+      if(_newId){
+        try{ await window._dealLogActivity(_newId,'note',{ body:'Proposal created from Smart Inbox email: '+email.subject }); }catch(_){}
+        try{ const _sum=await window._emailLogBody({id:email.id, subject:email.subject, from:email.from, body:email.body, snippet:email.snippet}); await window._dealLogActivity(_newId,'email',{ body:_sum, aiSummary:true, gmailId:email.id, gmailSubject:email.subject, gmailFrom:email.fromEmail, gmailDate:email.date, autoLogged:false }); }catch(_){}
+        let _na=0; try{ _na=await window._siSaveEmailAttachments(_newId, email); }catch(_){}
+        msg = 'Created proposal “'+address+'”'+(_na?(' · '+_na+' file'+(_na!==1?'s':'')+' saved'):'');
+        if(mode==='docs'){
+          try{
+            if(typeof handleProposalTodoAutomation==='function'){ await handleProposalTodoAutomation({ ..._deal, id:_newId }); msg += ' · generating proposal package'; }
+            else if(typeof fireAutomations==='function'){ fireAutomations({ ..._deal, id:_newId }, 'Prospect'); msg += ' · generating proposal package'; }
+          }catch(pe){ console.warn('[smart-inbox] proposal automation failed', pe); }
+        }
+        try{ _siRefreshDealFeed(_newId); }catch(_){}
+      }
+    } else if(s.kind==='create'){
       const address=_siVal('si-f-'+i+'-address');
       if(!address){ showToast('Property address is required','error'); return; }
       const _newId = await Store.createDeal({
@@ -26050,7 +26195,7 @@ window._siDismiss = function(i){
 function _siLogHtml(){
   const log = window._siState.log;
   if(!log || !log.length) return '<div id="si-log"></div>';
-  const ic={ create:'➕', attach:'🔗', task:'✅' };
+  const ic={ create:'➕', proposal:'📄', attach:'🔗', task:'✅' };
   return '<div id="si-log"><div style="font-size:.7rem;color:#6b7280;text-transform:uppercase;letter-spacing:.4px;margin:1rem 0 .5rem">Applied this session</div>'+
     log.map(l=>'<div style="font-size:.76rem;color:#374151;padding:.4rem .6rem;background:#fff;border:1px solid #e5e7eb;border-radius:7px;margin-bottom:.35rem">'+(ic[l.kind]||'•')+' '+_siEsc(l.msg)+'</div>').join('')+'</div>';
 }
