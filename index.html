@@ -3742,6 +3742,8 @@ let pendingActions = [];
 let activeChart  = null;
 let currentView  = 'board';
 let adminViewAsAdvisor = false; // admin toggle: view as plain advisor
+let payViewAdvisorUid  = null;  // admin drill-down: view a specific advisor's My Pay (Top Producers click)
+let payViewAdvisorName = '';    // display name of the advisor being viewed in My Pay
 let staffViewMode      = false; // dual-role toggle: show staff-restricted view
 let adminOfficeFilter  = 'both'; // 'both' | specific office name
 let draggedDealId = null;
@@ -7359,7 +7361,25 @@ window.setMailchimpConfig = async ({apiKey, listId, categoryName}) => {
   console.log('%c✅ Mailchimp config saved to Firestore', 'color:green;font-weight:bold');
 };
 
+// Admin drill-down: open a specific advisor's My Pay view from the Top Producers table.
+window.openAdvisorPay = uid => {
+  if(!uid) return;
+  const a = (typeof getDistinctAdvisors==='function' ? getDistinctAdvisors() : []).find(x=>x.uid===uid);
+  payViewAdvisorUid  = uid;
+  payViewAdvisorName = (a && a.name) || (getProfile(uid)||{}).name || '';
+  currentView = 'commissions';
+  renderCurrentView(); updateTabs();
+  window.scrollTo({top:0, behavior:'smooth'});
+};
+// Clear the drill-down and return to Financials.
+window.closeAdvisorPay = () => {
+  payViewAdvisorUid = null; payViewAdvisorName = '';
+  switchView('dashboard');
+};
 window.switchView = id => {
+  // Any explicit nav click exits the admin "view advisor's pay" drill-down so the
+  // logged-in user always sees their own My Pay.
+  payViewAdvisorUid = null; payViewAdvisorName = '';
   currentView=id;
   if(id==='hr') { localStorage.setItem('hr_headlines_seen', Date.now()); _updateNavBadges(); }
   // Calendar tab: open Google Calendar immediately in a new tab (this runs inside the
@@ -10345,7 +10365,7 @@ function viewDashboard(){
     <p class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">Top Producers</p>
     <div class="bg-white rounded-2xl border p-5 mb-8">
       <div class="flex items-center justify-between mb-4">
-        <p class="text-xs text-gray-400">Sorted by CY closed commission &nbsp;·&nbsp; commissions, not land volume</p>
+        <p class="text-xs text-gray-400">Sorted by CY closed commission &nbsp;·&nbsp; commissions, not land volume &nbsp;·&nbsp; <span class="text-blue-500">click a row to view their Pay tab</span></p>
         <div class="flex gap-2">
           <button onclick="exportCSV()" class="text-xs border rounded px-3 py-1 text-gray-600 hover:bg-gray-50">Export CSV</button>
           <button onclick="exportJSON()" class="text-xs border rounded px-3 py-1 text-gray-600 hover:bg-gray-50">Export JSON</button>
@@ -10389,9 +10409,9 @@ function viewDashboard(){
               const winTxt = k.winPct!==null
                 ? `<span class="${k.winPct>=50?'text-green-700':'text-red-600'} font-semibold">${k.winPct}%</span><span class="text-gray-400 text-xs ml-1">(${k.proposalWon}W / ${k.lostListingCount||0}LL / ${k.lostProposalCount||0}LP)</span>`
                 : '<span class="text-gray-300">—</span>';
-              return `<tr class="hover:bg-gray-50">
+              return `<tr class="hover:bg-blue-50 cursor-pointer" onclick="openAdvisorPay('${adv.uid}')" title="View ${(adv.name||'advisor').replace(/'/g,'&#39;').replace(/"/g,'&quot;')}'s Pay tab">
                 <td class="py-2.5 pr-3 text-center">${rank}</td>
-                <td class="py-2.5 pr-4 font-semibold text-gray-800">${adv.name}<br><span class="text-xs text-gray-400 font-normal">${adv.office||''}</span></td>
+                <td class="py-2.5 pr-4 font-semibold text-gray-800">${adv.name} <span class="text-blue-400 text-xs">›</span><br><span class="text-xs text-gray-400 font-normal">${adv.office||''}</span></td>
                 <td class="py-2.5">${closedBar}</td>
                 <td class="py-2.5">${ucBar}</td>
                 <td class="py-2.5 text-right">${qBar}</td>
@@ -10573,7 +10593,8 @@ function viewProjection(){ viewDashboard(); }
    ======================================================= */
 function viewMyCommissions(){
   if(activeChart){ activeChart.destroy(); activeChart=null; }
-  const uid      = currentUser.uid;
+  const viewingOther = !!(payViewAdvisorUid && payViewAdvisorUid !== currentUser.uid);
+  const uid      = viewingOther ? payViewAdvisorUid : currentUser.uid;
   const myDeals  = allDeals.filter(d => isDealAdvisor(d, uid));
   const profile  = getProfile(uid);
   // legacy vars kept so nothing below breaks if referenced elsewhere
@@ -10697,14 +10718,25 @@ function viewMyCommissions(){
     </div>`;
 
   setContent(`
+    ${viewingOther ? `<div class="flex items-center justify-between gap-3 mb-4 rounded-xl border border-blue-200 bg-blue-50 px-4 py-2.5 flex-wrap">
+      <div class="flex items-center gap-2 text-sm text-blue-800">
+        <span class="text-xs font-bold uppercase tracking-widest text-blue-500">Viewing as admin</span>
+        <span class="text-gray-400">·</span>
+        <span>You are viewing <span class="font-semibold">${payViewAdvisorName||profile.name||'this advisor'}</span>'s Pay tab (read-only).</span>
+      </div>
+      <button onclick="closeAdvisorPay()"
+        class="text-xs font-semibold px-3 py-1.5 rounded-lg border border-blue-300 bg-white text-blue-700 hover:bg-blue-100 transition-colors">
+        ← Back to Financials
+      </button>
+    </div>` : ''}
     <div class="flex items-center justify-between mb-1 flex-wrap gap-2">
-      <h2 class="text-xl font-bold text-gray-800">My Pay</h2>
-      ${currentUser.isAdmin ? `<button onclick="markAllCommissionsPaid()"
+      <h2 class="text-xl font-bold text-gray-800">${viewingOther ? (payViewAdvisorName||profile.name||'Advisor')+' — Pay' : 'My Pay'}</h2>
+      ${(currentUser.isAdmin && !viewingOther) ? `<button onclick="markAllCommissionsPaid()"
         class="text-xs font-semibold px-3 py-1.5 rounded-lg border border-green-300 bg-green-50 text-green-700 hover:bg-green-100 transition-colors">
         ✅ Mark All Pending → Paid
       </button>` : ''}
     </div>
-    <p class="text-sm text-gray-500 mb-5">Commission summary based on your split schedule.</p>
+    <p class="text-sm text-gray-500 mb-5">Commission summary based on ${viewingOther ? 'their' : 'your'} split schedule.</p>
 
     <!-- ═══════ YEAR SUMMARY BANNER ═══════ -->
     <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
