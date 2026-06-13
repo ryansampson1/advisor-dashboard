@@ -19537,19 +19537,17 @@ function viewEOS(sub='rocks'){
           <div class="grid grid-cols-2 gap-2">
             ${(()=>{
               if(roleFilter==='staff'){
-                const _adminEmails=(APP_CONFIG.adminEmails||[]).map(e=>e.toLowerCase());
-                const _staffMap={};
-                Object.entries(allProfiles).forEach(([_uid,_p])=>{
-                  const _r=_p.roles||[], _e=(_p.email||'').toLowerCase();
-                  if(_r.includes('staff')||_r.includes('admin')||_r.includes('superAdmin')||STAFF_ONLY_EMAILS.includes(_e)||DUAL_ROLE_EMAILS.includes(_e)||_adminEmails.includes(_e)){
-                    if(!_staffMap[_uid]) _staffMap[_uid]={uid:_uid,name:_p.name||_p.email||_uid};
-                  }
+                // Fixed Segue roster — staff meeting attendees only (no admin roles)
+                const SEGUE_STAFF=[
+                  {email:'pat@thedirtdog.com',    name:'Pat'},
+                  {email:'ryan@thedirtdog.com',   name:'Ryan'},
+                  {email:'krissy@thedirtdog.com', name:'Krissy'},
+                  {email:'nick@thedirtdog.com',   name:'Nick'},
+                ];
+                return SEGUE_STAFF.map(s=>{
+                  const _p=Object.values(allProfiles).find(p=>(p.email||'').toLowerCase()===s.email);
+                  return {uid:s.email, name:(_p&&_p.name)||s.name};
                 });
-                // Always include current user if admin/dual-role
-                if(currentUser && (currentUser.isAdmin||currentUser.isDualRole||currentUser.isStaff) && !_staffMap[currentUser.uid]){
-                  _staffMap[currentUser.uid]={uid:currentUser.uid,name:currentUser.name||currentUser.email};
-                }
-                return Object.values(_staffMap).filter(m=>m.name&&m.name.length<60);
               }
               return getDistinctAdvisors();
             })().map(a=>`
@@ -19691,29 +19689,63 @@ function viewEOS(sub='rocks'){
         ${section('🔥','IDS — Issues List','60', idsIssues.length===0?emptyMsg:issueList(idsIssues),'#DA291C')}
 
         ${isAdminTab ? section('💰','Company Financials','5',(()=>{
-          const _n=new Date(), _qN=Math.floor(_n.getMonth()/3)+1;
-          const _qS=new Date(_n.getFullYear(),(_qN-1)*3,1).getTime();
-          const _qE=new Date(_n.getFullYear(),_qN*3,0,23,59,59).getTime();
-          const _allAdvs=getDistinctAdvisors();
-          const _totalVol=_allAdvs.reduce((sum,a)=>{
-            return sum+allDeals.filter(d=>isDealAdvisor(d,a.uid)&&!isLostStage(d.stage||'')&&(isContractActiveStage(d.stage)||isWonStage(d.stage||''))&&getEffectiveDealTs(d)>=_qS&&getEffectiveDealTs(d)<=_qE).reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||0),0);
-          },0);
-          const _totalGoal=_allAdvs.reduce((sum,a)=>sum+((allProfiles[a.uid]?.quarterlyUCGoal)||10000000),0);
-          const _pct=_totalGoal>0?Math.min(Math.round(_totalVol/_totalGoal*100),100):0;
-          const _col=_pct>=100?'#059669':_pct>=60?'#D97706':'#DA291C';
-          const _stages=['Prospect','LOI','Proposal To Do','Listing','Under Contract','Closed Won'];
-          const _counts={}; allDeals.filter(d=>!isLostStage(d.stage||'')).forEach(d=>{_counts[d.stage]=(_counts[d.stage]||0)+1;});
+          const _now=new Date();
+          const _yr=_now.getFullYear();
+          const _todayStr=_now.toISOString().slice(0,10);
+          const _startToday=new Date(_yr,_now.getMonth(),_now.getDate()).getTime();
+          const _in30=_startToday+30*24*60*60*1000;
+          const _curQ=Math.floor(_now.getMonth()/3)+1;
+          const _deals=filterDealsByOffice(allDeals).filter(d=>!isLostStage(d.stage||''));
+          // Resolve a deal's revenue-recognition date (ms). Won deals without a
+          // close date default to today so already-closed revenue still counts.
+          const _dt=d=>{
+            const s=d.closeDate||(isWonStage(d.stage||'')?_todayStr:null);
+            if(!s) return null;
+            const t=new Date(s+'T00:00:00').getTime();
+            return isNaN(t)?null:t;
+          };
+          // ── Next 30 days (real close dates only — forward-looking) ──────────
+          let _next30=0;
+          _deals.forEach(d=>{
+            if(!d.closeDate) return;
+            const t=new Date(d.closeDate+'T00:00:00').getTime();
+            if(!isNaN(t)&&t>=_startToday&&t<=_in30) _next30+=dealProjected(d);
+          });
+          // ── Remaining quarters of the current year ─────────────────────────
+          const _quarters=[];
+          for(let q=_curQ;q<=4;q++){
+            const qs=new Date(_yr,(q-1)*3,1).getTime();
+            const qe=new Date(_yr,q*3,0,23,59,59).getTime();
+            let rev=0;
+            _deals.forEach(d=>{ const t=_dt(d); if(t!==null&&t>=qs&&t<=qe) rev+=dealProjected(d); });
+            _quarters.push({label:'Q'+q,rev});
+          }
+          // ── Following year (full) ──────────────────────────────────────────
+          let _nextYr=0;
+          _deals.forEach(d=>{ const t=_dt(d); if(t!==null&&new Date(t).getFullYear()===_yr+1) _nextYr+=dealProjected(d); });
+
+          const qCard=q=>'<div class="bg-gray-50 rounded-xl p-3 text-center">'
+            +'<div class="text-base font-bold text-gray-800">'+fmt$(q.rev)+'</div>'
+            +'<div class="text-xs text-gray-400 mt-0.5 leading-tight">'+q.label+' '+_yr+'</div></div>';
+
           return '<div class="space-y-4">'
-            +'<div><div class="flex justify-between text-xs text-gray-500 mb-1.5"><span class="font-semibold">Q'+_qN+' '+_n.getFullYear()+' Contract Volume</span><span style="color:'+_col+';font-weight:700">'+_pct+'% of goal</span></div>'
-            +'<div style="height:10px;background:#e5e7eb;border-radius:9999px;overflow:hidden"><div style="width:'+_pct+'%;height:100%;background:'+_col+';border-radius:9999px"></div></div>'
-            +'<div class="flex justify-between text-xs text-gray-400 mt-1"><span>'+fmt$(_totalVol)+'</span><span>Goal: '+fmt$(_totalGoal)+'</span></div></div>'
-            +'<div class="grid grid-cols-3 gap-2">'
-            +_stages.map(s=>{
-              const cnt=Object.entries(_counts).filter(([k])=>s==='Under Contract'?/under.?contract/i.test(k):k===s).reduce((t,[,c])=>t+c,0);
-              return '<div class="bg-gray-50 rounded-xl p-3 text-center"><div class="text-xl font-bold text-gray-800">'+cnt+'</div><div class="text-xs text-gray-400 mt-0.5 leading-tight">'+s+'</div></div>';
-            }).join('')
+            // Next 30 days — headline
+            +'<div class="rounded-xl p-4" style="background:#ecfdf5;border:1px solid #a7f3d0">'
+              +'<div class="text-xs font-semibold uppercase tracking-wide mb-1" style="color:#047857">Projected Revenue · Next 30 Days</div>'
+              +'<div class="text-2xl font-bold" style="color:#059669">'+fmt$(_next30)+'</div>'
+              +'<div class="mt-0.5" style="font-size:11px;color:#059669">Commission on deals with a close date in the next 30 days</div>'
             +'</div>'
-            +'<div class="text-right"><button onclick="navigate(\'pipeline\')" class="text-xs text-blue-600 hover:underline font-medium">Full Pipeline →</button></div>'
+            // Remaining quarters
+            +'<div><div class="text-xs text-gray-500 font-semibold mb-1.5">Projected Revenue · Remaining Quarters '+_yr+'</div>'
+              +'<div class="grid gap-2" style="grid-template-columns:repeat('+_quarters.length+',minmax(0,1fr))">'
+              +_quarters.map(qCard).join('')
+              +'</div></div>'
+            // Following year
+            +'<div class="flex items-center justify-between rounded-xl p-3 bg-gray-50">'
+              +'<span class="text-xs text-gray-500 font-semibold">Projected Revenue · '+(_yr+1)+'</span>'
+              +'<span class="text-base font-bold text-gray-800">'+fmt$(_nextYr)+'</span>'
+            +'</div>'
+            +'<div class="text-right"><button onclick="switchView(\'dashboard\')" class="text-xs text-blue-600 hover:underline font-medium">Full Financials →</button></div>'
             +'</div>';
         })(),'#059669') : ''}
 
