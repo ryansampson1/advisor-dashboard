@@ -6488,6 +6488,9 @@ function buildMonthlyProjection(deals){
   }
   for(const deal of deals){
     if(isLostStage(deal.stage)||!deal.closeDate) continue;
+    // Projected revenue only counts Due Diligence, Rezoning/Permitting, Closing
+    // (or already-won deals) — not LOI or earlier listing/prospect stages.
+    if(!isWonStage(deal.stage)&&!isContractActiveStage(deal.stage)) continue;
     const cd=new Date(deal.closeDate+'T00:00:00');
     const m=months.find(m=>m.yr===cd.getFullYear()&&m.mo===cd.getMonth());
     if(m){ m.rev+=dealProjected(deal); m.deals.push(deal.propertyAddress||'Unnamed'); }
@@ -6501,6 +6504,9 @@ function buildYearlyOutlook(deals){
   const years=[0,1,2].map(i=>({label:`${now.getFullYear()+i}`,yr:now.getFullYear()+i,remaining:0,closed:0,projected:0,closedVol:0,remainingVol:0,vol:0}));
   for(const deal of deals){
     if(isLostStage(deal.stage)) continue;
+    // Projected revenue only counts Due Diligence, Rezoning/Permitting, Closing
+    // (or already-won deals) — not LOI or earlier listing/prospect stages.
+    if(!isWonStage(deal.stage)&&!isContractActiveStage(deal.stage)) continue;
     // Won deals without a closeDate still count — default to today
     const dateStr = deal.closeDate || (isWonStage(deal.stage) ? todayStr : null);
     if(!dateStr) continue;
@@ -20078,7 +20084,10 @@ function viewEOS(sub='rocks'){
           const _startToday=new Date(_yr,_now.getMonth(),_now.getDate()).getTime();
           const _in30=_startToday+30*24*60*60*1000;
           const _curQ=Math.floor(_now.getMonth()/3)+1;
-          const _deals=filterDealsByOffice(allDeals).filter(d=>!isLostStage(d.stage||''));
+          // Projected revenue only counts active contract stages —
+          // Due Diligence, Rezoning/Permitting, and Closing. LOI (and earlier
+          // listing/prospect stages) and won/lost deals are excluded.
+          const _deals=filterDealsByOffice(allDeals).filter(d=>isContractActiveStage(d.stage||''));
           // Resolve a deal's revenue-recognition date (ms). Won deals without a
           // close date default to today so already-closed revenue still counts.
           const _dt=d=>{
