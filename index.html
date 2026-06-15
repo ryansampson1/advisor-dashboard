@@ -3770,6 +3770,7 @@ let payViewAdvisorUid  = null;  // admin drill-down: view a specific advisor's M
 let payViewAdvisorName = '';    // display name of the advisor being viewed in My Pay
 let staffViewMode      = false; // dual-role toggle: show staff-restricted view
 let adminOfficeFilter  = 'both'; // 'both' | specific office name
+let adminPreviewOffice = null;  // admin "view as office manager" preview: office name to scope My Office view to
 let draggedDealId = null;
 let editingDealId = null;
 let editingAutoId = null;
@@ -7450,6 +7451,8 @@ window.switchView = id => {
   // Any explicit nav click exits the admin "view advisor's pay" drill-down so the
   // logged-in user always sees their own My Pay.
   payViewAdvisorUid = null; payViewAdvisorName = '';
+  // Leaving the My Office view exits the admin "view as office manager" preview.
+  if(id!=='officeOverview') adminPreviewOffice = null;
   currentView=id;
   if(id==='hr') { localStorage.setItem('hr_headlines_seen', Date.now()); _updateNavBadges(); }
   // Calendar tab: now rendered in-app as an interactive embedded grid
@@ -17692,6 +17695,7 @@ function viewOfficeManagers(){
                     <div class="text-xs text-gray-400">${m.office} Office</div>
                   </div>
                   <span class="text-xs px-2 py-1 rounded-full font-semibold text-white" style="background:var(--brand-teal)">${m.office}</span>
+                  <button onclick="adminPreviewOfficeManager('${(m.office||'').replace(/'/g,"\\'")}')" class="text-xs font-semibold px-3 py-1.5 rounded-lg text-white hover:opacity-90" style="background:#5bbccc" title="See the My Office view this manager sees">👁 View office</button>
                   <button onclick="removeOfficeManager(${i})" class="text-red-400 hover:text-red-600 text-sm font-bold">✕</button>
                 </div>`).join('')}
             </div>`}
@@ -17736,6 +17740,14 @@ function viewOfficeManagers(){
     else { custom?.classList.add('hidden'); }
   });
 }
+
+// Admin "view as office manager": render the My Office view scoped to the chosen office,
+// exactly as that office's manager sees it. Cleared automatically when navigating elsewhere.
+window.adminPreviewOfficeManager = (office) => {
+  if(!currentUser?.isAdmin){ showToast('Admins only','warning'); return; }
+  adminPreviewOffice = office || null;
+  switchView('officeOverview');
+};
 
 window.addOfficeManager = () => {
   const email = document.getElementById('om-email')?.value.trim();
@@ -18668,7 +18680,10 @@ window.saveStageGate = i => {
 function viewOfficeOverview(){
   if(activeChart){ activeChart.destroy(); activeChart=null; }
 
-  const office = currentUser.officeManagerOffice || '';
+  // Admins can preview an office manager's view via the Offices tab (adminPreviewOffice).
+  // Office managers see their own office.
+  const isPreview = !!(adminPreviewOffice && currentUser.isAdmin);
+  const office = (isPreview ? adminPreviewOffice : currentUser.officeManagerOffice) || '';
   const now    = new Date();
   const qNum   = Math.floor(now.getMonth()/3)+1;
   const qStart = new Date(now.getFullYear(),(qNum-1)*3,1).getTime();
@@ -18885,6 +18900,13 @@ function viewOfficeOverview(){
     </div>`;
 
   setContent(`
+    ${isPreview ? `
+    <div class="flex items-center justify-between gap-3 mb-4 px-4 py-3 rounded-xl border" style="background:#fff7ed;border-color:#fed7aa">
+      <div class="text-sm text-amber-800">
+        👁 <strong>Manager preview</strong> — viewing the <strong>${office}</strong> office exactly as its office manager sees it.
+      </div>
+      <button onclick="switchView('officeManagers')" class="text-xs font-semibold px-3 py-1.5 rounded-lg border bg-white hover:bg-amber-50" style="border-color:#fed7aa;color:#b45309">← Back to Offices</button>
+    </div>` : ''}
     <h2 class="text-xl font-bold text-gray-800 mb-1">🏢 ${office} Office</h2>
     <p class="text-xs text-gray-400 mb-5">Q${qNum} ${now.getFullYear()} · ${allAdvs.length} advisor${allAdvs.length===1?'':'s'}</p>
 
