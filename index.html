@@ -18997,41 +18997,103 @@ function viewEOS(sub='rocks'){
 
   else if(sub==='vto'){
     const vto=eosGet('vto',{coreValues:'',focus:'',tenYear:'',threeYear:'',oneYear:'',issues:''});
-    const fld=(lbl,key,rows=2)=>`
+    const fld=(lbl,key,rows=3)=>`
       <div>
         <label class="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-1">${lbl}</label>
         ${isAdmin
-          ? `<textarea rows="${rows}" id="vto-${key}" onblur="saveVTO()" class="w-full border rounded-lg px-3 py-2 text-sm outline-none resize-none">${vto[key]||''}</textarea>`
-          : `<div class="bg-gray-50 rounded-lg px-3 py-2 text-sm text-gray-700 whitespace-pre-wrap min-h-[56px]">${vto[key]||'<span class="text-gray-400">Not set</span>'}</div>`
+          ? `<textarea rows="${rows}" id="vto-${key}" onblur="saveVTO()" oninput="this.style.height='auto';this.style.height=this.scrollHeight+'px'" class="w-full border rounded-lg px-3 py-2.5 text-sm outline-none resize-y overflow-hidden leading-relaxed">${vto[key]||''}</textarea>`
+          : `<div class="bg-gray-50 rounded-lg px-3 py-2.5 text-sm text-gray-700 whitespace-pre-wrap leading-relaxed min-h-[56px]">${vto[key]||'<span class="text-gray-400">Not set</span>'}</div>`
         }
       </div>`;
     body=`
-      <div class="bg-white rounded-2xl border p-6 max-w-2xl">
-        <h3 class="font-bold text-gray-800 mb-5 text-lg">Vision/Traction Organizer</h3>
-        <div class="space-y-4">
-          ${fld('Core Values','coreValues',3)}
-          ${fld('Core Focus','focus',2)}
-          ${fld('10-Year Target','tenYear',2)}
-          ${fld('3-Year Picture','threeYear',3)}
-          ${fld('1-Year Plan','oneYear',3)}
-          ${fld('Issues (Org-level)','issues',3)}
+      <div class="bg-white rounded-2xl border p-6 sm:p-8 w-full">
+        <h3 class="font-bold text-gray-800 mb-6 text-lg">Vision/Traction Organizer</h3>
+        <div class="space-y-5">
+          ${fld('Core Values','coreValues',4)}
+          ${fld('Core Focus','focus',3)}
+          ${fld('10-Year Target','tenYear',3)}
+          ${fld('3-Year Picture','threeYear',5)}
+          ${fld('1-Year Plan','oneYear',5)}
+          ${fld('Issues (Org-level)','issues',5)}
         </div>
-        ${isAdmin?`<p class="text-xs text-gray-400 mt-4">Fields auto-save on blur.</p>`:''}
+        ${isAdmin?`<p class="text-xs text-gray-400 mt-5">Fields auto-save on blur and grow to fit your text.</p>`:''}
       </div>`;
+    // Auto-size all VTO fields to show their full content after the DOM is injected.
+    setTimeout(()=>{document.querySelectorAll('textarea[id^="vto-"]').forEach(t=>{t.style.height='auto';t.style.height=t.scrollHeight+'px';});},0);
   }
 
   else if(sub==='chart'){
-    const chart=eosGet('accountChart',{text:''});
-    body=`
-      <div class="bg-white rounded-2xl border p-6 max-w-2xl">
-        <h3 class="font-bold text-gray-800 mb-2">Accountability Chart</h3>
-        <p class="text-xs text-gray-400 mb-4">Paste your org chart, role descriptions, or a Mermaid diagram here.</p>
-        ${isAdmin
-          ? `<textarea id="acc-chart-text" rows="18" onblur="saveAccChart()"
-               class="w-full border rounded-lg px-3 py-2 text-sm outline-none resize-y font-mono">${chart.text||''}</textarea>
-             <p class="text-xs text-gray-400 mt-2">Auto-saves on blur.</p>`
-          : `<div class="bg-gray-50 rounded-xl px-4 py-3 text-sm text-gray-700 whitespace-pre-wrap min-h-[200px] font-mono">${chart.text||'<span class="text-gray-400">Accountability chart not yet configured.</span>'}</div>`}
+    const chartRaw=eosGet('accountChart',{seats:[],text:''});
+    const seats=Array.isArray(chartRaw.seats)?chartRaw.seats:[];
+    const legacyText=chartRaw.text||'';
+    const esc=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    const ACC_TREE_CSS=`
+      .acc-tree{display:inline-block;min-width:100%;text-align:center;padding:4px 0}
+      .acc-tree ul{display:flex;justify-content:center;padding-top:22px;position:relative;margin:0;list-style:none}
+      .acc-tree>ul{padding-top:0}
+      .acc-tree li{list-style:none;position:relative;padding:22px 10px 0;text-align:center}
+      .acc-tree li::before,.acc-tree li::after{content:'';position:absolute;top:0;right:50%;border-top:2px solid #cbd5e1;width:50%;height:22px}
+      .acc-tree li::after{right:auto;left:50%;border-left:2px solid #cbd5e1}
+      .acc-tree li:only-child::after,.acc-tree li:only-child::before{display:none}
+      .acc-tree li:only-child{padding-top:0}
+      .acc-tree li:first-child::before,.acc-tree li:last-child::after{border:0 none}
+      .acc-tree li:last-child::before{border-right:2px solid #cbd5e1;border-radius:0 6px 0 0}
+      .acc-tree li:first-child::after{border-radius:6px 0 0 0}
+      .acc-tree ul ul::before{content:'';position:absolute;top:0;left:50%;border-left:2px solid #cbd5e1;width:0;height:22px}
+      .acc-seat{display:inline-block;background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:10px 14px;min-width:150px;max-width:230px;box-shadow:0 1px 3px rgba(0,0,0,.06);vertical-align:top}`;
+    const byParent={};
+    const ids=new Set(seats.map(s=>s.id));
+    seats.forEach(s=>{const p=(s.parentId&&ids.has(s.parentId))?s.parentId:'';(byParent[p]=byParent[p]||[]).push(s);});
+    const seatBox=s=>{
+      const resp=(Array.isArray(s.responsibilities)?s.responsibilities:String(s.responsibilities||'').split('\n')).map(r=>r.trim()).filter(Boolean);
+      return `<div class="acc-seat">
+        <div class="font-bold text-sm text-gray-800 leading-tight">${esc(s.role)||'<span class="text-gray-400 font-normal">Untitled seat</span>'}</div>
+        ${s.holder?`<div class="text-xs text-gray-500 mt-0.5">${esc(s.holder)}</div>`:''}
+        ${resp.length?`<ul class="text-[11px] text-gray-600 mt-2 text-left space-y-0.5 list-disc list-inside">${resp.map(r=>`<li>${esc(r)}</li>`).join('')}</ul>`:''}
       </div>`;
+    };
+    const renderNodes=pid=>{const kids=byParent[pid]||[];return kids.length?`<ul>${kids.map(s=>`<li>${seatBox(s)}${renderNodes(s.id)}</li>`).join('')}</ul>`:'';};
+    const roots=byParent['']||[];
+    const treeHtml=seats.length
+      ? `<div style="overflow-x:auto;-webkit-overflow-scrolling:touch"><div class="acc-tree"><ul>${roots.map(s=>`<li>${seatBox(s)}${renderNodes(s.id)}</li>`).join('')}</ul></div></div>`
+      : `<div class="text-sm text-gray-400 py-12 text-center">No seats yet.${isAdmin?' Use the editor below to add the first seat.':''}</div>`;
+    const seatOptions=(parentVal,excludeId)=>`<option value="">— Top level —</option>`+seats.filter(o=>o.id!==excludeId).map(o=>`<option value="${esc(o.id)}" ${parentVal===o.id?'selected':''}>${esc(o.role)||'(untitled)'}</option>`).join('');
+    const editor=isAdmin?`
+      <div class="bg-white rounded-2xl border p-6 sm:p-8 w-full mt-6">
+        <div class="flex items-center justify-between mb-4">
+          <h4 class="font-bold text-gray-800 text-lg">Edit Seats</h4>
+          <button onclick="addAccSeat()" class="px-3 py-1.5 text-sm font-medium text-white rounded-lg" style="background:var(--brand-black)">+ Add Seat</button>
+        </div>
+        <div class="space-y-3">
+          ${seats.map(s=>`
+            <div class="acc-seat-row border rounded-xl p-4" data-id="${esc(s.id)}">
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div><label class="block text-[11px] font-bold text-gray-500 uppercase mb-1">Seat / Role</label>
+                  <input class="acc-f-role w-full border rounded-lg px-3 py-2 text-sm outline-none" value="${esc(s.role)}" onblur="saveAccChart()"></div>
+                <div><label class="block text-[11px] font-bold text-gray-500 uppercase mb-1">Who sits here</label>
+                  <input class="acc-f-holder w-full border rounded-lg px-3 py-2 text-sm outline-none" value="${esc(s.holder)}" onblur="saveAccChart()"></div>
+              </div>
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
+                <div><label class="block text-[11px] font-bold text-gray-500 uppercase mb-1">Reports to</label>
+                  <select class="acc-f-parent w-full border rounded-lg px-3 py-2 text-sm outline-none bg-white" onchange="saveAccChart(true)">${seatOptions(s.parentId,s.id)}</select></div>
+                <div class="flex items-end justify-end">
+                  <button onclick="deleteAccSeat('${esc(s.id)}')" class="px-3 py-2 text-xs font-medium text-red-600 hover:bg-red-50 rounded-lg">Delete seat</button></div>
+              </div>
+              <div class="mt-3"><label class="block text-[11px] font-bold text-gray-500 uppercase mb-1">Responsibilities (one per line)</label>
+                <textarea rows="3" class="acc-f-resp w-full border rounded-lg px-3 py-2 text-sm outline-none resize-y" onblur="saveAccChart()">${esc((Array.isArray(s.responsibilities)?s.responsibilities:[]).join('\n'))}</textarea></div>
+            </div>`).join('')}
+        </div>
+        ${legacyText?`<details class="mt-5"><summary class="text-xs text-gray-400 cursor-pointer">Show previous free-text chart</summary><pre class="text-xs text-gray-500 whitespace-pre-wrap mt-2 bg-gray-50 rounded-lg p-3 font-mono">${esc(legacyText)}</pre></details>`:''}
+        <p class="text-xs text-gray-400 mt-4">Seats auto-save on blur. The chart above updates when you add, delete, or re-assign reporting.</p>
+      </div>`:'';
+    body=`
+      <style>${ACC_TREE_CSS}</style>
+      <div class="bg-white rounded-2xl border p-6 sm:p-8 w-full">
+        <h3 class="font-bold text-gray-800 text-lg">Accountability Chart</h3>
+        <p class="text-xs text-gray-400 mb-6">Who owns what, and who reports to whom.</p>
+        ${treeHtml}
+      </div>
+      ${editor}`;
   }
 
   else if(sub==='issues'){
@@ -20419,9 +20481,36 @@ window.saveVTO = () => {
     threeYear:g('vto-threeYear'),oneYear:g('vto-oneYear'),issues:g('vto-issues')});
   showToast('VTO saved','success');
 };
-window.saveAccChart = () => {
-  eosSave('accountChart',{text:document.getElementById('acc-chart-text')?.value||''});
-  showToast('Accountability chart saved','success');
+window._collectAccSeats = () => [...document.querySelectorAll('.acc-seat-row')].map(r=>({
+  id:r.dataset.id,
+  role:(r.querySelector('.acc-f-role')?.value||'').trim(),
+  holder:(r.querySelector('.acc-f-holder')?.value||'').trim(),
+  parentId:r.querySelector('.acc-f-parent')?.value||'',
+  responsibilities:(r.querySelector('.acc-f-resp')?.value||'').split('\n').map(s=>s.trim()).filter(Boolean)
+}));
+window.saveAccChart = (rerender=false) => {
+  const rows=document.querySelectorAll('.acc-seat-row');
+  if(!rows.length) return; // avoid wiping data when no editor rows are present
+  const prev=eosGet('accountChart',{});
+  eosSave('accountChart',{seats:window._collectAccSeats(),text:prev.text||''});
+  if(rerender){ viewEOS('chart'); } else { showToast('Accountability chart saved','success'); }
+};
+window.addAccSeat = () => {
+  const prev=eosGet('accountChart',{});
+  let seats=document.querySelectorAll('.acc-seat-row').length?window._collectAccSeats():(Array.isArray(prev.seats)?[...prev.seats]:[]);
+  seats.push({id:'s'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),role:'',holder:'',parentId:'',responsibilities:[]});
+  eosSave('accountChart',{seats,text:prev.text||''});
+  viewEOS('chart');
+};
+window.deleteAccSeat = (id) => {
+  if(!confirm('Delete this seat? Anyone reporting to it will move up to its manager.'))return;
+  const prev=eosGet('accountChart',{});
+  let seats=document.querySelectorAll('.acc-seat-row').length?window._collectAccSeats():(Array.isArray(prev.seats)?[...prev.seats]:[]);
+  const gone=seats.find(s=>s.id===id);
+  const newParent=gone?gone.parentId:'';
+  seats=seats.filter(s=>s.id!==id).map(s=>s.parentId===id?{...s,parentId:newParent}:s);
+  eosSave('accountChart',{seats,text:prev.text||''});
+  viewEOS('chart');
 };
 window.addCompRock = () => {
   const text=prompt('Company rock:'); if(!text) return;
