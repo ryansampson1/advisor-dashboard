@@ -12099,6 +12099,13 @@ function viewTasks(){
   const pending   = myTasks.filter(t=>t.status==='pending').sort((a,b)=>(a.dueDate||'9999')>(b.dueDate||'9999')?1:-1);
   const completed = myTasks.filter(t=>t.status==='complete').sort((a,b)=>b.createdAt-a.createdAt);
 
+  // Tasks this user assigned to OTHER people — shown so the assigner can track them.
+  // Only open (pending) delegated tasks appear; once completed they drop off this view.
+  // Admins already see every task, so this extra section is for non-admins only.
+  const delegated = isAdmin ? [] : allTasks
+    .filter(t => t.createdBy===uid && t.assignedTo!==uid && t.status==='pending')
+    .sort((a,b)=>(a.dueDate||'9999')>(b.dueDate||'9999')?1:-1);
+
   const showPending   = !statusFilter || statusFilter==='pending';
   const showCompleted = !statusFilter || statusFilter==='complete';
 
@@ -12265,7 +12272,7 @@ function viewTasks(){
     <div class="flex items-center justify-between mb-6">
       <div>
         <h2 class="text-xl font-bold text-gray-800">Tasks</h2>
-        <p class="text-sm text-gray-500 mt-0.5">${pending.length} pending${isAdmin?` across ${advisors.length} advisors`:''}</p>
+        <p class="text-sm text-gray-500 mt-0.5">${pending.length} pending${isAdmin?` across ${advisors.length} advisors`:''}${delegated.length?` · ${delegated.length} assigned to others`:''}</p>
       </div>
       <button onclick="openTaskModal(null)" class="brand-btn px-4 py-2 rounded-lg text-sm font-semibold">+ New Task</button>
     </div>
@@ -12296,13 +12303,23 @@ function viewTasks(){
       </select>
     </div>
 
-    ${(showPending?pending:[]).length===0&&(showCompleted?completed:[]).length===0?`
+    ${(showPending?pending:[]).length===0&&(showCompleted?completed:[]).length===0&&(showPending?delegated:[]).length===0?`
     <div class="text-center py-16 text-gray-400">
       <div class="text-5xl mb-3">✅</div>
-      <div class="font-medium text-gray-500">${myTasks.length===0?'No tasks yet — create one above.':'No tasks match the selected filter.'}</div>
+      <div class="font-medium text-gray-500">${myTasks.length===0&&delegated.length===0?'No tasks yet — create one above.':'No tasks match the selected filter.'}</div>
     </div>`:`
     ${showPending&&pending.length>0?`<div class="space-y-2 mb-6">
       ${pending.map(t=>taskCard(t,false)).join('')}
+    </div>`:''}
+    ${showPending&&delegated.length>0?`
+    <div class="mt-2 mb-6">
+      <div class="flex items-center gap-2 mb-2">
+        <span class="text-sm font-semibold text-gray-600">↗ Assigned to others</span>
+        <span class="text-xs text-gray-400">${delegated.length} open · disappears when completed</span>
+      </div>
+      <div class="space-y-2">
+        ${delegated.map(t=>taskCard(t,false)).join('')}
+      </div>
     </div>`:''}
     ${showCompleted&&completed.length>0?`
     <details class="mt-4" ${statusFilter==='complete'?'open':''}>
@@ -18713,10 +18730,15 @@ function viewOfficeOverview(){
     const prof = allProfiles[d.advisorUid];
     return prof && (prof.office||'') === office;
   });
-  const activeDeals   = officeDeals.filter(d => !isLostStage(d.stage||'') && !isWonStage(d.stage||''));
   const closedQDeals  = officeDeals.filter(d => isWonStage(d.stage||'') && getEffectiveDealTs(d)>=qStart && getEffectiveDealTs(d)<=qEnd);
   const ucDeals       = officeDeals.filter(d => !isLostStage(d.stage||'') && /under.?contract|due.?diligence|rezoning|permitting|closing|in.?contract/i.test(d.stage||''));
-  const pipelineVal   = activeDeals.reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||0),0);
+  // Active Listings = deals currently in the "Listing" stage; their combined value is "Total Volume of Listings".
+  const activeListings = officeDeals.filter(d => (d.stage||'') === 'Listing');
+  const listingsVal    = activeListings.reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||0),0);
+  // Active LOIs = LOI outstanding ("LOI") + LOI signed ("Signed LOI/Contract Drafting").
+  const loiOutstanding = officeDeals.filter(d => (d.stage||'') === 'LOI');
+  const loiSigned      = officeDeals.filter(d => (d.stage||'') === 'Signed LOI/Contract Drafting');
+  const activeLOIs     = loiOutstanding.length + loiSigned.length;
   const closedQVal    = closedQDeals.reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||0),0);
   const ucVal         = ucDeals.reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||0),0);
 
@@ -18912,8 +18934,9 @@ function viewOfficeOverview(){
 
     <!-- Stats row -->
     <div class="grid grid-cols-2 gap-4 mb-6" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr))">
-      ${statCard('📋', 'Active Deals', activeDeals.length, `${officeDeals.length} total`)}
-      ${statCard('💰', 'Total Pipeline', fmt$(pipelineVal), 'active deal value')}
+      ${statCard('🏷️', 'Active Listings', activeListings.length, `${officeDeals.length} total deals`)}
+      ${statCard('💰', 'Total Volume of Listings', fmt$(listingsVal), 'active listing value')}
+      ${statCard('🤝', 'Active LOIs', activeLOIs, `${loiOutstanding.length} outstanding · ${loiSigned.length} signed`)}
       ${statCard('📝', 'Under Contract', fmt$(ucVal), `${ucDeals.length} deal${ucDeals.length===1?'':'s'}`)}
       ${statCard('🏆', `Q${qNum} Closed`, fmt$(closedQVal), `${closedQDeals.length} closed this quarter`)}
     </div>
