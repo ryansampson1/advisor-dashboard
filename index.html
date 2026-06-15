@@ -1398,6 +1398,11 @@ const APP_CONFIG = {
   // Values are SHA-256 of the lowercased email — plaintext addresses are intentionally kept OUT of this public source.
   bootstrapSuperAdminHashes: ["ff39435318d07547558cfb5045eb6de98739f5d557fb474158dc35ff22075242","3f8a3dee7347cc1c3b1d24bf86b17653329a49334b72d8545360d79939b459aa"],
   allowedAdvisorEmails: [],   // empty = allow any authenticated Google user
+  // Off-boarding denylist. Anyone listed here is DENIED access at the login gate
+  // regardless of company-domain, approved-user, or admin status. Merged at runtime
+  // with the Firestore eos/blockedUsers doc (emails[]), so an admin can add/remove
+  // without a redeploy. To restore access, remove the address from both places.
+  blockedEmails: ['kathleen@thedirtdog.com'],   // separated 2026-06-15 — temporary lockout
   // Office managers — managed via the Admin → Office Managers UI (stored in Firestore/localStorage).
   // This array is the bootstrap fallback if the DB entry hasn't loaded yet.
   officeManagerSeeds: [
@@ -12347,17 +12352,20 @@ let allCRMCompanies = [];  // live-synced standalone company records
 window._crmReady = false;
 
 // ── Dismissed merge pairs (persisted to Firestore) ─────────────────
-window._dismissedPairs = { contacts: new Set(), groups: new Set() };
+window._dismissedPairs = { contacts: new Set(), groups: new Set(), companies: new Set() };
 
 window._dismissPairKey = (id1, id2) => [id1, id2].sort().join('|');
+// Companies have no stable id — key dismissed pairs by their normalized names
+window._dismissCoPairKey = (n1, n2) => [_normGrp(n1), _normGrp(n2)].sort().join('|');
 
 window._saveDismissedPairs = async () => {
   if(!_fbDb || !_fbFns) return;
   const {doc, setDoc} = _fbFns;
   try {
     await setDoc(doc(_fbDb, 'settings', 'crmDismissedPairs'), {
-      contacts: [...window._dismissedPairs.contacts],
-      groups:   [...window._dismissedPairs.groups],
+      contacts:  [...window._dismissedPairs.contacts],
+      groups:    [...window._dismissedPairs.groups],
+      companies: [...window._dismissedPairs.companies],
       updatedAt: Date.now(),
     }, { merge: true });
   } catch(e) { console.warn('[dismissedPairs save]', e); }
@@ -12370,8 +12378,9 @@ window._loadDismissedPairs = async () => {
     const snap = await getDoc(doc(_fbDb, 'settings', 'crmDismissedPairs'));
     if(snap.exists()){
       const d = snap.data();
-      window._dismissedPairs.contacts = new Set(d.contacts || []);
-      window._dismissedPairs.groups   = new Set(d.groups   || []);
+      window._dismissedPairs.contacts  = new Set(d.contacts  || []);
+      window._dismissedPairs.groups    = new Set(d.groups    || []);
+      window._dismissedPairs.companies = new Set(d.companies || []);
     }
   } catch(e) { console.warn('[dismissedPairs load]', e); }
 };
@@ -12382,6 +12391,20 @@ window._dismissMergePair = async (type, id1, id2, rowEl) => {
   await window._saveDismissedPairs();
   if(rowEl) rowEl.remove();
   showToast('Pair dismissed — won\'t appear again', 'success', 2500);
+};
+
+// Companies version — keyed by name pair instead of id pair
+window._dismissCompanyPair = async (nameA, nameB, rowEl) => {
+  window._dismissedPairs.companies.add(window._dismissCoPairKey(nameA, nameB));
+  await window._saveDismissedPairs();
+  if(rowEl) rowEl.remove();
+  showToast('Pair dismissed — won\'t appear again', 'success', 2500);
+};
+// Modal helper: dismiss the company pair at index i on the current page
+window._dismissCompanyPairByIndex = (i, rowEl) => {
+  const p = (window._smcPairs || [])[i];
+  if(!p) return;
+  return window._dismissCompanyPair(p.a, p.b, rowEl);
 };
 
 // ── Gmail "never sync" blocklist (persisted to Firestore) ──────────
@@ -14773,13 +14796,17 @@ window.crmSmartMergeCompanies = async () => {
     }
   }
 
-  if(pairs.length===0){
+  // Drop any pairs the user has previously marked "Not duplicates"
+  const visiblePairs = pairs.filter(p =>
+    !window._dismissedPairs.companies.has(window._dismissCoPairKey(p.a.name, p.b.name)));
+
+  if(visiblePairs.length===0){
     showToast(autoMerged?`Merged ${autoMerged} exact duplicate compan${autoMerged!==1?'ies':'y'} ✓. No similar companies found.`:'Companies are clean — no duplicates or similar names found ✓','success');
     return;
   }
 
   // Open paginated merge modal (100 pairs at a time)
-  window._smcOpenPage(pairs, 0, autoMerged);
+  window._smcOpenPage(visiblePairs, 0, autoMerged);
 };
 
 window._smcOpenPage = (allPairData, offset, autoMerged) => {
@@ -14801,7 +14828,7 @@ window._smcOpenPage = (allPairData, offset, autoMerged) => {
     <div class="overflow-y-auto flex-1 px-6 py-4 space-y-4">
       ${offset===0&&autoMerged?`<div class="bg-green-50 border border-green-200 rounded-lg px-3 py-2 text-xs text-green-700">✓ Auto-merged ${autoMerged} exact duplicate name${autoMerged!==1?'s':''}.</div>`:''}
       <p class="text-xs text-gray-500">Showing ${offset+1}–${end} of ${total} — check pairs to merge, then choose which name to keep.</p>
-      ${page.map((p,i)=>`<div class="border rounded-xl p-4 space-y-2">
+      ${page.map((p,i)=>`<div class="border rounded-xl p-4 space-y-2 co-pair-card">
         <label class="flex items-center gap-2 cursor-pointer">
           <input type="checkbox" id="scm-chk-${i}" ${p.hint?'':'checked'} class="w-4 h-4 accent-blue-600"/>
           <span class="text-sm font-semibold text-gray-700">Merge these companies${p.hint?` <span class="font-normal text-blue-500 text-xs">(${p.hint})</span>`:''}</span>
@@ -14815,6 +14842,13 @@ window._smcOpenPage = (allPairData, offset, autoMerged) => {
             <input type="radio" name="scm-keep-${i}" value="b" class="w-3.5 h-3.5 accent-blue-600"/>
             <span class="text-sm text-gray-700">${p.b.name} <span class="text-xs text-gray-400">(${p.b.cb} contact${p.b.cb!==1?'s':''})</span></span>
           </label>
+        </div>
+        <div class="ml-6">
+          <button onclick="window._dismissCompanyPairByIndex(${i}, this.closest('.co-pair-card'))"
+            style="padding:.15rem .55rem;font-size:.7rem;border-radius:6px;border:1px solid #e2e8f0;background:#f8fafc;color:#64748b;cursor:pointer;white-space:nowrap"
+            title="These are different companies — never suggest merging them again">
+            ✕ Not duplicates
+          </button>
         </div>
       </div>`).join('')}
     </div>
@@ -23810,6 +23844,24 @@ async function init(){
           }
         }
       }catch(_e){ console.warn('[auth] bootstrap hash check failed',_e); }
+      // Off-boarding denylist: a blocked email is denied access BEFORE any bypass
+      // (company-domain, approved-user, or admin). Source list guarantees immediate
+      // effect; the Firestore eos/blockedUsers doc lets admins block/unblock without
+      // a redeploy. Either source blocks; the user is signed out on every sign-in.
+      try{
+        let _blocked = (APP_CONFIG.blockedEmails||[]).map(e=>(e||'').toLowerCase());
+        try{
+          const {doc:_db, getDoc:_gb}=_fbFns;
+          const _bs=await _gb(_db(_fbDb,'eos','blockedUsers'));
+          if(_bs.exists() && Array.isArray(_bs.data()?.emails)){
+            _blocked = Array.from(new Set([..._blocked, ..._bs.data().emails.map(x=>(x||'').toLowerCase())]));
+          }
+        }catch(_e){ console.warn('[auth] blockedUsers read failed',_e); }
+        if(_blocked.includes((email||'').toLowerCase())){
+          showToast('Access denied — your Terra access has been removed. Contact your administrator.','error');
+          await FB.signOut(); return;
+        }
+      }catch(_e){ console.warn('[auth] blocked-users gate failed',_e); }
       // Approved-users gate: always enforced (admins + company-domain users bypass)
       // Anyone with a @thedirtdog.com email is auto-approved — no manual approval needed.
       const _isCompanyDomain = (email||'').toLowerCase().endsWith('@thedirtdog.com');
