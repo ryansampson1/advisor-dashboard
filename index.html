@@ -6188,15 +6188,9 @@ function computeAdvisorKPIs(advisorUid){
   // Include deals where this advisor is primary OR listed as co-advisor
   const advDeals  = allDeals.filter(d => isDealAdvisor(d, advisorUid));
 
-  // Revenue share for this advisor on a deal (respects co-advisor splits)
-  const advRevShare = d => {
-    if(d.advisorUid===advisorUid) return getEffectiveRevenue(d); // primary: full gross
-    const ca=(d.coAdvisors||[]).find(c=>c.uid===advisorUid);
-    if(ca && (ca.split||0)>0) return getEffectiveRevenue(d)*(ca.split/100);
-    // legacy single co-advisor field
-    if((d.coAdvisorSplit||0)>0) return getEffectiveRevenue(d)*(d.coAdvisorSplit/100);
-    return getEffectiveRevenue(d)*0.5; // fallback: assume 50/50
-  };
+  // Revenue share for this advisor on a deal (prorated — respects co-advisor splits
+  // for BOTH the primary and co-advisors, so a 50/50 deal gives each broker 50% of gross)
+  const advRevShare = d => getAdvisorShare(d, advisorUid);
 
   // Under-contract stages (DD, Rezoning, Permitting, Closing, Under Contract)
   const isUCStage = s => !isLostStage(s||'') && !isWonStage(s||'')
@@ -6256,9 +6250,31 @@ function computeAdvisorKPIs(advisorUid){
   // 7. Projected revenue = UC commissions (CY+NY) — what will close
   const projectedRevenue = ucComm;
 
+  // 8. Net pay to the broker (after tiered commission schedule), prorated by split.
+  //    Tiers stack on YTD gross-share, so deals are walked in close-date order.
+  const _profile = getProfile(advisorUid);
+  const netPayForDeals = arr => {
+    const sorted=[...arr].sort((a,b)=>((a.closeDate||'9999')<(b.closeDate||'9999')?-1:1));
+    let ytd=0, total=0;
+    for(const d of sorted){
+      const g=advRevShare(d);
+      if(g<=0) continue;
+      total += payoutForGross(g, ytd, _profile);
+      ytd   += g;
+    }
+    return total;
+  };
+  // CY net pay = realized net pay on deals already closed/won this calendar year
+  const cyNetPay   = netPayForDeals(advDeals.filter(d=>isWonStage(d.stage) && dealYear(d)===thisYear));
+  // Projected CY net pay = net pay on the full current-year book (closed this year + under-contract
+  // pipeline expected this year), with tiers stacked across both
+  const projNetPay = netPayForDeals(advDeals.filter(d=>!isLostStage(d.stage||'')
+      && (isWonStage(d.stage)||isUCStage(d.stage)) && dealYear(d)===thisYear));
+
   return { ucComm, activeLOI, listingVol, winPct, proposalWon, proposalLost,
            lostListingCount, lostProposalCount, contractCancelledCount,
-           qPct, qVol, qLabel:'Q'+qNum+' '+thisYear, closedComm, projectedRevenue };
+           qPct, qVol, qLabel:'Q'+qNum+' '+thisYear, closedComm, projectedRevenue,
+           cyNetPay, projNetPay };
 }
 
 function getDistinctAdvisors(){
@@ -10372,7 +10388,7 @@ function viewDashboard(){
     <p class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">Top Producers</p>
     <div class="bg-white rounded-2xl border p-5 mb-8">
       <div class="flex items-center justify-between mb-4">
-        <p class="text-xs text-gray-400">Sorted by CY closed commission &nbsp;·&nbsp; commissions, not land volume &nbsp;·&nbsp; <span class="text-blue-500">click a row to view their Pay tab</span></p>
+        <p class="text-xs text-gray-400">Sorted by CY closed commission &nbsp;·&nbsp; commissions prorated by each broker's deal split &nbsp;·&nbsp; <span class="text-blue-500">click a row to view their Pay tab</span></p>
         <div class="flex gap-2">
           <button onclick="exportCSV()" class="text-xs border rounded px-3 py-1 text-gray-600 hover:bg-gray-50">Export CSV</button>
           <button onclick="exportJSON()" class="text-xs border rounded px-3 py-1 text-gray-600 hover:bg-gray-50">Export JSON</button>
@@ -10384,10 +10400,11 @@ function viewDashboard(){
             <tr class="border-b text-left text-xs text-gray-500 uppercase tracking-wide">
               <th class="pb-2 font-semibold pr-3">#</th>
               <th class="pb-2 font-semibold pr-4">Advisor</th>
-              <th class="pb-2 font-semibold text-right" title="Commission on Closed/Won deals this year">CY Closed Comm</th>
-              <th class="pb-2 font-semibold text-right" title="Commission on Under Contract / DD / Rezoning / Closing deals">UC Pipeline Comm</th>
+              <th class="pb-2 font-semibold text-right" title="Prorated gross commission on Closed/Won deals this year (this broker's share of the split)">CY Closed Comm</th>
+              <th class="pb-2 font-semibold text-right" title="Prorated gross commission on Under Contract / DD / Rezoning / Closing deals (this broker's share of the split)">UC Pipeline Comm</th>
+              <th class="pb-2 font-semibold text-right" title="Net pay to the broker (after commission schedule) on deals closed this year">CY Net Pay</th>
+              <th class="pb-2 font-semibold text-right" title="Projected net pay to the broker for the current year (closed + under-contract pipeline expected this year)">Proj Net Pay</th>
               <th class="pb-2 font-semibold text-right" title="% of current quarter volume goal achieved">Q Goal %</th>
-              <th class="pb-2 font-semibold text-right" title="Proposal-to-listing win rate">Win %</th>
               <th class="pb-2 font-semibold text-right" title="Active Listing volume">Listing Vol</th>
               <th class="pb-2 font-semibold text-right" title="Deals currently at LOI stage">Active LOIs</th>
             </tr>
@@ -10413,16 +10430,20 @@ function viewDashboard(){
                   <div class="h-full rounded-full ${k.qPct>=100?'bg-green-500':'bg-blue-400'}" style="width:${Math.min(k.qPct,100)}%"></div>
                 </div>
               </div>`;
-              const winTxt = k.winPct!==null
-                ? `<span class="${k.winPct>=50?'text-green-700':'text-red-600'} font-semibold">${k.winPct}%</span><span class="text-gray-400 text-xs ml-1">(${k.proposalWon}W / ${k.lostListingCount||0}LL / ${k.lostProposalCount||0}LP)</span>`
+              const cyNetTxt = k.cyNetPay>0
+                ? `<span class="font-semibold text-emerald-700">${fmt$(k.cyNetPay)}</span>`
+                : '<span class="text-gray-300">—</span>';
+              const projNetTxt = k.projNetPay>0
+                ? `<span class="font-semibold text-emerald-600">${fmt$(k.projNetPay)}</span>`
                 : '<span class="text-gray-300">—</span>';
               return `<tr class="hover:bg-blue-50 cursor-pointer" onclick="openAdvisorPay('${adv.uid}')" title="View ${(adv.name||'advisor').replace(/'/g,'&#39;').replace(/"/g,'&quot;')}'s Pay tab">
                 <td class="py-2.5 pr-3 text-center">${rank}</td>
                 <td class="py-2.5 pr-4 font-semibold text-gray-800">${adv.name} <span class="text-blue-400 text-xs">›</span><br><span class="text-xs text-gray-400 font-normal">${adv.office||''}</span></td>
                 <td class="py-2.5">${closedBar}</td>
                 <td class="py-2.5">${ucBar}</td>
+                <td class="py-2.5 text-right">${cyNetTxt}</td>
+                <td class="py-2.5 text-right">${projNetTxt}</td>
                 <td class="py-2.5 text-right">${qBar}</td>
-                <td class="py-2.5 text-right">${winTxt}</td>
                 <td class="py-2.5 text-right text-gray-700">${k.listingVol>0?fmt$(k.listingVol):'<span class="text-gray-300">—</span>'}</td>
                 <td class="py-2.5 text-right ${k.activeLOI>0?'font-semibold text-purple-700':'text-gray-400'}">${k.activeLOI||'—'}</td>
               </tr>`;
