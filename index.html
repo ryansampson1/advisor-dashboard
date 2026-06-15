@@ -6340,6 +6340,25 @@ function getDistinctAdvisors(){
   });
 }
 
+// Everyone who can be assigned a task — advisors + admins (from getDistinctAdvisors)
+// PLUS pure-staff profiles that getDistinctAdvisors() deliberately excludes. Tasks can be
+// assigned to anyone regardless of role, so this is the source list for task assignee pickers.
+function getAssignableUsers(){
+  if (DEMO_MODE) return DEMO_ADVISORS;
+  const users = getDistinctAdvisors();
+  const seen = new Set(users.map(a=>a.uid));
+  Object.entries(allProfiles||{}).forEach(([uid,p])=>{
+    if(!p || p.removed || seen.has(uid)) return;
+    const roles = p.roles || [];
+    // Pull in pure-staff (and any other non-advisor/admin) profiles missed above
+    if(roles.includes('staff') && !roles.includes('advisor') && !roles.includes('admin')){
+      users.push({ uid, name: p.name||p.email||uid, email: p.email||'' });
+      seen.add(uid);
+    }
+  });
+  return users.sort((a,b)=>String(a.name||'').localeCompare(String(b.name||'')));
+}
+
 // Returns the office a deal belongs to (via the advisor's profile)
 function dealOffice(deal){ return allProfiles[deal.advisorUid]?.office || 'Unknown'; }
 
@@ -16745,7 +16764,7 @@ window._micBtn = (targetId, opts={}) => {
 
 window.openTaskModal = (id, presetDealId) => {
   editingTaskId = id||null;
-  const advisors = getDistinctAdvisors();
+  const advisors = getAssignableUsers(); // include staff — anyone can be assigned a task
   const t = id ? allTasks.find(x=>x.id===id) : null;
   const _selDealId = (t && t.dealId) || presetDealId || '';
   const _dealOpts = ((typeof allDeals!=='undefined'&&allDeals)||[])
@@ -23707,6 +23726,20 @@ async function init(){
           if(Array.isArray(_p.superAdminEmails)) APP_CONFIG.superAdminEmails = Array.from(new Set([...(APP_CONFIG.superAdminEmails||[]), ..._p.superAdminEmails.map(x=>(x||'').toLowerCase())]));
         }
       }catch(_e){ console.warn('[auth] admin-list preload failed',_e); }
+      // Load office-manager list from Firestore BEFORE building currentUser, so the
+      // office-manager role (and the "My Office" tab) is detected on first login even
+      // when localStorage is empty. Without this, detectOfficeManager() runs against an
+      // empty allOfficeManagers (the eos listener that fills it only fires AFTER
+      // currentUser is built and never recomputes the role), so a fresh-browser login
+      // is wrongly treated as a plain advisor. Mirrors the admin-list preload above.
+      try{
+        const {doc:_d2, getDoc:_g2}=_fbFns;
+        const _oms=await _g2(_d2(_fbDb,'eos','officeManagers'));
+        if(_oms.exists() && Array.isArray(_oms.data()?.data)){
+          allOfficeManagers = _oms.data().data;
+          localStorage.setItem(K('officeManagers'), JSON.stringify(allOfficeManagers));
+        }
+      }catch(_e){ console.warn('[auth] office-manager preload failed',_e); }
       // Safety net: if Firestore was unreachable, admit the two bootstrap super-admins via email hash (no plaintext in source).
       try{
         if(!isAdminEmail(email) && Array.isArray(APP_CONFIG.bootstrapSuperAdminHashes) && APP_CONFIG.bootstrapSuperAdminHashes.length && window.crypto?.subtle){
@@ -24751,7 +24784,36 @@ function _driveGetOfficeConfig(deal){
 }
 
 function _drivePropName(deal){
-  return (deal.propertyAddress || deal.projectName || 'Property').slice(0, 60);
+  // Folder naming convention is the project name (falls back to address only if no project name)
+  return (deal.projectName || deal.propertyAddress || 'Property').slice(0, 60);
+}
+
+// Search the office's Proposals + Active Listings (+ Closed) for a folder that
+// already matches this deal by normalized/fuzzy name. Returns {id,name,parent} or
+// null. Used to reuse a hand-made folder instead of creating a duplicate.
+async function _driveFindExistingDealFolder(deal, token){
+  const cfg = _driveGetOfficeConfig(deal);
+  const AUTH = { Authorization: `Bearer ${token}` };
+  const parents = [cfg.proposals, cfg.listings, cfg.closed].filter(Boolean);
+  let best = null, bestScore = 0;
+  for (const parentId of parents){
+    const qs = new URLSearchParams({
+      q: `mimeType='application/vnd.google-apps.folder' and '${parentId}' in parents and trashed=false`,
+      fields: 'files(id,name)', pageSize: '1000',
+      supportsAllDrives: 'true', includeItemsFromAllDrives: 'true',
+    });
+    try {
+      const r = await fetch(`https://www.googleapis.com/drive/v3/files?${qs}`, { headers: AUTH });
+      const d = await r.json();
+      for (const f of (d.files || [])){
+        const sc = _dsfScore(f.name, deal);
+        if (sc > bestScore){ bestScore = sc; best = { id: f.id, name: f.name, parent: parentId }; }
+      }
+    } catch(e){ console.warn('[driveFindExistingDealFolder]', e); }
+  }
+  // Require a confident (exact / containment) match — _dsfScore returns 85-100 for
+  // those, ≤70 for loose word-overlap — so we never merge two different deals.
+  return bestScore >= 80 ? best : null;
 }
 
 // Find-or-create a folder by name inside a parent. Idempotent & cached.
@@ -24814,7 +24876,22 @@ async function _driveUploadFile(folderId, file, fileName, token){
 async function _driveWorkflowProposalToDo(deal, token){
   const cfg = _driveGetOfficeConfig(deal);
   const propName = _drivePropName(deal);
-  const mainId = await _driveCreateFolder(propName, cfg.proposals, token);
+  // Reuse an existing folder before creating one — prevents duplicates.
+  // 1) already linked on the card  2) fuzzy match an existing hand-made folder
+  let mainId = deal.driveFolderId || _getDriveFolderIdFromUrl(deal.driveUrl);
+  if (!mainId) {
+    const found = await _driveFindExistingDealFolder(deal, token);
+    if (found) {
+      mainId = found.id;
+      const driveUrl = `https://drive.google.com/drive/folders/${mainId}`;
+      await Store.updateDeal(deal.id, { driveFolderId: mainId, driveUrl });
+      Object.assign(deal, { driveFolderId: mainId, driveUrl });
+      showToast(`📁 Linked existing Drive folder — ${found.name}`, 'info', 4000);
+    }
+  }
+  // No link and no confident match → create a new folder (named by project name)
+  const _reused = !!mainId;
+  if (!mainId) mainId = await _driveCreateFolder(propName, cfg.proposals, token);
   const [laId, sdId, propId] = await Promise.all([
     _driveCreateFolder('Listing Agreement', mainId, token),
     _driveCreateFolder('Seller Docs',       mainId, token),
@@ -24827,7 +24904,7 @@ async function _driveWorkflowProposalToDo(deal, token){
   };
   await Store.updateDeal(deal.id, update);
   Object.assign(deal, update);
-  showToast(`📁 Drive folder created — ${propName}`, 'success', 4000);
+  if (!_reused) showToast(`📁 Drive folder created — ${propName}`, 'success', 4000);
   return mainId;
 }
 
