@@ -1812,10 +1812,10 @@ async function ensureSoldAutomations(){
     {id:'auto-5', _v:1, stage:'Sold', type:'toast', active:true,
      config:{message:'🎉 {address} SOLD! Congratulations {advisor_name}!'}},
     {id:'auto-6', _v:2, stage:'Sold', type:'press_release', active:true, config:{}},
-    {id:'auto-7', _v:1, stage:'Sold', type:'assign_task', active:true,
-     config:{assignToEmail:'krissy@thedirtdog.com', dueDays:'3',
-             taskTitle:'Send Closing Statement — {address}',
-             taskDesc:'Send the final closing statement to all parties for {address}. Closing date: {close_date}. Buyer: {buyer}.'}},
+    {id:'auto-7', _v:2, stage:'Sold', type:'assign_task', active:true,
+     config:{dueDays:'3',
+             taskTitle:'Send closing statement to Krissy — {address}',
+             taskDesc:'Send the final closing statement for {address} to Krissy (krissy@thedirtdog.com) so she can distribute it to all parties. Closing date: {close_date}. Buyer: {buyer}.'}},
     {id:'auto-8', _v:2, stage:'Sold', type:'assign_task', active:true,
      config:{assignToEmail:'krissy@thedirtdog.com', dueDays:'7', skipForBuyer:true,
              taskTitle:'Remove from websites + archive Google Drive — {address}',
@@ -1827,10 +1827,7 @@ async function ensureSoldAutomations(){
              taskDesc:thankyouBody,
              gmailDraft:true,
              gmailSubject:'Thank You — {project_name}'}},
-    {id:'auto-11', _v:1, stage:'Sold', type:'assign_task', active:true,
-     config:{assignToEmail:'krissy@thedirtdog.com', dueDays:'5',
-             taskTitle:'Order closing gift for client — {address}',
-             taskDesc:'Order a closing gift for the client on {address}. Buyer: {buyer}. Check with {advisor_name} for preference or use the standard gift package.'}},
+    {id:'auto-11', _v:2, stage:'Sold', type:'gift_confirm', active:true, config:{}},
     {id:'auto-12', _v:3, stage:'Sold', type:'assign_task', active:true,
      config:{assignToEmail:'krissy@thedirtdog.com', dueDays:'7', skipForBuyer:true,
              taskTitle:'Mark as Sold on Eshenbaugh Report + remove from Available Land — {address}',
@@ -2049,6 +2046,60 @@ function handleSignPickupAutomation(deal){
   });
 }
 
+// ── Closing Gift Confirmation (Sold stage) ────────────────────────────
+// Opt-in: when an advisor drags a deal to Sold they choose whether Krissy
+// should order a closing gift. Only creates the task if they pick "Yes".
+function handleGiftConfirmAutomation(deal){
+  const addr = deal.propertyAddress||deal.projectName||deal.address||'property';
+  const buyerName = deal.buyer||deal.buyerName||'the client';
+  const advisorName = deal.advisorName||deal.advisorEmail||'the advisor';
+  const dueDate = n => { const d=new Date(); d.setDate(d.getDate()+n); return d.toISOString().slice(0,10); };
+
+  const overlay = document.createElement('div');
+  overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:9999;display:flex;align-items:center;justify-content:center;padding:1rem';
+
+  const card = document.createElement('div');
+  card.style.cssText='background:#fff;border-radius:18px;padding:1.5rem;width:100%;max-width:400px;box-shadow:0 20px 60px rgba(0,0,0,.3)';
+  card.innerHTML=
+    '<div style="display:flex;align-items:center;gap:.625rem;margin-bottom:.375rem">'
+      +'<span style="font-size:1.375rem">🎁</span>'
+      +'<h3 style="font-weight:700;color:#1f2937;font-size:1.05rem;margin:0">Closing Gift</h3>'
+    +'</div>'
+    +'<p style="color:#6b7280;font-size:.875rem;margin:0 0 1.25rem;line-height:1.5">Would you like Krissy to order a closing gift for the client on <strong style="color:#1f2937">'+addr+'</strong>?</p>'
+    +'<div style="display:flex;gap:.625rem;margin-bottom:.75rem">'
+      +'<button id="gf-yes" style="flex:1;padding:.65rem;border:2px solid #e5e7eb;border-radius:10px;background:#fff;font-weight:700;font-size:.9rem;cursor:pointer;color:#374151;transition:all .15s">Yes — Order a Gift</button>'
+      +'<button id="gf-no"  style="flex:1;padding:.65rem;border:2px solid #e5e7eb;border-radius:10px;background:#fff;font-weight:700;font-size:.9rem;cursor:pointer;color:#374151;transition:all .15s">No Gift</button>'
+    +'</div>'
+    +'<button id="gf-cancel" style="width:100%;padding:.5rem;border:none;background:none;color:#9ca3af;font-size:.825rem;cursor:pointer">Cancel</button>';
+
+  overlay.appendChild(card);
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', e=>{ if(e.target===overlay) document.body.removeChild(overlay); });
+
+  card.querySelector('#gf-cancel').addEventListener('click',()=>document.body.removeChild(overlay));
+
+  card.querySelector('#gf-no').addEventListener('click',()=>{
+    document.body.removeChild(overlay);
+    showToast('✅ No closing gift — no task created','info',3000);
+  });
+
+  card.querySelector('#gf-yes').addEventListener('click', async ()=>{
+    document.body.removeChild(overlay);
+    const km = Object.entries(allProfiles).find(([,p])=>(p.email||'').toLowerCase()==='krissy@thedirtdog.com');
+    await Store.createTask({
+      title:'🎁 Order closing gift for client — '+addr,
+      description:'Order a closing gift for the client on '+addr+'. Buyer: '+buyerName+'. Check with '+advisorName+' for preference or use the standard gift package.',
+      assignedTo: km?.[0]||null,
+      assignedToName: km?.[1]?.name||'Krissy',
+      assignedToEmail: 'krissy@thedirtdog.com',
+      dealId: deal.id, dealAddress: deal.propertyAddress,
+      dueDate: dueDate(5), status:'pending',
+      createdBy: currentUser?.uid||'system', createdByName:'Automation', createdAt:Date.now(),
+    }).catch(e=>console.error('[gift-confirm]',e));
+    showToast('🎁 Closing gift task sent to Krissy','success',4000);
+  });
+}
+
 async function handleDDAutomation(deal){
   const dueDate=n=>{const d=new Date();d.setDate(d.getDate()+n);return d.toISOString().slice(0,10);};
   const apiKey=APP_CONFIG.ai?.anthropicKey;
@@ -2056,15 +2107,7 @@ async function handleDDAutomation(deal){
   const buyerName=deal.buyer||deal.buyerName||'Buyer';
   const price=deal.purchasePrice||deal.price?'$'+Number(deal.purchasePrice||deal.price).toLocaleString():'See Contract';
 
-  // Always-create: Krissy files PSA
-  const km=Object.entries(allProfiles).find(([,p])=>(p.email||'').toLowerCase()==='krissy@thedirtdog.com');
-  Store.createTask({
-    title:'File PSA in Google Drive — '+addr,
-    description:'1. Save the Purchase and Sale Agreement to the Google Drive deal folder for '+addr+'.\n2. Add to the contract tracking spreadsheet: Date received, Buyer ('+buyerName+'), Purchase price ('+price+'), Property.\n3. Confirm with '+( deal.advisorName||'advisor')+' once filed.',
-    assignedTo:km?.[0]||deal.advisorUid,assignedToName:km?.[1]?.name||'Krissy',assignedToEmail:'krissy@thedirtdog.com',
-    dealId:deal.id,dealAddress:deal.propertyAddress,dueDate:dueDate(2),status:'pending',
-    createdBy:currentUser?.uid||'system',createdByName:'Automation',createdAt:Date.now(),
-  }).catch(e=>console.error('[DD-krissy]',e));
+  // PSA is auto-filed to the Drive "Offers" subfolder on stage change (_driveWorkflowOffers) — no manual filing task.
 
   // Always-create: Advisor delivers DD materials
   Store.createTask({
@@ -2270,17 +2313,7 @@ async function handleLOIAutomation(deal){
                   : deal.purchasePrice ? '$'+Number(deal.purchasePrice).toLocaleString() : 'See LOI';
   const addr = deal.propertyAddress||deal.projectName||deal.address||'property';
 
-  // Always-create tasks: Krissy filing + advisor follow-up
-  const km = Object.entries(allProfiles).find(([,p])=>(p.email||'').toLowerCase()==='krissy@thedirtdog.com');
-  Store.createTask({
-    title:`File LOI in Google Drive — ${addr}`,
-    description:`1. Save the LOI document to the Google Drive deal folder for ${addr}.
-2. Add to the LOI tracking spreadsheet: Date received, Buyer (${buyerName}), Offer price (${loiPrice}), Property.
-3. Confirm with ${deal.advisorName||'advisor'} once filed.`,
-    assignedTo:km?.[0]||deal.advisorUid, assignedToName:km?.[1]?.name||'Krissy', assignedToEmail:'krissy@thedirtdog.com',
-    dealId:deal.id, dealAddress:deal.propertyAddress, dueDate:dueDate(3), status:'pending',
-    createdBy:currentUser?.uid||'system', createdByName:'Automation', createdAt:Date.now(),
-  }).catch(e=>console.error('[LOI-krissy]',e));
+  // LOI is auto-filed to the Drive "Offers" subfolder on stage change (_driveWorkflowOffers) — no manual filing task.
 
   const followBody = `Hi [Seller Name],
 
@@ -3514,16 +3547,7 @@ function handleListingAutomation(deal){
 
     const tasks = [];
 
-    /* 1. Krissy — file and track listing agreement */
-    tasks.push(Store.createTask({
-      title:`📁 File & Track Listing Agreement — ${addr}`,
-      description:`A new listing has been signed for ${addr}.\n\nAdvisor: ${deal.advisorName||deal.advisorEmail||''}\nEffective Date: ${effDate}\nExpiration Date: ${expDate}\nListed Price: ${price}\nAcres: ${acres}\nCounty: ${county}${agmtUrl?'\nListing Agreement: '+agmtUrl:''}\n\n☐ File listing agreement in Google Drive\n☐ Add deal to listing tracker\n☐ Confirm effective and expiration dates are on the deal card\n☐ Set calendar reminder 15 days before expiration`,
-      assignedTo:krissyHit?.[0]||null, assignedToName:krissyHit?.[1]?.name||'Krissy',
-      assignedToEmail:'krissy@thedirtdog.com',
-      dealId:deal.id, dealAddress:deal.propertyAddress,
-      dueDate:dueDate(2), status:'pending',
-      createdBy:currentUser?.uid||'system', createdByName:'Automation', createdAt:Date.now(),
-    }).catch(e=>console.error('[listing-krissy-file]',e)));
+    /* Listing agreement is auto-filed to the Drive "Listing Agreement" subfolder on stage change (_driveWorkflowListing) — no manual filing task. */
 
     /* 2. Advisor — draft OM and call top 10 buyers */
     tasks.push(Store.createTask({
@@ -6918,6 +6942,11 @@ function fireAutomations(deal, oldStage){
         // Skip sign pickup for Buyer Rep deals — no sign was placed
         if(deal.representation === 'buyer') break;
         handleSignPickupAutomation(deal);
+        break;
+      }
+      case 'gift_confirm':{
+        // Closing gift is opt-in — advisor chooses when dragging to Sold
+        handleGiftConfirmAutomation(deal);
         break;
       }
       case 'dd_research':{
@@ -17595,15 +17624,16 @@ function autoSummary(rule){
     case 'commission_invoice': return '📄 Auto-generate commission invoice (Word doc) + Gmail draft + advisor task';
     case 'press_release':    return '📰 AI-generated press release Word doc + task (Sold stage)';
     case 'sold_wire_confirm':  return '🏦 Wire confirmation task + DocuSign close checklist (Sold)';
-    case 'sign_pickup_confirm':return '🪧 Interactive prompt: "Sign needs pick-up?" → task to Marketing if Yes (Sold & Lost Listing)';
+    case 'sign_pickup_confirm':return '🪧 Interactive prompt: "Sign needs pick-up?" → task to Nick if Yes (Sold & Lost Listing)';
+    case 'gift_confirm':       return '🎁 Interactive prompt: "Order a closing gift?" → task to Krissy if Yes (Sold)';
     case 'dd_research':      return '🔎 AI buyer research report + comps task (Due Diligence)';
     case 'loi_research':     return '🤝 AI LOI buyer research + response task (LOI stage)';
     case 'proposal_todo':    return '📋 Aerials task + AI DD report + listing agreement + proposal email (Proposal To Do)';
     case 'proposal_outstanding': return '📬 Follow-up task + AI follow-up email draft + check-in reminder (Proposal Outstanding)';
-    case 'contract_terminated':  return '🔄 Re-listing decision (advisor) + tracking/website update (Krissy) + remarketing (Marketing) + AI listing extension agreement (Contract Terminated)';
-    case 'lost_listing':         return '📋 Interactive popup: Listing or Proposal? → protection list task (broker) and/or sign removal task (marketing)';
+    case 'contract_terminated':  return '🔄 Re-listing decision (advisor) + tracking/website update (Krissy) + remarketing (Nick) + AI listing extension agreement (Contract Terminated)';
+    case 'lost_listing':         return '📋 Interactive popup: Listing or Proposal? → protection list task (broker) and/or sign removal task (Nick)';
     case 'prospect':             return '📞 Task to advisor to reach out and log notes in CRM (Prospect stage)';
-    case 'listing':              return '🏠 Popup: sign + website? → tasks to Krissy (file + websites), Advisor (OM + buyers), Bill (groups), Marketing (sign + Telzio) + calendar events + 15-day renewal reminder';
+    case 'listing':              return '🏠 Popup: sign + website? → tasks to Advisor (OM + buyers), Nick (groups + sign + Telzio) + calendar events + 15-day renewal reminder';
     default: return JSON.stringify(cfg);
   }
 }
@@ -19041,8 +19071,9 @@ function viewEOS(sub='rocks'){
       .acc-tree li:first-child::after{border-radius:6px 0 0 0}
       .acc-tree ul ul::before{content:'';position:absolute;top:0;left:50%;border-left:2px solid #cbd5e1;width:0;height:22px}
       .acc-seat{display:inline-block;background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:12px 16px;min-width:200px;max-width:300px;box-shadow:0 1px 3px rgba(0,0,0,.06);vertical-align:top}
-      .acc-resp{margin:8px 0 0;padding:0;text-align:left;list-style:none;display:flex;flex-direction:column;gap:5px}
-      .acc-resp li{font-size:11px;line-height:1.35;color:#374151;background:#f3f4f6;border-radius:7px;padding:4px 8px;overflow-wrap:anywhere;word-break:break-word}`;
+      .acc-resp{margin:8px 0 0;padding:0;text-align:left;display:flex;flex-direction:column;gap:5px}
+      .acc-resp span{display:block;font-size:11px;line-height:1.35;color:#374151;background:#f3f4f6;border-radius:7px;padding:4px 8px;overflow-wrap:anywhere;word-break:break-word}`;
+    window._accTreeCss = ACC_TREE_CSS;
     const byParent={};
     const ids=new Set(seats.map(s=>s.id));
     seats.forEach(s=>{const p=(s.parentId&&ids.has(s.parentId))?s.parentId:'';(byParent[p]=byParent[p]||[]).push(s);});
@@ -19051,13 +19082,13 @@ function viewEOS(sub='rocks'){
       return `<div class="acc-seat">
         <div class="font-bold text-sm text-gray-800 leading-tight">${esc(s.role)||'<span class="text-gray-400 font-normal">Untitled seat</span>'}</div>
         ${s.holder?`<div class="text-xs text-gray-500 mt-0.5">${esc(s.holder)}</div>`:''}
-        ${resp.length?`<ul class="acc-resp">${resp.map(r=>`<li>${esc(r)}</li>`).join('')}</ul>`:''}
+        ${resp.length?`<div class="acc-resp">${resp.map(r=>`<span>${esc(r)}</span>`).join('')}</div>`:''}
       </div>`;
     };
     const renderNodes=pid=>{const kids=byParent[pid]||[];return kids.length?`<ul>${kids.map(s=>`<li>${seatBox(s)}${renderNodes(s.id)}</li>`).join('')}</ul>`:'';};
     const roots=byParent['']||[];
     const treeHtml=seats.length
-      ? `<div style="overflow-x:auto;-webkit-overflow-scrolling:touch"><div class="acc-tree"><ul>${roots.map(s=>`<li>${seatBox(s)}${renderNodes(s.id)}</li>`).join('')}</ul></div></div>`
+      ? `<div id="acc-tree-scroll" style="overflow:auto;-webkit-overflow-scrolling:touch"><div class="acc-tree" id="acc-tree-print"><ul>${roots.map(s=>`<li>${seatBox(s)}${renderNodes(s.id)}</li>`).join('')}</ul></div></div>`
       : `<div class="text-sm text-gray-400 py-12 text-center">No seats yet.${isAdmin?' Use the editor below to add the first seat.':''}</div>`;
     const seatOptions=(parentVal,excludeId)=>`<option value="">— Top level —</option>`+seats.filter(o=>o.id!==excludeId).map(o=>`<option value="${esc(o.id)}" ${parentVal===o.id?'selected':''}>${esc(o.role)||'(untitled)'}</option>`).join('');
     const editor=isAdmin?`
@@ -19091,11 +19122,20 @@ function viewEOS(sub='rocks'){
     body=`
       <style>${ACC_TREE_CSS}</style>
       <div class="bg-white rounded-2xl border p-6 sm:p-8 w-full">
-        <h3 class="font-bold text-gray-800 text-lg">Accountability Chart</h3>
-        <p class="text-xs text-gray-400 mb-6">Who owns what, and who reports to whom.</p>
+        <div class="flex items-start justify-between gap-3 mb-6">
+          <div>
+            <h3 class="font-bold text-gray-800 text-lg">Accountability Chart</h3>
+            <p class="text-xs text-gray-400">Who owns what, and who reports to whom.</p>
+          </div>
+          ${seats.length?`<div class="flex items-center gap-2 shrink-0">
+            <button onclick="toggleAccFit()" class="px-3 py-1.5 text-sm font-medium rounded-lg border ${(window._accFit!==false)?'text-white':'text-gray-700 bg-white'}" style="${(window._accFit!==false)?'background:var(--brand-black);border-color:var(--brand-black)':'border-color:#d1d5db'}">${(window._accFit!==false)?'↔ Fit: On':'↔ Fit: Off'}</button>
+            <button onclick="printAccChart()" class="px-3 py-1.5 text-sm font-medium text-white rounded-lg" style="background:var(--brand-black)">🖨 Print (11×17)</button>
+          </div>`:''}
+        </div>
         ${treeHtml}
       </div>
       ${editor}`;
+    setTimeout(()=>window._fitAccTree&&window._fitAccTree(),0);
   }
 
   else if(sub==='issues'){
@@ -20496,6 +20536,58 @@ window.saveAccChart = (rerender=false) => {
   const prev=eosGet('accountChart',{});
   eosSave('accountChart',{seats:window._collectAccSeats(),text:prev.text||''});
   if(rerender){ viewEOS('chart'); } else { showToast('Accountability chart saved','success'); }
+};
+// On-screen: scale the chart down so the whole thing fits the card width (never scales up).
+window._accFit = (window._accFit===false)?false:true;
+window._fitAccTree = () => {
+  const scroll=document.getElementById('acc-tree-scroll');
+  const tree=document.getElementById('acc-tree-print');
+  if(!scroll||!tree) return;
+  tree.style.transformOrigin='top left';
+  if(window._accFit===false){ tree.style.transform=''; scroll.style.height=''; return; }
+  tree.style.transform='';            // measure at natural size first
+  const avail=scroll.clientWidth;
+  const natW=tree.scrollWidth, natH=tree.scrollHeight;
+  const scale=natW>avail ? avail/natW : 1;
+  if(scale<1){
+    tree.style.transform='scale('+scale+')';
+    scroll.style.height=Math.ceil(natH*scale)+'px';   // collapse the gap left by the transform
+  } else { scroll.style.height=''; }
+};
+window.toggleAccFit = () => { window._accFit = (window._accFit===false); viewEOS('chart'); };
+if(!window._accFitResizeBound){ window._accFitResizeBound=true;
+  window.addEventListener('resize',()=>{ if(window._eosSub==='chart') window._fitAccTree&&window._fitAccTree(); });
+}
+// Print the accountability chart scaled to fit on a single 11x17 (tabloid) landscape page.
+window.printAccChart = () => {
+  const tree=document.getElementById('acc-tree-print');
+  if(!tree){ showToast('Open the Accountability tab first','error'); return; }
+  const css=window._accTreeCss||'';
+  // Tabloid landscape printable area (17in x 11in minus 0.4in margins each side) -> px @96dpi.
+  const PAGE_W=(17-0.8)*96, PAGE_H=(11-0.8)*96;
+  const w=window.open('','_blank','width=1200,height=800');
+  if(!w){ showToast('Allow pop-ups to print the chart','error'); return; }
+  w.document.write('<!doctype html><html><head><title>Accountability Chart</title>'
+    +'<style>'
+    +'@page{size:17in 11in;margin:0.4in}'
+    +'*{-webkit-print-color-adjust:exact;print-color-adjust:exact}'
+    +'html,body{margin:0;padding:0;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}'
+    +'.acc-seat>div:first-child{font-weight:700;font-size:13px;color:#1f2937;line-height:1.2}'
+    +'.text-gray-800{color:#1f2937}.text-gray-500{color:#6b7280}.text-gray-400{color:#9ca3af}.font-bold{font-weight:700}.font-normal{font-weight:400}'
+    +css
+    +'#wrap{transform-origin:top left}'
+    +'h1{font-size:18px;margin:0 0 10px;color:#1f2937}'
+    +'</style></head><body>'
+    +'<h1>Accountability Chart</h1>'
+    +'<div id="wrap">'+tree.outerHTML+'</div>'
+    +'<scr'+'ipt>window.onload=function(){'
+    +'var el=document.getElementById("wrap");var t=el.firstElementChild;'
+    +'var cw=t.scrollWidth,ch=t.scrollHeight;'
+    +'var scale=Math.min('+PAGE_W+'/cw,'+PAGE_H+'/ch,1);'
+    +'el.style.width=cw+"px";el.style.transform="scale("+scale+")";'
+    +'setTimeout(function(){window.focus();window.print();},300);'
+    +'};</scr'+'ipt></body></html>');
+  w.document.close();
 };
 window.addAccSeat = () => {
   const prev=eosGet('accountChart',{});
