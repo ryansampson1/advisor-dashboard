@@ -13892,7 +13892,7 @@ window.openContactModal = id => {
             </div>
             <div>
               <label class="block text-xs font-medium text-gray-600 mb-1">Last Name</label>
-              <input id="cm-last" type="text" value="${c?.lastName||''}" class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-200"/>
+              <input id="cm-last" type="text" value="${c?.lastName||''}" oninput="window._crmCheckDupes()" class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-200"/>
             </div>
           </div>
           <div class="grid grid-cols-2 gap-3">
@@ -13902,9 +13902,11 @@ window.openContactModal = id => {
             </div>
             <div>
               <label class="block text-xs font-medium text-gray-600 mb-1">Company</label>
-              <input id="cm-company" type="text" value="${c?.company||''}" class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-200"/>
+              <input id="cm-company" type="text" value="${c?.company||''}" oninput="window._crmCheckDupes()" class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-200"/>
             </div>
           </div>
+          <!-- Live duplicate check: surfaces existing contacts matching last name / company -->
+          <div id="cm-dupe-warn"></div>
           <div class="grid grid-cols-2 gap-3">
             <div>
               <label class="block text-xs font-medium text-gray-600 mb-1">Primary Email</label>
@@ -14006,6 +14008,36 @@ window.openContactModal = id => {
     if(!document.getElementById('crm-contact-modal')) document.removeEventListener('click', _cmOutside);
   };
   document.addEventListener('click', _cmOutside);
+};
+
+// ── Live duplicate check in the contact modal ───────────────────────
+// As the user types Last Name / Company, surface existing contacts that
+// match so they can open the existing record instead of creating a dupe.
+window._crmCheckDupes = () => {
+  const wrap = document.getElementById('cm-dupe-warn');
+  if(!wrap) return;
+  const e = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  const norm = s => (s||'').toString().toLowerCase().replace(/[^a-z0-9]/g,'');
+  const last  = (document.getElementById('cm-last')?.value||'').trim().toLowerCase();
+  const compN = norm(document.getElementById('cm-company')?.value);
+  if(last.length < 2 && compN.length < 2){ wrap.innerHTML=''; return; }
+  const matches = (allContacts||[]).filter(c => {
+    if(_editingContactId && c.id===_editingContactId) return false;
+    const lastHit = last.length>=2 && (c.lastName||'').trim().toLowerCase() === last;
+    const compHit = compN.length>=2 && norm(c.company) === compN;
+    return lastHit || compHit;
+  }).slice(0,8);
+  if(!matches.length){ wrap.innerHTML=''; return; }
+  wrap.innerHTML = `<div class="border border-amber-300 bg-amber-50 rounded-lg p-3">
+    <div class="text-xs font-semibold text-amber-800 mb-1.5">⚠ ${matches.length} possible match${matches.length>1?'es':''} already in the database — click to open</div>
+    <div class="space-y-0.5">${matches.map(c=>{
+      const nm  = [c.firstName,c.lastName].filter(Boolean).join(' ') || c.email || 'Unnamed contact';
+      const sub = [c.company,c.email].filter(Boolean).join(' · ');
+      return `<button type="button" onclick="window.openContactModal('${c.id}')" class="block w-full text-left px-2 py-1 rounded hover:bg-amber-100 transition text-sm">
+        <span class="font-medium text-gray-800">${e(nm)}</span>${sub?`<span class="text-gray-500 text-xs"> — ${e(sub)}</span>`:''}
+      </button>`;
+    }).join('')}</div>
+  </div>`;
 };
 
 // ── Deal typeahead helpers ──────────────────────────────────────────
@@ -15196,6 +15228,45 @@ const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-06-12_0","emailDate":"2026-06-12",
 let _GMAIL_SYNC_DATE;  // set at runtime by crmGmailSync; blank = never synced this session
 let _GMAIL_SYNC_DATA = [];  // per-user: populated at runtime from the signed-in account's Gmail. Do NOT bake a shared snapshot here — it leaks one user's contacts to everyone.
 
+// ── Company-name canonicalizer for Gmail Sync ─────────────────────────
+// Gmail-derived company hints come from the email domain (e.g. "dirtdoglandco.com"
+// → "Dirtdoglandco") with no spaces, which produced duplicate companies that didn't
+// match the properly-spaced names already in the CRM. _crmCanonCompany first reuses
+// the exact spelling of any existing CRM company whose letters/digits match (so
+// "dirtdoglandco" becomes your existing "Dirt Dog Land Co"); failing that it splits
+// camelCase / letter-digit boundaries and title-cases the result.
+window._crmBuildCompanyCanonMap = () => {
+  const m = new Map();
+  for(const c of (allContacts||[])){
+    const name = (c.company||'').trim();
+    if(!name) continue;
+    const key = name.toLowerCase().replace(/[^a-z0-9]/g,'');
+    if(key && !m.has(key)) m.set(key, name); // first spelling seen wins
+  }
+  return m;
+};
+window._crmSplitCompany = (raw) => {
+  let s = (raw||'').trim();
+  if(!s) return s;
+  s = s.replace(/([a-z])([A-Z])/g,'$1 $2')   // camelCase → camel Case
+       .replace(/([A-Za-z])(\d)/g,'$1 $2')   // letter→digit boundary
+       .replace(/(\d)([A-Za-z])/g,'$1 $2')   // digit→letter boundary
+       .replace(/\s+/g,' ').trim();
+  const KNOWN = {llc:'LLC',inc:'Inc',co:'Co',corp:'Corp',pa:'PA',pllc:'PLLC',lp:'LP',llp:'LLP',usa:'USA',pc:'PC'};
+  return s.split(' ').map(w => {
+    const lw = w.toLowerCase();
+    if(KNOWN[lw]) return KNOWN[lw];
+    return w.charAt(0).toUpperCase() + w.slice(1);
+  }).join(' ');
+};
+window._crmCanonCompany = (raw, canonMap) => {
+  const s = (raw||'').trim();
+  if(!s) return s;
+  const key = s.toLowerCase().replace(/[^a-z0-9]/g,'');
+  if(key && canonMap && canonMap.has(key)) return canonMap.get(key); // reuse existing spelling
+  return window._crmSplitCompany(s);
+};
+
 // ── CRM Outreach Import Logic ─────────────────────────────────────────────────
 window._crmOutreachCheckDone = false;
 
@@ -15807,6 +15878,13 @@ window.crmGmailSync = async () => {
   }
 
   // ── Build review modal from updated _GMAIL_SYNC_DATA ──────────────
+  // Normalize company hints: reuse existing CRM company spelling where possible,
+  // otherwise split run-together domain-derived names. Stops space-less duplicates.
+  const _companyCanonMap = window._crmBuildCompanyCanonMap();
+  for(const g of _GMAIL_SYNC_DATA){
+    if(g.companyHint) g.companyHint = window._crmCanonCompany(g.companyHint, _companyCanonMap);
+  }
+
   const emailIndex = {};
   for(const c of (allContacts||[])) if(c.email) emailIndex[c.email.toLowerCase().trim()] = c;
 
