@@ -23240,7 +23240,24 @@ function bootLeads(){
     if(currentView==='leads') viewLeads();
     const panelId = window._openLeadId;
     if(panelId && document.getElementById('lead-panel')) renderLeadPanel(panelId);
+    _leadCRMBackfill(); // auto-match any new/pulled leads against the CRM
   });
+}
+// Background pass: match unchecked leads to CRM contacts (incl. ones pulled by
+// the discovery worker). Idempotent — each lead is flagged crmMatchChecked once.
+let _leadCRMInflight = new Set();
+async function _leadCRMBackfill(){
+  if(!Array.isArray(allContacts) || !allContacts.length){
+    clearTimeout(window._leadCRMRetry);
+    window._leadCRMRetry = setTimeout(_leadCRMBackfill, 2500); // CRM not loaded yet
+    return;
+  }
+  const todo = (allLeads||[]).filter(l=>!l.crmMatchChecked && !LEAD_TERMINAL.includes(l.status) && !_leadCRMInflight.has(l.id));
+  for(const l of todo.slice(0,25)){
+    _leadCRMInflight.add(l.id);
+    try { await _leadEnrichFromCRM(l.id); } catch(e){ console.warn('[lead crm backfill]',e); }
+    _leadCRMInflight.delete(l.id);
+  }
 }
 function _leadEsc(s){ return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function _leadById(id){ return allLeads.find(l=>l.id===id); }
@@ -23269,12 +23286,22 @@ async function leadAI(systemPrompt, userText, maxTokens=1800){
   const payload = {
     system_instruction:{parts:[{text:systemPrompt}]},
     contents:[{role:'user',parts:[{text:userText}]}],
-    generationConfig:{maxOutputTokens:maxTokens},
+    // gemini-2.5-flash spends maxOutputTokens on hidden "thinking" tokens by
+    // default, which left no budget for the actual answer and made the agent
+    // return empty text (→ the JSON parse threw and the agent "failed").
+    // Disabling thinking lets the whole budget go to the response.
+    generationConfig:{maxOutputTokens:maxTokens, temperature:0.7, thinkingConfig:{thinkingBudget:0}},
   };
   const resp = await fetch(proxyUrl,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});
   if(!resp.ok){ const t=await resp.text().catch(()=>''); throw new Error('AI service error '+resp.status+': '+t.slice(0,150)); }
   const data = await resp.json();
-  return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  const cand = data.candidates?.[0];
+  const text = (cand?.content?.parts||[]).map(p=>p.text||'').join('') || '';
+  if(!text.trim()){
+    const why = cand?.finishReason || data?.promptFeedback?.blockReason || 'empty response';
+    throw new Error('AI returned no text ('+why+'). Try Retry agent, or shorten the lead notes.');
+  }
+  return text;
 }
 function _leadAIParseJSON(raw){
   // Tolerant JSON extraction (model may wrap in ```json fences)
@@ -23295,7 +23322,91 @@ function _leadContextBlock(lead){
 - Trigger signals observed: ${(lead.triggerSignals||[]).join('; ')||'(none recorded)'}
 - Source: ${lead.source||'manual'}${lead.inboundMessage?'\n- Inbound message from lead: "'+lead.inboundMessage+'"':''}
 - Advisor: ${lead.advisorName||currentUser.name}${adv.office?' ('+adv.office+' office)':''}
-- Notes: ${lead.notes||'(none)'}`;
+- Notes: ${lead.notes||'(none)'}${lead.crmContactId?'\n- ⚠️ EXISTING CRM RELATIONSHIP — this person/company is already in our CRM. Treat as a warm contact, not a cold lead. Reference the prior relationship naturally; never reintroduce the firm as if they\'ve never heard of us.':''}${lead.crmHistorySummary?'\n- Known history with us:\n'+lead.crmHistorySummary.split('\n').map(s=>'    '+s).join('\n'):''}`;
+}
+
+// ── CRM cross-reference ─────────────────────────────────────────────────────
+// Find an existing CRM contact that matches this lead by email, full name, or
+// company (+ name). Conservative on purpose — we don't want false matches
+// auto-filling the wrong person's phone number into a lead.
+function _leadMatchCRM(lead){
+  if(!Array.isArray(allContacts) || !allContacts.length) return null;
+  const norm = s => String(s||'').toLowerCase().trim();
+  const emailLow = norm(lead.email);
+  const nameLow  = norm(lead.name);
+  const coLow    = norm(lead.company);
+  // 1. Email is the strongest signal
+  if(emailLow){
+    const byEmail = allContacts.find(c => norm(c.email)===emailLow || norm(c.email2)===emailLow);
+    if(byEmail) return byEmail;
+  }
+  // 2. Exact full-name match
+  if(nameLow){
+    const fullName = c => norm([c.firstName,c.lastName].filter(Boolean).join(' '));
+    const byName = allContacts.find(c => fullName(c)===nameLow);
+    if(byName) return byName;
+    // 3. Same last name AND same company (handles "Bob Smith" vs "Robert Smith" at one firm)
+    if(coLow){
+      const last = nameLow.split(' ').slice(-1)[0];
+      const byCo = allContacts.find(c => norm(c.company)===coLow && norm(c.lastName)===last && last);
+      if(byCo) return byCo;
+    }
+  }
+  return null;
+}
+
+// Build a short plain-text history summary for a matched contact (activities +
+// linked deals) — used both in the panel and as context for the AI agent.
+async function _leadFetchCRMHistory(contact){
+  const out = { summary:'', activities:[], deals:[] };
+  // Linked deals
+  (contact.linkedDeals||[]).forEach(did=>{
+    const d = (allDeals||[]).find(x=>x.id===did);
+    if(d) out.deals.push(d.projectName||d.propertyAddress||d.address||'Deal');
+  });
+  // Activity subcollection (most recent first)
+  try {
+    if(_fbDb && _fbFns){
+      const {collection, query, orderBy, limit, getDocs} = _fbFns;
+      const snap = await getDocs(query(collection(_fbDb,'contacts',contact.id,'activities'), orderBy('createdAt','desc'), limit(8)));
+      out.activities = snap.docs.map(d=>({id:d.id,...d.data()}));
+    }
+  } catch(e){ console.warn('[lead crm history]', e); }
+  const lines = [];
+  if(out.deals.length) lines.push('Linked deals: '+out.deals.join(', '));
+  out.activities.slice(0,6).forEach(a=>{
+    const when = a.createdAt ? new Date(a.createdAt).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'2-digit'}) : '';
+    const label = (_ACTIVITY_LABELS && _ACTIVITY_LABELS[a.type]) || a.type || 'note';
+    const body = (a.body||a.emailSubject||a.meetingTitle||'').replace(/\s+/g,' ').trim().slice(0,120);
+    lines.push('• '+when+' '+label+(body?': '+body:''));
+  });
+  out.summary = lines.join('\n');
+  return out;
+}
+
+// Match → fill blank lead fields from CRM (never overwrite) → cache history.
+// Idempotent: skips the write if nothing changed.
+async function _leadEnrichFromCRM(leadId, {force=false}={}){
+  const lead = _leadById(leadId); if(!lead) return null;
+  if(lead.crmMatchChecked && !force && lead.crmContactId===undefined) return null;
+  const match = _leadMatchCRM(lead);
+  if(!match){
+    if(!lead.crmMatchChecked) await _leadUpdate(leadId, {crmMatchChecked:true}).catch(()=>{});
+    return null;
+  }
+  const hist = await _leadFetchCRMHistory(match);
+  const patch = { crmMatchChecked:true, crmContactId:match.id,
+    crmContactName:[match.firstName,match.lastName].filter(Boolean).join(' ')||match.email||'',
+    crmMatchedAt:Date.now(), crmHistorySummary:hist.summary };
+  // Fill blanks only
+  if(!lead.email && (match.email||match.email2)) patch.email = match.email||match.email2;
+  if(!lead.phone && (match.phone||match.officePhone)) patch.phone = match.phone||match.officePhone;
+  if(!lead.company && match.company) patch.company = match.company;
+  if(!lead.title && match.title) patch.title = match.title;
+  const wasMatched = lead.crmContactId===match.id;
+  await _leadUpdate(leadId, patch);
+  if(!wasMatched) await _leadLog(leadId, '🔗 Matched to CRM contact '+(patch.crmContactName||'')+' — pulled in known history'+(Object.keys(patch).some(k=>['email','phone','company','title'].includes(k))?' and filled blank fields':''));
+  return match.id;
 }
 
 // ── The agent: research → outreach draft → cadence pre-drafts ──────────────
@@ -23497,6 +23608,7 @@ async function claimLead(leadId){
   if(lead.advisorUid && lead.advisorUid!==currentUser.uid){ showToast('Already claimed by '+(lead.advisorName||'another advisor'),'warning'); return; }
   await _leadUpdate(leadId,{advisorUid:currentUser.uid, advisorName:currentUser.name, advisorEmail:currentUser.email});
   await _leadLog(leadId,'Claimed by '+currentUser.name);
+  try { await _leadEnrichFromCRM(leadId, {force:true}); } catch(e){ console.warn('[claimLead crm]',e); }
   showToast('🙋 Lead claimed — it\'s yours','success');
   if(!lead.research && lead.status==='New' && confirm('Run the AI agent now? (research + outreach draft + cadence)')){
     runLeadAgent(leadId);
@@ -23516,6 +23628,9 @@ async function createLead(data, runAgent){
     activityLog:[{at:Date.now(), by:currentUser?.name||'system', text:'Lead created'}],
     createdAt:Date.now(), createdBy:currentUser?.uid||'', updatedAt:Date.now(),
   });
+  // Cross-reference the CRM first so the agent runs with any known contact
+  // info + relationship history already attached to the lead.
+  try { await _leadEnrichFromCRM(ref.id); } catch(e){ console.warn('[createLead crm]',e); }
   if(runAgent) runLeadAgent(ref.id); // fire and forget — status updates live
   return ref.id;
 }
@@ -23622,6 +23737,11 @@ window.openLeadPanel = function(id){
   document.body.appendChild(backdrop);
   document.body.appendChild(panel);
   renderLeadPanel(id);
+  // Refresh CRM match + history on open (re-renders live via the leads snapshot)
+  if(!_leadCRMInflight.has(id)){
+    _leadCRMInflight.add(id);
+    _leadEnrichFromCRM(id,{force:true}).catch(()=>{}).finally(()=>_leadCRMInflight.delete(id));
+  }
 };
 function renderLeadPanel(id){
   const panel=document.getElementById('lead-panel'); if(!panel) return;
@@ -23670,6 +23790,26 @@ function renderLeadPanel(id){
         ${l.inboundMessage?`<div class="col-span-2"><span class="text-gray-400">Inbound message</span><br><span class="italic">"${_leadEsc(l.inboundMessage)}"</span></div>`:''}
         ${l.notes?`<div class="col-span-2"><span class="text-gray-400">Notes</span><br>${_leadEsc(l.notes)}</div>`:''}
       </div>
+
+      ${l.crmContactId?`<div class="mb-4 bg-emerald-50 border border-emerald-200 rounded-lg p-3">
+        <div class="flex justify-between items-center mb-1">
+          <span class="text-xs font-bold text-emerald-800">🔗 ALREADY IN OUR CRM</span>
+          <button onclick="closeLeadPanel();window._crmView='contacts';if(window.viewCRM)viewCRM();setTimeout(()=>openContactPanel('${l.crmContactId}'),250)" class="text-[11px] text-emerald-700 underline hover:text-emerald-900">View full contact ↗</button>
+        </div>
+        <div class="text-xs text-emerald-900 font-semibold">${_leadEsc(l.crmContactName||'Known contact')}</div>
+        ${l.crmHistorySummary?`<div class="text-[11px] text-emerald-800 whitespace-pre-wrap mt-1">${_leadEsc(l.crmHistorySummary)}</div>`:`<div class="text-[11px] text-emerald-700 mt-1">No prior activity logged yet.</div>`}
+      </div>`:''}
+
+      ${(l.propertyAddress||l.county||l.parcelId)?(()=>{
+        const q=encodeURIComponent([l.propertyAddress,l.county?l.county+' County':'',l.parcelId&&!l.propertyAddress?'parcel '+l.parcelId:'','FL'].filter(Boolean).join(', '));
+        return `<details class="mb-4" ${l.propertyAddress?'open':''}>
+          <summary class="text-xs font-bold text-gray-700 cursor-pointer mb-1">📍 LOCATION <span class="font-normal text-gray-400">${_leadEsc(l.propertyAddress||l.county+' County'||'')}</span></summary>
+          <div class="rounded-lg overflow-hidden border border-gray-200">
+            <iframe width="100%" height="220" frameborder="0" style="border:0;display:block" loading="lazy" referrerpolicy="no-referrer-when-downgrade" src="https://maps.google.com/maps?q=${q}&z=14&output=embed"></iframe>
+          </div>
+          <a href="https://www.google.com/maps/search/?api=1&query=${q}" target="_blank" rel="noopener" class="inline-block mt-1.5 text-xs border rounded-lg px-3 py-1.5 hover:bg-gray-50">🗺️ Open in Google Maps ↗</a>
+        </details>`;
+      })():''}
 
       <div class="flex gap-2 mb-4 flex-wrap">
         ${!l.advisorUid?`<button onclick="claimLead('${l.id}')" class="text-xs bg-yellow-500 text-gray-900 font-bold rounded-lg px-3 py-1.5 hover:bg-yellow-400">🙋 Claim this lead</button>`:''}
