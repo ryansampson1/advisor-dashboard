@@ -10320,12 +10320,10 @@ function viewDashboard(){
   const cyClosedComm  = cyClosedDeals.reduce((s,d)=>s+getEffectiveRevenue(d),0);
   const cyClosedVol   = cyClosedDeals.reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||0),0);
 
-  // Remaining/projected KPIs count ONLY contracted deals (DD / Rezoning / Permitting / Closing)
-  // with a set close date in the period — matching the projection chart & forecast cards.
-  const cyOpenDeals   = deals.filter(d=>isContractActiveStage(d.stage||'')&&d.closeDate&&d.closeDate>=todayStr&&new Date(d.closeDate+'T00:00:00').getFullYear()===thisYear);
+  const cyOpenDeals   = deals.filter(d=>!isWonStage(d.stage)&&!isLostStage(d.stage)&&d.closeDate&&d.closeDate>=todayStr&&new Date(d.closeDate+'T00:00:00').getFullYear()===thisYear);
   const cyOpenComm    = cyOpenDeals.reduce((s,d)=>s+getEffectiveRevenue(d),0);
 
-  const nyDeals       = deals.filter(d=>isContractActiveStage(d.stage||'')&&d.closeDate&&new Date(d.closeDate+'T00:00:00').getFullYear()===nextYear);
+  const nyDeals       = deals.filter(d=>!isWonStage(d.stage)&&!isLostStage(d.stage)&&d.closeDate&&new Date(d.closeDate+'T00:00:00').getFullYear()===nextYear);
   const nyComm        = nyDeals.reduce((s,d)=>s+getEffectiveRevenue(d),0);
 
   const ucDeals       = deals.filter(d=>isContractActiveStage(d.stage||''));
@@ -23273,10 +23271,21 @@ async function _leadLog(id, text){
   log.push({at:Date.now(), by:currentUser?.name||'system', text});
   await _leadUpdate(id, {activityLog:log});
 }
+// True only when the user is acting as a manager/admin AND hasn't toggled into
+// "Advisor View" / "Staff View". In those preview modes an admin/office manager
+// is treated exactly like a plain advisor — they only see their own claimed
+// leads plus anything still unclaimed, never leads another advisor has claimed.
+function _leadsMgrView(){
+  return (currentUser.isAdmin || currentUser.isOfficeManager) && !adminViewAsAdvisor && !staffViewMode;
+}
 function _leadVisible(l){
   const mine = l.advisorUid===currentUser.uid || !l.advisorUid;
-  if(currentUser.isAdmin || currentUser.isOfficeManager) {
-    return window._leadsFilter==='mine' ? mine : true;
+  if(_leadsMgrView()){
+    if(window._leadsFilter==='mine') return mine;
+    // Admin/manager "sort by advisor": when an advisor is selected, show only
+    // that advisor's leads (unclaimed leads are not tied to anyone, so hide them).
+    if(window._leadsAdvisorFilter) return l.advisorUid===window._leadsAdvisorFilter;
+    return true;
   }
   return mine;
 }
@@ -23640,10 +23649,16 @@ async function createLead(data, runAgent){
 // ── VIEW: LEADS ─────────────────────────────────────────────────────────────
 function viewLeads(){
   bootLeads();
-  const isMgr = currentUser.isAdmin || currentUser.isOfficeManager;
+  const isMgr = _leadsMgrView();
   const visible = allLeads.filter(_leadVisible);
   const active  = visible.filter(l=>!LEAD_TERMINAL.includes(l.status));
   const showTerminal = window._leadsFilter==='all-states';
+  // Distinct advisors who actually hold leads — powers the admin "sort by user"
+  // dropdown. Built from every lead (not just the visible/filtered set) so the
+  // list stays stable while a single advisor is selected.
+  const advisorMap = {};
+  allLeads.forEach(l=>{ if(l.advisorUid) advisorMap[l.advisorUid] = l.advisorName || allProfiles[l.advisorUid]?.name || allProfiles[l.advisorUid]?.email || 'Advisor'; });
+  const advisorList = Object.entries(advisorMap).sort((a,b)=>String(a[1]).localeCompare(String(b[1])));
   const fmtD = ts => ts? new Date(ts).toLocaleDateString('en-US',{month:'short',day:'numeric'}) : '';
 
   // Stats
@@ -23700,11 +23715,15 @@ function viewLeads(){
         <div class="text-xs text-gray-500 mt-0.5">Powered by the ELC Lead Gen Program · ${active.length} active lead${active.length===1?'':'s'}</div>
       </div>
       <div class="flex items-center gap-2 flex-wrap">
-        ${isMgr?`<select onchange="window._leadsFilter=this.value;viewLeads()" class="text-xs border rounded-lg px-2 py-1.5 bg-white">
-          <option value="active" ${window._leadsFilter==='active'?'selected':''}>All advisors</option>
+        ${isMgr?`<select onchange="window._leadsFilter=this.value;if(this.value==='mine')window._leadsAdvisorFilter='';viewLeads()" class="text-xs border rounded-lg px-2 py-1.5 bg-white">
+          <option value="active" ${(window._leadsFilter==='active'||!window._leadsFilter)?'selected':''}>All advisors</option>
           <option value="mine" ${window._leadsFilter==='mine'?'selected':''}>My leads</option>
           <option value="all-states" ${window._leadsFilter==='all-states'?'selected':''}>+ Promoted & Dead</option>
-        </select>`:`<button onclick="window._leadsFilter=window._leadsFilter==='all-states'?'active':'all-states';viewLeads()" class="text-xs border rounded-lg px-2 py-1.5 bg-white hover:bg-gray-50">${window._leadsFilter==='all-states'?'Hide':'Show'} closed</button>`}
+        </select>
+        ${advisorList.length?`<select onchange="window._leadsAdvisorFilter=this.value;if(this.value)window._leadsFilter='active';viewLeads()" class="text-xs border rounded-lg px-2 py-1.5 bg-white" title="Sort by advisor — see what one person is working on">
+          <option value="" ${!window._leadsAdvisorFilter?'selected':''}>Every advisor</option>
+          ${advisorList.map(([uid,name])=>`<option value="${uid}" ${window._leadsAdvisorFilter===uid?'selected':''}>${_leadEsc(name)}</option>`).join('')}
+        </select>`:''}`:`<button onclick="window._leadsFilter=window._leadsFilter==='all-states'?'active':'all-states';viewLeads()" class="text-xs border rounded-lg px-2 py-1.5 bg-white hover:bg-gray-50">${window._leadsFilter==='all-states'?'Hide':'Show'} closed</button>`}
         <button onclick="openNewLeadModal()" class="text-sm font-semibold bg-gray-900 text-white rounded-lg px-4 py-2 hover:bg-gray-700">+ New Lead</button>
       </div>
     </div>
@@ -23852,7 +23871,7 @@ function renderLeadPanel(id){
 // ── New Lead modal ──────────────────────────────────────────────────────────
 window.openNewLeadModal = function(){
   document.getElementById('new-lead-modal')?.remove();
-  const isMgr=currentUser.isAdmin||currentUser.isOfficeManager;
+  const isMgr=_leadsMgrView();
   const advisorOpts=Object.entries(allProfiles).map(([uid,p])=>`<option value="${uid}" ${uid===currentUser.uid?'selected':''}>${_leadEsc(p.name||p.email)}</option>`).join('');
   const wrap=document.createElement('div');
   wrap.id='new-lead-modal';
