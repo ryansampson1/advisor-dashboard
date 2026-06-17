@@ -182,9 +182,13 @@
                 </div>
                 <label>Cover description</label>
                 <textarea id="f-coverdesc" placeholder="A short line shown on the cover, e.g. Prime development land fronting US-301…"></textarea>
-                <label>Property cover photo (image URL)</label>
-                <input type="text" id="f-photo" placeholder="https://…/property.jpg">
-                <div class="hint">Paste a hosted image link (e.g. your listing photo). Used as the full-screen cover background.</div>
+                <label>Property cover photo</label>
+                <input type="file" id="f-photo-file" accept="image/*" style="display:none">
+                <div class="row2">
+                  <button class="btn full" type="button" id="f-photo-pick">📷 Add photo from your computer</button>
+                  <button class="btn full ghost" type="button" id="f-photo-clear" style="display:none">Remove photo</button>
+                </div>
+                <div class="hint">Choose an image file (JPG or PNG) from your computer. It's resized automatically and used as the full-screen cover background.</div>
                 <div class="photo-preview" id="photo-preview">No photo yet</div>
 
                 <label>Welcome message (optional)</label>
@@ -328,6 +332,10 @@
   function toast(m){ const t=document.getElementById("toast"); t.textContent=m; t.classList.add("show"); setTimeout(()=>t.classList.remove("show"),1800); }
   const $=id=>document.getElementById(id);
 
+  /* ---- signed-in user identity (passed in by the dashboard via query params) ---- */
+  const QP = new URLSearchParams(location.search);
+  const IDENT = { name:(QP.get("n")||"").trim(), email:(QP.get("e")||"").trim(), phone:(QP.get("ph")||"").trim() };
+
   /* ---- no backend login ----
      This builder is embedded inside the terra dashboard, which already requires a
      sign-in, so there's no separate broker password. The only password is the one
@@ -346,7 +354,7 @@
   });
 
   /* ---- state ---- */
-  let segments=[]; let editingId=null;
+  let segments=[]; let editingId=null; let photoData="";
   function presets(){ return (CFG.presets||[]).concat(LS.get("presets",[])); }
   function intro(){ return LS.get("intro_override", CFG.introVideo || {title:"Welcome",url:""}); }
 
@@ -355,7 +363,7 @@
 
   function init(){
     const b=LS.get("broker_default",{});
-    $("b-name").value=b.name||""; $("b-phone").value=b.phone||""; $("b-email").value=b.email||"";
+    $("b-name").value=b.name||IDENT.name||""; $("b-phone").value=b.phone||IDENT.phone||""; $("b-email").value=b.email||IDENT.email||"";
     $("set-viewer").value=LS.get("viewer_base","");
     $("detected-base").textContent=detectedBase();
     const i=intro(); $("intro-title").value=i.title||""; $("intro-url").value=i.url||"";
@@ -424,22 +432,43 @@
     $("f-acre").value=rec?rec.acreage||"":"";
     $("f-client").value=rec?rec.client||"":"";
     $("f-coverdesc").value=rec?rec.coverDescription||"":"";
-    $("f-photo").value=rec?rec.photo||"":"";
+    photoData=rec?rec.photo||"":"";
     $("f-message").value=rec?rec.message||"":"";
     $("f-pw").value=rec?rec.pwPlain||"":"";
     const b=(rec&&rec.broker)||LS.get("broker_default",{});
-    $("b-name").value=b.name||""; $("b-phone").value=b.phone||""; $("b-email").value=b.email||"";
+    $("b-name").value=b.name||IDENT.name||""; $("b-phone").value=b.phone||IDENT.phone||""; $("b-email").value=b.email||IDENT.email||"";
     segments=(rec&&rec.segments)?rec.segments.slice():[];
     updatePhotoPreview(); renderSegList(); renderPresetChips();
     showEditor();
   }
 
-  $("f-photo").addEventListener("input",updatePhotoPreview);
+  $("f-photo-pick").onclick=()=>$("f-photo-file").click();
+  $("f-photo-file").onchange=e=>loadPhotoFile(e.target.files&&e.target.files[0]);
+  $("f-photo-clear").onclick=()=>{ photoData=""; $("f-photo-file").value=""; updatePhotoPreview(); };
+  function loadPhotoFile(file){
+    if(!file) return;
+    if(!/^image\//.test(file.type)){ toast("Please choose an image file"); return; }
+    const r=new FileReader();
+    r.onload=ev=>{
+      const img=new Image();
+      img.onload=()=>{
+        const max=1280; let w=img.naturalWidth||img.width, h=img.naturalHeight||img.height;
+        if(w>max||h>max){ const s=Math.min(max/w,max/h); w=Math.round(w*s); h=Math.round(h*s); }
+        const c=document.createElement("canvas"); c.width=w; c.height=h;
+        c.getContext("2d").drawImage(img,0,0,w,h);
+        photoData=c.toDataURL("image/jpeg",0.72);
+        updatePhotoPreview(); toast("Photo added");
+      };
+      img.onerror=()=>toast("Couldn't read that image");
+      img.src=ev.target.result;
+    };
+    r.readAsDataURL(file);
+  }
   function updatePhotoPreview(){
-    const u=$("f-photo").value.trim();
-    const el=$("photo-preview");
-    if(u){ el.style.backgroundImage=`url("${u.replace(/"/g,'%22')}")`; el.textContent=""; }
-    else { el.style.backgroundImage="none"; el.textContent="No photo yet"; }
+    const u=photoData;
+    const el=$("photo-preview"), clr=$("f-photo-clear");
+    if(u){ el.style.backgroundImage=`url("${u.replace(/"/g,'%22')}")`; el.textContent=""; if(clr)clr.style.display=""; }
+    else { el.style.backgroundImage="none"; el.textContent="No photo yet"; if(clr)clr.style.display="none"; }
   }
 
   function videoTypeLabel(url){ return ({youtube:"YOUTUBE",vimeo:"VIMEO",file:"MP4 FILE",iframe:"EMBED",unknown:"⚠ CHECK URL"})[DD.parseVideo(url).type]||""; }
@@ -486,7 +515,7 @@
     return { id: editingId||("p"+Date.now()),
       projectName:$("f-proj").value.trim(), acreage:$("f-acre").value.trim(),
       client:$("f-client").value.trim(), coverDescription:$("f-coverdesc").value.trim(),
-      photo:$("f-photo").value.trim(), message:$("f-message").value.trim(),
+      photo:photoData, message:$("f-message").value.trim(),
       pwPlain:$("f-pw").value.trim(), broker:collectBroker(),
       segments:segments.slice(), status:"active", updated:Date.now() };
   }

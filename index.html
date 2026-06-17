@@ -12,6 +12,9 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+<!-- Video Proposals: shared config + helpers (encode/hash/video-embed) reused by the native builder tab -->
+<script src="proposals/config.js"></script>
+<script src="proposals/shared.js"></script>
 <style>
 /* ================================================================
    ESHENBAUGH LAND COMPANY — BRAND SYSTEM
@@ -3772,6 +3775,7 @@ let allTasks = [];
 let allHeadlines = [];   // [{id,title,body,createdAt,createdBy,pinned}]         // [{id, title, description, assignedTo, assignedToName, dueDate, status, dealId, dealAddress, createdBy, createdAt}]
 let allHrDocs = [];      // HR knowledge documents uploaded by admins: [{id,name,text,chars,createdAt,createdByName}]
 let allDocuments = [];     // [{id, type, office, url, name, uploadedAt}]
+let allProposals = [];     // Video Proposals: [{id, projectName, acreage, advisorUid, coAdvisorUids, segments, status, ...}]
 let pendingActions = [];
 let activeChart  = null;
 let currentView  = 'board';
@@ -7491,26 +7495,423 @@ function renderCurrentView(){
 }
 
 /* =======================================================
-   VIEW: VIDEO PROPOSALS (embedded broker backend)
-   The standalone proposal builder lives in /proposals/admin/ within this same
-   repo. It's same-origin static HTML, so it embeds cleanly in an iframe and
-   renders as a native dashboard tab.
+   VIEW: VIDEO PROPOSALS (native, Firestore-backed builder)
+   Replaces the old static /proposals/admin iframe. Proposals live in the
+   'proposals' Firestore collection, scoped per advisor/co-advisor (admins &
+   staff see all; office managers see their office). The client viewer
+   (/proposals/index.html) is unchanged — share links still encode the proposal
+   in the URL hash via DD.encodeProposal, so no client login is needed.
    ======================================================= */
+let _vpBooted=false; let _vpSources={};
+function bootProposals(){
+  if(_vpBooted || !currentUser || !_fbDb) return; _vpBooted=true;
+  const {collection,onSnapshot,query,where}=_fbFns;
+  const uid=currentUser.uid;
+  const seeAll = currentUser.isAdmin||currentUser.isSuperAdmin||currentUser.isStaff;
+  const apply=(key,docs)=>{ _vpSources[key]=docs; const m=new Map();
+    Object.values(_vpSources).forEach(arr=>arr.forEach(d=>m.set(d.id,d)));
+    allProposals=[...m.values()];
+    if(currentView==='videoProposals' && window._vpView!=='editor') _vpRenderList();
+  };
+  const handle=key=>snap=>apply(key, snap.docs.map(d=>({id:d.id,...d.data()})));
+  const onErr=key=>e=>console.warn('[proposals] '+key+' listener', e&&e.message||e);
+  try{
+    if(seeAll){
+      onSnapshot(collection(_fbDb,'proposals'), handle('all'), onErr('all'));
+    } else if(currentUser.isOfficeManager && currentUser.officeManagerOffice){
+      onSnapshot(query(collection(_fbDb,'proposals'), where('office','==',currentUser.officeManagerOffice)), handle('office'), onErr('office'));
+      onSnapshot(query(collection(_fbDb,'proposals'), where('advisorUid','==',uid)), handle('mine'), onErr('mine'));
+    } else {
+      onSnapshot(query(collection(_fbDb,'proposals'), where('advisorUid','==',uid)), handle('mine'), onErr('mine'));
+      onSnapshot(query(collection(_fbDb,'proposals'), where('coAdvisorUids','array-contains',uid)), handle('co'), onErr('co'));
+    }
+  }catch(e){ console.warn('[proposals] boot failed', e); _vpBooted=false; }
+}
+
+function _vpAdminView(){ return (currentUser.isAdmin||currentUser.isSuperAdmin||currentUser.isStaff) && !adminViewAsAdvisor && !staffViewMode; }
+function _vpOfficeUids(){ const off=currentUser.officeManagerOffice; if(!off) return []; return getDistinctAdvisors().filter(a=>(allProfiles[a.uid]?.office||'')===off).map(a=>a.uid); }
+function _vpVisible(p){
+  const uid=currentUser.uid;
+  const mine = p.advisorUid===uid || (p.coAdvisorUids||[]).includes(uid);
+  if(_vpAdminView()) return true;
+  if(currentUser.isOfficeManager && !adminViewAsAdvisor && !staffViewMode){
+    if(p.office && p.office===currentUser.officeManagerOffice) return true;
+    const team=_vpOfficeUids();
+    if(p.advisorUid && team.includes(p.advisorUid)) return true;
+    if((p.coAdvisorUids||[]).some(u=>team.includes(u))) return true;
+  }
+  return mine;
+}
+function _vpAdvisorName(uid){ if(!uid) return ''; if(uid===currentUser.uid) return currentUser.name||'You';
+  const a=getDistinctAdvisors().find(x=>x.uid===uid); return (a&&a.name)||(allProfiles[uid]&&allProfiles[uid].name)||uid; }
+function _vpDefaultBroker(){ let b={}; try{ b=JSON.parse(localStorage.getItem('dd_broker_default')||'{}'); }catch(e){}
+  const prof=(allProfiles&&allProfiles[currentUser.uid])||{};
+  return { name:b.name||currentUser.name||'', phone:b.phone||prof.phone||prof.officePhone||'', email:b.email||currentUser.email||'' }; }
+function _vpDealTeamUids(dealId){ const d=allDeals.find(x=>x.id===dealId); if(!d) return [];
+  const s=new Set([...(d.coAdvisorUids||[]), ...((d.coAdvisors||[]).map(c=>c.uid).filter(Boolean))]); if(d.advisorUid) s.add(d.advisorUid); return [...s]; }
+
+function _vpInjectStyles(){
+  if(document.getElementById('vp-styles')) return;
+  const css=`
+  #vp-root{max-width:1180px;margin:0 auto;color:#111827}
+  #vp-root .vp-pagehead{display:flex;align-items:center;gap:14px;margin-bottom:20px;flex-wrap:wrap}
+  #vp-root .vp-pagehead h2{font-size:24px;font-weight:800;margin:0}
+  #vp-root .vp-spacer{flex:1 1 auto}
+  #vp-root .vp-toggle{display:flex;align-items:center;gap:7px;font-size:13px;color:#6b7280;cursor:pointer;user-select:none}
+  #vp-root .vp-card{background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:20px;margin-bottom:18px}
+  #vp-root h3.vp-sec{font-size:12px;text-transform:uppercase;letter-spacing:1.2px;color:#00857c;margin:0 0 14px;font-weight:800}
+  #vp-root label{display:block;font-size:12px;color:#6b7280;margin:13px 0 5px;font-weight:600}
+  #vp-root label:first-child{margin-top:0}
+  #vp-root input[type=text],#vp-root input[type=password],#vp-root input[type=email],#vp-root input[type=tel],#vp-root textarea,#vp-root select{
+    width:100%;padding:10px 12px;border-radius:9px;border:1px solid #d1d5db;background:#fff;color:#111827;font-size:14px;font-family:inherit}
+  #vp-root input:focus,#vp-root textarea:focus,#vp-root select:focus{outline:none;border-color:#da291c;box-shadow:0 0 0 3px rgba(218,41,28,.12)}
+  #vp-root textarea{resize:vertical;min-height:60px}
+  #vp-root .vp-row2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  #vp-root .vp-hint{font-size:12px;color:#9ca3af;margin-top:5px}
+  #vp-root .vp-btn{display:inline-flex;align-items:center;gap:6px;padding:10px 15px;border-radius:9px;border:1px solid #d1d5db;background:#f9fafb;color:#111827;cursor:pointer;font-size:14px;font-weight:600}
+  #vp-root .vp-btn:hover{border-color:#00b2a9}
+  #vp-root .vp-btn.primary{background:#da291c;color:#fff;border-color:#da291c}
+  #vp-root .vp-btn.teal{background:#00b2a9;color:#06231f;border-color:#00b2a9}
+  #vp-root .vp-btn.danger{color:#b91c1c;border-color:#fca5a5;background:#fef2f2}
+  #vp-root .vp-btn.ghost{background:transparent}
+  #vp-root .vp-btn.sm{padding:6px 10px;font-size:12.5px}
+  #vp-root .vp-btn.full{width:100%;justify-content:center}
+  #vp-root .vp-btn.lg{padding:12px 20px;font-size:15px}
+  #vp-root .vp-pgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:18px}
+  #vp-root .vp-pcard{background:#fff;border:1px solid #e5e7eb;border-radius:14px;overflow:hidden;display:flex;flex-direction:column}
+  #vp-root .vp-cover{height:140px;background-size:cover;background-position:center;position:relative;background-color:#f3f4f6}
+  #vp-root .vp-fallback{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:40px;font-weight:800;color:#cbd5e1;background:linear-gradient(135deg,#f8fafc,#eef2f7)}
+  #vp-root .vp-status{position:absolute;top:10px;right:10px;font-size:10px;font-weight:800;letter-spacing:.5px;padding:4px 9px;border-radius:20px;text-transform:uppercase}
+  #vp-root .vp-status.act{background:#00b2a9;color:#06231f} #vp-root .vp-status.arch{background:#e5e7eb;color:#6b7280}
+  #vp-root .vp-pbody{padding:14px 15px 16px;flex:1 1 auto;display:flex;flex-direction:column}
+  #vp-root .vp-pn{font-size:17px;font-weight:800;line-height:1.2}
+  #vp-root .vp-ac{font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:#00857c;margin-top:5px}
+  #vp-root .vp-sub{font-size:12.5px;color:#6b7280;margin-top:8px}
+  #vp-root .vp-owner{font-size:12px;color:#9ca3af;margin-top:4px}
+  #vp-root .vp-acts{display:flex;gap:7px;flex-wrap:wrap;margin-top:13px}
+  #vp-root .vp-empty{grid-column:1/-1;color:#9ca3af;font-size:14px;text-align:center;padding:48px 20px;border:1px dashed #d1d5db;border-radius:14px}
+  #vp-root .vp-egrid{display:grid;grid-template-columns:1.1fr .9fr;gap:20px;align-items:start}
+  @media(max-width:900px){#vp-root .vp-egrid{grid-template-columns:1fr}}
+  #vp-root .vp-edhead{display:flex;align-items:center;gap:14px;margin-bottom:18px}
+  #vp-root .vp-back{background:none;border:0;color:#6b7280;cursor:pointer;font-size:14px;font-weight:600;padding:6px 0}
+  #vp-root .vp-edhead h2{font-size:22px;font-weight:800;margin:0}
+  #vp-root .vp-photo{width:100%;height:150px;border-radius:11px;border:1px solid #d1d5db;background:#f9fafb center/cover no-repeat;display:flex;align-items:center;justify-content:center;color:#9ca3af;font-size:13px;margin-top:8px}
+  #vp-root .vp-seg{display:flex;gap:10px;align-items:flex-start;background:#f9fafb;border:1px solid #e5e7eb;border-radius:11px;padding:11px 13px;margin-bottom:9px}
+  #vp-root .vp-seg .ord{display:flex;flex-direction:column;gap:3px}
+  #vp-root .vp-seg .ord button{width:26px;height:21px;border-radius:6px;border:1px solid #d1d5db;background:#fff;color:#6b7280;cursor:pointer;font-size:11px;line-height:1}
+  #vp-root .vp-seg .sbody{flex:1 1 auto;min-width:0}
+  #vp-root .vp-seg .st{font-weight:700;font-size:14px}
+  #vp-root .vp-seg .sd{font-size:12.5px;color:#6b7280;margin-top:2px}
+  #vp-root .vp-seg .su{font-size:12px;color:#9ca3af;word-break:break-all;margin-top:2px}
+  #vp-root .vp-vtype{font-size:10px;font-weight:700;letter-spacing:.5px;padding:2px 6px;border-radius:5px;border:1px solid #d1d5db;color:#6b7280;margin-top:5px;display:inline-block}
+  #vp-root .vp-seg .x{background:none;border:0;color:#b91c1c;cursor:pointer;font-size:18px;line-height:1}
+  #vp-root .vp-segempty{color:#9ca3af;font-size:13px;text-align:center;padding:15px;border:1px dashed #d1d5db;border-radius:11px;margin-bottom:12px}
+  #vp-root .vp-chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:4px}
+  #vp-root .vp-chip{background:#f3f4f6;border:1px solid #d1d5db;border-radius:20px;padding:6px 12px;font-size:13px;cursor:pointer;color:#374151}
+  #vp-root .vp-chip:hover{border-color:#00b2a9;color:#111}
+  #vp-root .vp-chip.on{background:#00b2a9;color:#06231f;border-color:#00b2a9}
+  #vp-root .vp-chip .plus{color:#00857c;font-weight:800;margin-right:4px}
+  .vp-modal-bg{position:fixed;inset:0;background:rgba(8,9,11,.5);z-index:1000;display:flex;align-items:center;justify-content:center;padding:20px}
+  .vp-modal{width:100%;max-width:560px;background:#fff;border-radius:16px;padding:24px;color:#111827;box-shadow:0 24px 70px rgba(0,0,0,.3)}
+  .vp-modal h3{margin:0 0 4px;font-size:20px;font-weight:800}
+  .vp-modal .x{float:right;background:none;border:0;color:#9ca3af;font-size:24px;cursor:pointer;line-height:1}
+  .vp-linkbox{display:flex;gap:8px;margin-top:14px}
+  .vp-linkbox input{flex:1 1 auto;font-size:13px;padding:10px 12px;border:1px solid #d1d5db;border-radius:9px}
+  .vp-pwcall{margin-top:12px;font-size:13.5px;background:#f9fafb;border:1px dashed #d1d5db;border-radius:9px;padding:11px 13px}
+  .vp-share-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
+  `;
+  const s=document.createElement('style'); s.id='vp-styles'; s.textContent=css; document.head.appendChild(s);
+}
+
 function viewVideoProposals(){
   if(activeChart){ activeChart.destroy(); activeChart=null; }
-  setContent(`
-    <div style="display:flex;flex-direction:column;height:calc(100vh - 120px);min-height:480px">
-      <div style="display:flex;align-items:center;gap:.6rem;padding:0 .25rem .6rem">
-        <span style="font-size:1.05rem;font-weight:700;color:var(--text-1)">🎬 Video Proposals</span>
-        <span style="font-size:.75rem;color:var(--text-3)">Build &amp; share private video proposals for your listings</span>
-        <a href="proposals/admin/" target="_blank" rel="noopener"
-           style="margin-left:auto;font-size:.78rem;color:#2563eb;text-decoration:none">Open in new tab ↗</a>
-      </div>
-      <iframe src="proposals/admin/" title="Video Proposals"
-        style="flex:1 1 auto;width:100%;border:1px solid var(--border,#e5e7eb);border-radius:12px;background:#0e1013"></iframe>
-    </div>
-  `);
+  _vpInjectStyles();
+  bootProposals();
+  if(window._vpView==='editor') _vpPaintEditor();
+  else _vpRenderList();
 }
+
+function _vpRenderList(){
+  const showArch=!!window._vpShowArchived;
+  const list=allProposals.filter(_vpVisible).filter(p=> showArch ? p.status==='archived' : p.status!=='archived');
+  list.sort((a,b)=>(b.updated||0)-(a.updated||0));
+  let localCount=0; try{ localCount=(JSON.parse(localStorage.getItem('dd_proposals')||'[]')).length; }catch(e){}
+  const cards=list.map(p=>{
+    const initial=((p.projectName||'?').trim().charAt(0)||'?').toUpperCase();
+    const cover=p.photo
+      ? `<div class="vp-cover" style="background-image:url('${DD.esc(p.photo)}')"><span class="vp-status ${p.status==='archived'?'arch':'act'}">${p.status==='archived'?'Archived':'Active'}</span></div>`
+      : `<div class="vp-cover"><div class="vp-fallback">${DD.esc(initial)}</div><span class="vp-status ${p.status==='archived'?'arch':'act'}">${p.status==='archived'?'Archived':'Active'}</span></div>`;
+    const arch=p.status==='archived';
+    const owner=(p.advisorUid&&p.advisorUid!==currentUser.uid)?`<div class="vp-owner">👤 ${DD.esc(_vpAdvisorName(p.advisorUid))}</div>`:'';
+    const nseg=(p.segments||[]).length;
+    return `<div class="vp-pcard">${cover}<div class="vp-pbody">
+      <div class="vp-pn">${DD.esc(p.projectName||'(untitled)')}</div>
+      ${p.acreage?`<div class="vp-ac">${DD.esc(p.acreage)}</div>`:''}
+      <div class="vp-sub">${nseg} video${nseg===1?'':'s'}${p.client?' · '+DD.esc(p.client):''}${p.pwPlain?' · 🔒 '+DD.esc(p.pwPlain):''}</div>
+      ${owner}
+      <div class="vp-acts">${arch
+        ? `<button class="vp-btn sm" onclick="_vpRestore('${p.id}')">Restore</button><button class="vp-btn sm danger" onclick="_vpDelete('${p.id}')">Delete</button>`
+        : `<button class="vp-btn sm primary" onclick="_vpQuickLink('${p.id}')">Get link</button><button class="vp-btn sm" onclick="_vpEdit('${p.id}')">Edit</button><button class="vp-btn sm ghost" onclick="_vpArchive('${p.id}')">Archive</button>`}
+      </div></div></div>`;
+  }).join('');
+  setContent(`<div id="vp-root"><div class="vp-pagehead">
+      <h2>🎬 Video Proposals</h2><div class="vp-spacer"></div>
+      ${localCount?`<button class="vp-btn sm" onclick="_vpImportLocal()">⬇ Import ${localCount} from this browser</button>`:''}
+      <label class="vp-toggle"><input type="checkbox" ${showArch?'checked':''} onchange="_vpToggleArchived(this)"> Show archived</label>
+      <button class="vp-btn primary lg" onclick="_vpAdd()">+ Add Property</button>
+    </div>
+    <div class="vp-pgrid">${cards||`<div class="vp-empty">${showArch?'No archived proposals.':'No proposals yet. Click <b>+ Add Property</b> to build your first one.'}</div>`}</div>
+  </div>`);
+}
+
+function _vpAdd(){ _vpOpenEditor(null); }
+function _vpEdit(id){ _vpOpenEditor(id); }
+function _vpBack(){ window._vpView='list'; window._vpEditing=null; viewVideoProposals(); }
+function _vpToggleArchived(el){ window._vpShowArchived=el.checked; _vpRenderList(); }
+function _vpOpenEditor(id){
+  window._vpView='editor'; window._vpEditing=id;
+  const rec=id?allProposals.find(p=>p.id===id):null;
+  window._vpOwnerUid = rec? rec.advisorUid : currentUser.uid;
+  window._vpSegments = rec&&rec.segments? rec.segments.map(s=>({...s})) : [];
+  window._vpCoAdvisors = rec&&rec.coAdvisorUids? rec.coAdvisorUids.slice() : [];
+  window._vpDealId = rec? (rec.dealId||'') : '';
+  window._vpForm = rec ? {proj:rec.projectName||'',acre:rec.acreage||'',client:rec.client||'',coverdesc:rec.coverDescription||'',photo:rec.photo||'',message:rec.message||'',pw:rec.pwPlain||''} : {};
+  window._vpBroker = (rec&&rec.broker)? {...rec.broker} : _vpDefaultBroker();
+  _vpPaintEditor();
+}
+function _vpPaintEditor(){
+  const f=window._vpForm||{}, b=window._vpBroker||{};
+  const presets=(window.DIRTDOG_CONFIG&&window.DIRTDOG_CONFIG.presets||[]).concat(_vpLocalPresets());
+  const deals=(typeof visibleDeals==='function'?visibleDeals():[]).slice()
+    .sort((a,b)=>String(a.propertyAddress||a.projectName||'').localeCompare(String(b.propertyAddress||b.projectName||'')));
+  const dealOpts='<option value="">— Not linked —</option>'+deals.map(d=>`<option value="${d.id}" ${d.id===window._vpDealId?'selected':''}>${DD.esc(d.propertyAddress||d.projectName||d.address||'(deal)')}</option>`).join('');
+  setContent(`<div id="vp-root">
+    <div class="vp-edhead"><button class="vp-back" onclick="_vpBack()">← All proposals</button>
+      <h2>${window._vpEditing?'Edit Proposal':'New Proposal'}</h2></div>
+    <div class="vp-egrid">
+      <div>
+        <div class="vp-card">
+          <h3 class="vp-sec">Cover Page</h3>
+          <label>Project name</label>
+          <input type="text" id="vp-proj" value="${DD.esc(f.proj||'')}" placeholder="e.g. Willow Creek Ranch">
+          <div class="vp-row2">
+            <div><label>Acreage</label><input type="text" id="vp-acre" value="${DD.esc(f.acre||'')}" placeholder="e.g. 120± Acres"></div>
+            <div><label>Prepared for (client)</label><input type="text" id="vp-client" value="${DD.esc(f.client||'')}" placeholder="e.g. The Smith Family"></div>
+          </div>
+          <label>Cover description</label>
+          <textarea id="vp-coverdesc" placeholder="Short line shown on the cover…">${DD.esc(f.coverdesc||'')}</textarea>
+          <label>Property cover photo</label>
+          <input type="file" id="vp-photo-file" accept="image/*" style="display:none" onchange="_vpPhotoFile(this.files&&this.files[0])">
+          <div class="vp-row2">
+            <button class="vp-btn full" onclick="document.getElementById('vp-photo-file').click()">📷 Add photo from your computer</button>
+            <button class="vp-btn full ghost" id="vp-photo-clear" style="${f.photo?'':'display:none'}" onclick="_vpPhotoClear()">Remove photo</button>
+          </div>
+          <div class="vp-hint">Choose an image file (JPG or PNG) from your computer. It's resized automatically and used as the full-screen cover background.</div>
+          <div class="vp-photo" id="vp-photo-prev">${f.photo?'':'No photo yet'}</div>
+          <label>Welcome message (optional)</label>
+          <textarea id="vp-message" placeholder="A short personal note shown inside the dashboard…">${DD.esc(f.message||'')}</textarea>
+          <div class="vp-row2">
+            <div><label>Client password</label><input type="text" id="vp-pw" value="${DD.esc(f.pw||'')}" placeholder="e.g. willow2026"></div>
+            <div><label>&nbsp;</label><button class="vp-btn full" onclick="_vpSuggestPw()">Suggest password</button></div>
+          </div>
+          <div class="vp-hint">The client types this to open their proposal. Leave blank for no password.</div>
+        </div>
+
+        <div class="vp-card">
+          <h3 class="vp-sec">Proposal Videos &amp; Order</h3>
+          <div class="vp-hint" style="margin-bottom:10px">The company intro plays first automatically. Use ▲▼ to set the order clients watch.</div>
+          <div id="vp-seglist"></div>
+          <label>Add from your video library</label>
+          <div class="vp-chips" id="vp-presets"></div>
+          <label style="margin-top:16px">Or add a new video</label>
+          <input type="text" id="vp-ns-title" placeholder="Segment title (e.g. Pricing Strategy)">
+          <input type="text" id="vp-ns-url" placeholder="Video URL (YouTube, Vimeo, or .mp4)" style="margin-top:8px">
+          <input type="text" id="vp-ns-desc" placeholder="Short description (optional)" style="margin-top:8px">
+          <button class="vp-btn" style="margin-top:10px" onclick="_vpAddSeg()">+ Add to this proposal</button>
+        </div>
+      </div>
+
+      <div>
+        <div class="vp-card">
+          <h3 class="vp-sec">Who can see this</h3>
+          <label>Link to a deal (optional)</label>
+          <select id="vp-deal" onchange="_vpOnDealChange(this.value)">${dealOpts}</select>
+          <div class="vp-hint">Linking a deal auto-adds its co-advisors below. You own this proposal; co-advisors can also see &amp; edit it.</div>
+          <label style="margin-top:14px">Co-advisors</label>
+          <div class="vp-chips" id="vp-coadv"></div>
+        </div>
+        <div class="vp-card">
+          <h3 class="vp-sec">Your Contact Info</h3>
+          <div class="vp-hint" style="margin-bottom:8px">Shown to the client. Saved for next time.</div>
+          <label>Name</label><input type="text" id="vp-bname" value="${DD.esc(b.name||'')}" placeholder="Your name">
+          <div class="vp-row2">
+            <div><label>Phone</label><input type="tel" id="vp-bphone" value="${DD.esc(b.phone||'')}" placeholder="(813) 555-5555"></div>
+            <div><label>Email</label><input type="email" id="vp-bemail" value="${DD.esc(b.email||'')}" placeholder="you@thedirtdog.com"></div>
+          </div>
+        </div>
+        <div class="vp-card">
+          <h3 class="vp-sec">Save &amp; Share</h3>
+          <button class="vp-btn primary full lg" onclick="_vpGenerate()">Generate Client Link</button>
+          <button class="vp-btn full" style="margin-top:10px" onclick="_vpSaveClick()">Save Proposal</button>
+          <div class="vp-hint" style="margin-top:9px">The full proposal is encoded in the link, so it works on any device with no client login.</div>
+        </div>
+      </div>
+    </div>
+  </div>`);
+  _vpRenderSegList(); _vpRenderPresets(presets); _vpRenderCoAdvisors(); _vpUpdatePhoto();
+}
+function _vpLocalPresets(){ try{ return JSON.parse(localStorage.getItem('dd_presets')||'[]'); }catch(e){ return []; } }
+function _vpUpdatePhoto(){ const u=((window._vpForm||{}).photo||'').trim(); const el=document.getElementById('vp-photo-prev'); const clr=document.getElementById('vp-photo-clear'); if(!el) return;
+  if(u){ el.style.backgroundImage='url("'+u.replace(/"/g,'%22')+'")'; el.textContent=''; if(clr)clr.style.display=''; } else { el.style.backgroundImage='none'; el.textContent='No photo yet'; if(clr)clr.style.display='none'; } }
+function _vpPhotoFile(file){
+  if(!file) return;
+  if(!/^image\//.test(file.type)){ showToast('Please choose an image file','warning'); return; }
+  const r=new FileReader();
+  r.onload=ev=>{ const img=new Image();
+    img.onload=()=>{ const max=1280; let w=img.naturalWidth||img.width, h=img.naturalHeight||img.height;
+      if(w>max||h>max){ const s=Math.min(max/w,max/h); w=Math.round(w*s); h=Math.round(h*s); }
+      const c=document.createElement('canvas'); c.width=w; c.height=h; c.getContext('2d').drawImage(img,0,0,w,h);
+      window._vpForm=window._vpForm||{}; window._vpForm.photo=c.toDataURL('image/jpeg',0.72);
+      _vpUpdatePhoto(); showToast('Photo added','success'); };
+    img.onerror=()=>showToast("Couldn't read that image",'error');
+    img.src=ev.target.result; };
+  r.readAsDataURL(file);
+}
+function _vpPhotoClear(){ window._vpForm=window._vpForm||{}; window._vpForm.photo=''; const fi=document.getElementById('vp-photo-file'); if(fi)fi.value=''; _vpUpdatePhoto(); }
+function _vpVtype(url){ return ({youtube:'YOUTUBE',vimeo:'VIMEO',file:'MP4 FILE',iframe:'EMBED',unknown:'⚠ CHECK URL'})[DD.parseVideo(url).type]||''; }
+function _vpRenderSegList(){
+  const el=document.getElementById('vp-seglist'); if(!el) return; const segs=window._vpSegments||[];
+  if(!segs.length){ el.innerHTML='<div class="vp-segempty">No videos yet. Add from your library or paste one below.</div>'; return; }
+  el.innerHTML=segs.map((s,i)=>`<div class="vp-seg"><div class="ord">
+      <button onclick="_vpSegMove(${i},-1)" ${i===0?'disabled style=opacity:.3':''}>▲</button>
+      <button onclick="_vpSegMove(${i},1)" ${i===segs.length-1?'disabled style=opacity:.3':''}>▼</button></div>
+      <div class="sbody"><div class="st">${i+1}. ${DD.esc(s.title)}</div>
+      ${s.description?`<div class="sd">${DD.esc(s.description)}</div>`:''}
+      <div class="su">${DD.esc(s.url)}</div><span class="vp-vtype">${_vpVtype(s.url)}</span></div>
+      <button class="x" onclick="_vpSegDel(${i})" title="Remove">×</button></div>`).join('');
+}
+function _vpSegMove(i,dir){ const s=window._vpSegments,j=i+dir; if(j<0||j>=s.length) return; [s[i],s[j]]=[s[j],s[i]]; _vpRenderSegList(); }
+function _vpSegDel(i){ window._vpSegments.splice(i,1); _vpRenderSegList(); }
+function _vpRenderPresets(presets){
+  const el=document.getElementById('vp-presets'); if(!el) return;
+  if(!presets.length){ el.innerHTML='<div class="vp-hint">No presets configured. Add them in proposals/config.js.</div>'; return; }
+  el.innerHTML=presets.map((p,i)=>`<span class="vp-chip" onclick='_vpAddPreset(${i})'><span class="plus">+</span>${DD.esc(p.title)}</span>`).join('');
+  window._vpPresets=presets;
+}
+function _vpAddPreset(i){ const p=(window._vpPresets||[])[i]; if(!p) return; window._vpSegments.push({title:p.title,url:p.url,description:p.description||''}); _vpRenderSegList(); showToast('Added: '+p.title,'success'); }
+function _vpAddSeg(){ const t=(document.getElementById('vp-ns-title').value||'').trim(),u=(document.getElementById('vp-ns-url').value||'').trim(),d=(document.getElementById('vp-ns-desc').value||'').trim();
+  if(!t||!u){ showToast('Add a title and a video URL','warning'); return; }
+  window._vpSegments.push({title:t,url:u,description:d});
+  document.getElementById('vp-ns-title').value=document.getElementById('vp-ns-url').value=document.getElementById('vp-ns-desc').value='';
+  _vpRenderSegList(); }
+function _vpSuggestPw(){ const base=((document.getElementById('vp-proj').value||'').trim().split(/\s+/)[0]||'elc').toLowerCase().replace(/[^a-z0-9]/g,''); document.getElementById('vp-pw').value=base+Math.floor(1000+Math.random()*9000); }
+function _vpOwnerUid(){ return window._vpOwnerUid||currentUser.uid; }
+function _vpOnDealChange(v){ window._vpDealId=v||''; if(v){ const team=_vpDealTeamUids(v).filter(u=>u!==_vpOwnerUid()); window._vpCoAdvisors=[...new Set([...(window._vpCoAdvisors||[]),...team])]; _vpRenderCoAdvisors(); if(team.length) showToast('Co-advisors added from deal','info'); } }
+function _vpRenderCoAdvisors(){
+  const el=document.getElementById('vp-coadv'); if(!el) return;
+  const owner=_vpOwnerUid();
+  const advs=getDistinctAdvisors().filter(a=>a.uid!==owner).sort((a,b)=>String(a.name).localeCompare(String(b.name)));
+  const sel=new Set(window._vpCoAdvisors||[]);
+  if(!advs.length){ el.innerHTML='<div class="vp-hint">No other advisors found.</div>'; return; }
+  el.innerHTML=advs.map(a=>`<span class="vp-chip ${sel.has(a.uid)?'on':''}" onclick="_vpToggleCo('${a.uid}')">${sel.has(a.uid)?'✓ ':''}${DD.esc(a.name||a.email||a.uid)}</span>`).join('');
+}
+function _vpToggleCo(uid){ const arr=window._vpCoAdvisors||[]; const i=arr.indexOf(uid); if(i>=0) arr.splice(i,1); else arr.push(uid); window._vpCoAdvisors=arr; _vpRenderCoAdvisors(); }
+
+function _vpCollectRecord(){
+  const val=id=>{ const e=document.getElementById(id); return e?e.value.trim():''; };
+  const existing=window._vpEditing?allProposals.find(p=>p.id===window._vpEditing):null;
+  const pwPlain=val('vp-pw');
+  const broker={name:val('vp-bname'),phone:val('vp-bphone'),email:val('vp-bemail')};
+  try{ localStorage.setItem('dd_broker_default',JSON.stringify(broker)); }catch(e){}
+  const office=(allProfiles[(existing?existing.advisorUid:currentUser.uid)]||{}).office || (existing&&existing.office) || allProfiles[currentUser.uid]?.office || '';
+  return { projectName:val('vp-proj'), acreage:val('vp-acre'), client:val('vp-client'),
+    coverDescription:val('vp-coverdesc'), photo:(window._vpForm&&window._vpForm.photo)||'', message:val('vp-message'),
+    pwPlain, pwHash: pwPlain?DD.hash(pwPlain):'',
+    segments:(window._vpSegments||[]).map(s=>({title:s.title,url:s.url,description:s.description||''})),
+    dealId:window._vpDealId||'', coAdvisorUids:(window._vpCoAdvisors||[]).slice(), broker, office,
+    advisorUid: existing?existing.advisorUid:currentUser.uid,
+    advisorName: existing?existing.advisorName:(currentUser.name||''),
+    advisorEmail: existing?existing.advisorEmail:(currentUser.email||''),
+    status: existing&&existing.status?existing.status:'active',
+    created: existing&&existing.created?existing.created:Date.now(), updated:Date.now() };
+}
+async function _vpSave(opts){
+  opts=opts||{};
+  const rec=_vpCollectRecord();
+  if(!rec.projectName){ showToast('Add a project name first','warning'); return null; }
+  const {doc,setDoc,collection}=_fbFns;
+  const ref=window._vpEditing? doc(_fbDb,'proposals',window._vpEditing) : doc(collection(_fbDb,'proposals'));
+  rec.id=ref.id;
+  try{ await setDoc(ref, sanitizeForFirestore(rec), {merge:true}); window._vpEditing=ref.id;
+    if(!opts.silent) showToast('Proposal saved','success'); return rec;
+  }catch(e){ console.error('[proposals] save',e); showToast('Save failed: '+(e.message||e),'error'); return null; }
+}
+function _vpSaveClick(){ _vpSave().then(r=>{ if(r) _vpBack(); }); }
+function _vpGenerate(){ if(!(window._vpSegments||[]).length){ showToast('Add at least one video','warning'); return; }
+  _vpSave({silent:true}).then(rec=>{ if(rec) _vpShareModal(rec); }); }
+function _vpQuickLink(id){ const rec=allProposals.find(p=>p.id===id); if(rec) _vpShareModal(rec); }
+async function _vpArchive(id){ await _vpSetStatus(id,'archived'); }
+async function _vpRestore(id){ await _vpSetStatus(id,'active'); }
+async function _vpSetStatus(id,st){ const {doc,setDoc}=_fbFns;
+  try{ await setDoc(doc(_fbDb,'proposals',id),{status:st,updated:Date.now()},{merge:true}); showToast(st==='archived'?'Archived':'Restored','success'); }
+  catch(e){ showToast('Failed: '+(e.message||e),'error'); } }
+async function _vpDelete(id){ if(!confirm('Permanently delete this proposal?')) return; const {doc,deleteDoc}=_fbFns;
+  try{ await deleteDoc(doc(_fbDb,'proposals',id)); showToast('Deleted','success'); }catch(e){ showToast('Failed: '+(e.message||e),'error'); } }
+
+function _vpViewerBase(){ let u=location.href.split('#')[0].split('?')[0]; u=u.replace(/[^/]*$/,''); return u+'proposals/'; }
+function _vpProposalObj(rec){ const CFG=window.DIRTDOG_CONFIG||{};
+  return { v:1, projectName:rec.projectName, acreage:rec.acreage, client:rec.client, coverDescription:rec.coverDescription,
+    photo:rec.photo, message:rec.message, broker:rec.broker, intro:CFG.introVideo||null,
+    segments:(rec.segments||[]).map(s=>({title:s.title,url:s.url,description:s.description||''})), pw: rec.pwHash||'' }; }
+function _vpShareModal(rec){
+  const link=_vpViewerBase()+'#p='+DD.encodeProposal(_vpProposalObj(rec));
+  const pw=rec.pwPlain||'', client=rec.client||'', proj=rec.projectName||'';
+  const company=(window.DIRTDOG_CONFIG&&window.DIRTDOG_CONFIG.brand&&window.DIRTDOG_CONFIG.brand.company)||'Eshenbaugh Land Company';
+  const bg=document.createElement('div'); bg.className='vp-modal-bg'; bg.onclick=e=>{ if(e.target===bg) bg.remove(); };
+  bg.innerHTML=`<div class="vp-modal"><button class="x" onclick="this.closest('.vp-modal-bg').remove()">×</button>
+    <h3>✓ Invite ready</h3><div class="vp-hint">Share this private link with your client. They see only this property.</div>
+    <div class="vp-linkbox"><input type="text" id="vp-outlink" readonly value="${DD.esc(link)}"><button class="vp-btn primary" id="vp-copy">Copy</button></div>
+    <div class="vp-pwcall">${pw?('Give your client this password: <b>'+DD.esc(pw)+'</b>'):'No password set — anyone with the link can view it.'}</div>
+    <div class="vp-share-row">
+      <button class="vp-btn" id="vp-email">✉ Email invite</button>
+      <button class="vp-btn" id="vp-sms">💬 Text invite</button>
+      <button class="vp-btn teal" id="vp-prev">↗ Preview as client</button>
+    </div></div>`;
+  document.body.appendChild(bg);
+  bg.querySelector('#vp-copy').onclick=()=>{ const i=bg.querySelector('#vp-outlink'); navigator.clipboard.writeText(i.value).then(()=>showToast('Link copied','success')).catch(()=>{i.select();document.execCommand('copy');showToast('Link copied','success');}); };
+  bg.querySelector('#vp-prev').onclick=()=>window.open(link,'_blank','noopener');
+  bg.querySelector('#vp-email').onclick=()=>{ const subj=encodeURIComponent('Your private proposal from '+company);
+    const body=encodeURIComponent('Hi '+(client||'there')+',\n\nThank you for the opportunity to earn your business'+(proj?(' on '+proj):'')+'. I\'ve put together a short video proposal just for you — watch the videos in any order.\n\n'+link+'\n\n'+(pw?('Password: '+pw+'\n\n'):'')+'Looking forward to your thoughts.\n\n'+(rec.broker&&rec.broker.name||company));
+    window.location.href='mailto:?subject='+subj+'&body='+body; };
+  bg.querySelector('#vp-sms').onclick=()=>{ const msg=encodeURIComponent('Here\'s your private video proposal from '+company+': '+link+(pw?(' (password: '+pw+')'):''));
+    window.location.href='sms:?&body='+msg; };
+}
+
+async function _vpImportLocal(){
+  let list=[]; try{ list=JSON.parse(localStorage.getItem('dd_proposals')||'[]'); }catch(e){}
+  if(!list.length){ showToast('No local proposals to import','info'); return; }
+  if(!confirm('Import '+list.length+' proposal(s) from this browser into your account?')) return;
+  const {doc,setDoc,collection}=_fbFns; let n=0;
+  for(const p of list){
+    const ref=doc(collection(_fbDb,'proposals'));
+    const rec={ projectName:p.projectName||'', acreage:p.acreage||'', client:p.client||'', coverDescription:p.coverDescription||'',
+      photo:p.photo||'', message:p.message||'', pwPlain:p.pwPlain||'', pwHash:p.pwPlain?DD.hash(p.pwPlain):'',
+      segments:(p.segments||[]).map(s=>({title:s.title,url:s.url,description:s.description||''})),
+      dealId:'', coAdvisorUids:[], broker:p.broker||{}, office:allProfiles[currentUser.uid]?.office||'',
+      advisorUid:currentUser.uid, advisorName:currentUser.name||'', advisorEmail:currentUser.email||'',
+      status:p.status||'active', created:p.updated||Date.now(), updated:Date.now(), id:ref.id };
+    try{ await setDoc(ref, sanitizeForFirestore(rec)); n++; }catch(e){ console.warn('[proposals] import',e); }
+  }
+  showToast('Imported '+n+' proposal(s)','success');
+}
+
+window.bootProposals=bootProposals; window._vpAdd=_vpAdd; window._vpEdit=_vpEdit; window._vpBack=_vpBack;
+window._vpToggleArchived=_vpToggleArchived; window._vpUpdatePhoto=_vpUpdatePhoto; window._vpSegMove=_vpSegMove;
+window._vpSegDel=_vpSegDel; window._vpAddPreset=_vpAddPreset; window._vpAddSeg=_vpAddSeg; window._vpSuggestPw=_vpSuggestPw;
+window._vpOnDealChange=_vpOnDealChange; window._vpToggleCo=_vpToggleCo; window._vpSaveClick=_vpSaveClick;
+window._vpGenerate=_vpGenerate; window._vpQuickLink=_vpQuickLink; window._vpArchive=_vpArchive; window._vpRestore=_vpRestore;
+window._vpDelete=_vpDelete; window._vpImportLocal=_vpImportLocal;
+window._vpPhotoFile=_vpPhotoFile; window._vpPhotoClear=_vpPhotoClear;
 
 /* =======================================================
    VIEW: EARTHNOTES (embedded website)
