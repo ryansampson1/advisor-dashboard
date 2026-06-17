@@ -7547,6 +7547,17 @@ function _vpAdvisorName(uid){ if(!uid) return ''; if(uid===currentUser.uid) retu
 function _vpDefaultBroker(){ let b={}; try{ b=JSON.parse(localStorage.getItem('dd_broker_default')||'{}'); }catch(e){}
   const prof=(allProfiles&&allProfiles[currentUser.uid])||{};
   return { name:b.name||currentUser.name||'', phone:b.phone||prof.phone||prof.officePhone||'', email:b.email||currentUser.email||'' }; }
+// Contact card {name,phone,email} for any advisor uid — pulled from their profile so the
+// static client viewer can show co-advisors without needing access to the roster.
+function _vpAdvisorContact(uid){
+  if(!uid) return null;
+  const prof=allProfiles[uid]||{};
+  const da=getDistinctAdvisors().find(x=>x.uid===uid)||{};
+  const name =(uid===currentUser.uid?(currentUser.name||''):'')||da.name||prof.name||'';
+  const email=(uid===currentUser.uid?(currentUser.email||''):'')||da.email||prof.email||'';
+  const c={ name, phone:DD.fmtPhone(prof.phone||prof.officePhone||''), email };
+  return (c.name||c.phone||c.email)?c:null;
+}
 function _vpDealTeamUids(dealId){ const d=allDeals.find(x=>x.id===dealId); if(!d) return [];
   const s=new Set([...(d.coAdvisorUids||[]), ...((d.coAdvisors||[]).map(c=>c.uid).filter(Boolean))]); if(d.advisorUid) s.add(d.advisorUid); return [...s]; }
 
@@ -7826,7 +7837,8 @@ function _vpCollectRecord(){
     coverDescription:val('vp-coverdesc'), photo:(window._vpForm&&window._vpForm.photo)||'', message:val('vp-message'),
     pwPlain, pwHash: pwPlain?DD.hash(pwPlain):'',
     segments:(window._vpSegments||[]).map(s=>({title:s.title,url:s.url,description:s.description||''})),
-    dealId:window._vpDealId||'', coAdvisorUids:(window._vpCoAdvisors||[]).slice(), broker, office,
+    dealId:window._vpDealId||'', coAdvisorUids:(window._vpCoAdvisors||[]).slice(),
+    coBrokers:(window._vpCoAdvisors||[]).map(_vpAdvisorContact).filter(Boolean), broker, office,
     advisorUid: existing?existing.advisorUid:currentUser.uid,
     advisorName: existing?existing.advisorName:(currentUser.name||''),
     advisorEmail: existing?existing.advisorEmail:(currentUser.email||''),
@@ -7864,7 +7876,7 @@ async function _vpDelete(id){ if(!confirm('Permanently delete this proposal?')) 
 function _vpViewerBase(){ let u=location.href.split('#')[0].split('?')[0]; u=u.replace(/[^/]*$/,''); return u+'proposals/'; }
 function _vpProposalObj(rec){ const CFG=window.DIRTDOG_CONFIG||{};
   return { v:1, projectName:rec.projectName, acreage:rec.acreage, client:rec.client, coverDescription:rec.coverDescription,
-    photo:rec.photo, message:rec.message, broker:rec.broker, intro:CFG.introVideo||null,
+    photo:rec.photo, message:rec.message, broker:rec.broker, coBrokers:rec.coBrokers||[], intro:CFG.introVideo||null,
     segments:(rec.segments||[]).map(s=>({title:s.title,url:s.url,description:s.description||''})), pw: rec.pwHash||'' }; }
 // Readable slug from the project name, e.g. "Willow Creek Ranch" -> "Willow_Creek_Ranch"
 function _vpSlug(s){ return (String(s||'').trim().replace(/[^A-Za-z0-9]+/g,'_').replace(/^_+|_+$/g,'')) || 'Proposal'; }

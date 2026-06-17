@@ -59,7 +59,18 @@
   .cover-foot .contact .sep{color:var(--dd-primary);opacity:.6;margin:0 12px}
   .cover-foot .contact a{color:var(--dd-primary);text-decoration:none}
   .cover-foot .logo img{height:62px;width:auto;display:block}
+  .cover-foot .advisors{text-align:center;color:#374151;font-size:13.5px;line-height:1.8;margin-bottom:14px}
+  .cover-foot .advisors:empty{display:none}
+  .cover-foot .advisors .lbl{display:block;font-size:11px;font-weight:700;letter-spacing:1.5px;
+    text-transform:uppercase;color:var(--dd-primary);margin-bottom:6px}
+  .cover-foot .advisors .adv{display:inline-block;white-space:nowrap}
+  .cover-foot .advisors .adv b{color:#111}
+  .cover-foot .advisors a{color:var(--dd-primary);text-decoration:none}
+  .cover-foot .advisors .sep{margin:0 12px;color:#cbd5e1}
   @media(max-width:760px){
+    .cover-foot .advisors{font-size:12px}
+    .cover-foot .advisors .adv{display:block}
+    .cover-foot .advisors .sep{display:none}
     .cover-title{left:24px;right:24px;top:26px;max-width:88%}
     .cover-foot{padding:30px 18px 14px}
     .cover-foot .row{grid-template-columns:1fr;gap:12px;justify-items:center}
@@ -110,6 +121,7 @@
   .navbtns .next{background:var(--dd-accent);color:#fff;border-color:var(--dd-accent)}
   .contact{padding:16px 20px;border-top:1px solid #25282d;font-size:13px;color:#9aa0a6;line-height:1.6}
   .contact .nm{color:#e8eaed;font-weight:700}
+  .contact .person{margin-top:11px}
 
   @media(max-width:860px){
     .layout{flex-direction:column}
@@ -146,6 +158,7 @@
     </div>
 
     <div class="cover-foot">
+      <div class="advisors" id="gate-advisors"></div>
       <div class="rule"></div>
       <div class="row">
         <div class="contact" id="gate-contact"></div>
@@ -258,7 +271,7 @@
     const d = snap.data();
     return { projectName:d.projectName, acreage:d.acreage, client:d.client,
       coverDescription:d.coverDescription, photo:d.photo, message:d.message,
-      broker:d.broker||{}, intro:CFG.introVideo||null,
+      broker:d.broker||{}, coBrokers:Array.isArray(d.coBrokers)?d.coBrokers:[], intro:CFG.introVideo||null,
       segments:Array.isArray(d.segments)?d.segments:[], pw:d.pwHash||"" };
   }
 
@@ -278,10 +291,34 @@
     boot(P);
   })();
 
+  // The advisors working this proposal: the owner (broker block) plus any co-advisors,
+  // de-duplicated. Used for both the cover page and the in-proposal contact panel.
+  function teamContacts(P){
+    const out=[], seen=new Set();
+    const add=b=>{ if(!b) return; if(!(b.name||b.phone||b.email)) return;
+      const key=((b.name||'')+'|'+(b.email||'')+'|'+(b.phone||'')).toLowerCase();
+      if(seen.has(key)) return; seen.add(key); out.push(b); };
+    add(P.broker||{});
+    (P.coBrokers||[]).forEach(add);
+    return out;
+  }
+
   function boot(P){
 
   /* ---- Cover content ---- */
   const projName = P.projectName || P.property || "Your Private Proposal";
+
+  /* ---- Advisors on the cover page ---- */
+  const gateAdv = document.getElementById("gate-advisors");
+  const coverTeam = teamContacts(P);
+  if(gateAdv && coverTeam.length){
+    gateAdv.innerHTML = '<span class="lbl">'+(coverTeam.length>1?"Your Advisors":"Your Advisor")+'</span>' +
+      coverTeam.map(b => '<span class="adv">' +
+        (b.name ? '<b>'+DD.esc(b.name)+'</b>' : "") +
+        (b.phone ? ' · '+DD.esc(DD.fmtPhone(b.phone)) : "") +
+        (b.email ? ' · <a href="mailto:'+DD.esc(b.email)+'">'+DD.esc(b.email)+'</a>' : "") +
+        '</span>').join('<span class="sep">•</span>');
+  }
   const bgEl = document.getElementById("gate-bg");
   if(P.photo){ bgEl.style.backgroundImage = `url("${P.photo.replace(/"/g,'%22')}")`; }
   else { bgEl.style.background = "linear-gradient(135deg,#2b3a22 0%,#1b2417 45%,#121417 80%)"; }
@@ -326,13 +363,17 @@
     document.getElementById("side-msg").textContent = P.message ||
       "Watch the videos below in any order. We're excited about the opportunity to represent your property.";
 
-    const b = P.broker || {};
+    const team = teamContacts(P);
     const c = document.getElementById("contact");
-    if(b.name || b.phone || b.email){
-      c.innerHTML = "Questions? Reach out anytime:<br>" +
-        (b.name ? '<span class="nm">'+DD.esc(b.name)+'</span><br>' : "") +
-        (b.phone ? DD.esc(DD.fmtPhone(b.phone))+"<br>" : "") +
-        (b.email ? '<a href="mailto:'+DD.esc(b.email)+'">'+DD.esc(b.email)+'</a>' : "");
+    if(team.length){
+      c.innerHTML = "Questions? Reach out anytime:" +
+        team.map(b =>
+          '<div class="person">' +
+          (b.name ? '<span class="nm">'+DD.esc(b.name)+'</span><br>' : "") +
+          (b.phone ? DD.esc(DD.fmtPhone(b.phone))+"<br>" : "") +
+          (b.email ? '<a href="mailto:'+DD.esc(b.email)+'">'+DD.esc(b.email)+'</a>' : "") +
+          '</div>'
+        ).join("");
     } else c.style.display="none";
 
     const introCount = (intro&&intro.url)?1:0;
