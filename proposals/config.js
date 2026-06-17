@@ -42,40 +42,66 @@ window.DIRTDOG_CONFIG = {
     url: "https://www.youtube.com/watch?v=ScMzIvxBSi4"
   },
 
-  /* ---- Shared preset video library ------------------------------------ */
-  // Brokers pick from these when building a proposal, or add new ones.
-  // To make a video available to ALL brokers, add it here and commit the file.
+  /* ---- Proposal types -------------------------------------------------- */
+  // Drive the auto-pull / suggested-video logic in the builder. Each library
+  // video can be tagged with the types it applies to (a "suggestion" for that
+  // type) and, optionally, the types it should be AUTO-included on. When an
+  // advisor picks a type while building a proposal, every video marked
+  // auto-include for that type is pulled in automatically; the rest tagged for
+  // that type are offered as one-click suggestions. `id` must be unique;
+  // `default` marks the type pre-selected on a new proposal.
+  proposalTypes: [
+    { id: "seller",  label: "Seller / Listing",      default: true },
+    { id: "buyer",   label: "Buyer" },
+    { id: "land",    label: "Land / Development" },
+    { id: "general", label: "General" }
+  ],
+
+  /* ---- Shared preset video library (legacy / fallback) ----------------- */
+  // The live library now lives in the `videoLibrary` Firestore collection and
+  // is managed inside the dashboard (🎬 Video Proposals → 📚 Video Library):
+  // any member can add/upload, edit titles, and tag videos by proposal type;
+  // admins can delete. These config presets remain as a built-in fallback that
+  // every advisor sees even before the Firestore library is populated. They're
+  // tagged as Seller suggestions but NOT auto-included (the URLs below are
+  // placeholders — replace them, or add the real videos in the library and
+  // check "auto-include for Seller" to make them pull in automatically).
   // id must be unique. Supports YouTube, Vimeo, or direct .mp4 links.
   presets: [
     {
       id: "marketing-plan",
       title: "Our Marketing Plan",
       description: "How we put your property in front of the right buyers.",
-      url: "https://www.youtube.com/watch?v=ScMzIvxBSi4"
+      url: "https://www.youtube.com/watch?v=ScMzIvxBSi4",
+      types: ["seller"], autoTypes: []
     },
     {
       id: "pricing-strategy",
       title: "Pricing Strategy",
       description: "How we price to sell for the most, in the least time.",
-      url: "https://www.youtube.com/watch?v=ScMzIvxBSi4"
+      url: "https://www.youtube.com/watch?v=ScMzIvxBSi4",
+      types: ["seller"], autoTypes: []
     },
     {
       id: "track-record",
       title: "Our Track Record",
       description: "Recent sales and happy clients in your area.",
-      url: "https://www.youtube.com/watch?v=ScMzIvxBSi4"
+      url: "https://www.youtube.com/watch?v=ScMzIvxBSi4",
+      types: ["seller", "buyer"], autoTypes: []
     },
     {
       id: "photography",
       title: "Professional Photography & Video",
       description: "The production quality that makes listings stand out.",
-      url: "https://www.youtube.com/watch?v=ScMzIvxBSi4"
+      url: "https://www.youtube.com/watch?v=ScMzIvxBSi4",
+      types: ["seller"], autoTypes: []
     },
     {
       id: "next-steps",
       title: "Next Steps",
       description: "What happens after you choose to work with us.",
-      url: "https://www.youtube.com/watch?v=ScMzIvxBSi4"
+      url: "https://www.youtube.com/watch?v=ScMzIvxBSi4",
+      types: ["seller", "buyer", "land", "general"], autoTypes: []
     }
   ]
 };

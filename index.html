@@ -3776,6 +3776,7 @@ let allHeadlines = [];   // [{id,title,body,createdAt,createdBy,pinned}]        
 let allHrDocs = [];      // HR knowledge documents uploaded by admins: [{id,name,text,chars,createdAt,createdByName}]
 let allDocuments = [];     // [{id, type, office, url, name, uploadedAt}]
 let allProposals = [];     // Video Proposals: [{id, projectName, acreage, advisorUid, coAdvisorUids, segments, status, ...}]
+let _vpLibrary = [];       // Shared video library: [{id, title, description, url, source, storagePath, types[], autoTypes[], createdByUid, createdByName, created, updated}]
 let pendingActions = [];
 let activeChart  = null;
 let currentView  = 'board';
@@ -7630,6 +7631,12 @@ function _vpInjectStyles(){
   .vp-linkbox input{flex:1 1 auto;font-size:13px;padding:10px 12px;border:1px solid #d1d5db;border-radius:9px}
   .vp-pwcall{margin-top:12px;font-size:13.5px;background:#f9fafb;border:1px dashed #d1d5db;border-radius:9px;padding:11px 13px}
   .vp-share-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
+  #vp-root .vp-checks{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:2px}
+  #vp-root .vp-tcheck{display:inline-flex;align-items:center;gap:5px;font-size:13px;color:#374151;font-weight:600;margin:0;cursor:pointer}
+  #vp-root .vp-tcheck input{width:15px;height:15px;accent-color:#da291c;margin:0}
+  #vp-root .vp-prog{height:7px;border-radius:5px;background:#e5e7eb;overflow:hidden;margin-top:8px}
+  #vp-root .vp-prog-bar{height:100%;width:0;background:#00b2a9;transition:width .2s}
+  #vp-root .vp-seg .vp-acts{display:flex;gap:6px;align-items:center}
   `;
   const s=document.createElement('style'); s.id='vp-styles'; s.textContent=css; document.head.appendChild(s);
 }
@@ -7638,7 +7645,9 @@ function viewVideoProposals(){
   if(activeChart){ activeChart.destroy(); activeChart=null; }
   _vpInjectStyles();
   bootProposals();
+  bootLibrary();
   if(window._vpView==='editor') _vpPaintEditor();
+  else if(window._vpView==='library') _vpPaintLibrary();
   else _vpRenderList();
 }
 
@@ -7667,6 +7676,7 @@ function _vpRenderList(){
   setContent(`<div id="vp-root"><div class="vp-pagehead">
       <h2>🎬 Video Proposals</h2><div class="vp-spacer"></div>
       <label class="vp-toggle"><input type="checkbox" ${showArch?'checked':''} onchange="_vpToggleArchived(this)"> Show archived</label>
+      <button class="vp-btn" onclick="_vpOpenLibrary()">📚 Video Library</button>
       <button class="vp-btn primary lg" onclick="_vpAdd()">+ Add Property</button>
     </div>
     <div class="vp-pgrid">${cards||`<div class="vp-empty">${showArch?'No archived proposals.':'No proposals yet. Click <b>+ Add Property</b> to build your first one.'}</div>`}</div>
@@ -7686,11 +7696,16 @@ function _vpOpenEditor(id){
   window._vpDealId = rec? (rec.dealId||'') : '';
   window._vpForm = rec ? {proj:rec.projectName||'',acre:rec.acreage||'',client:rec.client||'',coverdesc:rec.coverDescription||'',photo:rec.photo||'',message:rec.message||'',pw:rec.pwPlain||''} : {};
   window._vpBroker = (rec&&rec.broker)? {...rec.broker} : _vpDefaultBroker();
+  window._vpType = rec && rec.type ? rec.type : _vpDefaultType();
   _vpPaintEditor();
+  // On a brand-new proposal, auto-pull the default type's "auto-include" videos.
+  if(!rec) _vpAutoPull(window._vpType, true);
 }
 function _vpPaintEditor(){
   const f=window._vpForm||{}, b=window._vpBroker||{};
   const presets=(window.DIRTDOG_CONFIG&&window.DIRTDOG_CONFIG.presets||[]).concat(_vpLocalPresets());
+  const curType=window._vpType||_vpDefaultType();
+  const typeOpts=_vpTypes().map(t=>`<option value="${DD.esc(t.id)}" ${t.id===curType?'selected':''}>${DD.esc(t.label)}</option>`).join('');
   const deals=(typeof visibleDeals==='function'?visibleDeals():[]).slice()
     .sort((a,b)=>String(a.propertyAddress||a.projectName||'').localeCompare(String(b.propertyAddress||b.projectName||'')));
   const dealOpts='<option value="">— Not linked —</option>'+deals.map(d=>`<option value="${d.id}" ${d.id===window._vpDealId?'selected':''}>${DD.esc(d.propertyAddress||d.projectName||d.address||'(deal)')}</option>`).join('');
@@ -7727,16 +7742,31 @@ function _vpPaintEditor(){
         </div>
 
         <div class="vp-card">
+          <h3 class="vp-sec">Proposal Type</h3>
+          <div class="vp-hint" style="margin-top:0;margin-bottom:8px">Pick the kind of proposal. Videos marked <b>auto-include</b> (★) for this type are pulled in automatically; others tagged for it are offered as suggestions below.</div>
+          <div class="vp-row2">
+            <select id="vp-type" onchange="_vpApplyType(this.value)">${typeOpts}</select>
+            <button class="vp-btn" onclick="_vpLoadStarter()" title="Add this type's auto-include videos">↻ Load starter set</button>
+          </div>
+        </div>
+
+        <div class="vp-card">
           <h3 class="vp-sec">Proposal Videos &amp; Order</h3>
           <div class="vp-hint" style="margin-bottom:10px">The company intro plays first automatically. Use ▲▼ to set the order clients watch.</div>
           <div id="vp-seglist"></div>
-          <label>Add from your video library</label>
-          <div class="vp-chips" id="vp-presets"></div>
+          <label id="vp-suggest-label">Suggested for this type</label>
+          <div class="vp-chips" id="vp-suggest"></div>
+          <label style="margin-top:14px">All library videos</label>
+          <div class="vp-chips" id="vp-lib-all"></div>
+          <div class="vp-hint" style="margin-top:6px"><button class="vp-btn sm ghost" onclick="_vpOpenLibrary()" style="padding:4px 8px">📚 Manage the shared library →</button></div>
           <label style="margin-top:16px">Or add a new video</label>
           <input type="text" id="vp-ns-title" placeholder="Segment title (e.g. Pricing Strategy)">
           <input type="text" id="vp-ns-url" placeholder="Video URL (YouTube, Vimeo, or .mp4)" style="margin-top:8px">
           <input type="text" id="vp-ns-desc" placeholder="Short description (optional)" style="margin-top:8px">
-          <button class="vp-btn" style="margin-top:10px" onclick="_vpAddSeg()">+ Add to this proposal</button>
+          <div class="vp-row2" style="margin-top:10px">
+            <button class="vp-btn" onclick="_vpAddSeg()">+ Add to this proposal</button>
+            <button class="vp-btn" onclick="_vpAddSegToLib()">+ Add &amp; save to library</button>
+          </div>
         </div>
       </div>
 
@@ -7767,7 +7797,7 @@ function _vpPaintEditor(){
       </div>
     </div>
   </div>`);
-  _vpRenderSegList(); _vpRenderPresets(presets); _vpRenderCoAdvisors(); _vpUpdatePhoto();
+  _vpRenderSegList(); _vpRenderLibraryChips(); _vpRenderCoAdvisors(); _vpUpdatePhoto();
 }
 function _vpLocalPresets(){ try{ return JSON.parse(localStorage.getItem('dd_presets')||'[]'); }catch(e){ return []; } }
 function _vpUpdatePhoto(){ const u=((window._vpForm||{}).photo||'').trim(); const el=document.getElementById('vp-photo-prev'); const clr=document.getElementById('vp-photo-clear'); if(!el) return;
@@ -7834,6 +7864,7 @@ function _vpCollectRecord(){
   try{ localStorage.setItem('dd_broker_default',JSON.stringify(broker)); }catch(e){}
   const office=(allProfiles[(existing?existing.advisorUid:currentUser.uid)]||{}).office || (existing&&existing.office) || allProfiles[currentUser.uid]?.office || '';
   return { projectName:val('vp-proj'), acreage:val('vp-acre'), client:val('vp-client'),
+    type: window._vpType||_vpDefaultType(),
     coverDescription:val('vp-coverdesc'), photo:(window._vpForm&&window._vpForm.photo)||'', message:val('vp-message'),
     pwPlain, pwHash: pwPlain?DD.hash(pwPlain):'',
     segments:(window._vpSegments||[]).map(s=>({title:s.title,url:s.url,description:s.description||''})),
@@ -7918,6 +7949,257 @@ function _vpShareModal(rec){
     window.location.href='sms:?&body='+msg; };
 }
 
+/* =======================================================
+   SHARED VIDEO LIBRARY (Firestore: 'videoLibrary')
+   A team-wide library any member can add to / upload to / retitle; admins &
+   staff can delete. Each video can be tagged by proposal type and, optionally,
+   marked "auto-include" so it's pulled into a new proposal of that type
+   automatically. Files are uploaded to Firebase Storage under proposal-library/.
+   ======================================================= */
+let _vpLibBooted=false;
+function bootLibrary(){
+  if(_vpLibBooted || !currentUser || !_fbDb || !_fbFns) return; _vpLibBooted=true;
+  const {collection,onSnapshot}=_fbFns;
+  try{
+    onSnapshot(collection(_fbDb,'videoLibrary'), snap=>{
+      _vpLibrary=snap.docs.map(d=>({id:d.id,...d.data()}));
+      if(currentView==='videoProposals'){
+        if(window._vpView==='library') _vpRenderLibList();
+        else if(window._vpView==='editor') _vpRenderLibraryChips();
+      }
+    }, e=>console.warn('[library] listener', (e&&e.message)||e));
+  }catch(e){ console.warn('[library] boot failed', e); _vpLibBooted=false; }
+}
+
+/* ---- proposal types (from config.js, with a safe fallback) ---- */
+function _vpTypes(){ const t=(window.DIRTDOG_CONFIG&&window.DIRTDOG_CONFIG.proposalTypes)||[]; return t.length?t:[{id:'general',label:'General',default:true}]; }
+function _vpDefaultType(){ const t=_vpTypes(); return (t.find(x=>x.default)||t[0]).id; }
+function _vpTypeLabel(id){ const t=_vpTypes().find(x=>x.id===id); return t?t.label:(id||''); }
+
+/* ---- combined library: live Firestore videos + built-in config presets ---- */
+function _vpAllLibrary(){
+  const fs=(_vpLibrary||[]).map(v=>({
+    id:v.id, title:v.title||'', description:v.description||'', url:v.url||'',
+    types:Array.isArray(v.types)?v.types:[], autoTypes:Array.isArray(v.autoTypes)?v.autoTypes:[],
+    source:v.source||'link', storagePath:v.storagePath||'', _builtin:false
+  })).sort((a,b)=>String(a.title).localeCompare(String(b.title)));
+  const seen=new Set(fs.map(v=>(v.url||'').trim()));
+  const cfg=((window.DIRTDOG_CONFIG&&window.DIRTDOG_CONFIG.presets)||[])
+    .filter(p=>!seen.has((p.url||'').trim()))
+    .map(p=>({ id:'cfg:'+(p.id||p.url), title:p.title||'', description:p.description||'', url:p.url||'',
+      types:Array.isArray(p.types)?p.types:[], autoTypes:Array.isArray(p.autoTypes)?p.autoTypes:[],
+      source:'link', storagePath:'', _builtin:true }));
+  return fs.concat(cfg);
+}
+
+/* ---- editor: library chips split into "suggested for type" + "all" ---- */
+function _vpRenderLibraryChips(){
+  const suggest=document.getElementById('vp-suggest');
+  const all=document.getElementById('vp-lib-all');
+  if(!suggest||!all) return;
+  const type=window._vpType||_vpDefaultType();
+  const lib=_vpAllLibrary(); window._vpChipIndex=lib;
+  const added=new Set((window._vpSegments||[]).map(s=>(s.url||'').trim()));
+  const forType=[], others=[];
+  lib.forEach((v,i)=>{ if(added.has((v.url||'').trim())) return;
+    if((v.types||[]).includes(type)) forType.push(i); else others.push(i); });
+  const lbl=document.getElementById('vp-suggest-label'); if(lbl) lbl.textContent='Suggested for '+_vpTypeLabel(type);
+  suggest.innerHTML = forType.length
+    ? forType.map(i=>_vpLibChip(lib[i],i,type)).join('')
+    : '<div class="vp-hint">No videos tagged for this type yet. Add some in 📚 Video Library.</div>';
+  all.innerHTML = others.length
+    ? others.map(i=>_vpLibChip(lib[i],i,type)).join('')
+    : '<div class="vp-hint">Nothing else in the library.</div>';
+}
+function _vpLibChip(v,i,type){
+  const auto=(v.autoTypes||[]).includes(type);
+  return `<span class="vp-chip" onclick="_vpAddFromLib(${i})" title="${DD.esc(v.description||v.url)}"><span class="plus">+</span>${DD.esc(v.title||'(untitled)')}${auto?' ★':''}</span>`;
+}
+function _vpAddFromLib(i){
+  const v=(window._vpChipIndex||_vpAllLibrary())[i]; if(!v) return;
+  window._vpSegments.push({title:v.title,url:v.url,description:v.description||''});
+  _vpRenderSegList(); _vpRenderLibraryChips(); showToast('Added: '+(v.title||'video'),'success');
+}
+
+/* ---- proposal type selection + auto-pull ---- */
+function _vpApplyType(type){ window._vpType=type||_vpDefaultType(); _vpRenderLibraryChips(); }
+function _vpAutoPull(type, silent){
+  type=type||_vpDefaultType();
+  const added=new Set((window._vpSegments||[]).map(s=>(s.url||'').trim()));
+  let n=0;
+  _vpAllLibrary().filter(v=>(v.autoTypes||[]).includes(type)).forEach(v=>{
+    const u=(v.url||'').trim(); if(u&&!added.has(u)){ window._vpSegments.push({title:v.title,url:v.url,description:v.description||''}); added.add(u); n++; } });
+  if(n) _vpRenderSegList();
+  _vpRenderLibraryChips();
+  if(!silent) showToast(n? ('Added '+n+' starter video'+(n===1?'':'s')) : ('No auto-include videos set for '+_vpTypeLabel(type)),'info');
+  return n;
+}
+function _vpLoadStarter(){
+  const sel=document.getElementById('vp-type'); const type=sel?sel.value:(window._vpType||_vpDefaultType());
+  window._vpType=type; _vpAutoPull(type,false);
+}
+function _vpAddSegToLib(){
+  const t=(document.getElementById('vp-ns-title').value||'').trim();
+  const u=(document.getElementById('vp-ns-url').value||'').trim();
+  const d=(document.getElementById('vp-ns-desc').value||'').trim();
+  if(!t||!u){ showToast('Add a title and a video URL','warning'); return; }
+  window._vpSegments.push({title:t,url:u,description:d}); _vpRenderSegList();
+  document.getElementById('vp-ns-title').value=document.getElementById('vp-ns-url').value=document.getElementById('vp-ns-desc').value='';
+  _vpLibCreate({title:t,url:u,description:d,types:[window._vpType||_vpDefaultType()],autoTypes:[],source:'link',storagePath:''})
+    .then(()=>{ showToast('Added to proposal & saved to shared library','success'); _vpRenderLibraryChips(); })
+    .catch(e=>{ console.error('[library] quick-add',e); showToast('Added to proposal, but library save failed: '+(e.message||e),'error'); });
+}
+
+/* ================= LIBRARY MANAGER VIEW ================= */
+function _vpOpenLibrary(){ window._vpView='library'; window._vpLibEditing=null; window._vpLibUpload=null; _vpPaintLibrary(); }
+function _vpCanDeleteLib(){ return !!(currentUser&&(currentUser.isAdmin||currentUser.isSuperAdmin||currentUser.isStaff)); }
+function _vpPaintLibrary(){
+  const types=_vpTypes();
+  const editing=window._vpLibEditing? (_vpLibrary.find(v=>v.id===window._vpLibEditing)||null):null;
+  const e=editing||{};
+  const typeChecks=types.map(t=>`<label class="vp-tcheck"><input type="checkbox" class="vp-ltype" value="${DD.esc(t.id)}" ${ (e.types||[]).includes(t.id)?'checked':''}> ${DD.esc(t.label)}</label>`).join('');
+  const autoChecks=types.map(t=>`<label class="vp-tcheck"><input type="checkbox" class="vp-lauto" value="${DD.esc(t.id)}" ${ (e.autoTypes||[]).includes(t.id)?'checked':''}> ${DD.esc(t.label)}</label>`).join('');
+  setContent(`<div id="vp-root">
+    <div class="vp-edhead"><button class="vp-back" onclick="_vpBack()">← All proposals</button>
+      <h2>📚 Video Library</h2></div>
+    <div class="vp-egrid">
+      <div>
+        <div class="vp-card">
+          <h3 class="vp-sec">${editing?'Edit Video':'Add a Video'}</h3>
+          <div class="vp-hint" style="margin-top:0">Shared with the whole team. Paste a YouTube/Vimeo link (fastest for clients) or upload a file.</div>
+          <label>Title</label>
+          <input type="text" id="vp-lib-title" value="${DD.esc(e.title||'')}" placeholder="e.g. Our Marketing Plan">
+          <label>Description (optional)</label>
+          <input type="text" id="vp-lib-desc" value="${DD.esc(e.description||'')}" placeholder="One line shown under the title">
+          <label>Video link</label>
+          <input type="text" id="vp-lib-url" value="${DD.esc(e.url||'')}" placeholder="YouTube, Vimeo, or .mp4 link">
+          <div class="vp-hint" style="text-align:center;margin:8px 0">— or —</div>
+          <input type="file" id="vp-lib-file" accept="video/*" style="display:none" onchange="_vpLibFilePicked(this.files&&this.files[0])">
+          <button class="vp-btn full" onclick="document.getElementById('vp-lib-file').click()">⬆ Upload a video file</button>
+          <div class="vp-hint" id="vp-lib-fileinfo">${e.source==='upload'?'Current video is an uploaded file.':'Tip: for client-facing videos a YouTube/Vimeo link loads faster than an uploaded file.'}</div>
+          <div id="vp-lib-progress" style="display:none"><div class="vp-prog"><div class="vp-prog-bar" id="vp-lib-progbar"></div></div></div>
+          <label style="margin-top:14px">Applies to (suggested for these proposal types)</label>
+          <div class="vp-checks">${typeChecks}</div>
+          <label style="margin-top:12px">Auto-include on (★ pulled in automatically for these types)</label>
+          <div class="vp-checks">${autoChecks}</div>
+          <div class="vp-hint">Auto-include is a subset of "applies to": these videos are added to a new proposal of that type without the advisor picking them.</div>
+          <div class="vp-row2" style="margin-top:14px">
+            <button class="vp-btn primary" onclick="_vpLibSaveClick()">${editing?'Save changes':'+ Add to library'}</button>
+            ${editing?'<button class="vp-btn ghost" onclick="_vpLibCancelEdit()">Cancel</button>':''}
+          </div>
+        </div>
+      </div>
+      <div>
+        <div class="vp-card">
+          <h3 class="vp-sec">Library</h3>
+          <div class="vp-hint" style="margin-top:0;margin-bottom:10px">★ = auto-included on that type. ${_vpCanDeleteLib()?'':'Only admins/staff can delete.'}</div>
+          <div id="vp-lib-list"></div>
+        </div>
+      </div>
+    </div>
+  </div>`);
+  _vpRenderLibList();
+}
+function _vpRenderLibList(){
+  const el=document.getElementById('vp-lib-list'); if(!el) return;
+  const lib=_vpAllLibrary();
+  if(!lib.length){ el.innerHTML='<div class="vp-segempty">No videos yet. Add your first on the left.</div>'; return; }
+  const canDel=_vpCanDeleteLib();
+  el.innerHTML=lib.map(v=>{
+    const tags=(v.types||[]).map(t=>`<span class="vp-vtype">${DD.esc(_vpTypeLabel(t))}${(v.autoTypes||[]).includes(t)?' ★':''}</span>`).join(' ');
+    const src=v.source==='upload'?'<span class="vp-vtype">UPLOAD</span>':`<span class="vp-vtype">${_vpVtype(v.url)}</span>`;
+    let acts='';
+    if(v._builtin){ acts='<span class="vp-hint" style="align-self:center">in config.js</span>'; }
+    else { acts=`<button class="vp-btn sm" onclick="_vpLibEdit('${DD.esc(v.id)}')">Edit</button>`;
+      if(canDel) acts+=`<button class="vp-btn sm danger" onclick="_vpLibDelete('${DD.esc(v.id)}')">Delete</button>`; }
+    return `<div class="vp-seg"><div class="sbody">
+        <div class="st">${DD.esc(v.title||'(untitled)')}</div>
+        ${v.description?`<div class="sd">${DD.esc(v.description)}</div>`:''}
+        <div class="su">${DD.esc(v.url)}</div>
+        <div style="margin-top:5px">${src} ${tags}</div>
+      </div><div class="vp-acts" style="margin-top:0">${acts}</div></div>`;
+  }).join('');
+}
+async function _vpLibFilePicked(file){
+  if(!file) return;
+  if(!/^video\//.test(file.type)){ showToast('Please choose a video file','warning'); return; }
+  const MAX=500*1024*1024;
+  if(file.size>MAX){ showToast('That file is over 500 MB — use a YouTube/Vimeo link instead for large videos.','warning'); return; }
+  let waited=0; while(!_fbStorage&&waited<6000){ await new Promise(r=>setTimeout(r,200)); waited+=200; }
+  if(!_fbStorage){ showToast('Storage not ready — try again in a moment','error'); return; }
+  const info=document.getElementById('vp-lib-fileinfo'), prog=document.getElementById('vp-lib-progress'), bar=document.getElementById('vp-lib-progbar');
+  if(info) info.textContent='Uploading '+file.name+'…'; if(prog) prog.style.display='';
+  try{
+    const {ref,uploadBytesResumable,uploadBytes,getDownloadURL}=_fbFns;
+    const path='proposal-library/'+Date.now()+'-'+file.name.replace(/[^\w.\-]+/g,'_');
+    let url;
+    if(uploadBytesResumable){
+      url=await new Promise((resolve,reject)=>{
+        const task=uploadBytesResumable(ref(_fbStorage,path),file,{contentType:file.type});
+        task.on('state_changed', s=>{ if(bar&&s.totalBytes) bar.style.width=Math.round(100*s.bytesTransferred/s.totalBytes)+'%'; }, reject,
+          async()=>{ try{ resolve(await getDownloadURL(task.snapshot.ref)); }catch(err){ reject(err); } });
+      });
+    } else { const snap=await uploadBytes(ref(_fbStorage,path),file); url=await getDownloadURL(snap.ref); }
+    window._vpLibUpload={url,storagePath:path,source:'upload'};
+    const u=document.getElementById('vp-lib-url'); if(u) u.value=url;
+    const titleEl=document.getElementById('vp-lib-title'); if(titleEl&&!titleEl.value.trim()) titleEl.value=file.name.replace(/\.[^.]+$/,'');
+    if(info) info.textContent='✓ Uploaded: '+file.name;
+    showToast('Video uploaded','success');
+  }catch(err){ console.error('[library] upload',err); if(info) info.textContent='Upload failed: '+(err.message||err); showToast('Upload failed: '+(err.message||err),'error'); }
+  finally{ if(prog) setTimeout(()=>{ prog.style.display='none'; },800); }
+}
+function _vpLibCollect(){
+  const t=(document.getElementById('vp-lib-title').value||'').trim();
+  const d=(document.getElementById('vp-lib-desc').value||'').trim();
+  const u=(document.getElementById('vp-lib-url').value||'').trim();
+  const types=[...document.querySelectorAll('.vp-ltype:checked')].map(c=>c.value);
+  const autoTypes=[...document.querySelectorAll('.vp-lauto:checked')].map(c=>c.value).filter(x=>types.includes(x));
+  const up=window._vpLibUpload;
+  const isUpload = up && up.url===u;
+  return { title:t, description:d, url:u, types, autoTypes,
+    source:isUpload?'upload':'link', storagePath:isUpload?up.storagePath:'' };
+}
+async function _vpLibCreate(data){
+  const {collection,addDoc}=_fbFns;
+  return addDoc(collection(_fbDb,'videoLibrary'), sanitizeForFirestore({
+    title:data.title||'', description:data.description||'', url:data.url||'',
+    types:data.types||[], autoTypes:data.autoTypes||[],
+    source:data.source||'link', storagePath:data.storagePath||'',
+    createdByUid:currentUser.uid, createdByName:currentUser.name||currentUser.email||'',
+    created:Date.now(), updated:Date.now() }));
+}
+async function _vpLibSaveClick(){
+  const data=_vpLibCollect();
+  if(!data.title||!data.url){ showToast('Add a title and a video link (or upload a file)','warning'); return; }
+  try{
+    if(window._vpLibEditing){
+      const {doc,setDoc}=_fbFns;
+      await setDoc(doc(_fbDb,'videoLibrary',window._vpLibEditing), sanitizeForFirestore({
+        title:data.title, description:data.description, url:data.url, types:data.types, autoTypes:data.autoTypes,
+        source:data.source, storagePath:data.storagePath, updated:Date.now() }), {merge:true});
+      showToast('Video updated','success'); window._vpLibEditing=null;
+    } else { await _vpLibCreate(data); showToast('Added to library','success'); }
+    window._vpLibUpload=null; _vpPaintLibrary();
+  }catch(err){ console.error('[library] save',err); showToast('Save failed: '+(err.message||err),'error'); }
+}
+function _vpLibEdit(id){ window._vpLibEditing=id; window._vpLibUpload=null; _vpPaintLibrary(); window.scrollTo(0,0); }
+function _vpLibCancelEdit(){ window._vpLibEditing=null; window._vpLibUpload=null; _vpPaintLibrary(); }
+async function _vpLibDelete(id){
+  if(!_vpCanDeleteLib()){ showToast('Only admins/staff can delete library videos','warning'); return; }
+  const v=(_vpLibrary||[]).find(x=>x.id===id); if(!v) return;
+  if(!confirm('Delete "'+(v.title||'this video')+'" from the shared library? This removes it for everyone.')) return;
+  try{
+    if(v.storagePath){ const {ref,deleteObject}=_fbFns; try{ await deleteObject(ref(_fbStorage,v.storagePath)); }catch(e){ console.warn('[library] storage delete',e); } }
+    const {doc,deleteDoc}=_fbFns; await deleteDoc(doc(_fbDb,'videoLibrary',id));
+    if(window._vpLibEditing===id) window._vpLibEditing=null;
+    showToast('Deleted from library','success'); _vpPaintLibrary();
+  }catch(err){ console.error('[library] delete',err); showToast('Delete failed: '+(err.message||err),'error'); }
+}
+
+window.bootLibrary=bootLibrary; window._vpOpenLibrary=_vpOpenLibrary; window._vpApplyType=_vpApplyType;
+window._vpLoadStarter=_vpLoadStarter; window._vpAddFromLib=_vpAddFromLib; window._vpAddSegToLib=_vpAddSegToLib;
+window._vpLibFilePicked=_vpLibFilePicked; window._vpLibSaveClick=_vpLibSaveClick; window._vpLibEdit=_vpLibEdit;
+window._vpLibCancelEdit=_vpLibCancelEdit; window._vpLibDelete=_vpLibDelete;
 window.bootProposals=bootProposals; window._vpAdd=_vpAdd; window._vpEdit=_vpEdit; window._vpBack=_vpBack;
 window._vpToggleArchived=_vpToggleArchived; window._vpUpdatePhoto=_vpUpdatePhoto; window._vpSegMove=_vpSegMove;
 window._vpSegDel=_vpSegDel; window._vpAddPreset=_vpAddPreset; window._vpAddSeg=_vpAddSeg; window._vpSuggestPw=_vpSuggestPw;
