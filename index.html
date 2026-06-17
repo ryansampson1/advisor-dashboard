@@ -7635,7 +7635,6 @@ function _vpRenderList(){
   const showArch=!!window._vpShowArchived;
   const list=allProposals.filter(_vpVisible).filter(p=> showArch ? p.status==='archived' : p.status!=='archived');
   list.sort((a,b)=>(b.updated||0)-(a.updated||0));
-  let localCount=0; try{ localCount=(JSON.parse(localStorage.getItem('dd_proposals')||'[]')).length; }catch(e){}
   const cards=list.map(p=>{
     const initial=((p.projectName||'?').trim().charAt(0)||'?').toUpperCase();
     const cover=p.photo
@@ -7656,7 +7655,6 @@ function _vpRenderList(){
   }).join('');
   setContent(`<div id="vp-root"><div class="vp-pagehead">
       <h2>🎬 Video Proposals</h2><div class="vp-spacer"></div>
-      ${localCount?`<button class="vp-btn sm" onclick="_vpImportLocal()">⬇ Import ${localCount} from this browser</button>`:''}
       <label class="vp-toggle"><input type="checkbox" ${showArch?'checked':''} onchange="_vpToggleArchived(this)"> Show archived</label>
       <button class="vp-btn primary lg" onclick="_vpAdd()">+ Add Property</button>
     </div>
@@ -7745,7 +7743,7 @@ function _vpPaintEditor(){
           <div class="vp-hint" style="margin-bottom:8px">Shown to the client. Saved for next time.</div>
           <label>Name</label><input type="text" id="vp-bname" value="${DD.esc(b.name||'')}" placeholder="Your name">
           <div class="vp-row2">
-            <div><label>Phone</label><input type="tel" id="vp-bphone" value="${DD.esc(b.phone||'')}" placeholder="(813) 555-5555"></div>
+            <div><label>Phone</label><input type="tel" id="vp-bphone" value="${DD.esc(DD.fmtPhone(b.phone||''))}" placeholder="(813) 555-5555" onblur="this.value=DD.fmtPhone(this.value)"></div>
             <div><label>Email</label><input type="email" id="vp-bemail" value="${DD.esc(b.email||'')}" placeholder="you@thedirtdog.com"></div>
           </div>
         </div>
@@ -7821,7 +7819,7 @@ function _vpCollectRecord(){
   const val=id=>{ const e=document.getElementById(id); return e?e.value.trim():''; };
   const existing=window._vpEditing?allProposals.find(p=>p.id===window._vpEditing):null;
   const pwPlain=val('vp-pw');
-  const broker={name:val('vp-bname'),phone:val('vp-bphone'),email:val('vp-bemail')};
+  const broker={name:val('vp-bname'),phone:DD.fmtPhone(val('vp-bphone')),email:val('vp-bemail')};
   try{ localStorage.setItem('dd_broker_default',JSON.stringify(broker)); }catch(e){}
   const office=(allProfiles[(existing?existing.advisorUid:currentUser.uid)]||{}).office || (existing&&existing.office) || allProfiles[currentUser.uid]?.office || '';
   return { projectName:val('vp-proj'), acreage:val('vp-acre'), client:val('vp-client'),
@@ -7839,8 +7837,11 @@ async function _vpSave(opts){
   opts=opts||{};
   const rec=_vpCollectRecord();
   if(!rec.projectName){ showToast('Add a project name first','warning'); return null; }
-  const {doc,setDoc,collection}=_fbFns;
-  const ref=window._vpEditing? doc(_fbDb,'proposals',window._vpEditing) : doc(collection(_fbDb,'proposals'));
+  const {doc,setDoc}=_fbFns;
+  // New proposals get a readable, project-name doc id so the share link is clean
+  // (e.g. /proposals/#Willow_Creek_Ranch). Editing keeps the existing id so links
+  // already sent to a client never break.
+  const ref=window._vpEditing? doc(_fbDb,'proposals',window._vpEditing) : doc(_fbDb,'proposals',_vpUniqueSlugId(rec.projectName));
   rec.id=ref.id;
   try{ await setDoc(ref, sanitizeForFirestore(rec), {merge:true}); window._vpEditing=ref.id;
     if(!opts.silent) showToast('Proposal saved','success'); return rec;
@@ -7867,11 +7868,18 @@ function _vpProposalObj(rec){ const CFG=window.DIRTDOG_CONFIG||{};
     segments:(rec.segments||[]).map(s=>({title:s.title,url:s.url,description:s.description||''})), pw: rec.pwHash||'' }; }
 // Readable slug from the project name, e.g. "Willow Creek Ranch" -> "Willow_Creek_Ranch"
 function _vpSlug(s){ return (String(s||'').trim().replace(/[^A-Za-z0-9]+/g,'_').replace(/^_+|_+$/g,'')) || 'Proposal'; }
-// Short, clean share link: the client viewer loads the proposal from Firestore by id.
-// e.g. https://terra.dirtdog.com/proposals/#Willow_Creek_Ranch~aB3xK9...
+// Turn the project name into a Firestore doc id that's unique among existing proposals.
+// Collisions (two proposals with the same name) get -2, -3, … appended.
+function _vpUniqueSlugId(name){
+  const base=_vpSlug(name); const taken=new Set((allProposals||[]).map(p=>p.id));
+  let id=base, n=2; while(taken.has(id)){ id=base+'-'+n; n++; }
+  return id;
+}
+// Short, clean share link: the doc id IS the project-name slug, so the link reads
+// e.g. https://terra.dirtdog.com/proposals/#Willow_Creek_Ranch  (no random characters).
 // Falls back to the self-contained encoded link if the proposal hasn't been saved yet.
 function _vpShareLink(rec){
-  if(rec && rec.id) return _vpViewerBase()+'#'+_vpSlug(rec.projectName)+'~'+rec.id;
+  if(rec && rec.id) return _vpViewerBase()+'#'+rec.id;
   return _vpViewerBase()+'#p='+DD.encodeProposal(_vpProposalObj(rec));
 }
 function _vpShareModal(rec){
@@ -7898,30 +7906,12 @@ function _vpShareModal(rec){
     window.location.href='sms:?&body='+msg; };
 }
 
-async function _vpImportLocal(){
-  let list=[]; try{ list=JSON.parse(localStorage.getItem('dd_proposals')||'[]'); }catch(e){}
-  if(!list.length){ showToast('No local proposals to import','info'); return; }
-  if(!confirm('Import '+list.length+' proposal(s) from this browser into your account?')) return;
-  const {doc,setDoc,collection}=_fbFns; let n=0;
-  for(const p of list){
-    const ref=doc(collection(_fbDb,'proposals'));
-    const rec={ projectName:p.projectName||'', acreage:p.acreage||'', client:p.client||'', coverDescription:p.coverDescription||'',
-      photo:p.photo||'', message:p.message||'', pwPlain:p.pwPlain||'', pwHash:p.pwPlain?DD.hash(p.pwPlain):'',
-      segments:(p.segments||[]).map(s=>({title:s.title,url:s.url,description:s.description||''})),
-      dealId:'', coAdvisorUids:[], broker:p.broker||{}, office:allProfiles[currentUser.uid]?.office||'',
-      advisorUid:currentUser.uid, advisorName:currentUser.name||'', advisorEmail:currentUser.email||'',
-      status:p.status||'active', created:p.updated||Date.now(), updated:Date.now(), id:ref.id };
-    try{ await setDoc(ref, sanitizeForFirestore(rec)); n++; }catch(e){ console.warn('[proposals] import',e); }
-  }
-  showToast('Imported '+n+' proposal(s)','success');
-}
-
 window.bootProposals=bootProposals; window._vpAdd=_vpAdd; window._vpEdit=_vpEdit; window._vpBack=_vpBack;
 window._vpToggleArchived=_vpToggleArchived; window._vpUpdatePhoto=_vpUpdatePhoto; window._vpSegMove=_vpSegMove;
 window._vpSegDel=_vpSegDel; window._vpAddPreset=_vpAddPreset; window._vpAddSeg=_vpAddSeg; window._vpSuggestPw=_vpSuggestPw;
 window._vpOnDealChange=_vpOnDealChange; window._vpToggleCo=_vpToggleCo; window._vpSaveClick=_vpSaveClick;
 window._vpGenerate=_vpGenerate; window._vpQuickLink=_vpQuickLink; window._vpArchive=_vpArchive; window._vpRestore=_vpRestore;
-window._vpDelete=_vpDelete; window._vpImportLocal=_vpImportLocal;
+window._vpDelete=_vpDelete;
 window._vpPhotoFile=_vpPhotoFile; window._vpPhotoClear=_vpPhotoClear;
 
 /* =======================================================

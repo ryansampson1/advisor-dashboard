@@ -38,6 +38,17 @@
       .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   };
 
+  /* ---- Phone formatting ------------------------------------------------ */
+  // Format a US phone number as (XXX) XXX-XXXX. Leaves anything that isn't a
+  // 10-digit (or 1+10) number untouched, so extensions / intl numbers survive.
+  DD.fmtPhone = function (s) {
+    if (s == null || s === "") return s;
+    const d = String(s).replace(/\D/g, "");
+    if (d.length === 10) return "(" + d.slice(0, 3) + ") " + d.slice(3, 6) + "-" + d.slice(6);
+    if (d.length === 11 && d.charAt(0) === "1") return "(" + d.slice(1, 4) + ") " + d.slice(4, 7) + "-" + d.slice(7);
+    return s;
+  };
+
   /* ---- Video URL parsing ---------------------------------------------- */
   // Returns {type:'youtube'|'vimeo'|'file'|'unknown', id, url}
   DD.parseVideo = function (url) {
