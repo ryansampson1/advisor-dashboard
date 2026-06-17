@@ -7979,16 +7979,20 @@ function _vpTypeLabel(id){ const t=_vpTypes().find(x=>x.id===id); return t?t.lab
 /* ---- combined library: live Firestore videos + built-in config presets ---- */
 function _vpAllLibrary(){
   const fs=(_vpLibrary||[]).map(v=>({
-    id:v.id, title:v.title||'', description:v.description||'', url:v.url||'',
+    id:v.id, title:v.title||'', description:v.description||'', internalNote:v.internalNote||'', url:v.url||'',
     types:Array.isArray(v.types)?v.types:[], autoTypes:Array.isArray(v.autoTypes)?v.autoTypes:[],
     source:v.source||'link', storagePath:v.storagePath||'', _builtin:false
   })).sort((a,b)=>String(a.title).localeCompare(String(b.title)));
-  const seen=new Set(fs.map(v=>(v.url||'').trim()));
+  // Hide a built-in config preset once a Firestore video with the same title or
+  // URL exists (i.e. it's been imported/edited), so there's no duplicate.
+  const seenUrl=new Set(fs.map(v=>(v.url||'').trim()).filter(Boolean));
+  const seenTitle=new Set(fs.map(v=>(v.title||'').trim().toLowerCase()).filter(Boolean));
   const cfg=((window.DIRTDOG_CONFIG&&window.DIRTDOG_CONFIG.presets)||[])
-    .filter(p=>!seen.has((p.url||'').trim()))
-    .map(p=>({ id:'cfg:'+(p.id||p.url), title:p.title||'', description:p.description||'', url:p.url||'',
+    .filter(p=>!seenUrl.has((p.url||'').trim()) && !seenTitle.has((p.title||'').trim().toLowerCase()))
+    .map(p=>({ id:'cfg:'+(p.id||p.url), title:p.title||'', description:p.description||'', internalNote:'', url:p.url||'',
       types:Array.isArray(p.types)?p.types:[], autoTypes:Array.isArray(p.autoTypes)?p.autoTypes:[],
-      source:'link', storagePath:'', _builtin:true }));
+      source:'link', storagePath:'', _builtin:true,
+      _cfg:{ title:p.title||'', description:p.description||'', url:p.url||'', types:Array.isArray(p.types)?p.types:[], autoTypes:Array.isArray(p.autoTypes)?p.autoTypes:[] } }));
   return fs.concat(cfg);
 }
 
@@ -8013,7 +8017,8 @@ function _vpRenderLibraryChips(){
 }
 function _vpLibChip(v,i,type){
   const auto=(v.autoTypes||[]).includes(type);
-  return `<span class="vp-chip" onclick="_vpAddFromLib(${i})" title="${DD.esc(v.description||v.url)}"><span class="plus">+</span>${DD.esc(v.title||'(untitled)')}${auto?' ★':''}</span>`;
+  const tip=v.internalNote?('🔒 '+v.internalNote):(v.description||v.url);
+  return `<span class="vp-chip" onclick="_vpAddFromLib(${i})" title="${DD.esc(tip)}"><span class="plus">+</span>${DD.esc(v.title||'(untitled)')}${auto?' ★':''}</span>`;
 }
 function _vpAddFromLib(i){
   const v=(window._vpChipIndex||_vpAllLibrary())[i]; if(!v) return;
@@ -8052,7 +8057,7 @@ function _vpAddSegToLib(){
 
 /* ================= LIBRARY MANAGER VIEW ================= */
 function _vpOpenLibrary(){ window._vpView='library'; window._vpLibEditing=null; window._vpLibUpload=null; _vpPaintLibrary(); }
-function _vpCanDeleteLib(){ return !!(currentUser&&(currentUser.isAdmin||currentUser.isSuperAdmin||currentUser.isStaff)); }
+function _vpCanDeleteLib(){ return !!(currentUser&&(currentUser.isAdmin||currentUser.isSuperAdmin)); }
 function _vpPaintLibrary(){
   const types=_vpTypes();
   const editing=window._vpLibEditing? (_vpLibrary.find(v=>v.id===window._vpLibEditing)||null):null;
@@ -8069,8 +8074,10 @@ function _vpPaintLibrary(){
           <div class="vp-hint" style="margin-top:0">Shared with the whole team. Paste a YouTube/Vimeo link (fastest for clients) or upload a file.</div>
           <label>Title</label>
           <input type="text" id="vp-lib-title" value="${DD.esc(e.title||'')}" placeholder="e.g. Our Marketing Plan">
-          <label>Description (optional)</label>
-          <input type="text" id="vp-lib-desc" value="${DD.esc(e.description||'')}" placeholder="One line shown under the title">
+          <label>Description — shown to the client (optional)</label>
+          <input type="text" id="vp-lib-desc" value="${DD.esc(e.description||'')}" placeholder="One line the client sees under the video">
+          <label>Internal note — advisors only, never shown to the client (optional)</label>
+          <input type="text" id="vp-lib-note" value="${DD.esc(e.internalNote||'')}" placeholder="e.g. Use for raw land only; updated 2026">
           <label>Video link</label>
           <input type="text" id="vp-lib-url" value="${DD.esc(e.url||'')}" placeholder="YouTube, Vimeo, or .mp4 link">
           <div class="vp-hint" style="text-align:center;margin:8px 0">— or —</div>
@@ -8102,19 +8109,22 @@ function _vpPaintLibrary(){
 }
 function _vpRenderLibList(){
   const el=document.getElementById('vp-lib-list'); if(!el) return;
-  const lib=_vpAllLibrary();
+  const lib=_vpAllLibrary(); window._vpLibListIndex=lib;
   if(!lib.length){ el.innerHTML='<div class="vp-segempty">No videos yet. Add your first on the left.</div>'; return; }
   const canDel=_vpCanDeleteLib();
-  el.innerHTML=lib.map(v=>{
+  el.innerHTML=lib.map((v,i)=>{
     const tags=(v.types||[]).map(t=>`<span class="vp-vtype">${DD.esc(_vpTypeLabel(t))}${(v.autoTypes||[]).includes(t)?' ★':''}</span>`).join(' ');
     const src=v.source==='upload'?'<span class="vp-vtype">UPLOAD</span>':`<span class="vp-vtype">${_vpVtype(v.url)}</span>`;
     let acts='';
-    if(v._builtin){ acts='<span class="vp-hint" style="align-self:center">in config.js</span>'; }
-    else { acts=`<button class="vp-btn sm" onclick="_vpLibEdit('${DD.esc(v.id)}')">Edit</button>`;
+    if(v._builtin){
+      // Built-in config.js preset → let advisors import a copy into the editable library.
+      acts=`<button class="vp-btn sm" onclick="_vpLibImportBuiltin(${i})" title="Make this editable">Import &amp; edit</button>`;
+    } else { acts=`<button class="vp-btn sm" onclick="_vpLibEdit('${DD.esc(v.id)}')">Edit</button>`;
       if(canDel) acts+=`<button class="vp-btn sm danger" onclick="_vpLibDelete('${DD.esc(v.id)}')">Delete</button>`; }
     return `<div class="vp-seg"><div class="sbody">
-        <div class="st">${DD.esc(v.title||'(untitled)')}</div>
+        <div class="st">${DD.esc(v.title||'(untitled)')}${v._builtin?' <span class="vp-vtype">BUILT-IN</span>':''}</div>
         ${v.description?`<div class="sd">${DD.esc(v.description)}</div>`:''}
+        ${v.internalNote?`<div class="sd" style="color:#9a6a00">🔒 ${DD.esc(v.internalNote)}</div>`:''}
         <div class="su">${DD.esc(v.url)}</div>
         <div style="margin-top:5px">${src} ${tags}</div>
       </div><div class="vp-acts" style="margin-top:0">${acts}</div></div>`;
@@ -8151,18 +8161,19 @@ async function _vpLibFilePicked(file){
 function _vpLibCollect(){
   const t=(document.getElementById('vp-lib-title').value||'').trim();
   const d=(document.getElementById('vp-lib-desc').value||'').trim();
+  const noteEl=document.getElementById('vp-lib-note'); const note=noteEl?(noteEl.value||'').trim():'';
   const u=(document.getElementById('vp-lib-url').value||'').trim();
   const types=[...document.querySelectorAll('.vp-ltype:checked')].map(c=>c.value);
   const autoTypes=[...document.querySelectorAll('.vp-lauto:checked')].map(c=>c.value).filter(x=>types.includes(x));
   const up=window._vpLibUpload;
   const isUpload = up && up.url===u;
-  return { title:t, description:d, url:u, types, autoTypes,
+  return { title:t, description:d, internalNote:note, url:u, types, autoTypes,
     source:isUpload?'upload':'link', storagePath:isUpload?up.storagePath:'' };
 }
 async function _vpLibCreate(data){
   const {collection,addDoc}=_fbFns;
   return addDoc(collection(_fbDb,'videoLibrary'), sanitizeForFirestore({
-    title:data.title||'', description:data.description||'', url:data.url||'',
+    title:data.title||'', description:data.description||'', internalNote:data.internalNote||'', url:data.url||'',
     types:data.types||[], autoTypes:data.autoTypes||[],
     source:data.source||'link', storagePath:data.storagePath||'',
     createdByUid:currentUser.uid, createdByName:currentUser.name||currentUser.email||'',
@@ -8175,12 +8186,23 @@ async function _vpLibSaveClick(){
     if(window._vpLibEditing){
       const {doc,setDoc}=_fbFns;
       await setDoc(doc(_fbDb,'videoLibrary',window._vpLibEditing), sanitizeForFirestore({
-        title:data.title, description:data.description, url:data.url, types:data.types, autoTypes:data.autoTypes,
+        title:data.title, description:data.description, internalNote:data.internalNote, url:data.url, types:data.types, autoTypes:data.autoTypes,
         source:data.source, storagePath:data.storagePath, updated:Date.now() }), {merge:true});
       showToast('Video updated','success'); window._vpLibEditing=null;
     } else { await _vpLibCreate(data); showToast('Added to library','success'); }
     window._vpLibUpload=null; _vpPaintLibrary();
   }catch(err){ console.error('[library] save',err); showToast('Save failed: '+(err.message||err),'error'); }
+}
+// Import a built-in config.js preset into the editable Firestore library, then
+// open it for editing. After this the config version is hidden (deduped by title).
+async function _vpLibImportBuiltin(i){
+  const v=(window._vpLibListIndex||_vpAllLibrary())[i]; if(!v||!v._cfg) return;
+  try{
+    const ref=await _vpLibCreate({ title:v._cfg.title, description:v._cfg.description, internalNote:'', url:v._cfg.url,
+      types:v._cfg.types, autoTypes:v._cfg.autoTypes, source:'link', storagePath:'' });
+    showToast('Imported "'+(v._cfg.title||'video')+'" — now editable','success');
+    if(ref&&ref.id){ window._vpLibEditing=ref.id; _vpPaintLibrary(); window.scrollTo(0,0); }
+  }catch(err){ console.error('[library] import',err); showToast('Import failed: '+(err.message||err),'error'); }
 }
 function _vpLibEdit(id){ window._vpLibEditing=id; window._vpLibUpload=null; _vpPaintLibrary(); window.scrollTo(0,0); }
 function _vpLibCancelEdit(){ window._vpLibEditing=null; window._vpLibUpload=null; _vpPaintLibrary(); }
@@ -8199,7 +8221,7 @@ async function _vpLibDelete(id){
 window.bootLibrary=bootLibrary; window._vpOpenLibrary=_vpOpenLibrary; window._vpApplyType=_vpApplyType;
 window._vpLoadStarter=_vpLoadStarter; window._vpAddFromLib=_vpAddFromLib; window._vpAddSegToLib=_vpAddSegToLib;
 window._vpLibFilePicked=_vpLibFilePicked; window._vpLibSaveClick=_vpLibSaveClick; window._vpLibEdit=_vpLibEdit;
-window._vpLibCancelEdit=_vpLibCancelEdit; window._vpLibDelete=_vpLibDelete;
+window._vpLibCancelEdit=_vpLibCancelEdit; window._vpLibDelete=_vpLibDelete; window._vpLibImportBuiltin=_vpLibImportBuiltin;
 window.bootProposals=bootProposals; window._vpAdd=_vpAdd; window._vpEdit=_vpEdit; window._vpBack=_vpBack;
 window._vpToggleArchived=_vpToggleArchived; window._vpUpdatePhoto=_vpUpdatePhoto; window._vpSegMove=_vpSegMove;
 window._vpSegDel=_vpSegDel; window._vpAddPreset=_vpAddPreset; window._vpAddSeg=_vpAddSeg; window._vpSuggestPw=_vpSuggestPw;
