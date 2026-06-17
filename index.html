@@ -23241,6 +23241,7 @@ function bootLeads(){
     const panelId = window._openLeadId;
     if(panelId && document.getElementById('lead-panel')) renderLeadPanel(panelId);
     _leadCRMBackfill(); // auto-match any new/pulled leads against the CRM
+    _leadSweepSoftClaims(); // release any expired 3-day soft holds back to "New"
   });
 }
 // Background pass: match unchecked leads to CRM contacts (incl. ones pulled by
@@ -23288,6 +23289,38 @@ function _leadVisible(l){
     return true;
   }
   return mine;
+}
+
+// ── Soft-hold reversion ─────────────────────────────────────────────────────
+// A "soft" claim (created when an advisor runs research on an unclaimed lead)
+// reserves the lead to that advisor's board for 3 days. If they don't lock it in
+// (formal claim) or mark it dead, and the prospect hasn't responded, it reverts
+// to the unclaimed "New" pool so another advisor can pick it up. The nightly
+// cadence worker is the authoritative sweeper; this client pass self-heals the
+// UI promptly. We only WRITE for leads the current user owns or (for admins) any
+// lead, since other advisors can't even see someone else's reserved lead.
+const LEAD_SOFT_HOLD_MS = 3*24*60*60*1000; // 3 days
+let _leadSweepInflight = false;
+async function _leadSweepSoftClaims(){
+  if(_leadSweepInflight || !Array.isArray(allLeads) || !currentUser) return;
+  const now = Date.now();
+  const expired = allLeads.filter(l =>
+    l.claimType==='soft' && l.softClaimAt && (now - l.softClaimAt) > LEAD_SOFT_HOLD_MS &&
+    !LEAD_TERMINAL.includes(l.status) && l.status!=='Engaged' && l.status!=='Qualified' &&
+    !l.replyDetectedAt &&
+    (currentUser.isAdmin || l.advisorUid===currentUser.uid)
+  );
+  if(!expired.length) return;
+  _leadSweepInflight = true;
+  try {
+    for(const l of expired){
+      try {
+        await _leadUpdate(l.id, {advisorUid:'', advisorName:'', advisorEmail:'', claimType:null, softClaimAt:null,
+          status:'New', cadence: l.cadence?{...l.cadence, active:false}:l.cadence||null});
+        await _leadLog(l.id, '⏳ Soft-hold expired (3 days, no response) — returned to the unclaimed New pool');
+      } catch(e){ console.warn('[leadSweep]', e); }
+    }
+  } finally { _leadSweepInflight = false; }
 }
 
 // ── Stateless AI call (Gemini via the live Cloudflare proxy) ────────────────
@@ -23424,7 +23457,21 @@ async function _leadEnrichFromCRM(leadId, {force=false}={}){
 async function runLeadAgent(leadId){
   const lead = _leadById(leadId); if(!lead) return;
   try {
-    await _leadUpdate(leadId, {status:'Researching', agentError:null});
+    // Running the agent SOFT-CLAIMS an unclaimed lead: starting research reserves
+    // it to the advisor who ran it, so it only shows on their board (not the
+    // shared "New" pool). The hold lasts until they formally claim it, mark it
+    // dead, or LEAD_SOFT_HOLD_MS passes with no response — after which the nightly
+    // cadence worker (and the client-side sweep) release it back to "New".
+    const startPatch = {status:'Researching', agentError:null};
+    if(!lead.advisorUid){
+      startPatch.advisorUid  = currentUser.uid;
+      startPatch.advisorName = currentUser.name;
+      startPatch.advisorEmail= currentUser.email;
+      startPatch.claimType   = 'soft';
+      startPatch.softClaimAt = Date.now();
+    }
+    await _leadUpdate(leadId, startPatch);
+    if(startPatch.claimType==='soft') await _leadLog(leadId,'⏳ Reserved to '+currentUser.name+' (started research) — held on their board for 3 days unless claimed or marked dead');
     showToast('🤖 Agent researching '+(lead.name||'lead')+'…','info');
 
     // 1. Research brief
@@ -23617,8 +23664,11 @@ window.markLeadDead = markLeadDead;
 async function claimLead(leadId){
   const lead=_leadById(leadId); if(!lead) return;
   if(lead.advisorUid && lead.advisorUid!==currentUser.uid){ showToast('Already claimed by '+(lead.advisorName||'another advisor'),'warning'); return; }
-  await _leadUpdate(leadId,{advisorUid:currentUser.uid, advisorName:currentUser.name, advisorEmail:currentUser.email});
-  await _leadLog(leadId,'Claimed by '+currentUser.name);
+  const wasSoft = lead.claimType==='soft';
+  // A formal claim is a HARD claim — it permanently parks the lead on this
+  // advisor's board and cancels the 3-day soft-hold timer so it can't revert.
+  await _leadUpdate(leadId,{advisorUid:currentUser.uid, advisorName:currentUser.name, advisorEmail:currentUser.email, claimType:'hard', softClaimAt:null});
+  await _leadLog(leadId, wasSoft? 'Claimed by '+currentUser.name+' (locked in — no longer auto-reverts)' : 'Claimed by '+currentUser.name);
   try { await _leadEnrichFromCRM(leadId, {force:true}); } catch(e){ console.warn('[claimLead crm]',e); }
   showToast('🙋 Lead claimed — it\'s yours','success');
   if(!lead.research && lead.status==='New' && confirm('Run the AI agent now? (research + outreach draft + cadence)')){
@@ -23684,6 +23734,7 @@ function viewLeads(){
         ${l.agentError?`<span class="text-[10px] px-1.5 py-0.5 rounded-full bg-red-100 text-red-700" title="${_leadEsc(l.agentError)}">⚠️ agent failed</span>`:''}
         ${l.status==='Researching'?`<span class="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700">🤖 working…</span>`:''}
         ${!l.advisorUid?`<span class="text-[10px] px-1.5 py-0.5 rounded-full bg-yellow-100 text-yellow-800 font-semibold">🙋 unclaimed</span>`:''}
+        ${l.claimType==='soft'?`<span class="text-[10px] px-1.5 py-0.5 rounded-full bg-orange-100 text-orange-800 font-semibold" title="Reserved while being researched — reverts to New in 3 days unless claimed or marked dead">⏳ reserved</span>`:''}
       </div>
       ${isMgr&&window._leadsFilter!=='mine'?`<div class="text-[10px] text-gray-400 mt-1">${_leadEsc(l.advisorName||'Unassigned')}</div>`:''}
     </div>`;
