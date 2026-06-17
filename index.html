@@ -7848,7 +7848,9 @@ async function _vpSave(opts){
 }
 function _vpSaveClick(){ _vpSave().then(r=>{ if(r) _vpBack(); }); }
 function _vpGenerate(){ if(!(window._vpSegments||[]).length){ showToast('Add at least one video','warning'); return; }
-  _vpSave({silent:true}).then(rec=>{ if(rec) _vpShareModal(rec); }); }
+  // Save first so the proposal exists in Firestore — the client link loads it by id.
+  _vpSave({silent:true}).then(rec=>{ if(rec) _vpShareModal(rec);
+    else showToast("Couldn't save the proposal, so no link was created. Check your connection / Firestore rules.",'error'); }); }
 function _vpQuickLink(id){ const rec=allProposals.find(p=>p.id===id); if(rec) _vpShareModal(rec); }
 async function _vpArchive(id){ await _vpSetStatus(id,'archived'); }
 async function _vpRestore(id){ await _vpSetStatus(id,'active'); }
@@ -7863,8 +7865,17 @@ function _vpProposalObj(rec){ const CFG=window.DIRTDOG_CONFIG||{};
   return { v:1, projectName:rec.projectName, acreage:rec.acreage, client:rec.client, coverDescription:rec.coverDescription,
     photo:rec.photo, message:rec.message, broker:rec.broker, intro:CFG.introVideo||null,
     segments:(rec.segments||[]).map(s=>({title:s.title,url:s.url,description:s.description||''})), pw: rec.pwHash||'' }; }
+// Readable slug from the project name, e.g. "Willow Creek Ranch" -> "Willow_Creek_Ranch"
+function _vpSlug(s){ return (String(s||'').trim().replace(/[^A-Za-z0-9]+/g,'_').replace(/^_+|_+$/g,'')) || 'Proposal'; }
+// Short, clean share link: the client viewer loads the proposal from Firestore by id.
+// e.g. https://terra.dirtdog.com/proposals/#Willow_Creek_Ranch~aB3xK9...
+// Falls back to the self-contained encoded link if the proposal hasn't been saved yet.
+function _vpShareLink(rec){
+  if(rec && rec.id) return _vpViewerBase()+'#'+_vpSlug(rec.projectName)+'~'+rec.id;
+  return _vpViewerBase()+'#p='+DD.encodeProposal(_vpProposalObj(rec));
+}
 function _vpShareModal(rec){
-  const link=_vpViewerBase()+'#p='+DD.encodeProposal(_vpProposalObj(rec));
+  const link=_vpShareLink(rec);
   const pw=rec.pwPlain||'', client=rec.client||'', proj=rec.projectName||'';
   const company=(window.DIRTDOG_CONFIG&&window.DIRTDOG_CONFIG.brand&&window.DIRTDOG_CONFIG.brand.company)||'Eshenbaugh Land Company';
   const bg=document.createElement('div'); bg.className='vp-modal-bg'; bg.onclick=e=>{ if(e.target===bg) bg.remove(); };
@@ -7883,7 +7894,7 @@ function _vpShareModal(rec){
   bg.querySelector('#vp-email').onclick=()=>{ const subj=encodeURIComponent('Your private proposal from '+company);
     const body=encodeURIComponent('Hi '+(client||'there')+',\n\nThank you for the opportunity to earn your business'+(proj?(' on '+proj):'')+'. I\'ve put together a short video proposal just for you — watch the videos in any order.\n\n'+link+'\n\n'+(pw?('Password: '+pw+'\n\n'):'')+'Looking forward to your thoughts.\n\n'+(rec.broker&&rec.broker.name||company));
     window.location.href='mailto:?subject='+subj+'&body='+body; };
-  bg.querySelector('#vp-sms').onclick=()=>{ const msg=encodeURIComponent('Here\'s your private video proposal from '+company+': '+link+(pw?(' (password: '+pw+')'):''));
+  bg.querySelector('#vp-sms').onclick=()=>{ const msg=encodeURIComponent('Here\'s your private video proposal from '+company+':\n'+link+(pw?('\nPassword: '+pw):''));
     window.location.href='sms:?&body='+msg; };
 }
 

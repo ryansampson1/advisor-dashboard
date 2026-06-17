@@ -216,20 +216,69 @@
   if(ct.website) parts.push(`<a href="${DD.esc(ct.websiteUrl||('https://'+ct.website))}" target="_blank" rel="noopener">${DD.esc(ct.website)}</a>`);
   document.getElementById("gate-contact").innerHTML = parts.join('<span class="sep">✦</span>');
 
-  function getParam(){
+  /* ---- Figure out how this proposal was shared ----
+     New short links load the proposal from Firestore by id:
+       …/proposals/#Willow_Creek_Ranch~<docId>   (or ?id=<docId>)
+     Legacy links still carry the whole proposal encoded in the hash:
+       …/proposals/#p=<encoded>   (or ?p=<encoded>)                           */
+  function parseSource(){
     const h = location.hash.replace(/^#/,"");
     let m = h.match(/(?:^|&)p=([^&]+)/);
-    if(m) return m[1];
-    return new URLSearchParams(location.search).get("p");
+    if(m) return { enc:m[1] };
+    const qp = new URLSearchParams(location.search);
+    if(qp.get("p"))  return { enc:qp.get("p") };
+    if(qp.get("id")) return { id:qp.get("id") };
+    if(h){
+      if(h.indexOf("~")>=0)         return { id:h.split("~").pop() };
+      if(/^id=/.test(h))            return { id:h.slice(3) };
+      if(/^[A-Za-z0-9]{16,}$/.test(h)) return { id:h };
+    }
+    return {};
   }
-  const raw = getParam();
-  const P = raw ? DD.decodeProposal(raw) : null;
 
-  if(!P || !Array.isArray(P.segments)){
+  // Lazy Firebase fetch of a single proposal doc by id (no client login needed —
+  // the security rules allow a public read of one doc when you know its id).
+  const FB_CONFIG = {
+    apiKey:"AIzaSyC1cKWQnk4TeH3EMeX-sF4RejGPYL9xyYw",
+    authDomain:"eshenbaugh-dashboard.firebaseapp.com",
+    projectId:"eshenbaugh-dashboard",
+    storageBucket:"eshenbaugh-dashboard.firebasestorage.app",
+    messagingSenderId:"458253707783",
+    appId:"1:458253707783:web:8c86e4bfd2a371ae67d8a2"
+  };
+  async function fetchById(id){
+    const [appMod, fsMod] = await Promise.all([
+      import("https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js"),
+      import("https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js")
+    ]);
+    const app = appMod.initializeApp(FB_CONFIG);
+    const db  = fsMod.getFirestore(app);
+    const snap = await fsMod.getDoc(fsMod.doc(db, "proposals", id));
+    if(!snap.exists()) return null;
+    const d = snap.data();
+    return { projectName:d.projectName, acreage:d.acreage, client:d.client,
+      coverDescription:d.coverDescription, photo:d.photo, message:d.message,
+      broker:d.broker||{}, intro:CFG.introVideo||null,
+      segments:Array.isArray(d.segments)?d.segments:[], pw:d.pwHash||"" };
+  }
+
+  function showError(){
     document.getElementById("gate").style.display="none";
     document.getElementById("err-screen").style.display="flex";
-    return;
   }
+
+  (async function load(){
+    const src = parseSource();
+    let P = null;
+    try{
+      if(src.enc)      P = DD.decodeProposal(src.enc);
+      else if(src.id)  P = await fetchById(src.id);
+    }catch(e){ console.error("Proposal load failed:", e); }
+    if(!P || !Array.isArray(P.segments)){ showError(); return; }
+    boot(P);
+  })();
+
+  function boot(P){
 
   /* ---- Cover content ---- */
   const projName = P.projectName || P.property || "Your Private Proposal";
@@ -322,6 +371,8 @@
   }
   document.getElementById("prev-btn").addEventListener("click",()=>go(current-1));
   document.getElementById("next-btn").addEventListener("click",()=>go(current+1));
+
+  } /* ---- end boot(P) ---- */
 })();
 </script>
 </body>
