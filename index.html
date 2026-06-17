@@ -7637,6 +7637,13 @@ function _vpInjectStyles(){
   #vp-root .vp-prog{height:7px;border-radius:5px;background:#e5e7eb;overflow:hidden;margin-top:8px}
   #vp-root .vp-prog-bar{height:100%;width:0;background:#00b2a9;transition:width .2s}
   #vp-root .vp-seg .vp-acts{display:flex;gap:6px;align-items:center}
+  #vp-root .vp-libwrap{display:flex;flex-direction:column;gap:7px;margin-top:4px}
+  #vp-root .vp-librow{display:flex;gap:10px;align-items:flex-start;background:#f9fafb;border:1px solid #e5e7eb;border-radius:10px;padding:9px 11px}
+  #vp-root .vp-librow .lb{flex:1 1 auto;min-width:0}
+  #vp-root .vp-librow .lt{font-weight:700;font-size:13.5px}
+  #vp-root .vp-librow .ln{font-size:12px;color:#9a6a00;margin-top:2px}
+  #vp-root .vp-librow .ld{font-size:12px;color:#6b7280;margin-top:2px}
+  #vp-root .vp-librow .vp-btn{flex:0 0 auto;align-self:center}
   `;
   const s=document.createElement('style'); s.id='vp-styles'; s.textContent=css; document.head.appendChild(s);
 }
@@ -7755,9 +7762,9 @@ function _vpPaintEditor(){
           <div class="vp-hint" style="margin-bottom:10px">The company intro plays first automatically. Use ▲▼ to set the order clients watch.</div>
           <div id="vp-seglist"></div>
           <label id="vp-suggest-label">Suggested for this type</label>
-          <div class="vp-chips" id="vp-suggest"></div>
+          <div class="vp-libwrap" id="vp-suggest"></div>
           <label style="margin-top:14px">All library videos</label>
-          <div class="vp-chips" id="vp-lib-all"></div>
+          <div class="vp-libwrap" id="vp-lib-all"></div>
           <div class="vp-hint" style="margin-top:6px"><button class="vp-btn sm ghost" onclick="_vpOpenLibrary()" style="padding:4px 8px">📚 Manage the shared library →</button></div>
           <label style="margin-top:16px">Or add a new video</label>
           <input type="text" id="vp-ns-title" placeholder="Segment title (e.g. Pricing Strategy)">
@@ -8004,22 +8011,30 @@ function _vpRenderLibraryChips(){
   if(!suggest||!all) return;
   const type=window._vpType||_vpDefaultType();
   const lib=_vpAllLibrary(); window._vpChipIndex=lib;
-  const added=new Set((window._vpSegments||[]).map(s=>(s.url||'').trim()));
+  // Split by proposal type only — never hide a video just because it (or another
+  // video sharing its URL) is already on the proposal, so nothing disappears.
   const forType=[], others=[];
-  lib.forEach((v,i)=>{ if(added.has((v.url||'').trim())) return;
-    if((v.types||[]).includes(type)) forType.push(i); else others.push(i); });
+  lib.forEach((v,i)=>{ if((v.types||[]).includes(type)) forType.push(i); else others.push(i); });
   const lbl=document.getElementById('vp-suggest-label'); if(lbl) lbl.textContent='Suggested for '+_vpTypeLabel(type);
   suggest.innerHTML = forType.length
-    ? forType.map(i=>_vpLibChip(lib[i],i,type)).join('')
+    ? forType.map(i=>_vpLibRow(lib[i],i,type)).join('')
     : '<div class="vp-hint">No videos tagged for this type yet. Add some in 📚 Video Library.</div>';
   all.innerHTML = others.length
-    ? others.map(i=>_vpLibChip(lib[i],i,type)).join('')
+    ? others.map(i=>_vpLibRow(lib[i],i,type)).join('')
     : '<div class="vp-hint">Nothing else in the library.</div>';
 }
-function _vpLibChip(v,i,type){
+// A library video shown as a row in the editor: title (★ if auto), the
+// advisors-only internal note, and the client-facing description, plus an Add
+// button. Rows stay visible after adding so you can keep building the list.
+function _vpLibRow(v,i,type){
   const auto=(v.autoTypes||[]).includes(type);
-  const tip=v.internalNote?('🔒 '+v.internalNote):(v.description||v.url);
-  return `<span class="vp-chip" onclick="_vpAddFromLib(${i})" title="${DD.esc(tip)}"><span class="plus">+</span>${DD.esc(v.title||'(untitled)')}${auto?' ★':''}</span>`;
+  const added=(window._vpSegments||[]).some(s=>(s.title||'')===(v.title||'') && (s.url||'')===(v.url||''));
+  return `<div class="vp-librow"><div class="lb">
+      <div class="lt">${DD.esc(v.title||'(untitled)')}${auto?' ★':''}</div>
+      ${v.internalNote?`<div class="ln">🔒 ${DD.esc(v.internalNote)}</div>`:''}
+      ${v.description?`<div class="ld">${DD.esc(v.description)}</div>`:''}
+    </div>
+    <button class="vp-btn sm" onclick="_vpAddFromLib(${i})">${added?'✓ Add again':'+ Add'}</button></div>`;
 }
 function _vpAddFromLib(i){
   const v=(window._vpChipIndex||_vpAllLibrary())[i]; if(!v) return;
@@ -28262,9 +28277,41 @@ window.mobilePipelineFilter = function(stage){
 
 // ── Service Worker registration ──────────────────────────────────────────────
 if('serviceWorker' in navigator){
+  let _swReloading=false;
+  // When a new service worker takes control, reload once so the new code runs.
+  navigator.serviceWorker.addEventListener('controllerchange', ()=>{
+    if(_swReloading) return; _swReloading=true; location.reload();
+  });
+  function _swShowUpdateBar(reg){
+    if(document.getElementById('sw-update-bar')) return;
+    const bar=document.createElement('div'); bar.id='sw-update-bar';
+    bar.style.cssText='position:fixed;left:50%;transform:translateX(-50%);bottom:18px;z-index:99999;background:#111827;color:#fff;border-radius:10px;padding:10px 14px;display:flex;gap:12px;align-items:center;box-shadow:0 10px 34px rgba(0,0,0,.35);font:600 14px/1.2 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif';
+    bar.innerHTML='<span>A new version of the dashboard is available.</span>';
+    const btn=document.createElement('button'); btn.textContent='Refresh now';
+    btn.style.cssText='background:#da291c;color:#fff;border:0;border-radius:8px;padding:8px 14px;font-weight:700;cursor:pointer';
+    btn.onclick=async()=>{ btn.disabled=true; btn.textContent='Updating…';
+      try{ if(reg && reg.waiting) reg.waiting.postMessage({type:'SKIP_WAITING'}); }catch(e){}
+      try{ const regs=await navigator.serviceWorker.getRegistrations(); await Promise.all(regs.map(r=>r.unregister())); }catch(e){}
+      try{ if(window.caches){ const ks=await caches.keys(); await Promise.all(ks.map(k=>caches.delete(k))); } }catch(e){}
+      location.reload();
+    };
+    bar.appendChild(btn);
+    document.body.appendChild(bar);
+  }
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('/advisor-dashboard/sw.js')
-      .then(r => console.log('[SW] registered:', r.scope))
+      .then(reg => {
+        // An update downloaded in a previous visit may already be waiting.
+        if(reg.waiting && navigator.serviceWorker.controller) _swShowUpdateBar(reg);
+        reg.addEventListener('updatefound', ()=>{
+          const nw=reg.installing; if(!nw) return;
+          nw.addEventListener('statechange', ()=>{
+            if(nw.state==='installed' && navigator.serviceWorker.controller) _swShowUpdateBar(reg);
+          });
+        });
+        // Poll for a new deploy every 2 minutes.
+        setInterval(()=>{ reg.update().catch(()=>{}); }, 120000);
+      })
       .catch(e => console.warn('[SW] registration failed:', e));
   });
 }
