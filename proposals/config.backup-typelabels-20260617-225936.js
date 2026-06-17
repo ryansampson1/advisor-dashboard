@@ -51,10 +51,10 @@ window.DIRTDOG_CONFIG = {
   // that type are offered as one-click suggestions. `id` must be unique;
   // `default` marks the type pre-selected on a new proposal.
   proposalTypes: [
-    { id: "seller",  label: "Traditional Marketing",  default: true },
-    { id: "buyer",   label: "Call for Offers" },
-    { id: "land",    label: "About ELC General" },
-    { id: "general", label: "Buyer Representation" }
+    { id: "seller",  label: "Seller / Listing",      default: true },
+    { id: "buyer",   label: "Buyer" },
+    { id: "land",    label: "Land / Development" },
+    { id: "general", label: "General" }
   ],
 
   /* ---- Shared preset video library (legacy / fallback) ----------------- */
