@@ -29,9 +29,9 @@ window.DIRTDOG_CONFIG = {
   },
 
   /* ---- Broker backend login ------------------------------------------- */
-  // Password your brokers type to open the backend at terra.dirtdog.com/admin
-  // CHANGE THIS before going live.
-  adminPassword: "dirtdog2026",
+  // No separate broker password: the builder runs inside the terra dashboard,
+  // which already requires sign-in. The only password is the per-proposal one
+  // the broker sets for the client (configured per property in the builder).
 
   /* ---- Company intro video -------------------------------------------- */
   // Plays first on EVERY client proposal. Same for everyone.
