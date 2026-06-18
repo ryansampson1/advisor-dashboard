@@ -266,12 +266,23 @@
     ]);
     const app = appMod.initializeApp(FB_CONFIG);
     const db  = fsMod.getFirestore(app);
-    const snap = await fsMod.getDoc(fsMod.doc(db, "proposals", id));
+    // Fetch the proposal and the company intro override in parallel. The intro is
+    // stored once in proposals/__introSettings (publicly gettable) so admins can
+    // change it from the dashboard and it applies to every proposal at once.
+    const [snap, introSnap] = await Promise.all([
+      fsMod.getDoc(fsMod.doc(db, "proposals", id)),
+      fsMod.getDoc(fsMod.doc(db, "proposals", "__introSettings")).catch(function(){ return null; })
+    ]);
     if(!snap.exists()) return null;
     const d = snap.data();
+    let intro = CFG.introVideo || null;
+    if(introSnap && introSnap.exists && introSnap.exists()){
+      const s = introSnap.data();
+      if(s && s.introUrl) intro = { title: s.introTitle || "Welcome", url: s.introUrl };
+    }
     return { projectName:d.projectName, acreage:d.acreage, client:d.client,
       coverDescription:d.coverDescription, photo:d.photo, message:d.message,
-      broker:d.broker||{}, coBrokers:Array.isArray(d.coBrokers)?d.coBrokers:[], intro:CFG.introVideo||null,
+      broker:d.broker||{}, coBrokers:Array.isArray(d.coBrokers)?d.coBrokers:[], intro:intro,
       segments:Array.isArray(d.segments)?d.segments:[], pw:d.pwHash||"" };
   }
 

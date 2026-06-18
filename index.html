@@ -3777,6 +3777,7 @@ let allHrDocs = [];      // HR knowledge documents uploaded by admins: [{id,name
 let allDocuments = [];     // [{id, type, office, url, name, uploadedAt}]
 let allProposals = [];     // Video Proposals: [{id, projectName, acreage, advisorUid, coAdvisorUids, segments, status, ...}]
 let _vpLibrary = [];       // Shared video library: [{id, title, description, url, source, storagePath, types[], autoTypes[], createdByUid, createdByName, created, updated}]
+let _vpIntroSettings = null; // Company intro override: {introTitle, introUrl} from proposals/__introSettings (public-readable so the client viewer can use it)
 let pendingActions = [];
 let activeChart  = null;
 let currentView  = 'board';
@@ -7660,7 +7661,7 @@ function viewVideoProposals(){
 
 function _vpRenderList(){
   const showArch=!!window._vpShowArchived;
-  const list=allProposals.filter(_vpVisible).filter(p=> showArch ? p.status==='archived' : p.status!=='archived');
+  const list=allProposals.filter(p=>p.id!=='__introSettings').filter(_vpVisible).filter(p=> showArch ? p.status==='archived' : p.status!=='archived');
   list.sort((a,b)=>(b.updated||0)-(a.updated||0));
   const cards=list.map(p=>{
     const initial=((p.projectName||'?').trim().charAt(0)||'?').toUpperCase();
@@ -7914,7 +7915,7 @@ async function _vpDelete(id){ if(!confirm('Permanently delete this proposal?')) 
 function _vpViewerBase(){ let u=location.href.split('#')[0].split('?')[0]; u=u.replace(/[^/]*$/,''); return u+'proposals/'; }
 function _vpProposalObj(rec){ const CFG=window.DIRTDOG_CONFIG||{};
   return { v:1, projectName:rec.projectName, acreage:rec.acreage, client:rec.client, coverDescription:rec.coverDescription,
-    photo:rec.photo, message:rec.message, broker:rec.broker, coBrokers:rec.coBrokers||[], intro:CFG.introVideo||null,
+    photo:rec.photo, message:rec.message, broker:rec.broker, coBrokers:rec.coBrokers||[], intro:_vpIntroCur(),
     segments:(rec.segments||[]).map(s=>({title:s.title,url:s.url,description:s.description||''})), pw: rec.pwHash||'' }; }
 // Readable slug from the project name, e.g. "Willow Creek Ranch" -> "Willow_Creek_Ranch"
 function _vpSlug(s){ return (String(s||'').trim().replace(/[^A-Za-z0-9]+/g,'_').replace(/^_+|_+$/g,'')) || 'Proposal'; }
@@ -7966,6 +7967,7 @@ function _vpShareModal(rec){
 let _vpLibBooted=false;
 function bootLibrary(){
   if(_vpLibBooted || !currentUser || !_fbDb || !_fbFns) return; _vpLibBooted=true;
+  _vpLoadIntro();
   const {collection,onSnapshot}=_fbFns;
   try{
     onSnapshot(collection(_fbDb,'videoLibrary'), snap=>{
@@ -7976,6 +7978,37 @@ function bootLibrary(){
       }
     }, e=>console.warn('[library] listener', (e&&e.message)||e));
   }catch(e){ console.warn('[library] boot failed', e); _vpLibBooted=false; }
+}
+
+/* ---- company intro video (editable, stored in proposals/__introSettings) ---- */
+function _vpIntroCur(){
+  const cfg=(window.DIRTDOG_CONFIG&&window.DIRTDOG_CONFIG.introVideo)||{};
+  const s=_vpIntroSettings||{};
+  return { title: (s.introTitle||cfg.title||'Welcome to The Dirt Dog'), url: (s.introUrl||cfg.url||'') };
+}
+async function _vpLoadIntro(){
+  if(!_fbDb||!_fbFns) return;
+  try{ const {doc,getDoc}=_fbFns; const s=await getDoc(doc(_fbDb,'proposals','__introSettings'));
+    _vpIntroSettings = s.exists()? s.data() : null;
+    // refresh the inputs if the library editor is open
+    const ti=document.getElementById('vp-intro-title'), ui=document.getElementById('vp-intro-url');
+    if(ti&&ui){ const c=_vpIntroCur(); ti.value=c.title; ui.value=c.url; }
+  }catch(e){ console.warn('[intro] load', (e&&e.message)||e); }
+}
+async function _vpIntroSave(){
+  if(!_vpCanDeleteLib()){ showToast('Only admins can change the company intro','warning'); return; }
+  const t=(document.getElementById('vp-intro-title').value||'').trim();
+  const u=(document.getElementById('vp-intro-url').value||'').trim();
+  if(!u){ showToast('Add the intro video link','warning'); return; }
+  try{
+    const {doc,getDoc,setDoc}=_fbFns; const ref=doc(_fbDb,'proposals','__introSettings');
+    const existing=await getDoc(ref);
+    const data={ introTitle:t||'Welcome to The Dirt Dog', introUrl:u, kind:'introSettings', updated:Date.now() };
+    if(!existing.exists()){ data.advisorUid=currentUser.uid; data.advisorName=currentUser.name||''; data.created=Date.now(); }
+    await setDoc(ref, sanitizeForFirestore(data), {merge:true});
+    _vpIntroSettings={...(_vpIntroSettings||{}), introTitle:data.introTitle, introUrl:u};
+    showToast('Intro video saved — applies to all proposals','success');
+  }catch(e){ console.error('[intro] save',e); showToast('Save failed: '+(e.message||e),'error'); }
 }
 
 /* ---- proposal types (from config.js, with a safe fallback) ---- */
@@ -8072,10 +8105,21 @@ function _vpAddSegToLib(){
 }
 
 /* ================= LIBRARY MANAGER VIEW ================= */
-function _vpOpenLibrary(){ window._vpView='library'; window._vpLibEditing=null; window._vpLibUpload=null; _vpPaintLibrary(); }
+function _vpOpenLibrary(){ window._vpView='library'; window._vpLibEditing=null; window._vpLibUpload=null; _vpLoadIntro(); _vpPaintLibrary(); }
 function _vpCanDeleteLib(){ return !!(currentUser&&(currentUser.isAdmin||currentUser.isSuperAdmin)); }
 function _vpPaintLibrary(){
   const types=_vpTypes();
+  const introCur=_vpIntroCur();
+  const introCard = _vpCanDeleteLib() ? `
+    <div class="vp-card">
+      <h3 class="vp-sec">Company Intro Video</h3>
+      <div class="vp-hint" style="margin-top:0">Plays first (★ START HERE) on <b>every</b> proposal. Changing it updates all proposals at once. Paste a YouTube/Vimeo/.mp4 link.</div>
+      <div class="vp-row2" style="align-items:end">
+        <div><label>Intro title</label><input type="text" id="vp-intro-title" value="${DD.esc(introCur.title||'')}" placeholder="Welcome to The Dirt Dog"></div>
+        <div><label>Intro video link</label><input type="text" id="vp-intro-url" value="${DD.esc(introCur.url||'')}" placeholder="YouTube, Vimeo, or .mp4 link"></div>
+      </div>
+      <button class="vp-btn primary" style="margin-top:12px" onclick="_vpIntroSave()">Save intro video</button>
+    </div>` : '';
   const editing=window._vpLibEditing? (_vpLibrary.find(v=>v.id===window._vpLibEditing)||null):null;
   const e=editing||{};
   const typeChecks=types.map(t=>`<label class="vp-tcheck"><input type="checkbox" class="vp-ltype" value="${DD.esc(t.id)}" ${ (e.types||[]).includes(t.id)?'checked':''}> ${DD.esc(t.label)}</label>`).join('');
@@ -8083,6 +8127,7 @@ function _vpPaintLibrary(){
   setContent(`<div id="vp-root">
     <div class="vp-edhead"><button class="vp-back" onclick="_vpBack()">← All proposals</button>
       <h2>📚 Video Library</h2></div>
+    ${introCard}
     <div class="vp-egrid">
       <div>
         <div class="vp-card">
@@ -8238,6 +8283,7 @@ window.bootLibrary=bootLibrary; window._vpOpenLibrary=_vpOpenLibrary; window._vp
 window._vpLoadStarter=_vpLoadStarter; window._vpAddFromLib=_vpAddFromLib; window._vpAddSegToLib=_vpAddSegToLib;
 window._vpLibFilePicked=_vpLibFilePicked; window._vpLibSaveClick=_vpLibSaveClick; window._vpLibEdit=_vpLibEdit;
 window._vpLibCancelEdit=_vpLibCancelEdit; window._vpLibDelete=_vpLibDelete; window._vpLibImportBuiltin=_vpLibImportBuiltin;
+window._vpIntroSave=_vpIntroSave;
 window.bootProposals=bootProposals; window._vpAdd=_vpAdd; window._vpEdit=_vpEdit; window._vpBack=_vpBack;
 window._vpToggleArchived=_vpToggleArchived; window._vpUpdatePhoto=_vpUpdatePhoto; window._vpSegMove=_vpSegMove;
 window._vpSegDel=_vpSegDel; window._vpAddPreset=_vpAddPreset; window._vpAddSeg=_vpAddSeg; window._vpSuggestPw=_vpSuggestPw;
