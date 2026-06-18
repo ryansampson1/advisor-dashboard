@@ -7703,6 +7703,28 @@ function _vpInjectStyles(){
   #vp-root .vp-librow .ln{font-size:12px;color:#9a6a00;margin-top:2px}
   #vp-root .vp-librow .ld{font-size:12px;color:#6b7280;margin-top:2px}
   #vp-root .vp-librow .vp-btn{flex:0 0 auto;align-self:center}
+  /* ---- Property Valuation card ---- */
+  #vp-root .vpv-toggle{display:inline-flex;border:1px solid #d1d5db;border-radius:9px;overflow:hidden;margin-bottom:4px}
+  #vp-root .vpv-toggle button{border:0;background:#f9fafb;color:#374151;font-weight:700;font-size:13px;padding:9px 14px;cursor:pointer}
+  #vp-root .vpv-toggle button.on{background:#00857c;color:#fff}
+  #vp-root .vpv-meter{font-size:12px;color:#6b7280;margin-top:4px}
+  #vp-root .vpv-meter b{color:#111827}
+  #vp-root .vpv-meter.warn b{color:#b45309}
+  #vp-root .vpv-meter.good b{color:#059669}
+  #vp-root #vpv-map{width:100%;height:230px;border-radius:11px;border:1px solid #d1d5db;background:#eef2f4;margin-top:8px;overflow:hidden;cursor:crosshair}
+  #vp-root .vpv-coords{font-size:12px;color:#6b7280;margin-top:6px}
+  #vp-root .vpv-coords b{color:#111827}
+  #vp-root .vpv-status{font-size:13px;margin-top:10px;padding:9px 12px;border-radius:9px;background:#f3f4f6;color:#374151;display:none}
+  #vp-root .vpv-status.show{display:block}
+  #vp-root .vpv-status.err{background:#fef2f2;color:#b91c1c}
+  #vp-root .vpv-status.ok{background:#ecfdf5;color:#047857}
+  #vp-root .vpv-bar{height:7px;border-radius:999px;background:#e5e7eb;overflow:hidden;margin-top:8px;display:none}
+  #vp-root .vpv-bar.show{display:block}
+  #vp-root .vpv-bar > i{display:block;height:100%;width:0;background:#00857c;transition:width .25s}
+  #vp-root .vpv-prev{width:100%;border-radius:11px;border:1px solid #d1d5db;background:#000;margin-top:10px;display:none}
+  #vp-root .vpv-prev.show{display:block}
+  #vp-root .vpv-setup{font-size:12px;color:#9a6a00;background:#fffbeb;border:1px solid #fde68a;border-radius:9px;padding:9px 11px;margin-top:8px}
+  #vp-root .vpv-setup b{color:#92400e}
   `;
   const s=document.createElement('style'); s.id='vp-styles'; s.textContent=css; document.head.appendChild(s);
 }
@@ -7880,6 +7902,7 @@ function _vpOpenEditor(id){
   window._vpType = rec && rec.type ? rec.type : _vpDefaultType();
   window._vpAgreement = (rec&&rec.agreement&&rec.agreement.pdfUrl)? JSON.parse(JSON.stringify(rec.agreement)) : null;
   window._vpAgLocalBytes = null;
+  window._vpValuation = (rec&&rec.valuation)? JSON.parse(JSON.stringify(rec.valuation)) : null;
   _vpPaintEditor();
   // On a brand-new proposal, load the default type's ordered starter set.
   if(!rec) _vpBuildStarter(window._vpType, {replace:true, silent:true});
@@ -7922,6 +7945,54 @@ function _vpPaintEditor(){
             <div><label>&nbsp;</label><button class="vp-btn full" onclick="_vpSuggestPw()">Suggest password</button></div>
           </div>
           <div class="vp-hint">The client types this to open their proposal. Leave blank for no password.</div>
+        </div>
+
+        <div class="vp-card" id="vpv-card">
+          <h3 class="vp-sec">Property Valuation</h3>
+          <div class="vp-hint" style="margin-top:0;margin-bottom:10px">Type a short valuation narration, click the property on the map, and generate a flyover video with an AI voiceover. It saves as this proposal's Property Valuation video.</div>
+          <label>Valuation narration</label>
+          <textarea id="vpv-text" placeholder="e.g. Welcome to this exceptional 120-acre parcel in the heart of Pasco County. Based on recent comparable sales, current entitlements, and frontage on Highway 52, we estimate a market value in the range of…" oninput="_vpvOnText()" style="min-height:120px"></textarea>
+          <div class="vpv-meter" id="vpv-meter">About <b>0s</b> of narration · aim for <b>45–90s</b></div>
+
+          <label style="margin-top:14px">Flyover style</label>
+          <div class="vpv-toggle" id="vpv-style">
+            <button type="button" data-style="satellite" onclick="_vpvSetStyle('satellite')">🛰 Satellite pan</button>
+            <button type="button" data-style="3d" onclick="_vpvSetStyle('3d')">⛰ 3D aerial orbit</button>
+          </div>
+
+          <label style="margin-top:14px">Property location <span class="vp-hint" style="display:inline">— click the map to drop the pin</span></label>
+          <div id="vpv-map"></div>
+          <div class="vpv-coords" id="vpv-coords">No location set yet. Click the map, or it will center on the linked deal's address.</div>
+
+          <div class="vp-row2" style="margin-top:12px">
+            <div><label>Voice</label>
+              <select id="vpv-voice">
+                <option value="en-US-Polyglot-1">Deep cowboy (Polyglot-1)</option>
+                <option value="en-US-Neural2-D">Rugged male (Neural2-D)</option>
+                <option value="en-US-Standard-J">Gravelly male (Standard-J)</option>
+                <option value="en-US-Standard-D">Classic male (Standard-D)</option>
+                <option value="en-US-Neural2-A">Neutral male (Neural2-A)</option>
+              </select>
+            </div>
+            <div><label>Drawl (rate)</label>
+              <select id="vpv-rate">
+                <option value="0.80">Slow drawl</option>
+                <option value="0.88" selected>Easy cowboy</option>
+                <option value="1.0">Natural</option>
+              </select>
+            </div>
+          </div>
+
+          <div id="vpv-setup" class="vpv-setup" style="display:none"></div>
+
+          <div class="vp-row2" style="margin-top:12px">
+            <button class="vp-btn full" type="button" id="vpv-preview-voice" onclick="_vpvPreviewVoice()">🔊 Preview voice</button>
+            <button class="vp-btn full primary" type="button" id="vpv-generate" onclick="_vpvGenerate()">🎬 Generate valuation video</button>
+          </div>
+          <div class="vpv-bar" id="vpv-bar"><i></i></div>
+          <div class="vpv-status" id="vpv-status"></div>
+          <video class="vpv-prev" id="vpv-prev" controls playsinline preload="metadata"></video>
+          <button class="vp-btn full ghost" type="button" id="vpv-remove" onclick="_vpvRemove()" style="display:none;margin-top:8px">Remove valuation video</button>
         </div>
 
         <div class="vp-card">
@@ -7991,7 +8062,7 @@ function _vpPaintEditor(){
       </div>
     </div>
   </div>`);
-  _vpRenderSegList(); _vpRenderLibraryChips(); _vpRenderCoAdvisors(); _vpUpdatePhoto(); _vpAgRender();
+  _vpRenderSegList(); _vpRenderLibraryChips(); _vpRenderCoAdvisors(); _vpUpdatePhoto(); _vpAgRender(); _vpvPaint();
 }
 function _vpLocalPresets(){ try{ return JSON.parse(localStorage.getItem('dd_presets')||'[]'); }catch(e){ return []; } }
 function _vpUpdatePhoto(){ const u=((window._vpForm||{}).photo||'').trim(); const el=document.getElementById('vp-photo-prev'); const clr=document.getElementById('vp-photo-clear'); if(!el) return;
@@ -8064,6 +8135,7 @@ function _vpCollectRecord(){
     segments:(window._vpSegments||[]).map(s=>({title:s.title,url:s.url,description:s.description||'',pdfUrl:s.pdfUrl||'',pdfFileName:s.pdfFileName||''})),
     dealId:window._vpDealId||'',
     agreement: (window._vpAgreement&&window._vpAgreement.pdfUrl)? {...window._vpAgreement, dealId:window._vpDealId||''} : null,
+    valuation: (window._vpValuation&&window._vpValuation.videoUrl)? {...window._vpValuation} : null,
     coAdvisorUids:(window._vpCoAdvisors||[]).slice(),
     coBrokers:(window._vpCoAdvisors||[]).map(_vpAdvisorContact).filter(Boolean), broker, office,
     advisorUid: existing?existing.advisorUid:currentUser.uid,
@@ -8981,6 +9053,368 @@ async function _vpLibDelete(id){
   }catch(err){ console.error('[library] delete',err); showToast('Delete failed: '+(err.message||err),'error'); }
 }
 
+/* =======================================================================
+   PROPERTY VALUATION VIDEO MODULE
+   Builds a cinematic flyover of a clicked location with an AI "cowboy"
+   voiceover and saves it as the proposal's Property Valuation video.
+
+   Pipeline (all client-side, advisor-side, one-time per proposal):
+     1. Google Cloud Text-to-Speech (via the tts-proxy worker) reads the
+        narration → base64 MP3 → decoded WebAudio buffer.
+     2. Satellite imagery (Esri World Imagery tiles — keyless and CORS-safe,
+        so the canvas isn't tainted and can be recorded) is stitched onto an
+        offscreen basemap centered on the clicked lat/lng.
+     3. A canvas animates either a flat Ken-Burns pan ("satellite") or a
+        tilted orbiting aerial ("3d"), captured with captureStream(); the
+        decoded voiceover is mixed in via a MediaStreamAudioDestinationNode.
+     4. MediaRecorder records the combined stream. If the browser can't record
+        MP4 directly (Chrome records WebM), ffmpeg.wasm transcodes to H.264
+        MP4 so it plays on iPhones.
+     5. The MP4 is uploaded to Firebase Storage (proposalValuations/{id}) and
+        the download URL is saved on the proposal as `valuation`.
+   ======================================================================= */
+function _vpvCfg(){
+  const d=(window.DIRTDOG_CONFIG&&window.DIRTDOG_CONFIG.valuation)||{};
+  return { mapsApiKey:d.mapsApiKey||'', ttsProxyUrl:d.ttsProxyUrl||'',
+    voice:d.voice||'en-US-Polyglot-1', pitch:(d.pitch!=null?d.pitch:-4), rate:(d.rate!=null?d.rate:0.88),
+    defaultStyle:d.defaultStyle||'satellite', minSeconds:d.minSeconds||45, maxSeconds:d.maxSeconds||90,
+    fps:d.fps||30, width:d.width||1280, height:d.height||720 };
+}
+function _vpvLoadScript(src){ return new Promise((res,rej)=>{ if([].some.call(document.scripts,s=>s.src===src)) return res();
+  const s=document.createElement('script'); s.src=src; s.onload=res; s.onerror=()=>rej(new Error('load '+src)); document.head.appendChild(s); }); }
+function _vpvLoadCss(href){ if([].some.call(document.styleSheets,s=>s.href===href)) return; const l=document.createElement('link'); l.rel='stylesheet'; l.href=href; document.head.appendChild(l); }
+
+/* ---- Paint controls from state, init map, refresh meter/preview ---- */
+function _vpvPaint(){
+  const v=window._vpValuation||{}; const cfg=_vpvCfg();
+  const t=document.getElementById('vpv-text'); if(t) t.value=v.text||'';
+  const vo=document.getElementById('vpv-voice'); if(vo) vo.value=v.voice||cfg.voice;
+  const ra=document.getElementById('vpv-rate'); if(ra) ra.value=String(v.rate||cfg.rate);
+  window._vpvStyle=v.style||cfg.defaultStyle;
+  _vpvSetStyle(window._vpvStyle, true);
+  if(v.lat!=null && v.lng!=null){ window._vpvLat=v.lat; window._vpvLng=v.lng; }
+  _vpvOnText();
+  _vpvRenderCoords();
+  _vpvSetupNotice();
+  // Existing valuation video → show preview + remove button.
+  const prev=document.getElementById('vpv-prev'), rm=document.getElementById('vpv-remove');
+  if(v.videoUrl && prev){ prev.src=v.videoUrl; prev.classList.add('show'); if(rm) rm.style.display=''; }
+  else if(prev){ prev.classList.remove('show'); prev.removeAttribute('src'); if(rm) rm.style.display='none'; }
+  _vpvInitMap();
+}
+function _vpvSetupNotice(){
+  const el=document.getElementById('vpv-setup'); if(!el) return; const cfg=_vpvCfg();
+  if(cfg.ttsProxyUrl){ el.style.display='none'; return; }
+  el.style.display='block';
+  el.innerHTML='<b>One-time setup needed:</b> the voiceover needs the Text-to-Speech proxy. '+
+    'Deploy <code>tts-proxy</code> (see its README) and paste the worker URL into '+
+    '<code>proposals/config.js → valuation.ttsProxyUrl</code>. Satellite imagery is keyless. '+
+    'Until then you can still write narration and pick the location.';
+}
+function _vpvOnText(){
+  const t=((document.getElementById('vpv-text')||{}).value||'').trim();
+  const words=t?t.split(/\s+/).length:0;
+  const cfg=_vpvCfg();
+  // ~150 wpm for a slow cowboy cadence at rate 0.88 → ~2.6 words/sec effective.
+  const rate=parseFloat((document.getElementById('vpv-rate')||{}).value||cfg.rate)||0.88;
+  const wps=(150/60)*rate; const secs=words? Math.round(words/wps):0;
+  const m=document.getElementById('vpv-meter'); if(!m) return;
+  m.className='vpv-meter'+(secs>=cfg.minSeconds&&secs<=cfg.maxSeconds?' good':(secs>cfg.maxSeconds||(secs>0&&secs<cfg.minSeconds)?' warn':''));
+  m.innerHTML='About <b>'+secs+'s</b> of narration · aim for <b>'+cfg.minSeconds+'–'+cfg.maxSeconds+'s</b>'+
+    (words?(' · '+words+' words'):'');
+}
+function _vpvSetStyle(style, noStore){
+  window._vpvStyle=style;
+  document.querySelectorAll('#vpv-style button').forEach(b=>b.classList.toggle('on', b.dataset.style===style));
+}
+function _vpvRenderCoords(){
+  const el=document.getElementById('vpv-coords'); if(!el) return;
+  if(window._vpvLat!=null && window._vpvLng!=null){
+    el.innerHTML='Pin set at <b>'+(+window._vpvLat).toFixed(5)+', '+(+window._vpvLng).toFixed(5)+'</b> — drag or click again to move it.';
+  } else { el.textContent='No location set yet. Click the map, or it will center on the linked deal’s address.'; }
+}
+
+/* ---- Interactive Esri-imagery map picker (keyless) ---- */
+const _VPV_ESRI='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+async function _vpvInitMap(){
+  const div=document.getElementById('vpv-map'); if(!div) return;
+  try{
+    if(typeof window.L==='undefined'){
+      _vpvLoadCss('https://unpkg.com/leaflet@1.9.4/dist/leaflet.css');
+      await _vpvLoadScript('https://unpkg.com/leaflet@1.9.4/dist/leaflet.js');
+    }
+  }catch(e){ div.innerHTML='<div style="padding:14px;color:#9ca3af;font-size:13px">Map couldn’t load. Check your connection.</div>'; return; }
+  if(window._vpvMap){ try{ window._vpvMap.remove(); }catch(_){} window._vpvMap=null; }
+  const start=(window._vpvLat!=null)?[window._vpvLat,window._vpvLng]:[27.95,-82.46];
+  const zoom=(window._vpvLat!=null)?15:6;
+  const map=L.map(div,{attributionControl:false,zoomControl:true}).setView(start,zoom);
+  L.tileLayer(_VPV_ESRI,{maxZoom:19,crossOrigin:true}).addTo(map);
+  window._vpvMap=map; window._vpvMarker=null;
+  if(window._vpvLat!=null) _vpvSetMarker(window._vpvLat,window._vpvLng,false);
+  map.on('click',e=>_vpvSetMarker(e.latlng.lat,e.latlng.lng,false));
+  setTimeout(()=>{ try{ map.invalidateSize(); }catch(_){} },200);
+  // No pin yet but a deal is linked → best-effort geocode its address.
+  if(window._vpvLat==null && window._vpDealId) _vpvGeocodeDeal(map);
+}
+function _vpvSetMarker(lat,lng,fromGeocode){
+  window._vpvLat=lat; window._vpvLng=lng;
+  const map=window._vpvMap; if(map){
+    if(window._vpvMarker){ window._vpvMarker.setLatLng([lat,lng]); }
+    else { window._vpvMarker=L.marker([lat,lng],{draggable:true}).addTo(map);
+      window._vpvMarker.on('dragend',ev=>{ const p=ev.target.getLatLng(); _vpvSetMarker(p.lat,p.lng,false); }); }
+    if(fromGeocode) map.setView([lat,lng],15);
+  }
+  _vpvRenderCoords();
+}
+async function _vpvGeocodeDeal(map){
+  try{
+    const deal=(typeof allDeals!=='undefined'?allDeals:[]).find(d=>d.id===window._vpDealId)
+      ||(typeof visibleDeals==='function'?visibleDeals():[]).find(d=>d.id===window._vpDealId);
+    const addr=deal&&(deal.propertyAddress||deal.address); if(!addr) return;
+    const u='https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&maxLocations=1&singleLine='+encodeURIComponent(addr);
+    const r=await fetch(u); const j=await r.json();
+    const c=j&&j.candidates&&j.candidates[0];
+    if(c&&c.location&&window._vpvLat==null){ _vpvSetMarker(c.location.y,c.location.x,true); }
+  }catch(e){ /* non-fatal */ }
+}
+
+/* ---- Text-to-Speech (via proxy) → ArrayBuffer of MP3 ---- */
+async function _vpvFetchTTS(text){
+  const cfg=_vpvCfg();
+  if(!cfg.ttsProxyUrl) throw new Error('Text-to-Speech proxy not configured (valuation.ttsProxyUrl).');
+  const voice=(document.getElementById('vpv-voice')||{}).value||cfg.voice;
+  const rate=parseFloat((document.getElementById('vpv-rate')||{}).value||cfg.rate)||cfg.rate;
+  const res=await fetch(cfg.ttsProxyUrl,{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({text, voice, languageCode:'en-US', pitch:cfg.pitch, speakingRate:rate})});
+  let data; try{ data=await res.json(); }catch(_){ throw new Error('TTS proxy returned a bad response.'); }
+  if(!res.ok || !data.audioContent) throw new Error((data&&data.error&&data.error.message)||('TTS failed ('+res.status+')'));
+  const bin=atob(data.audioContent); const bytes=new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
+  return bytes.buffer;
+}
+function _vpvPreviewVoice(){
+  const text=((document.getElementById('vpv-text')||{}).value||'').trim()
+    || 'Welcome to this exceptional Florida property. Let me walk you through what makes it worth every acre.';
+  const btn=document.getElementById('vpv-preview-voice'); const orig=btn?btn.textContent:'';
+  if(btn){ btn.disabled=true; btn.textContent='Loading voice…'; }
+  _vpvFetchTTS(text.slice(0,600)).then(async buf=>{
+    const ac=new (window.AudioContext||window.webkitAudioContext)();
+    try{ await ac.resume(); }catch(_){}
+    const ab=await ac.decodeAudioData(buf.slice(0));
+    const src=ac.createBufferSource(); src.buffer=ab; src.connect(ac.destination); src.start();
+    src.onended=()=>{ try{ ac.close(); }catch(_){} };
+  }).catch(e=>{ showToast('Voice preview failed: '+(e.message||e),'error'); })
+    .finally(()=>{ if(btn){ btn.disabled=false; btn.textContent=orig||'🔊 Preview voice'; } });
+}
+
+/* ---- Slippy-tile basemap (Esri imagery, CORS-safe) ---- */
+function _vpvLatLngToWorldPx(lat,lng,z){
+  const n=256*Math.pow(2,z);
+  const x=(lng+180)/360*n;
+  const s=Math.sin(lat*Math.PI/180);
+  const y=(0.5-Math.log((1+s)/(1-s))/(4*Math.PI))*n;
+  return {x,y};
+}
+function _vpvLoadImg(src){ return new Promise((res,rej)=>{ const im=new Image(); im.crossOrigin='anonymous'; im.onload=()=>res(im); im.onerror=()=>rej(new Error('tile')); im.src=src; }); }
+async function _vpvBuildBasemap(lat,lng,zoom,size){
+  const c=document.createElement('canvas'); c.width=size; c.height=size; const ctx=c.getContext('2d');
+  ctx.fillStyle='#0b1f17'; ctx.fillRect(0,0,size,size);
+  const center=_vpvLatLngToWorldPx(lat,lng,zoom);
+  const left=center.x-size/2, top=center.y-size/2;
+  const tx0=Math.floor(left/256), ty0=Math.floor(top/256);
+  const tx1=Math.floor((left+size)/256), ty1=Math.floor((top+size)/256);
+  const max=Math.pow(2,zoom);
+  const jobs=[];
+  for(let tx=tx0; tx<=tx1; tx++){
+    for(let ty=ty0; ty<=ty1; ty++){
+      const wx=((tx%max)+max)%max;
+      if(ty<0||ty>=max) continue;
+      const url=_VPV_ESRI.replace('{z}',zoom).replace('{x}',wx).replace('{y}',ty);
+      const dx=tx*256-left, dy=ty*256-top;
+      jobs.push(_vpvLoadImg(url).then(im=>ctx.drawImage(im,dx,dy)).catch(()=>{}));
+    }
+  }
+  await Promise.all(jobs);
+  return c;
+}
+
+/* ---- Scene drawing ---- */
+function _vpvEase(p){ return p<0.5?2*p*p:1-Math.pow(-2*p+2,2)/2; }
+function _vpvDrawScene(ctx,W,H,bm,style,p,label){
+  const e=_vpvEase(Math.max(0,Math.min(1,p)));
+  ctx.clearRect(0,0,W,H); ctx.fillStyle='#000'; ctx.fillRect(0,0,W,H);
+  const bmS=bm.width;
+  if(style==='3d'){
+    // Tilted orbiting aerial: rotate heading + vertical squash to fake tilt + slow push-in.
+    const sky=ctx.createLinearGradient(0,0,0,H*0.5); sky.addColorStop(0,'#7fb0d6'); sky.addColorStop(1,'#0b1f17');
+    ctx.fillStyle=sky; ctx.fillRect(0,0,W,H);
+    const heading=(-0.22+0.44*e);          // sweep ~25° across the orbit
+    const zoom=(0.92+0.30*e)*(W/bmS);       // push in
+    ctx.save();
+    ctx.translate(W/2, H*0.62);
+    ctx.rotate(heading);
+    ctx.transform(1,0,0,0.58,0,0);          // tilt (vertical compression)
+    ctx.scale(zoom,zoom);
+    ctx.drawImage(bm,-bmS/2,-bmS/2);
+    ctx.restore();
+    // horizon haze + ground vignette
+    const hz=ctx.createLinearGradient(0,0,0,H); hz.addColorStop(0,'rgba(127,176,214,.35)'); hz.addColorStop(0.32,'rgba(0,0,0,0)'); hz.addColorStop(1,'rgba(0,0,0,.45)');
+    ctx.fillStyle=hz; ctx.fillRect(0,0,W,H);
+  } else {
+    // Flat Ken-Burns pan/zoom.
+    const scale=(1.06+0.20*e)*(W/bmS<H/bmS?H/bmS:W/bmS);
+    const dw=bmS*scale, dh=bmS*scale;
+    const panX=(0.08*bmS*scale)*(e-0.5)*2*-0.4;
+    const panY=(0.06*bmS*scale)*(e-0.5)*2*0.4;
+    ctx.drawImage(bm, W/2-dw/2+panX, H/2-dh/2+panY, dw, dh);
+    // center pin
+    const px=W/2, py=H/2-10;
+    ctx.fillStyle='rgba(0,0,0,.25)'; ctx.beginPath(); ctx.ellipse(px,py+18,10,4,0,0,2*Math.PI); ctx.fill();
+    ctx.fillStyle='#da291c'; ctx.beginPath(); ctx.arc(px,py,9,0,2*Math.PI); ctx.fill();
+    ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(px,py,3.4,0,2*Math.PI); ctx.fill();
+    const vg=ctx.createRadialGradient(W/2,H/2,H*0.3,W/2,H/2,H*0.75); vg.addColorStop(0,'rgba(0,0,0,0)'); vg.addColorStop(1,'rgba(0,0,0,.4)');
+    ctx.fillStyle=vg; ctx.fillRect(0,0,W,H);
+  }
+  // Lower-third caption
+  const grad=ctx.createLinearGradient(0,H-150,0,H); grad.addColorStop(0,'rgba(0,0,0,0)'); grad.addColorStop(1,'rgba(0,0,0,.8)');
+  ctx.fillStyle=grad; ctx.fillRect(0,H-150,W,150);
+  ctx.fillStyle='#00b2a9'; ctx.font='700 16px Inter, Arial, sans-serif'; ctx.textBaseline='alphabetic';
+  ctx.fillText('PROPERTY VALUATION', 44, H-58);
+  ctx.fillStyle='#fff'; ctx.font='800 34px "Playfair Display", Georgia, serif';
+  ctx.fillText((label||'Your Property').slice(0,46), 44, H-26);
+}
+
+/* ---- Ensure H.264 MP4 (transcode WebM via ffmpeg.wasm if needed) ---- */
+function _vpvPickMime(){
+  const cands=['video/mp4;codecs=h264,aac','video/mp4','video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm'];
+  for(const m of cands){ try{ if(window.MediaRecorder&&MediaRecorder.isTypeSupported(m)) return m; }catch(_){} }
+  return '';
+}
+async function _vpvLoadFFmpeg(){
+  if(window._vpvFF) return window._vpvFF;
+  await _vpvLoadScript('https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js');
+  const F=window.FFmpeg; if(!F||!F.createFFmpeg) throw new Error('ffmpeg failed to load');
+  const ff=F.createFFmpeg({log:false, corePath:'https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js'});
+  await ff.load();
+  window._vpvFF={ff, fetchFile:F.fetchFile};
+  return window._vpvFF;
+}
+async function _vpvEnsureMp4(blob, mime){
+  if(/^video\/mp4/.test(mime)) return blob;
+  _vpvStatus('Encoding an iPhone-friendly MP4 (one-time, ~30–90s)…');
+  const {ff,fetchFile}=await _vpvLoadFFmpeg();
+  ff.FS('writeFile','in.webm', await fetchFile(blob));
+  await ff.run('-i','in.webm','-c:v','libx264','-preset','veryfast','-pix_fmt','yuv420p','-c:a','aac','-b:a','128k','-movflags','+faststart','out.mp4');
+  const data=ff.FS('readFile','out.mp4');
+  try{ ff.FS('unlink','in.webm'); ff.FS('unlink','out.mp4'); }catch(_){}
+  return new Blob([data.buffer],{type:'video/mp4'});
+}
+
+/* ---- Status / progress helpers ---- */
+function _vpvStatus(msg,kind){ const el=document.getElementById('vpv-status'); if(!el) return;
+  el.className='vpv-status show'+(kind==='err'?' err':kind==='ok'?' ok':''); el.textContent=msg; }
+function _vpvProgress(pct){ const b=document.getElementById('vpv-bar'); if(!b) return;
+  if(pct==null){ b.classList.remove('show'); return; } b.classList.add('show'); b.firstElementChild.style.width=Math.round(pct*100)+'%'; }
+
+/* ---- Main: generate the valuation video ---- */
+async function _vpvGenerate(){
+  const cfg=_vpvCfg();
+  const text=((document.getElementById('vpv-text')||{}).value||'').trim();
+  if(!text){ showToast('Write the valuation narration first','warning'); return; }
+  if(window._vpvLat==null||window._vpvLng==null){ showToast('Click the property location on the map','warning'); return; }
+  if(!cfg.ttsProxyUrl){ _vpvSetupNotice(); showToast('Set up the Text-to-Speech proxy first (see the note in the card)','warning'); return; }
+  if(!(document.getElementById('vp-proj')||{}).value.trim()){ showToast('Add a project name first','warning'); return; }
+  const btn=document.getElementById('vpv-generate'); const orig=btn?btn.textContent:'';
+  if(btn){ btn.disabled=true; btn.textContent='Generating…'; }
+  _vpvProgress(0.04); _vpvStatus('Saving the proposal…');
+  try{
+    // Need a saved proposal id for the storage path.
+    const rec=await _vpSave({silent:true});
+    if(!rec||!rec.id) throw new Error('Could not save the proposal first.');
+
+    _vpvStatus('Recording the cowboy voiceover…'); _vpvProgress(0.12);
+    const ttsBuf=await _vpvFetchTTS(text);
+    const ac=new (window.AudioContext||window.webkitAudioContext)();
+    const audioBuf=await ac.decodeAudioData(ttsBuf.slice(0));
+    const vidSec=Math.max(8, audioBuf.duration+0.8);
+
+    _vpvStatus('Pulling in satellite imagery…'); _vpvProgress(0.24);
+    const style=window._vpvStyle||cfg.defaultStyle;
+    const zoom=(style==='3d')?16:16;
+    const bm=await _vpvBuildBasemap(window._vpvLat, window._vpvLng, zoom, 1536);
+
+    _vpvStatus('Filming the flyover…'); _vpvProgress(0.4);
+    const W=cfg.width, H=cfg.height, fps=cfg.fps;
+    const canvas=document.createElement('canvas'); canvas.width=W; canvas.height=H;
+    const ctx=canvas.getContext('2d');
+    const label=(document.getElementById('vp-proj')||{}).value.trim()||rec.projectName||'Your Property';
+
+    const stream=canvas.captureStream(fps);
+    const aDest=ac.createMediaStreamDestination();
+    const src=ac.createBufferSource(); src.buffer=audioBuf; src.connect(aDest);
+    const aTrack=aDest.stream.getAudioTracks()[0]; if(aTrack) stream.addTrack(aTrack);
+    const mime=_vpvPickMime();
+    const rec2=new MediaRecorder(stream, mime?{mimeType:mime, videoBitsPerSecond:4500000}:undefined);
+    const chunks=[]; rec2.ondataavailable=ev=>{ if(ev.data&&ev.data.size) chunks.push(ev.data); };
+    const stopped=new Promise(r=>{ rec2.onstop=r; });
+
+    // Pre-draw first frame so there's no black flash.
+    _vpvDrawScene(ctx,W,H,bm,style,0,label);
+    try{ await ac.resume(); }catch(_){}   // context may start suspended after awaits
+    rec2.start(); src.start();
+    const t0=performance.now();
+    await new Promise(resolve=>{
+      function frame(now){ const t=(now-t0)/1000; const p=t/vidSec;
+        _vpvDrawScene(ctx,W,H,bm,style,p,label);
+        _vpvProgress(0.4+0.35*Math.min(1,p));
+        if(t<vidSec){ requestAnimationFrame(frame); }
+        else { try{ rec2.stop(); }catch(_){} try{ src.stop(); }catch(_){} resolve(); }
+      }
+      requestAnimationFrame(frame);
+    });
+    await stopped;
+    try{ ac.close(); }catch(_){}
+    const recMime=(rec2.mimeType||mime||'video/webm');
+    let outBlob=new Blob(chunks,{type:recMime.split(';')[0]});
+
+    _vpvProgress(0.78);
+    outBlob=await _vpvEnsureMp4(outBlob, recMime);
+
+    _vpvStatus('Uploading the valuation video…'); _vpvProgress(0.9);
+    const {ref:fbRef,uploadBytes,getDownloadURL}=_fbFns;
+    const path='proposalValuations/'+rec.id+'/'+Date.now()+'.mp4';
+    const snap=await uploadBytes(fbRef(_fbStorage,path), outBlob, {contentType:'video/mp4'});
+    const url=await getDownloadURL(snap.ref);
+
+    window._vpValuation={ text, style, lat:window._vpvLat, lng:window._vpvLng,
+      voice:(document.getElementById('vpv-voice')||{}).value||cfg.voice,
+      rate:parseFloat((document.getElementById('vpv-rate')||{}).value||cfg.rate)||cfg.rate,
+      videoUrl:url, videoStoragePath:path, durationSec:Math.round(vidSec), createdAt:Date.now() };
+    await _vpSave({silent:true});
+
+    const prev=document.getElementById('vpv-prev'); if(prev){ prev.src=url; prev.classList.add('show'); }
+    const rm=document.getElementById('vpv-remove'); if(rm) rm.style.display='';
+    _vpvProgress(1); _vpvStatus('Done — saved as this proposal’s Property Valuation video.','ok');
+    showToast('Property Valuation video created','success');
+    setTimeout(()=>_vpvProgress(null),1200);
+  }catch(e){
+    console.error('[valuation] generate',e);
+    _vpvStatus('Failed: '+(e.message||e),'err'); _vpvProgress(null);
+    showToast('Valuation video failed: '+(e.message||e),'error');
+  }finally{ if(btn){ btn.disabled=false; btn.textContent=orig||'🎬 Generate valuation video'; } }
+}
+function _vpvRemove(){
+  if(!window._vpValuation) return;
+  if(!confirm('Remove the Property Valuation video from this proposal?')) return;
+  const path=window._vpValuation.videoStoragePath;
+  window._vpValuation=null;
+  const prev=document.getElementById('vpv-prev'); if(prev){ prev.classList.remove('show'); prev.removeAttribute('src'); }
+  const rm=document.getElementById('vpv-remove'); if(rm) rm.style.display='none';
+  _vpvStatus('Removed. Save the proposal to apply.');
+  if(path){ try{ const {ref,deleteObject}=_fbFns; deleteObject(ref(_fbStorage,path)).catch(()=>{}); }catch(_){} }
+  _vpSave({silent:true}).then(()=>showToast('Valuation removed','info'));
+}
+
 window.bootLibrary=bootLibrary; window._vpOpenLibrary=_vpOpenLibrary; window._vpApplyType=_vpApplyType;
 window._vpLoadStarter=_vpLoadStarter; window._vpAddFromLib=_vpAddFromLib; window._vpAddSegToLib=_vpAddSegToLib;
 window._vpLibFilePicked=_vpLibFilePicked; window._vpLibSaveClick=_vpLibSaveClick; window._vpLibEdit=_vpLibEdit;
@@ -8996,6 +9430,8 @@ window._vpOnDealChange=_vpOnDealChange; window._vpToggleCo=_vpToggleCo; window._
 window._vpGenerate=_vpGenerate; window._vpQuickLink=_vpQuickLink; window._vpArchive=_vpArchive; window._vpRestore=_vpRestore;
 window._vpDelete=_vpDelete;
 window._vpPhotoFile=_vpPhotoFile; window._vpPhotoClear=_vpPhotoClear;
+window._vpvOnText=_vpvOnText; window._vpvSetStyle=_vpvSetStyle; window._vpvPreviewVoice=_vpvPreviewVoice;
+window._vpvGenerate=_vpvGenerate; window._vpvRemove=_vpvRemove;
 window._vpAgUpload=_vpAgUpload; window._vpAgPlace=_vpAgPlace; window._vpAgRemove=_vpAgRemove;
 window._vpSigOpen=_vpSigOpen; window._vpSigFinalize=_vpSigFinalize;
 

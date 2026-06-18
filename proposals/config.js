@@ -135,6 +135,43 @@ window.DIRTDOG_CONFIG = {
     { id: "bio-austin",      title: "Bio Austin",      url: "", types: [], autoTypes: [] },
     { id: "bio-baxter",      title: "Bio Baxter",      url: "", types: [], autoTypes: [] },
     { id: "bio-andrew",      title: "Bio Andrew",      url: "", types: [], autoTypes: [] }
-  ]
+  ],
+
+  /* ---- Property Valuation video (flyover + AI voiceover) --------------- */
+  // Powers the "Property Valuation" card in the proposal builder. The advisor
+  // types a short valuation narration and clicks a spot on the map; the builder
+  // renders a cinematic flyover of that location, speaks the narration with a
+  // deep "cowboy" voice, records it to an iPhone-friendly H.264 MP4, uploads it
+  // to Firebase Storage and attaches it to the proposal as the Property
+  // Valuation video.
+  valuation: {
+    // Google Maps API key (a normal browser key, referrer-restricted to
+    // terra.dirtdog.com). Enable "Maps Static API" on the same Cloud project.
+    // Used to fetch the high-res satellite imagery the flyover is built from.
+    // Leave blank until you've created the key — the card explains what to add.
+    mapsApiKey: "",
+
+    // Text-to-Speech proxy. Deploy /tts-proxy as a Cloudflare Worker (see
+    // tts-proxy/README) and paste its URL here. The worker keeps the Google
+    // Cloud Text-to-Speech key server-side (the org policy forbids referrer
+    // restrictions on those keys, so it can't live in the page).
+    ttsProxyUrl: "https://elc-tts-proxy.dirtdog.workers.dev",
+
+    // Voice tuning — defaults chosen for a deep, rugged "cowboy narrator" feel.
+    // voice    : any Google Cloud TTS voice name. Deep male picks:
+    //            en-US-Polyglot-1 (deep), en-US-Neural2-D, en-US-Standard-D/J.
+    // pitch    : semitones, -20..20 (lower = deeper). rate: 0.25..2 (slower = drawl).
+    voice: "en-US-Polyglot-1",
+    pitch: -4.0,
+    rate: 0.88,
+
+    // Flyover render defaults.
+    defaultStyle: "satellite",   // "satellite" (flat pan/zoom) or "3d" (tilted aerial orbit)
+    minSeconds: 45,              // target valuation length window shown in the UI
+    maxSeconds: 90,
+    fps: 30,
+    width: 1280,
+    height: 720
+  }
 };
 
