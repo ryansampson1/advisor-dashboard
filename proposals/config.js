@@ -57,52 +57,84 @@ window.DIRTDOG_CONFIG = {
     { id: "general", label: "Buyer Representation" }
   ],
 
-  /* ---- Shared preset video library (legacy / fallback) ----------------- */
-  // The live library now lives in the `videoLibrary` Firestore collection and
-  // is managed inside the dashboard (🎬 Video Proposals → 📚 Video Library):
-  // any member can add/upload, edit titles, and tag videos by proposal type;
-  // admins can delete. These config presets remain as a built-in fallback that
-  // every advisor sees even before the Firestore library is populated. They're
-  // tagged as Seller suggestions but NOT auto-included (the URLs below are
-  // placeholders — replace them, or add the real videos in the library and
-  // check "auto-include for Seller" to make them pull in automatically).
-  // id must be unique. Supports YouTube, Vimeo, or direct .mp4 links.
+  /* ---- Starter sets (ordered "Load starter set" templates) ------------- */
+  // When an advisor picks a proposal type (or clicks "↻ Load starter set"),
+  // the builder fills the video list with these titles IN THIS ORDER. Each
+  // title is matched (case-insensitive) against the Video Library; if a video
+  // with that title exists, its link is used. Two special tokens resolve to the
+  // selected advisors' bio videos:
+  //   "@advisorBio"   → the proposal owner's bio video (e.g. "Bio Sampson")
+  //   "@coAdvisorBio" → the first co-advisor's bio video (skipped if no co-advisor)
+  // The company Intro Video always plays first automatically, so it's NOT listed
+  // here. Advisors can still reorder, add, or remove anything afterward.
+  // Only the first two types have starter sets for now; add "land"/"general" later.
+  starterSets: {
+    seller: [
+      "@advisorBio", "@coAdvisorBio",
+      "Why Land is Different", "Whats My Land Worth", "Whos the buyer",
+      "Our marketing machine", "AI Edge", "Down to Earth", "The Roadmap",
+      "Success Stories", "Monthly Report", "Success Fee 6%",
+      "Getting to closing", "What other owners say", "We are ready"
+    ],
+    buyer: [
+      "@advisorBio", "@coAdvisorBio",
+      "Why Land is Different- 5 Es", "Whats My Land Worth", "Whos the buyer",
+      "Our marketing machine", "AI Edge", "Down to Earth", "Call for Offers",
+      "Success Stories", "Monthly Report", "Success Fee 3%",
+      "Getting to closing", "What other owners say", "We are ready"
+    ]
+  },
+
+  /* ---- Shared preset video library (title catalog) --------------------- */
+  // These are the real video TITLES used by the starter sets above. Each shows
+  // up in the Video Library immediately (so the catalog is complete before any
+  // files are uploaded) and is matched by title when a starter set loads. The
+  // urls are intentionally blank: in the dashboard's 📚 Video Library, an admin
+  // clicks "Set up starter library" once to copy these into the editable
+  // library, then uploads the actual video file to each one. `types` controls
+  // which proposal types list a video under "Suggested for this type"; ordering
+  // is handled by `starterSets`, so autoTypes stays empty here.
+  // The live, editable copies live in the `videoLibrary` Firestore collection.
   presets: [
-    {
-      id: "marketing-plan",
-      title: "Our Marketing Plan",
-      description: "How we put your property in front of the right buyers.",
-      url: "https://www.youtube.com/watch?v=ScMzIvxBSi4",
-      types: ["seller"], autoTypes: []
-    },
-    {
-      id: "pricing-strategy",
-      title: "Pricing Strategy",
-      description: "How we price to sell for the most, in the least time.",
-      url: "https://www.youtube.com/watch?v=ScMzIvxBSi4",
-      types: ["seller"], autoTypes: []
-    },
-    {
-      id: "track-record",
-      title: "Our Track Record",
-      description: "Recent sales and happy clients in your area.",
-      url: "https://www.youtube.com/watch?v=ScMzIvxBSi4",
-      types: ["seller", "buyer"], autoTypes: []
-    },
-    {
-      id: "photography",
-      title: "Professional Photography & Video",
-      description: "The production quality that makes listings stand out.",
-      url: "https://www.youtube.com/watch?v=ScMzIvxBSi4",
-      types: ["seller"], autoTypes: []
-    },
-    {
-      id: "next-steps",
-      title: "Next Steps",
-      description: "What happens after you choose to work with us.",
-      url: "https://www.youtube.com/watch?v=ScMzIvxBSi4",
-      types: ["seller", "buyer", "land", "general"], autoTypes: []
-    }
+    /* — Traditional Marketing + Call for Offers segment videos — */
+    { id: "why-land-different",     title: "Why Land is Different",       url: "", types: ["seller"],          autoTypes: [] },
+    { id: "why-land-different-5es", title: "Why Land is Different- 5 Es", url: "", types: ["buyer"],           autoTypes: [] },
+    { id: "whats-my-land-worth",    title: "Whats My Land Worth",         url: "", types: ["seller","buyer"], autoTypes: [] },
+    { id: "whos-the-buyer",         title: "Whos the buyer",              url: "", types: ["seller","buyer"], autoTypes: [] },
+    { id: "our-marketing-machine",  title: "Our marketing machine",       url: "", types: ["seller","buyer"], autoTypes: [] },
+    { id: "ai-edge",                title: "AI Edge",                     url: "", types: ["seller","buyer"], autoTypes: [] },
+    { id: "down-to-earth",          title: "Down to Earth",               url: "", types: ["seller","buyer"], autoTypes: [] },
+    { id: "the-roadmap",            title: "The Roadmap",                 url: "", types: ["seller"],          autoTypes: [] },
+    { id: "call-for-offers",        title: "Call for Offers",             url: "", types: ["buyer"],           autoTypes: [] },
+    { id: "success-stories",        title: "Success Stories",             url: "", types: ["seller","buyer"], autoTypes: [] },
+    { id: "monthly-report",         title: "Monthly Report",              url: "", types: ["seller","buyer"], autoTypes: [] },
+    { id: "success-fee-6",          title: "Success Fee 6%",              url: "", types: ["seller"],          autoTypes: [] },
+    { id: "success-fee-3",          title: "Success Fee 3%",              url: "", types: ["buyer"],           autoTypes: [] },
+    { id: "getting-to-closing",     title: "Getting to closing",          url: "", types: ["seller","buyer"], autoTypes: [] },
+    { id: "what-other-owners-say",  title: "What other owners say",       url: "", types: ["seller","buyer"], autoTypes: [] },
+    { id: "we-are-ready",           title: "We are ready",                url: "", types: ["seller","buyer"], autoTypes: [] },
+
+    /* — Other library videos (available, not tied to a proposal type) — */
+    { id: "success-fee-4-6",  title: "Success Fee 4%/6%",      url: "", types: [], autoTypes: [] },
+    { id: "tougher-than-dirt", title: "Tougher Than Dirt",     url: "", types: [], autoTypes: [] },
+    { id: "behind-the-name",  title: "Behind the Name",        url: "", types: [], autoTypes: [] },
+    { id: "30th-anniversary", title: "30th Anniversary Video", url: "", types: [], autoTypes: [] },
+
+    /* — Advisor bio videos (auto-pulled into the Advisor/Co-advisor Bio slots) — */
+    { id: "bio-sampson",     title: "Bio Sampson",     url: "", types: [], autoTypes: [] },
+    { id: "bio-matt",        title: "Bio Matt",        url: "", types: [], autoTypes: [] },
+    { id: "bio-eshenbaugh",  title: "Bio Eshenbaugh",  url: "", types: [], autoTypes: [] },
+    { id: "bio-colliers",    title: "Bio Colliers",    url: "", types: [], autoTypes: [] },
+    { id: "bio-bowers",      title: "Bio Bowers",      url: "", types: [], autoTypes: [] },
+    { id: "bio-ward",        title: "Bio Ward",        url: "", types: [], autoTypes: [] },
+    { id: "bio-streitmatter", title: "Bio Streitmatter", url: "", types: [], autoTypes: [] },
+    { id: "bio-tyler",       title: "Bio Tyler",       url: "", types: [], autoTypes: [] },
+    { id: "bio-strahan",     title: "Bio Strahan",     url: "", types: [], autoTypes: [] },
+    { id: "bio-jack",        title: "Bio Jack",        url: "", types: [], autoTypes: [] },
+    { id: "bio-richie",      title: "Bio Richie",      url: "", types: [], autoTypes: [] },
+    { id: "bio-austin",      title: "Bio Austin",      url: "", types: [], autoTypes: [] },
+    { id: "bio-baxter",      title: "Bio Baxter",      url: "", types: [], autoTypes: [] },
+    { id: "bio-andrew",      title: "Bio Andrew",      url: "", types: [], autoTypes: [] }
   ]
 };
 

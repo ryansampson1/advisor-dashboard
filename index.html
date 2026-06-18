@@ -7023,6 +7023,27 @@ const ADVISOR_BIOS = {
   'vaike@thedirtdog.com': "With over 25 years of experience in residential real estate, Vaike O'Grady understands the key components of successful community development. She played a significant role in the success of notable Tampa-area communities including FishHawk Ranch, MiraBay, Bexley, and Waterset.\n\nVaike graduated Summa Cum Laude from Loyola University in Baltimore and has held roles with The Ryland Group, Newland Communities, and as Regional Director for Metrostudy (Zonda). She is an active member of the Urban Land Institute and Tampa Bay Builders Association."
 };
 
+// Maps each advisor's email to the title of their bio VIDEO in the shared Video
+// Library (see proposals/config.js presets). Used by the Video Proposals builder
+// to auto-fill the "Advisor Bio" / "Co-advisor Bio" slots when a starter set is
+// loaded. Edit a value here if an advisor's bio video is titled differently.
+const ADVISOR_BIO_VIDEOS = {
+  'jack@thedirtdog.com':    'Bio Jack',
+  'bill@thedirtdog.com':    'Bio Eshenbaugh',
+  'ryan@thedirtdog.com':    'Bio Sampson',
+  'michael@thedirtdog.com': 'Bio Strahan',
+  'chris@thedirtdog.com':   'Bio Bowers',
+  'chase@thedirtdog.com':   'Bio Colliers',
+  'baxter@thedirtdog.com':  'Bio Baxter',
+  'austin@thedirtdog.com':  'Bio Austin',
+  'andrew@thedirtdog.com':  'Bio Andrew',
+  'josh@thedirtdog.com':    'Bio Streitmatter',
+  'richie@thedirtdog.com':  'Bio Richie',
+  'alex@thedirtdog.com':    'Bio Ward',
+  'matt@thedirtdog.com':    'Bio Matt',
+  'tyler@thedirtdog.com':   'Bio Tyler'
+};
+
       case 'press_release':{
         // Skip press release for Buyer Rep deals — marketing handled differently
         if(deal.representation === 'buyer') break;
@@ -7528,6 +7549,35 @@ function bootProposals(){
       onSnapshot(query(collection(_fbDb,'proposals'), where('coAdvisorUids','array-contains',uid)), handle('co'), onErr('co'));
     }
   }catch(e){ console.warn('[proposals] boot failed', e); _vpBooted=false; }
+  _vpBootSignatures();
+}
+
+/* ---- Signed-agreement inbox: listen for client signatures awaiting finalize ---- */
+let _vpSigBooted=false, _vpPendingSigs=[], _vpSigSeen=new Set();
+function _vpBootSignatures(){
+  if(_vpSigBooted || !currentUser || !_fbDb || !_fbFns) return; _vpSigBooted=true;
+  const {collection,onSnapshot,query,where}=_fbFns;
+  try{
+    onSnapshot(query(collection(_fbDb,'signatureSubmissions'), where('status','==','pending')), snap=>{
+      _vpPendingSigs=snap.docs.map(d=>({id:d.id,...d.data()})).filter(_vpSigActable);
+      _vpPendingSigs.forEach(s=>{ if(!_vpSigSeen.has(s.id)){ _vpSigSeen.add(s.id);
+        showToast('✍️ '+(s.signerName||'A client')+' signed the agreement for '+(s.projectName||'a proposal')+' — review to finalize','success',7000); } });
+      _vpSigUpdateBadge();
+      if(currentView==='videoProposals' && window._vpView==='list') _vpRenderList();
+    }, e=>console.warn('[signatures] listener', e&&e.message||e));
+  }catch(e){ console.warn('[signatures] boot failed', e); _vpSigBooted=false; }
+}
+// Can the current user finalize this submission? (admins/staff, or the proposal's advisor/co-advisor.)
+function _vpSigActable(s){
+  if(currentUser.isAdmin||currentUser.isSuperAdmin||currentUser.isStaff||currentUser.isOfficeManager) return true;
+  const p=allProposals.find(x=>x.id===s.proposalId);
+  if(!p) return false;
+  return p.advisorUid===currentUser.uid || (Array.isArray(p.coAdvisorUids)&&p.coAdvisorUids.includes(currentUser.uid));
+}
+function _vpSigUpdateBadge(){
+  const b=document.getElementById('nav-badge-videoProposals'); if(!b) return;
+  const n=_vpPendingSigs.length;
+  if(n){ b.textContent=n; b.style.display=''; } else { b.style.display='none'; }
 }
 
 function _vpAdminView(){ return (currentUser.isAdmin||currentUser.isSuperAdmin||currentUser.isStaff) && !adminViewAsAdvisor && !staffViewMode; }
@@ -7687,8 +7737,123 @@ function _vpRenderList(){
       <button class="vp-btn" onclick="_vpOpenLibrary()">📚 Video Library</button>
       <button class="vp-btn primary lg" onclick="_vpAdd()">+ Add Property</button>
     </div>
+    ${_vpSigBanner()}
     <div class="vp-pgrid">${cards||`<div class="vp-empty">${showArch?'No archived proposals.':'No proposals yet. Click <b>+ Add Property</b> to build your first one.'}</div>`}</div>
   </div>`);
+}
+function _vpSigBanner(){
+  if(!_vpPendingSigs.length) return '';
+  const rows=_vpPendingSigs.map(s=>{
+    const when=s.signedAt?new Date(s.signedAt).toLocaleString():'';
+    return `<div style="display:flex;align-items:center;gap:12px;padding:11px 14px;border-top:1px solid #fde2c8">
+      <span style="font-size:20px">✍️</span>
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:800;color:#7c2d12">${DD.esc(s.signerName||'Client')} signed — ${DD.esc(s.projectName||'(proposal)')}</div>
+        <div style="font-size:12px;color:#9a3412">${DD.esc(when)}</div>
+      </div>
+      <button class="vp-btn sm primary" onclick="_vpSigOpen('${s.id}')">Review &amp; finalize</button>
+    </div>`;
+  }).join('');
+  return `<div style="background:#fff7ed;border:1px solid #fdba74;border-radius:14px;margin-bottom:16px;overflow:hidden">
+    <div style="padding:11px 14px;font-weight:800;color:#7c2d12">📥 Signed agreements awaiting you (${_vpPendingSigs.length})</div>
+    ${rows}</div>`;
+}
+async function _vpSigDownloadUrl(s){
+  if(s._url) return s._url;
+  try{ const {ref,getDownloadURL}=_fbFns; s._url=await getDownloadURL(ref(_fbStorage,s.pdfStoragePath)); return s._url; }
+  catch(e){ console.warn('[signatures] url',e); return ''; }
+}
+async function _vpSigOpen(id){
+  const s=_vpPendingSigs.find(x=>x.id===id); if(!s){ showToast('That submission is no longer pending','info'); return; }
+  const prop=allProposals.find(p=>p.id===s.proposalId)||{};
+  const dealId=s.dealId||prop.dealId||'';
+  const deal=dealId?allDeals.find(d=>d.id===dealId):null;
+  const url=await _vpSigDownloadUrl(s);
+  const when=s.signedAt?new Date(s.signedAt).toLocaleString():'';
+  const dealLine=deal
+    ? `Linked deal: <b>${DD.esc(deal.propertyAddress||deal.projectName||deal.id)}</b> — currently in <b>${DD.esc(deal.stage||'(no stage)')}</b>`
+    : (dealId?`Linked deal id <b>${DD.esc(dealId)}</b> not found in your view.`:`<b style="color:#b45309">No deal is linked to this proposal.</b> Finalizing will still create a task and email; link a deal on the proposal to auto-move the pipeline.`);
+  const bg=document.createElement('div'); bg.className='vp-modal-bg'; bg.onclick=e=>{ if(e.target===bg) bg.remove(); };
+  bg.innerHTML=`<div class="vp-modal"><button class="x" onclick="this.closest('.vp-modal-bg').remove()">×</button>
+    <h3>✍️ Finalize signed agreement</h3>
+    <div class="vp-hint" style="margin-bottom:10px"><b>${DD.esc(s.signerName||'Client')}</b> signed <b>${DD.esc(s.projectName||'(proposal)')}</b><br>${DD.esc(when)}</div>
+    <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:11px 13px;font-size:13px;color:#334155;margin-bottom:14px;line-height:1.5">${dealLine}</div>
+    ${url?`<a class="vp-btn full" href="${DD.esc(url)}" target="_blank" rel="noopener" style="text-decoration:none;text-align:center;margin-bottom:8px">📄 View signed PDF</a>`:'<div class="vp-hint" style="color:#b91c1c">Could not load the signed PDF link.</div>'}
+    <div class="vp-hint" style="margin:10px 0 4px"><b>Finalize</b> will${deal?' move the deal to <b>Listing</b>,':''} attach the signed PDF to the deal, create a counter-sign task, and notify the advisor.</div>
+    <div class="vp-share-row" style="margin-top:8px">
+      <button class="vp-btn primary" id="vpsig-final">✓ Finalize listing</button>
+      ${url?`<button class="vp-btn" id="vpsig-email">✉ Email advisor</button>`:''}
+      <button class="vp-btn ghost" id="vpsig-dismiss">Dismiss</button>
+    </div></div>`;
+  document.body.appendChild(bg);
+  bg.querySelector('#vpsig-final').onclick=()=>{ bg.remove(); _vpSigFinalize(id); };
+  const em=bg.querySelector('#vpsig-email'); if(em) em.onclick=()=>_vpSigEmail(s,deal,url);
+  bg.querySelector('#vpsig-dismiss').onclick=()=>{ if(confirm('Dismiss without starting the listing? The agreement stays in Storage but no pipeline changes are made.')){ bg.remove(); _vpSigMarkProcessed(id,'',{dismissed:true}); } };
+}
+function _vpSigEmail(s,deal,url){
+  const email=(deal&&deal.advisorEmail)|| (allProposals.find(p=>p.id===s.proposalId)||{}).advisorEmail || '';
+  const subj=encodeURIComponent('Signed listing agreement — '+(s.projectName||''));
+  const body=encodeURIComponent('Hi,\n\n'+(s.signerName||'The client')+' has e-signed the listing agreement for '+(s.projectName||'')+'.\n\nSigned copy: '+(url||'(open the dashboard to view)')+'\n\nPlease counter-sign to complete the listing.');
+  window.location.href='mailto:'+encodeURIComponent(email)+'?subject='+subj+'&body='+body;
+}
+async function _vpSigFinalize(id){
+  const s=_vpPendingSigs.find(x=>x.id===id); if(!s){ showToast('No longer pending','info'); return; }
+  const prop=allProposals.find(p=>p.id===s.proposalId)||{};
+  const dealId=s.dealId||prop.dealId||'';
+  const deal=dealId?allDeals.find(d=>d.id===dealId):null;
+  showToast('Finalizing…','info',2500);
+  try{
+    const url=await _vpSigDownloadUrl(s);
+    const fname=s.fileName||((s.projectName||'Listing').replace(/[^A-Za-z0-9]+/g,'_')+'_Signed_Listing_Agreement.pdf');
+    const addr=deal?(deal.propertyAddress||deal.projectName||''):(s.projectName||'');
+    const due=new Date(Date.now()+2*864e5).toISOString().slice(0,10);
+    if(deal){
+      const oldStage=deal.stage||'';
+      const proposalish=['','Prospect','Proposal To Do','Proposal Outstanding','Buyer Opportunities'];
+      const moveToListing=proposalish.includes(oldStage);
+      const upd={ updatedAt:Date.now(), listingAgreementUrl:url, listingAgreementFileName:fname };
+      if(moveToListing){
+        const _sh=[...(deal.stageHistory||[])];
+        if(!_sh.length && deal.stageEnteredAt) _sh.push({stage:oldStage,enteredAt:deal.stageEnteredAt});
+        if(_sh.length){ const _l=_sh[_sh.length-1]; if(!_l.exitedAt){ _l.exitedAt=Date.now(); _l.durationMs=_l.exitedAt-_l.enteredAt; } }
+        _sh.push({stage:'Listing',enteredAt:Date.now()});
+        upd.stage='Listing'; upd.stageEnteredAt=Date.now(); upd.stageHistory=_sh;
+        if(!deal.listingEnteredAt) upd.listingEnteredAt=Date.now();
+      }
+      await Store.updateDeal(deal.id,upd); Object.assign(deal,upd);
+      if(moveToListing && typeof window._logStageChange==='function'){ try{ window._logStageChange(deal.id,oldStage,'Listing'); }catch(e){} }
+    }
+    // Counter-sign task (notifies the advisor; carries the signed PDF)
+    await Store.createTask({
+      title:'✍️ Counter-sign listing agreement — '+(addr||s.projectName||''),
+      description:(s.signerName||'The client')+' e-signed the listing agreement via their video proposal.\n\n□ Review the signed agreement\n□ Counter-sign\n□ Save the fully-executed copy to the deal\n□ Confirm listing is live\n\nSigned copy: '+(url||'(open Video Proposals to view)'),
+      assignedTo: deal?deal.advisorUid:(prop.advisorUid||currentUser.uid),
+      assignedToName: deal?(deal.advisorName||''):(prop.advisorName||''),
+      assignedToEmail: deal?(deal.advisorEmail||''):(prop.advisorEmail||''),
+      dealId: deal?deal.id:'', dealAddress: addr||'',
+      dueDate: due, status:'pending', taskType:'countersign',
+      attachmentUrl: url||'', attachmentName: fname,
+      createdBy: currentUser.uid||'system', createdByName:'E-Sign', createdAt:Date.now()
+    });
+    if(deal){
+      await Store.createTask({
+        title:'🆕 New listing kickoff — '+addr,
+        description:'Listing agreement signed — kick off the new listing for '+addr+'.\n\n□ Order signage\n□ Set up marketing (photos/video, MLS, web)\n□ Confirm listing price & commission\n□ Enter critical dates / listing expiration\n□ Notify the team',
+        assignedTo: deal.advisorUid||null, assignedToName: deal.advisorName||'', assignedToEmail: deal.advisorEmail||'',
+        dealId: deal.id, dealAddress: addr, dueDate: due, status:'pending', taskType:'new_listing',
+        createdBy: currentUser.uid||'system', createdByName:'E-Sign', createdAt:Date.now()
+      });
+    }
+    await _vpSigMarkProcessed(id, deal?deal.id:'', {});
+    showToast(deal?('✓ '+(addr||'Deal')+' moved to Listing — tasks created'):'✓ Finalized — counter-sign task created','success',6000);
+  }catch(e){ console.error('[signatures] finalize',e); showToast('Finalize failed: '+(e.message||e),'error',6000); }
+}
+async function _vpSigMarkProcessed(id, dealId, extra){
+  try{ const {doc,setDoc}=_fbFns;
+    await setDoc(doc(_fbDb,'signatureSubmissions',id),{ status:(extra&&extra.dismissed)?'dismissed':'processed',
+      processedBy:currentUser.uid||'', processedByName:currentUser.name||'', processedAt:Date.now(), dealId:dealId||'' },{merge:true});
+    if(extra&&extra.dismissed) showToast('Dismissed','info');
+  }catch(e){ console.warn('[signatures] mark',e); showToast('Could not update status: '+(e.message||e),'error'); }
 }
 
 function _vpAdd(){ _vpOpenEditor(null); }
@@ -7705,9 +7870,10 @@ function _vpOpenEditor(id){
   window._vpForm = rec ? {proj:rec.projectName||'',acre:rec.acreage||'',client:rec.client||'',coverdesc:rec.coverDescription||'',photo:rec.photo||'',message:rec.message||'',pw:rec.pwPlain||''} : {};
   window._vpBroker = (rec&&rec.broker)? {...rec.broker} : _vpDefaultBroker();
   window._vpType = rec && rec.type ? rec.type : _vpDefaultType();
+  window._vpAgreement = (rec&&rec.agreement&&rec.agreement.pdfUrl)? JSON.parse(JSON.stringify(rec.agreement)) : null;
   _vpPaintEditor();
-  // On a brand-new proposal, auto-pull the default type's "auto-include" videos.
-  if(!rec) _vpAutoPull(window._vpType, true);
+  // On a brand-new proposal, load the default type's ordered starter set.
+  if(!rec) _vpBuildStarter(window._vpType, {replace:true, silent:true});
 }
 function _vpPaintEditor(){
   const f=window._vpForm||{}, b=window._vpBroker||{};
@@ -7788,6 +7954,17 @@ function _vpPaintEditor(){
           <div class="vp-chips" id="vp-coadv"></div>
         </div>
         <div class="vp-card">
+          <h3 class="vp-sec">Listing Agreement (E-Sign)</h3>
+          <div class="vp-hint" style="margin-top:0;margin-bottom:10px">Upload the listing agreement PDF and mark where the client signs &amp; dates. A “Review &amp; Sign” button appears at the bottom of their proposal. When they sign, it lands in your dashboard to counter-sign and starts the listing.</div>
+          <input type="file" id="vp-ag-file" accept="application/pdf,.pdf" style="display:none" onchange="_vpAgUpload(this.files&&this.files[0])">
+          <div id="vp-ag-status"></div>
+          <div class="vp-row2" style="margin-top:10px">
+            <button class="vp-btn full" type="button" onclick="document.getElementById('vp-ag-file').click()">📄 Upload agreement PDF</button>
+            <button class="vp-btn full" type="button" id="vp-ag-place" onclick="_vpAgPlace()" style="display:none">✍️ Place sign / date fields</button>
+          </div>
+          <button class="vp-btn full ghost" type="button" id="vp-ag-remove" onclick="_vpAgRemove()" style="display:none;margin-top:8px">Remove agreement</button>
+        </div>
+        <div class="vp-card">
           <h3 class="vp-sec">Your Contact Info</h3>
           <div class="vp-hint" style="margin-bottom:8px">Shown to the client. Saved for next time.</div>
           <label>Name</label><input type="text" id="vp-bname" value="${DD.esc(b.name||'')}" placeholder="Your name">
@@ -7805,7 +7982,7 @@ function _vpPaintEditor(){
       </div>
     </div>
   </div>`);
-  _vpRenderSegList(); _vpRenderLibraryChips(); _vpRenderCoAdvisors(); _vpUpdatePhoto();
+  _vpRenderSegList(); _vpRenderLibraryChips(); _vpRenderCoAdvisors(); _vpUpdatePhoto(); _vpAgRender();
 }
 function _vpLocalPresets(){ try{ return JSON.parse(localStorage.getItem('dd_presets')||'[]'); }catch(e){ return []; } }
 function _vpUpdatePhoto(){ const u=((window._vpForm||{}).photo||'').trim(); const el=document.getElementById('vp-photo-prev'); const clr=document.getElementById('vp-photo-clear'); if(!el) return;
@@ -7832,7 +8009,7 @@ function _vpRenderSegList(){
   el.innerHTML=segs.map((s,i)=>`<div class="vp-seg"><div class="ord">
       <button onclick="_vpSegMove(${i},-1)" ${i===0?'disabled style=opacity:.3':''}>▲</button>
       <button onclick="_vpSegMove(${i},1)" ${i===segs.length-1?'disabled style=opacity:.3':''}>▼</button></div>
-      <div class="sbody"><div class="st">${i+1}. ${DD.esc(s.title)}</div>
+      <div class="sbody"><div class="st">${i+1}. ${DD.esc(s.title)}${s._bio?' <span class="vp-vtype">AUTO BIO</span>':''}${(!s.url)?' <span class="vp-vtype" style="color:#d49a00">NO VIDEO YET</span>':''}</div>
       ${s.description?`<div class="sd">${DD.esc(s.description)}</div>`:''}
       <div class="su">${DD.esc(s.url)}</div><span class="vp-vtype">${_vpVtype(s.url)}</span></div>
       <button class="x" onclick="_vpSegDel(${i})" title="Remove">×</button></div>`).join('');
@@ -7853,7 +8030,7 @@ function _vpAddSeg(){ const t=(document.getElementById('vp-ns-title').value||'')
   _vpRenderSegList(); }
 function _vpSuggestPw(){ const base=((document.getElementById('vp-proj').value||'').trim().split(/\s+/)[0]||'elc').toLowerCase().replace(/[^a-z0-9]/g,''); document.getElementById('vp-pw').value=base+Math.floor(1000+Math.random()*9000); }
 function _vpOwnerUid(){ return window._vpOwnerUid||currentUser.uid; }
-function _vpOnDealChange(v){ window._vpDealId=v||''; if(v){ const team=_vpDealTeamUids(v).filter(u=>u!==_vpOwnerUid()); window._vpCoAdvisors=[...new Set([...(window._vpCoAdvisors||[]),...team])]; _vpRenderCoAdvisors(); if(team.length) showToast('Co-advisors added from deal','info'); } }
+function _vpOnDealChange(v){ window._vpDealId=v||''; if(v){ const team=_vpDealTeamUids(v).filter(u=>u!==_vpOwnerUid()); window._vpCoAdvisors=[...new Set([...(window._vpCoAdvisors||[]),...team])]; _vpRenderCoAdvisors(); _vpApplyBios(); if(team.length) showToast('Co-advisors added from deal','info'); } }
 function _vpRenderCoAdvisors(){
   const el=document.getElementById('vp-coadv'); if(!el) return;
   const owner=_vpOwnerUid();
@@ -7862,7 +8039,7 @@ function _vpRenderCoAdvisors(){
   if(!advs.length){ el.innerHTML='<div class="vp-hint">No other advisors found.</div>'; return; }
   el.innerHTML=advs.map(a=>`<span class="vp-chip ${sel.has(a.uid)?'on':''}" onclick="_vpToggleCo('${a.uid}')">${sel.has(a.uid)?'✓ ':''}${DD.esc(a.name||a.email||a.uid)}</span>`).join('');
 }
-function _vpToggleCo(uid){ const arr=window._vpCoAdvisors||[]; const i=arr.indexOf(uid); if(i>=0) arr.splice(i,1); else arr.push(uid); window._vpCoAdvisors=arr; _vpRenderCoAdvisors(); }
+function _vpToggleCo(uid){ const arr=window._vpCoAdvisors||[]; const i=arr.indexOf(uid); if(i>=0) arr.splice(i,1); else arr.push(uid); window._vpCoAdvisors=arr; _vpRenderCoAdvisors(); _vpApplyBios(); }
 
 function _vpCollectRecord(){
   const val=id=>{ const e=document.getElementById(id); return e?e.value.trim():''; };
@@ -7876,7 +8053,9 @@ function _vpCollectRecord(){
     coverDescription:val('vp-coverdesc'), photo:(window._vpForm&&window._vpForm.photo)||'', message:val('vp-message'),
     pwPlain, pwHash: pwPlain?DD.hash(pwPlain):'',
     segments:(window._vpSegments||[]).map(s=>({title:s.title,url:s.url,description:s.description||''})),
-    dealId:window._vpDealId||'', coAdvisorUids:(window._vpCoAdvisors||[]).slice(),
+    dealId:window._vpDealId||'',
+    agreement: (window._vpAgreement&&window._vpAgreement.pdfUrl)? {...window._vpAgreement, dealId:window._vpDealId||''} : null,
+    coAdvisorUids:(window._vpCoAdvisors||[]).slice(),
     coBrokers:(window._vpCoAdvisors||[]).map(_vpAdvisorContact).filter(Boolean), broker, office,
     advisorUid: existing?existing.advisorUid:currentUser.uid,
     advisorName: existing?existing.advisorName:(currentUser.name||''),
@@ -7955,6 +8134,164 @@ function _vpShareModal(rec){
     window.location.href='mailto:?subject='+subj+'&body='+body; };
   bg.querySelector('#vp-sms').onclick=()=>{ const msg=encodeURIComponent('Here\'s your private video proposal from '+company+':\n'+link+(pw?('\nPassword: '+pw):''));
     window.location.href='sms:?&body='+msg; };
+}
+
+/* =======================================================
+   LISTING AGREEMENT E-SIGN — admin upload + field placement
+   The advisor uploads a PDF (stored in Storage under proposal-agreements/) and
+   clicks to drop Signature / Initials / Date / Name fields. Coordinates are
+   saved as fractions of each page on the proposal's `agreement` object. The
+   public client viewer renders these and stamps the signature into the PDF.
+   ======================================================= */
+function _vpAgRender(){
+  const st=document.getElementById('vp-ag-status'); if(!st) return;
+  const a=window._vpAgreement;
+  const place=document.getElementById('vp-ag-place'), rm=document.getElementById('vp-ag-remove');
+  if(a&&a.pdfUrl){
+    const nf=(a.fields||[]).length;
+    st.innerHTML='<div style="display:flex;align-items:center;gap:8px;padding:9px 11px;background:#ecfdf5;border:1px solid #a7f3d0;border-radius:9px;font-size:13px;color:#065f46">'
+      +'<span style="font-size:16px">📄</span><div><b>'+_vpEsc(a.fileName||'Agreement.pdf')+'</b><br>'
+      +'<span style="color:'+(nf?'#065f46':'#b45309')+'">'+(nf?(nf+' field'+(nf===1?'':'s')+' placed'):'No fields placed yet — click “Place sign / date fields”')+'</span></div></div>';
+    if(place) place.style.display='';
+    if(rm) rm.style.display='';
+  } else {
+    st.innerHTML='<div class="vp-hint" style="margin:0">No agreement uploaded. The client will only see the videos.</div>';
+    if(place) place.style.display='none';
+    if(rm) rm.style.display='none';
+  }
+}
+function _vpEsc(s){ return (window.DD&&DD.esc)?DD.esc(s):String(s==null?'':s); }
+async function _vpAgUpload(file){
+  if(!file) return;
+  if(file.type!=='application/pdf' && !/\.pdf$/i.test(file.name)){ showToast('Please choose a PDF file','warning'); return; }
+  if(file.size>25*1024*1024){ showToast('PDF is over 25 MB — please use a smaller file','warning'); return; }
+  let waited=0; while(!_fbStorage&&waited<6000){ await new Promise(r=>setTimeout(r,200)); waited+=200; }
+  if(!_fbStorage){ showToast('Storage not ready — try again in a moment','error'); return; }
+  const st=document.getElementById('vp-ag-status'); if(st) st.innerHTML='<div class="vp-hint" style="margin:0">Uploading '+_vpEsc(file.name)+'…</div>';
+  try{
+    const {ref,uploadBytes,getDownloadURL}=_fbFns;
+    const slug=_vpSlug((document.getElementById('vp-proj')||{}).value||window._vpEditing||'agreement');
+    const path='proposal-agreements/'+slug+'-'+Date.now()+'.pdf';
+    const snap=await uploadBytes(ref(_fbStorage,path),file,{contentType:'application/pdf'});
+    const url=await getDownloadURL(snap.ref);
+    const prev=window._vpAgreement||{};
+    window._vpAgreement={ pdfUrl:url, pdfPath:path, fileName:file.name,
+      fields:Array.isArray(prev.fields)?prev.fields:[], updated:Date.now() };
+    _vpAgRender();
+    showToast('Agreement uploaded — now place the sign/date fields','success');
+    _vpAgPlace();
+  }catch(e){ console.error('[agreement] upload',e); showToast('Upload failed: '+(e.message||e),'error'); _vpAgRender(); }
+  finally{ const fi=document.getElementById('vp-ag-file'); if(fi) fi.value=''; }
+}
+function _vpAgRemove(){
+  if(!confirm('Remove the listing agreement from this proposal? The client will no longer see a Sign button.')) return;
+  window._vpAgreement=null; _vpAgRender(); showToast('Agreement removed','info');
+}
+
+/* ---- Field-placement modal ---- */
+let _vpAgTool='signature';
+const _VPAG_DEF={signature:{w:.20,h:.05},initials:{w:.09,h:.045},date:{w:.13,h:.035},name:{w:.22,h:.035}};
+function _vpAgLabel(t){ return t==='date'?'Date':t==='initials'?'Initials':t==='name'?'Name':'Sign'; }
+function _vpAgInjectStyles(){
+  if(document.getElementById('vpag-styles')) return;
+  const s=document.createElement('style'); s.id='vpag-styles';
+  s.textContent=`
+  #vpag-modal{position:fixed;inset:0;z-index:6000;background:#23262b;display:flex;flex-direction:column}
+  .vpag-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 16px;background:#15171b;border-bottom:1px solid rgba(255,255,255,.08)}
+  .vpag-bar .ttl{font-weight:800;color:#fff;font-size:14px;margin-right:6px}
+  .vpag-tool{border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.06);color:#fff;border-radius:8px;padding:7px 12px;font-weight:700;font-size:12.5px;cursor:pointer}
+  .vpag-tool.on{background:#00b2a9;border-color:#00b2a9}
+  .vpag-bar .sp{flex:1}
+  .vpag-hint{color:#aeb4bb;font-size:12px;width:100%;margin-top:2px}
+  .vpag-body{flex:1;overflow:auto;padding:22px 12px;display:flex;flex-direction:column;align-items:center;gap:16px}
+  .vpag-page{position:relative;background:#fff;box-shadow:0 6px 24px rgba(0,0,0,.4)}
+  .vpag-page canvas{display:block}
+  .vpag-f{position:absolute;box-sizing:border-box;border:1.5px solid #da291c;background:rgba(218,41,28,.14);border-radius:4px;cursor:move;display:flex;align-items:center;justify-content:center;color:#da291c;font-weight:800;font-size:11px;text-transform:uppercase;letter-spacing:.4px;user-select:none}
+  .vpag-f .rs{position:absolute;right:-6px;bottom:-6px;width:14px;height:14px;background:#da291c;border:2px solid #fff;border-radius:50%;cursor:nwse-resize}
+  .vpag-f .del{position:absolute;top:-9px;right:-9px;width:18px;height:18px;background:#111;color:#fff;border-radius:50%;font-size:12px;line-height:16px;text-align:center;cursor:pointer;border:2px solid #fff}
+  .vpag-btn{border:0;border-radius:8px;padding:8px 16px;font-weight:800;font-size:13px;cursor:pointer}
+  .vpag-btn.primary{background:#00b2a9;color:#fff}
+  .vpag-btn.ghost{background:rgba(255,255,255,.12);color:#fff}`;
+  document.head.appendChild(s);
+}
+async function _vpAgPlace(){
+  const a=window._vpAgreement; if(!a||!a.pdfUrl){ showToast('Upload a PDF first','warning'); return; }
+  if(typeof pdfjsLib==='undefined'){ showToast('PDF engine still loading — try again in a moment','warning'); return; }
+  pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  _vpAgInjectStyles();
+  a.fields=Array.isArray(a.fields)?a.fields:[];
+  const m=document.createElement('div'); m.id='vpag-modal';
+  m.innerHTML=`<div class="vpag-bar">
+      <span class="ttl">Place fields</span>
+      <button class="vpag-tool on" data-tool="signature">✍ Signature</button>
+      <button class="vpag-tool" data-tool="initials">In Initials</button>
+      <button class="vpag-tool" data-tool="date">📅 Date</button>
+      <button class="vpag-tool" data-tool="name">A Printed name</button>
+      <span class="sp"></span>
+      <button class="vpag-btn ghost" id="vpag-cancel">Cancel</button>
+      <button class="vpag-btn primary" id="vpag-done">Done</button>
+      <div class="vpag-hint">Pick a field type, then click on the page to drop it. Drag to move, drag the corner dot to resize, × to delete. Place a field everywhere the client must sign or date.</div>
+    </div><div class="vpag-body" id="vpag-body"></div>`;
+  document.body.appendChild(m);
+  _vpAgTool='signature';
+  m.querySelectorAll('.vpag-tool').forEach(b=>b.onclick=()=>{ _vpAgTool=b.dataset.tool; m.querySelectorAll('.vpag-tool').forEach(x=>x.classList.toggle('on',x===b)); });
+  m.querySelector('#vpag-cancel').onclick=()=>{ m.remove(); };
+  m.querySelector('#vpag-done').onclick=()=>{ m.remove(); window._vpAgreement.updated=Date.now(); _vpAgRender(); showToast('Fields saved','success'); };
+  const body=m.querySelector('#vpag-body');
+  body.innerHTML='<div style="color:#cfd3d8;margin-top:30px">Loading document…</div>';
+  try{
+    const bytes=new Uint8Array(await (await fetch(a.pdfUrl)).arrayBuffer());
+    const pdf=await pdfjsLib.getDocument({data:bytes}).promise;
+    body.innerHTML='';
+    for(let i=1;i<=pdf.numPages;i++){
+      const page=await pdf.getPage(i);
+      const vp1=page.getViewport({scale:1});
+      const scale=Math.min(1.6, 820/vp1.width);
+      const vp=page.getViewport({scale});
+      const pdiv=document.createElement('div'); pdiv.className='vpag-page'; pdiv.dataset.page=(i-1);
+      pdiv.style.width=vp.width+'px'; pdiv.style.height=vp.height+'px';
+      const cv=document.createElement('canvas'); cv.width=vp.width; cv.height=vp.height; pdiv.appendChild(cv);
+      await page.render({canvasContext:cv.getContext('2d'),viewport:vp}).promise;
+      pdiv.addEventListener('mousedown',ev=>{ if(ev.target!==pdiv && ev.target!==cv) return; _vpAgDrop(ev,pdiv); });
+      body.appendChild(pdiv);
+    }
+    // paint existing fields
+    (a.fields||[]).forEach(f=>{ const pg=body.querySelector('.vpag-page[data-page="'+(f.page|0)+'"]'); if(pg) _vpAgMakeEl(pg,f); });
+  }catch(e){ console.error('[agreement] render',e); body.innerHTML='<div style="color:#ffb4b4;margin-top:30px">Could not load the PDF: '+_vpEsc(e.message||e)+'</div>'; }
+}
+function _vpAgDrop(ev,pg){
+  const r=pg.getBoundingClientRect();
+  const def=_VPAG_DEF[_vpAgTool]||_VPAG_DEF.signature;
+  let xPct=(ev.clientX-r.left)/r.width - def.w/2;
+  let yPct=(ev.clientY-r.top)/r.height - def.h/2;
+  xPct=Math.max(0,Math.min(1-def.w,xPct)); yPct=Math.max(0,Math.min(1-def.h,yPct));
+  const f={ id:'f'+Date.now()+Math.floor(Math.random()*1000), page:+pg.dataset.page, type:_vpAgTool, xPct, yPct, wPct:def.w, hPct:def.h };
+  window._vpAgreement.fields.push(f);
+  _vpAgMakeEl(pg,f);
+}
+function _vpAgMakeEl(pg,f){
+  const el=document.createElement('div'); el.className='vpag-f'; el.dataset.fid=f.id;
+  el.innerHTML='<span>'+_vpAgLabel(f.type)+'</span><span class="del">×</span><span class="rs"></span>';
+  const apply=()=>{ el.style.left=(f.xPct*100)+'%'; el.style.top=(f.yPct*100)+'%'; el.style.width=(f.wPct*100)+'%'; el.style.height=(f.hPct*100)+'%'; };
+  apply(); pg.appendChild(el);
+  el.querySelector('.del').onclick=(e)=>{ e.stopPropagation(); const arr=window._vpAgreement.fields; const i=arr.findIndex(x=>x.id===f.id); if(i>=0) arr.splice(i,1); el.remove(); };
+  // drag move
+  el.addEventListener('mousedown',e=>{
+    if(e.target.classList.contains('rs')||e.target.classList.contains('del')) return;
+    e.preventDefault(); e.stopPropagation();
+    const r=pg.getBoundingClientRect(); const sx=e.clientX, sy=e.clientY, ox=f.xPct, oy=f.yPct;
+    const mv=ev=>{ f.xPct=Math.max(0,Math.min(1-f.wPct, ox+(ev.clientX-sx)/r.width)); f.yPct=Math.max(0,Math.min(1-f.hPct, oy+(ev.clientY-sy)/r.height)); apply(); };
+    const up=()=>{ document.removeEventListener('mousemove',mv); document.removeEventListener('mouseup',up); };
+    document.addEventListener('mousemove',mv); document.addEventListener('mouseup',up);
+  });
+  // resize
+  el.querySelector('.rs').addEventListener('mousedown',e=>{
+    e.preventDefault(); e.stopPropagation();
+    const r=pg.getBoundingClientRect(); const sx=e.clientX, sy=e.clientY, ow=f.wPct, oh=f.hPct;
+    const mv=ev=>{ f.wPct=Math.max(.04,Math.min(1-f.xPct, ow+(ev.clientX-sx)/r.width)); f.hPct=Math.max(.02,Math.min(1-f.yPct, oh+(ev.clientY-sy)/r.height)); apply(); };
+    const up=()=>{ document.removeEventListener('mousemove',mv); document.removeEventListener('mouseup',up); };
+    document.addEventListener('mousemove',mv); document.addEventListener('mouseup',up);
+  });
 }
 
 /* =======================================================
@@ -8111,22 +8448,90 @@ function _vpAddFromLib(i){
   _vpRenderSegList(); _vpRenderLibraryChips(); showToast('Added: '+(v.title||'video'),'success');
 }
 
-/* ---- proposal type selection + auto-pull ---- */
-function _vpApplyType(type){ window._vpType=type||_vpDefaultType(); _vpRenderLibraryChips(); }
-function _vpAutoPull(type, silent){
+/* ---- proposal type selection + ordered starter sets ----
+   Each proposal type can define an ordered list of video titles in
+   config.js → starterSets[typeId]. Picking a type (or clicking "Load starter
+   set") fills the video list with those titles IN ORDER, matched by title
+   against the shared library. Two tokens resolve to advisor bio videos:
+     "@advisorBio"   → the proposal owner's bio video
+     "@coAdvisorBio" → the first co-advisor's bio video (skipped if none)
+   Switching types only auto-reloads when the list is untouched, so a customized
+   list is never silently wiped. */
+function _vpStarterSet(type){ const ss=(window.DIRTDOG_CONFIG&&window.DIRTDOG_CONFIG.starterSets)||{}; return Array.isArray(ss[type])?ss[type]:[]; }
+function _vpSegSig(segs){ return (segs||[]).map(s=>(s.title||'').trim().toLowerCase()).join('>>'); }
+function _vpLibFindByTitle(t){ const k=(t||'').trim().toLowerCase(); if(!k) return null; return _vpAllLibrary().find(v=>(v.title||'').trim().toLowerCase()===k)||null; }
+// Bio video for an advisor uid → {title,url,description} (url blank until the
+// matching library video has a file/link). Returns null if the advisor has no
+// mapped bio video at all.
+function _vpBioVideoForUid(uid){
+  if(!uid) return null;
+  const a=(typeof getDistinctAdvisors==='function'?getDistinctAdvisors():[]).find(x=>x.uid===uid);
+  const email=((a&&a.email)||(typeof allProfiles!=='undefined'&&allProfiles[uid]&&allProfiles[uid].email)||'').toLowerCase();
+  const title=(typeof ADVISOR_BIO_VIDEOS!=='undefined')?ADVISOR_BIO_VIDEOS[email]:null;
+  if(!title) return null;
+  const v=_vpLibFindByTitle(title);
+  return v?{title:v.title,url:v.url,description:v.description||''}:{title:title,url:'',description:''};
+}
+function _vpApplyType(type){
+  const nt=type||_vpDefaultType();
+  const cur=window._vpSegments||[];
+  const untouched = !cur.length || _vpSegSig(cur)===(window._vpStarterSig||' ');
+  window._vpType=nt;
+  if(untouched){ _vpBuildStarter(nt,{replace:true,silent:false}); }
+  else { _vpRenderLibraryChips(); showToast('Type set. Click "↻ Load starter set" to replace the list with this type’s videos.','info'); }
+}
+// Build the ordered video list for a type from its starter set.
+function _vpBuildStarter(type, opts){
+  opts=opts||{};
   type=type||_vpDefaultType();
-  const added=new Set((window._vpSegments||[]).map(s=>(s.url||'').trim()));
-  let n=0;
-  _vpAllLibrary().filter(v=>(v.autoTypes||[]).includes(type)).forEach(v=>{
-    const u=(v.url||'').trim(); if(u&&!added.has(u)){ window._vpSegments.push({title:v.title,url:v.url,description:v.description||''}); added.add(u); n++; } });
-  if(n) _vpRenderSegList();
-  _vpRenderLibraryChips();
-  if(!silent) showToast(n? ('Added '+n+' starter video'+(n===1?'':'s')) : ('No auto-include videos set for '+_vpTypeLabel(type)),'info');
-  return n;
+  const tmpl=_vpStarterSet(type);
+  if(!tmpl.length){ if(!opts.silent) showToast('No starter set defined for '+_vpTypeLabel(type),'info'); _vpRenderLibraryChips(); return 0; }
+  const segs=[];
+  tmpl.forEach(item=>{
+    if(item==='@advisorBio'){
+      const v=_vpBioVideoForUid(_vpOwnerUid());
+      segs.push(v?{...v,_bio:'advisor'}:{title:'Advisor Bio',url:'',description:'',_bio:'advisor'});
+      return;
+    }
+    if(item==='@coAdvisorBio'){
+      const co=(window._vpCoAdvisors||[])[0];
+      if(co){ const v=_vpBioVideoForUid(co); segs.push(v?{...v,_bio:'co',_bioUid:co}:{title:'Co-advisor Bio',url:'',description:'',_bio:'co',_bioUid:co}); }
+      return; // no co-advisor → slot skipped
+    }
+    const v=_vpLibFindByTitle(item);
+    segs.push(v?{title:v.title,url:v.url,description:v.description||''}:{title:item,url:'',description:''});
+  });
+  window._vpSegments=segs;
+  window._vpStarterSig=_vpSegSig(segs);
+  _vpRenderSegList(); _vpRenderLibraryChips();
+  if(!opts.silent) showToast('Loaded '+_vpTypeLabel(type)+' starter set ('+segs.length+' videos)','success');
+  return segs.length;
+}
+// Re-resolve the advisor/co-advisor bio slots after the owner or co-advisors
+// change. Only touches segments tagged _bio (i.e. ones a starter set created),
+// so manually built lists are left alone.
+function _vpApplyBios(){
+  const segs=window._vpSegments||[]; if(!segs.length) return;
+  let changed=false;
+  const ai=segs.findIndex(s=>s._bio==='advisor');
+  if(ai>=0){ const av=_vpBioVideoForUid(_vpOwnerUid()); if(av){ segs[ai]={...av,_bio:'advisor'}; changed=true; } }
+  const co=(window._vpCoAdvisors||[])[0];
+  const ci=segs.findIndex(s=>s._bio==='co');
+  if(co){
+    const cv=_vpBioVideoForUid(co);
+    if(cv){
+      if(ci>=0) segs[ci]={...cv,_bio:'co',_bioUid:co};
+      else { const at=(ai>=0?ai+1:0); segs.splice(at,0,{...cv,_bio:'co',_bioUid:co}); }
+      changed=true;
+    } else if(ci>=0){ segs.splice(ci,1); changed=true; }
+  } else if(ci>=0){ segs.splice(ci,1); changed=true; }
+  if(changed){ window._vpSegments=segs; window._vpStarterSig=_vpSegSig(segs); _vpRenderSegList(); }
 }
 function _vpLoadStarter(){
   const sel=document.getElementById('vp-type'); const type=sel?sel.value:(window._vpType||_vpDefaultType());
-  window._vpType=type; _vpAutoPull(type,false);
+  window._vpType=type;
+  if((window._vpSegments||[]).length && !confirm('Replace the current video list with the '+_vpTypeLabel(type)+' starter set?')) return;
+  _vpBuildStarter(type,{replace:true,silent:false});
 }
 function _vpAddSegToLib(){
   const t=(document.getElementById('vp-ns-title').value||'').trim();
@@ -8202,6 +8607,7 @@ function _vpPaintLibrary(){
         <div class="vp-card">
           <h3 class="vp-sec">Library</h3>
           <div class="vp-hint" style="margin-top:0;margin-bottom:10px">★ = auto-included on that type. ${_vpCanDeleteLib()?'':'Only admins/staff can delete.'}</div>
+          ${_vpCanDeleteLib()?`<button class="vp-btn full" style="margin-bottom:10px" onclick="_vpLibImportAllBuiltin()">⬇ Set up starter library (add all titles, then upload files)</button>`:''}
           <div id="vp-lib-list"></div>
         </div>
       </div>
@@ -8306,6 +8712,22 @@ async function _vpLibImportBuiltin(i){
     if(ref&&ref.id){ window._vpLibEditing=ref.id; _vpPaintLibrary(); window.scrollTo(0,0); }
   }catch(err){ console.error('[library] import',err); showToast('Import failed: '+(err.message||err),'error'); }
 }
+// One-click setup: copy every built-in config preset that isn't yet in the
+// editable Firestore library into it (title + type tags, blank video). After
+// this each row is editable so an admin can upload the real video file to it.
+async function _vpLibImportAllBuiltin(){
+  if(!_vpCanDeleteLib()){ showToast('Only admins can set up the starter library','warning'); return; }
+  const builtins=_vpAllLibrary().filter(v=>v._builtin&&v._cfg);
+  if(!builtins.length){ showToast('All starter videos are already in the editable library','info'); return; }
+  if(!confirm('Add '+builtins.length+' starter video title'+(builtins.length===1?'':'s')+' to the editable library? You can then upload a file to each one.')) return;
+  let done=0;
+  for(const v of builtins){
+    try{ await _vpLibCreate({title:v._cfg.title,description:v._cfg.description||'',internalNote:'',url:v._cfg.url||'',types:v._cfg.types||[],autoTypes:v._cfg.autoTypes||[],source:'link',storagePath:''}); done++; }
+    catch(e){ console.error('[library] seed',v._cfg.title,e); }
+  }
+  showToast('Added '+done+' video'+(done===1?'':'s')+' to the library','success');
+  _vpPaintLibrary();
+}
 function _vpLibEdit(id){ window._vpLibEditing=id; window._vpLibUpload=null; _vpPaintLibrary(); window.scrollTo(0,0); }
 function _vpLibCancelEdit(){ window._vpLibEditing=null; window._vpLibUpload=null; _vpPaintLibrary(); }
 async function _vpLibDelete(id){
@@ -8324,6 +8746,7 @@ window.bootLibrary=bootLibrary; window._vpOpenLibrary=_vpOpenLibrary; window._vp
 window._vpLoadStarter=_vpLoadStarter; window._vpAddFromLib=_vpAddFromLib; window._vpAddSegToLib=_vpAddSegToLib;
 window._vpLibFilePicked=_vpLibFilePicked; window._vpLibSaveClick=_vpLibSaveClick; window._vpLibEdit=_vpLibEdit;
 window._vpLibCancelEdit=_vpLibCancelEdit; window._vpLibDelete=_vpLibDelete; window._vpLibImportBuiltin=_vpLibImportBuiltin;
+window._vpLibImportAllBuiltin=_vpLibImportAllBuiltin; window._vpBuildStarter=_vpBuildStarter; window._vpApplyBios=_vpApplyBios;
 window._vpIntroSave=_vpIntroSave; window._vpIntroFilePicked=_vpIntroFilePicked;
 window.bootProposals=bootProposals; window._vpAdd=_vpAdd; window._vpEdit=_vpEdit; window._vpBack=_vpBack;
 window._vpToggleArchived=_vpToggleArchived; window._vpUpdatePhoto=_vpUpdatePhoto; window._vpSegMove=_vpSegMove;
@@ -16055,8 +16478,8 @@ window._execManualMergeContacts = async () => {
 };
 
 // ── CRM Outreach Imports (updated nightly by daily-crm-outreach-sync task) ──
-const _CRM_OUTREACH_SYNC_DATE = '2026-06-17';
-const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-06-16_0","emailDate":"2026-06-16","emailSubject":"Inverness Property","attachmentNames":["OM Inverness.pdf"],"recipientEmail":"john@johngreenldc.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"John Green LDC","propertyHint":"Inverness","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-06-16_1","emailDate":"2026-06-16","emailSubject":"Walmart Lease","attachmentNames":["Trailer Parking License Agreement 2026.docx"],"recipientEmail":"aielloturner@aol.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"","propertyHint":"Walmart","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-06-16_2","emailDate":"2026-06-16","emailSubject":"Re: Overflow parking - FL9","attachmentNames":["Walmart lease lot 12 Gateway 2020.pdf"],"recipientEmail":"allison.coontz@walmart.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Walmart","propertyHint":"Gateway","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-06-16_3","emailDate":"2026-06-16","emailSubject":"Re: Offer on 173 E Par Street, Orlando - Development Site","attachmentNames":["Standard Purchase Agreement  175 E PAR.doc"],"recipientEmail":"dmadsen@harbertrealty.com","recipientName":"Damien Madsen","recipientFirstName":"Damien","recipientLastName":"Madsen","companyName":"Harbert Realty","propertyHint":"173 E Par Street","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-06-16_4","emailDate":"2026-06-16","emailSubject":"Re: Offer on 173 E Par Street, Orlando - Development Site","attachmentNames":["Standard Purchase Agreement  175 E PAR.doc"],"recipientEmail":"jsmith@harbertrealty.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Harbert Realty","propertyHint":"173 E Par Street","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-06-16_5","emailDate":"2026-06-16","emailSubject":"Re: Offer on 173 E Par Street, Orlando - Development Site","attachmentNames":["Standard Purchase Agreement  175 E PAR.doc"],"recipientEmail":"jtatem@harbertrealty.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Harbert Realty","propertyHint":"173 E Par Street","matchedDealId":null,"imported":false,"skipped":false}];
+const _CRM_OUTREACH_SYNC_DATE = '2026-06-18';
+const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-06-17_0","emailDate":"2026-06-17","emailSubject":"Mocassin Wallow Site","attachmentNames":["OM \u2013 Moccasin Wallow Holdings.pdf"],"recipientEmail":"daniel339walker@gmail.com","recipientName":"Daniel Walker","recipientFirstName":"Daniel","recipientLastName":"Walker","companyName":"","propertyHint":"Moccasin Wallow","matchedDealId":null,"imported":false,"skipped":false}];
 
 // ── Gmail Sync ───────────────────────────────────────────────────────
 let _GMAIL_SYNC_DATE;  // set at runtime by crmGmailSync; blank = never synced this session
