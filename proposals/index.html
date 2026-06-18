@@ -196,6 +196,11 @@
           <div class="sign-cta-sub" id="sign-cta-sub">Review and e-sign your listing agreement.</div>
           <button class="sign-cta-btn" id="sign-open-btn" type="button">✍️ Review &amp; Sign Listing Agreement</button>
         </div>
+        <div class="pdf-cta" id="pdf-cta" style="display:none">
+          <div class="pdf-cta-head">Your proposal, in one document</div>
+          <div class="pdf-cta-sub" id="pdf-cta-sub">Download a single PDF with the materials from your proposal.</div>
+          <button class="pdf-cta-btn" id="pdf-open-btn" type="button">📄 Proposal PDF</button>
+        </div>
         <div class="contact" id="contact"></div>
       </aside>
       <main>
@@ -275,6 +280,27 @@
   .sign-cta.signed{background:linear-gradient(150deg,#2f9e44,#1f7a33)}
   .sign-cta.signed .sign-cta-btn{background:rgba(255,255,255,.16);color:#fff;cursor:default}
 
+  /* ---- Proposal PDF CTA ---- */
+  .pdf-cta{margin:0 14px 14px;padding:16px;border-radius:14px;background:#1c2027;border:1px solid #2c323a;box-shadow:0 8px 24px rgba(0,0,0,.25)}
+  .pdf-cta-head{font-weight:800;font-size:15px;color:#fff}
+  .pdf-cta-sub{font-size:12.5px;color:#9aa0a6;margin:4px 0 12px;line-height:1.4}
+  .pdf-cta-btn{width:100%;border:0;border-radius:10px;padding:12px 14px;font-weight:800;font-size:14px;cursor:pointer;background:var(--dd-primary);color:#fff;transition:transform .12s, box-shadow .12s, filter .12s}
+  .pdf-cta-btn:hover:not(:disabled){transform:translateY(-1px);box-shadow:0 6px 16px rgba(0,0,0,.3);filter:brightness(1.05)}
+  .pdf-cta-btn:disabled{opacity:.7;cursor:default}
+
+  /* ---- Proposal PDF result modal ---- */
+  #pdf-modal{position:fixed;inset:0;z-index:1200;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;padding:18px}
+  #pdf-modal.open{display:flex}
+  .pdf-card{background:#1b1e22;color:#fff;border:1px solid #2c323a;border-radius:16px;width:100%;max-width:420px;padding:24px;position:relative;box-shadow:0 24px 70px rgba(0,0,0,.5);text-align:center}
+  .pdf-card .pic{width:62px;height:62px;border-radius:50%;background:var(--dd-primary);display:flex;align-items:center;justify-content:center;font-size:30px;margin:0 auto 14px}
+  .pdf-card h3{font-family:var(--serif);margin:0 0 8px;font-size:21px}
+  .pdf-card p{color:#9aa0a6;font-size:13.5px;line-height:1.5;margin:0 0 18px}
+  .pdf-card .acts{display:flex;flex-direction:column;gap:10px}
+  .pdf-card a.btn,.pdf-card button.btn{display:block;text-decoration:none;border:0;border-radius:10px;padding:12px 14px;font-weight:800;font-size:14px;cursor:pointer}
+  .pdf-card a.primary{background:var(--dd-primary);color:#fff}
+  .pdf-card a.ghost,.pdf-card button.ghost{background:rgba(255,255,255,.10);color:#fff}
+  .pdf-card .x{position:absolute;top:10px;right:14px;border:0;background:transparent;color:#9aa0a6;font-size:26px;cursor:pointer}
+
   /* ---- Sign overlay ---- */
   #sign-overlay{position:fixed;inset:0;z-index:1000;background:#23262b;display:none;flex-direction:column}
   #sign-overlay.open{display:flex}
@@ -325,6 +351,21 @@
   .sov-done h2{font-family:var(--serif);margin:0 0 10px}
   .sov-done p{color:#cfd3d8;line-height:1.55;margin:0 0 18px}
 </style>
+
+<!-- Proposal PDF result modal -->
+<div id="pdf-modal" aria-hidden="true">
+  <div class="pdf-card">
+    <button class="x" id="pdf-modal-x" type="button">&times;</button>
+    <div class="pic">📄</div>
+    <h3 id="pdf-modal-title">Your Proposal PDF is ready</h3>
+    <p id="pdf-modal-sub">Open it, download it, or share it — it's all in one document.</p>
+    <div class="acts">
+      <a class="btn primary" id="pdf-modal-download" href="#" download>⬇ Download</a>
+      <a class="btn ghost" id="pdf-modal-open" href="#" target="_blank" rel="noopener">↗ Open in new tab</a>
+      <button class="btn ghost" id="pdf-modal-share" type="button" style="display:none">📤 Share</button>
+    </div>
+  </div>
+</div>
 
 <script src="config.js"></script>
 <script src="shared.js"></script>
@@ -395,15 +436,18 @@
     if(!snap.exists()) return null;
     const d = snap.data();
     let intro = CFG.introVideo || null;
+    let covers = { front:"", back:"" };
     if(introSnap && introSnap.exists && introSnap.exists()){
       const s = introSnap.data();
       if(s && s.introUrl) intro = { title: s.introTitle || "Welcome", url: s.introUrl };
+      covers = { front: (s && s.proposalCoverUrl) || "", back: (s && s.proposalBackUrl) || "" };
     }
     return { id:id, projectName:d.projectName, acreage:d.acreage, client:d.client,
       coverDescription:d.coverDescription, photo:d.photo, message:d.message,
       broker:d.broker||{}, coBrokers:Array.isArray(d.coBrokers)?d.coBrokers:[], intro:intro,
       segments:Array.isArray(d.segments)?d.segments:[], pw:d.pwHash||"",
       agreement:(d.agreement&&d.agreement.pdfUrl)?d.agreement:null,
+      covers:covers,
       _app:app, _db:db, _fs:fsMod };
   }
 
@@ -466,7 +510,7 @@
   const intro = P.intro || (CFG.introVideo || null);
   const items = [];
   if(intro && intro.url) items.push({title:intro.title||"Welcome", description:"A quick introduction to who we are.", url:intro.url, isIntro:true});
-  P.segments.forEach(s=>items.push({title:s.title||"Untitled", description:s.description||"", url:s.url||""}));
+  P.segments.forEach(s=>items.push({title:s.title||"Untitled", description:s.description||"", url:s.url||"", pdfUrl:s.pdfUrl||"", pdfFileName:s.pdfFileName||""}));
 
   /* ---- Password gate ---- */
   if(!P.pw){ unlock(); }
@@ -530,6 +574,15 @@
       document.getElementById("sign-cta-sub").textContent =
         "When you're ready, review and e-sign your listing agreement. It's sent to "+advName+" to counter-sign.";
       document.getElementById("sign-open-btn").addEventListener("click",()=>Sign.open(P));
+    }
+
+    // Show the "Proposal PDF" button when at least one video has a PDF attached.
+    // Front/back cover pages alone aren't enough — there must be real content.
+    const pdfItems = items.filter(it=>it.pdfUrl);
+    if(pdfItems.length){
+      const pc=document.getElementById("pdf-cta");
+      pc.style.display="block";
+      document.getElementById("pdf-open-btn").addEventListener("click",()=>ProposalPDF.build(P, items));
     }
   }
 
@@ -812,6 +865,85 @@
     document.querySelectorAll(".sig-tab").forEach(t=>t.addEventListener("click",()=>{ setMode(t.dataset.mode); if(t.dataset.mode==="draw") initPad(); }));
 
     return { open };
+  })();
+
+  /* =======================================================================
+     PROPOSAL PDF MODULE
+     Builds one downloadable PDF for the client by merging, in play order:
+       company front cover  →  each video's attached PDF  →  company back cover
+     The per-video PDFs ride on each segment (pdfUrl); the front/back covers
+     are company-wide, read from proposals/__introSettings. Merge is done
+     entirely client-side with pdf-lib (no upload, no login), then offered as
+     download / open / native-share.
+     ======================================================================= */
+  const ProposalPDF = (function(){
+    let busy=false;
+    function loadScript(src){ return new Promise((res,rej)=>{ const s=document.createElement("script"); s.src=src; s.onload=res; s.onerror=()=>rej(new Error("load "+src)); document.head.appendChild(s); }); }
+    async function ensureLib(){
+      if(typeof window.PDFLib==="undefined"){
+        await loadScript("https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js");
+      }
+    }
+    async function fetchBytes(url){ const r=await fetch(url); if(!r.ok) throw new Error("fetch "+r.status); return new Uint8Array(await r.arrayBuffer()); }
+
+    async function build(P, items){
+      if(busy) return; busy=true;
+      const btn=document.getElementById("pdf-open-btn");
+      const orig=btn?btn.textContent:"";
+      if(btn){ btn.disabled=true; btn.textContent="Building your PDF…"; }
+      try{
+        await ensureLib();
+        const {PDFDocument}=window.PDFLib;
+        const out=await PDFDocument.create();
+        const covers=P.covers||{};
+        // Ordered source list: front cover, each video's PDF (play order), back cover.
+        const sources=[];
+        if(covers.front) sources.push(covers.front);
+        items.filter(it=>it.pdfUrl).forEach(it=>sources.push(it.pdfUrl));
+        if(covers.back) sources.push(covers.back);
+        for(const url of sources){
+          try{
+            const bytes=await fetchBytes(url);
+            const src=await PDFDocument.load(bytes,{ignoreEncryption:true});
+            const pages=await out.copyPages(src, src.getPageIndices());
+            pages.forEach(p=>out.addPage(p));
+          }catch(e){ console.warn("[proposal-pdf] skipped a source",url,e); }
+        }
+        if(!out.getPageCount()) throw new Error("No PDF pages could be assembled.");
+        const outBytes=await out.save();
+        const slug=((P.projectName||"Proposal").replace(/[^A-Za-z0-9]+/g,"_").replace(/^_+|_+$/g,"")||"Proposal");
+        showResult(outBytes, slug+"_Proposal.pdf");
+      }catch(e){
+        console.error("[proposal-pdf] build failed",e);
+        alert("Sorry — we couldn't build the Proposal PDF. Please try again or contact your advisor.");
+      }finally{
+        busy=false; if(btn){ btn.disabled=false; btn.textContent=orig||"📄 Proposal PDF"; }
+      }
+    }
+
+    function showResult(bytes, fname){
+      const blob=new Blob([bytes],{type:"application/pdf"});
+      const url=URL.createObjectURL(blob);
+      const m=document.getElementById("pdf-modal");
+      const dl=document.getElementById("pdf-modal-download");
+      const op=document.getElementById("pdf-modal-open");
+      const sh=document.getElementById("pdf-modal-share");
+      dl.href=url; dl.setAttribute("download",fname);
+      op.href=url;
+      // Native share (typically mobile) when file sharing is supported.
+      let file=null;
+      try{ file=new File([blob],fname,{type:"application/pdf"}); }catch(e){}
+      if(file && navigator.canShare && navigator.canShare({files:[file]})){
+        sh.style.display="block";
+        sh.onclick=()=>{ navigator.share({files:[file],title:fname}).catch(()=>{}); };
+      } else { sh.style.display="none"; }
+      m.classList.add("open"); m.setAttribute("aria-hidden","false");
+    }
+    function close(){ const m=document.getElementById("pdf-modal"); m.classList.remove("open"); m.setAttribute("aria-hidden","true"); }
+    document.getElementById("pdf-modal-x").addEventListener("click",close);
+    document.getElementById("pdf-modal").addEventListener("click",e=>{ if(e.target.id==="pdf-modal") close(); });
+
+    return { build };
   })();
 })();
 </script>

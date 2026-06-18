@@ -8017,7 +8017,7 @@ function _vpRenderSegList(){
   el.innerHTML=segs.map((s,i)=>`<div class="vp-seg"><div class="ord">
       <button onclick="_vpSegMove(${i},-1)" ${i===0?'disabled style=opacity:.3':''}>▲</button>
       <button onclick="_vpSegMove(${i},1)" ${i===segs.length-1?'disabled style=opacity:.3':''}>▼</button></div>
-      <div class="sbody"><div class="st">${i+1}. ${DD.esc(s.title)}${s._bio?' <span class="vp-vtype">AUTO BIO</span>':''}${(!s.url)?' <span class="vp-vtype" style="color:#d49a00">NO VIDEO YET</span>':''}</div>
+      <div class="sbody"><div class="st">${i+1}. ${DD.esc(s.title)}${s._bio?' <span class="vp-vtype">AUTO BIO</span>':''}${s.pdfUrl?' <span class="vp-vtype">📄 PDF</span>':''}${(!s.url)?' <span class="vp-vtype" style="color:#d49a00">NO VIDEO YET</span>':''}</div>
       ${s.description?`<div class="sd">${DD.esc(s.description)}</div>`:''}
       <div class="su">${DD.esc(s.url)}</div><span class="vp-vtype">${_vpVtype(s.url)}</span></div>
       <button class="x" onclick="_vpSegDel(${i})" title="Remove">×</button></div>`).join('');
@@ -8060,7 +8060,7 @@ function _vpCollectRecord(){
     type: window._vpType||_vpDefaultType(),
     coverDescription:val('vp-coverdesc'), photo:(window._vpForm&&window._vpForm.photo)||'', message:val('vp-message'),
     pwPlain, pwHash: pwPlain?DD.hash(pwPlain):'',
-    segments:(window._vpSegments||[]).map(s=>({title:s.title,url:s.url,description:s.description||''})),
+    segments:(window._vpSegments||[]).map(s=>({title:s.title,url:s.url,description:s.description||'',pdfUrl:s.pdfUrl||'',pdfFileName:s.pdfFileName||''})),
     dealId:window._vpDealId||'',
     agreement: (window._vpAgreement&&window._vpAgreement.pdfUrl)? {...window._vpAgreement, dealId:window._vpDealId||''} : null,
     coAdvisorUids:(window._vpCoAdvisors||[]).slice(),
@@ -8103,7 +8103,7 @@ function _vpViewerBase(){ let u=location.href.split('#')[0].split('?')[0]; u=u.r
 function _vpProposalObj(rec){ const CFG=window.DIRTDOG_CONFIG||{};
   return { v:1, projectName:rec.projectName, acreage:rec.acreage, client:rec.client, coverDescription:rec.coverDescription,
     photo:rec.photo, message:rec.message, broker:rec.broker, coBrokers:rec.coBrokers||[], intro:_vpIntroCur(),
-    segments:(rec.segments||[]).map(s=>({title:s.title,url:s.url,description:s.description||''})), pw: rec.pwHash||'' }; }
+    segments:(rec.segments||[]).map(s=>({title:s.title,url:s.url,description:s.description||'',pdfUrl:s.pdfUrl||'',pdfFileName:s.pdfFileName||''})), pw: rec.pwHash||'' }; }
 // Readable slug from the project name, e.g. "Willow Creek Ranch" -> "Willow_Creek_Ranch"
 function _vpSlug(s){ return (String(s||'').trim().replace(/[^A-Za-z0-9]+/g,'_').replace(/^_+|_+$/g,'')) || 'Proposal'; }
 // Turn the project name into a Firestore doc id that's unique among existing proposals.
@@ -8338,6 +8338,8 @@ async function _vpLoadIntro(){
     // refresh the inputs if the library editor is open
     const ti=document.getElementById('vp-intro-title'), ui=document.getElementById('vp-intro-url');
     if(ti&&ui){ const c=_vpIntroCur(); ti.value=c.title; ui.value=c.url; }
+    // Refresh the cover-page status now that settings have loaded.
+    if(typeof _vpCoverRender==='function' && document.getElementById('vp-cover-front-status')) _vpCoverRender();
   }catch(e){ console.warn('[intro] load', (e&&e.message)||e); }
 }
 async function _vpIntroFilePicked(file){
@@ -8453,7 +8455,7 @@ function _vpLibRow(v,i,type){
 }
 function _vpAddFromLib(i){
   const v=(window._vpChipIndex||_vpAllLibrary())[i]; if(!v) return;
-  window._vpSegments.push({title:v.title,url:v.url,description:v.description||''});
+  window._vpSegments.push({title:v.title,url:v.url,description:v.description||'',pdfUrl:v.pdfUrl||'',pdfFileName:v.pdfFileName||''});
   _vpRenderSegList(); _vpRenderLibraryChips(); showToast('Added: '+(v.title||'video'),'success');
 }
 
@@ -8484,12 +8486,12 @@ function _vpBioVideoForUid(uid){
   const {name,email}=_vpAdvisorInfo(uid);
   // 1) explicit email → title map
   let title=(typeof ADVISOR_BIO_VIDEOS!=='undefined')?ADVISOR_BIO_VIDEOS[email]:null;
-  if(title){ const v=_vpLibFindByTitle(title); return v?{title:v.title,url:v.url,description:v.description||''}:{title:title,url:'',description:''}; }
+  if(title){ const v=_vpLibFindByTitle(title); return v?{title:v.title,url:v.url,description:v.description||'',pdfUrl:v.pdfUrl||'',pdfFileName:v.pdfFileName||''}:{title:title,url:'',description:''}; }
   // 2) fall back to matching a "Bio <Last>" / "Bio <First>" library video by name
   if(name){
     const parts=name.split(/\s+/).filter(Boolean);
     const cands=[parts[parts.length-1],parts[0]].filter(Boolean).map(p=>'Bio '+p);
-    for(const c of cands){ const v=_vpLibFindByTitle(c); if(v) return {title:v.title,url:v.url,description:v.description||''}; }
+    for(const c of cands){ const v=_vpLibFindByTitle(c); if(v) return {title:v.title,url:v.url,description:v.description||'',pdfUrl:v.pdfUrl||'',pdfFileName:v.pdfFileName||''}; }
   }
   // 3) blank placeholder slot, labelled with the advisor's name
   return {title:(name?('Bio — '+name):'Advisor Bio'),url:'',description:''};
@@ -8525,7 +8527,7 @@ function _vpBuildStarter(type, opts){
       return; // no co-advisors → no slots
     }
     const v=_vpLibFindByTitle(item);
-    segs.push(v?{title:v.title,url:v.url,description:v.description||''}:{title:item,url:'',description:''});
+    segs.push(v?{title:v.title,url:v.url,description:v.description||'',pdfUrl:v.pdfUrl||'',pdfFileName:v.pdfFileName||''}:{title:item,url:'',description:''});
   });
   window._vpSegments=segs;
   window._vpStarterSig=_vpSegSig(segs);
@@ -8574,7 +8576,7 @@ function _vpAddSegToLib(){
 }
 
 /* ================= LIBRARY MANAGER VIEW ================= */
-function _vpOpenLibrary(){ window._vpView='library'; window._vpLibEditing=null; window._vpLibUpload=null; window._vpLibPdfUpload=null; _vpLoadIntro(); _vpPaintLibrary(); }
+function _vpOpenLibrary(){ window._vpView='library'; window._vpLibEditing=null; window._vpLibUpload=null; window._vpLibPdfUpload=null; window._vpCoverPending=null; _vpLoadIntro(); _vpPaintLibrary(); }
 function _vpCanDeleteLib(){ return !!(currentUser&&(currentUser.isAdmin||currentUser.isSuperAdmin)); }
 function _vpPaintLibrary(){
   const types=_vpTypes();
@@ -8594,6 +8596,31 @@ function _vpPaintLibrary(){
       <div id="vp-intro-progress" style="display:none"><div class="vp-prog"><div class="vp-prog-bar" id="vp-intro-progbar"></div></div></div>
       <button class="vp-btn primary" style="margin-top:12px" onclick="_vpIntroSave()">Save intro video</button>
     </div>` : '';
+  const coversCur=_vpCoversCur();
+  const coverCard = _vpCanDeleteLib() ? `
+    <div class="vp-card">
+      <h3 class="vp-sec">Proposal PDF Cover Pages</h3>
+      <div class="vp-hint" style="margin-top:0">Optional front &amp; back PDF pages wrapped around the combined <b>Proposal PDF</b> a client downloads. Set once here; they apply to <b>every</b> proposal. The front page goes first, the back page last, with each video's attached PDF in between.</div>
+      <div class="vp-row2" style="margin-top:10px">
+        <div>
+          <label>Front page</label>
+          <input type="file" id="vp-cover-front-file" accept="application/pdf,.pdf" style="display:none" onchange="_vpCoverFilePicked('front',this.files&&this.files[0])">
+          <button class="vp-btn full" type="button" onclick="document.getElementById('vp-cover-front-file').click()">📄 Upload front page</button>
+          <div id="vp-cover-front-status"></div>
+          <button class="vp-btn full ghost" type="button" id="vp-cover-front-remove" onclick="_vpCoverRemove('front')" style="display:none;margin-top:6px">Remove front page</button>
+          <div id="vp-cover-front-progress" style="display:none"><div class="vp-prog"><div class="vp-prog-bar" id="vp-cover-front-progbar"></div></div></div>
+        </div>
+        <div>
+          <label>Back page</label>
+          <input type="file" id="vp-cover-back-file" accept="application/pdf,.pdf" style="display:none" onchange="_vpCoverFilePicked('back',this.files&&this.files[0])">
+          <button class="vp-btn full" type="button" onclick="document.getElementById('vp-cover-back-file').click()">📄 Upload back page</button>
+          <div id="vp-cover-back-status"></div>
+          <button class="vp-btn full ghost" type="button" id="vp-cover-back-remove" onclick="_vpCoverRemove('back')" style="display:none;margin-top:6px">Remove back page</button>
+          <div id="vp-cover-back-progress" style="display:none"><div class="vp-prog"><div class="vp-prog-bar" id="vp-cover-back-progbar"></div></div></div>
+        </div>
+      </div>
+      <button class="vp-btn primary" style="margin-top:12px" onclick="_vpProposalPdfSave()">Save cover pages</button>
+    </div>` : '';
   const editing=window._vpLibEditing? (_vpLibrary.find(v=>v.id===window._vpLibEditing)||null):null;
   const e=editing||{};
   const typeChecks=types.map(t=>`<label class="vp-tcheck"><input type="checkbox" class="vp-ltype" value="${DD.esc(t.id)}" ${ (e.types||[]).includes(t.id)?'checked':''}> ${DD.esc(t.label)}</label>`).join('');
@@ -8602,6 +8629,7 @@ function _vpPaintLibrary(){
     <div class="vp-edhead"><button class="vp-back" onclick="_vpBack()">← All proposals</button>
       <h2>📚 Video Library</h2></div>
     ${introCard}
+    ${coverCard}
     <div class="vp-egrid">
       <div>
         <div class="vp-card">
@@ -8654,6 +8682,98 @@ function _vpPaintLibrary(){
   </div>`);
   _vpRenderLibList();
   _vpLibPdfRender();
+  _vpCoverRender();
+}
+/* ---- company-wide Proposal-PDF cover pages (stored in proposals/__introSettings) ---- */
+function _vpCoversCur(){
+  const s=_vpIntroSettings||{};
+  return {
+    front:{url:s.proposalCoverUrl||'', storagePath:s.proposalCoverPath||'', fileName:s.proposalCoverName||''},
+    back:{url:s.proposalBackUrl||'', storagePath:s.proposalBackPath||'', fileName:s.proposalBackName||''}
+  };
+}
+function _vpCoverEffective(which){
+  // Pending change this session wins (including an explicit blank removal).
+  const pend=(window._vpCoverPending||{})[which];
+  if(pend!==undefined) return pend; // pend may be {url:'',...} for removal
+  return _vpCoversCur()[which];
+}
+function _vpCoverRender(){
+  ['front','back'].forEach(which=>{
+    const st=document.getElementById('vp-cover-'+which+'-status'); if(!st) return;
+    const rm=document.getElementById('vp-cover-'+which+'-remove');
+    const c=_vpCoverEffective(which);
+    if(c&&c.url){
+      st.innerHTML='<div style="display:flex;align-items:center;gap:8px;padding:9px 11px;background:#ecfdf5;border:1px solid #a7f3d0;border-radius:9px;font-size:13px;color:#065f46;margin-top:8px">'
+        +'<span style="font-size:16px">📄</span><div><b>'+_vpEsc(c.fileName||(which+' page.pdf'))+'</b></div></div>';
+      if(rm) rm.style.display='';
+    } else {
+      st.innerHTML='<div class="vp-hint" style="margin:8px 0 0">No '+which+' page set.</div>';
+      if(rm) rm.style.display='none';
+    }
+  });
+}
+async function _vpCoverFilePicked(which,file){
+  if(!file) return;
+  if(file.type!=='application/pdf' && !/\.pdf$/i.test(file.name)){ showToast('Please choose a PDF file','warning'); return; }
+  if(file.size>25*1024*1024){ showToast('PDF is over 25 MB — please use a smaller file','warning'); return; }
+  let waited=0; while(!_fbStorage&&waited<6000){ await new Promise(r=>setTimeout(r,200)); waited+=200; }
+  if(!_fbStorage){ showToast('Storage not ready — try again in a moment','error'); return; }
+  const prog=document.getElementById('vp-cover-'+which+'-progress'), bar=document.getElementById('vp-cover-'+which+'-progbar');
+  const st=document.getElementById('vp-cover-'+which+'-status'); if(st) st.innerHTML='<div class="vp-hint" style="margin:8px 0 0">Uploading '+_vpEsc(file.name)+'…</div>';
+  if(prog) prog.style.display='';
+  try{
+    const {ref,uploadBytesResumable,uploadBytes,getDownloadURL}=_fbFns;
+    const path='proposal-library/cover-'+which+'-'+Date.now()+'-'+file.name.replace(/[^\w.\-]+/g,'_');
+    let url;
+    if(uploadBytesResumable){
+      url=await new Promise((resolve,reject)=>{
+        const task=uploadBytesResumable(ref(_fbStorage,path),file,{contentType:'application/pdf'});
+        task.on('state_changed', s=>{ if(bar&&s.totalBytes) bar.style.width=Math.round(100*s.bytesTransferred/s.totalBytes)+'%'; }, reject,
+          async()=>{ try{ resolve(await getDownloadURL(task.snapshot.ref)); }catch(err){ reject(err); } });
+      });
+    } else { const snap=await uploadBytes(ref(_fbStorage,path),file,{contentType:'application/pdf'}); url=await getDownloadURL(snap.ref); }
+    window._vpCoverPending=window._vpCoverPending||{};
+    window._vpCoverPending[which]={url,storagePath:path,fileName:file.name};
+    _vpCoverRender();
+    showToast('Uploaded — click "Save cover pages" to apply','success');
+  }catch(err){ console.error('[covers] upload',err); if(st) st.innerHTML='<div class="vp-hint" style="margin:8px 0 0;color:#b91c1c">Upload failed: '+_vpEsc(err.message||err)+'</div>'; showToast('Upload failed: '+(err.message||err),'error'); }
+  finally{ if(prog) setTimeout(()=>{ prog.style.display='none'; },800); const fi=document.getElementById('vp-cover-'+which+'-file'); if(fi) fi.value=''; }
+}
+function _vpCoverRemove(which){
+  window._vpCoverPending=window._vpCoverPending||{};
+  window._vpCoverPending[which]={url:'',storagePath:'',fileName:''};
+  _vpCoverRender();
+  showToast(which.charAt(0).toUpperCase()+which.slice(1)+' page will be removed when you save','info');
+}
+async function _vpProposalPdfSave(){
+  if(!_vpCanDeleteLib()){ showToast('Only admins can change the cover pages','warning'); return; }
+  const pend=window._vpCoverPending||{};
+  if(pend.front===undefined && pend.back===undefined){ showToast('No changes to save','info'); return; }
+  const cur=_vpCoversCur();
+  try{
+    const {doc,getDoc,setDoc}=_fbFns; const ref=doc(_fbDb,'proposals','__introSettings');
+    const existing=await getDoc(ref);
+    const data={ kind:'introSettings', updated:Date.now() };
+    if(pend.front!==undefined){ data.proposalCoverUrl=pend.front.url||''; data.proposalCoverPath=pend.front.storagePath||''; data.proposalCoverName=pend.front.fileName||''; }
+    if(pend.back!==undefined){ data.proposalBackUrl=pend.back.url||''; data.proposalBackPath=pend.back.storagePath||''; data.proposalBackName=pend.back.fileName||''; }
+    if(!existing.exists()){ data.advisorUid=currentUser.uid; data.advisorName=currentUser.name||''; data.created=Date.now(); }
+    await setDoc(ref, sanitizeForFirestore(data), {merge:true});
+    // Clean up replaced/removed cover files in Storage.
+    if(pend.front!==undefined && cur.front.storagePath && cur.front.storagePath!==data.proposalCoverPath){ try{ const {ref:sref,deleteObject}=_fbFns; await deleteObject(sref(_fbStorage,cur.front.storagePath)); }catch(e){ console.warn('[covers] old front delete',e); } }
+    if(pend.back!==undefined && cur.back.storagePath && cur.back.storagePath!==data.proposalBackPath){ try{ const {ref:sref,deleteObject}=_fbFns; await deleteObject(sref(_fbStorage,cur.back.storagePath)); }catch(e){ console.warn('[covers] old back delete',e); } }
+    // Reflect saved values locally.
+    _vpIntroSettings={...(_vpIntroSettings||{}),
+      proposalCoverUrl:data.proposalCoverUrl!==undefined?data.proposalCoverUrl:(_vpIntroSettings||{}).proposalCoverUrl,
+      proposalCoverPath:data.proposalCoverPath!==undefined?data.proposalCoverPath:(_vpIntroSettings||{}).proposalCoverPath,
+      proposalCoverName:data.proposalCoverName!==undefined?data.proposalCoverName:(_vpIntroSettings||{}).proposalCoverName,
+      proposalBackUrl:data.proposalBackUrl!==undefined?data.proposalBackUrl:(_vpIntroSettings||{}).proposalBackUrl,
+      proposalBackPath:data.proposalBackPath!==undefined?data.proposalBackPath:(_vpIntroSettings||{}).proposalBackPath,
+      proposalBackName:data.proposalBackName!==undefined?data.proposalBackName:(_vpIntroSettings||{}).proposalBackName};
+    window._vpCoverPending=null;
+    showToast('Cover pages saved — applies to all proposals','success');
+    _vpCoverRender();
+  }catch(e){ console.error('[covers] save',e); showToast('Save failed: '+(e.message||e),'error'); }
 }
 /* ---- attached-PDF state + upload for a library video ---- */
 function _vpLibCurrentPdf(){
@@ -8770,8 +8890,15 @@ function _vpLibCollect(){
   const autoTypes=[...document.querySelectorAll('.vp-lauto:checked')].map(c=>c.value).filter(x=>types.includes(x));
   const up=window._vpLibUpload;
   const isUpload = up && up.url===u;
+  // Attached PDF: a pending upload/removal this session wins; otherwise keep the
+  // editing record's saved PDF unchanged.
+  const editing=window._vpLibEditing?(_vpLibrary.find(v=>v.id===window._vpLibEditing)||null):null;
+  let pdf;
+  if(window._vpLibPdfUpload){ const p=window._vpLibPdfUpload; pdf={pdfUrl:p.url||'', pdfStoragePath:p.storagePath||'', pdfFileName:p.fileName||''}; }
+  else if(editing){ pdf={pdfUrl:editing.pdfUrl||'', pdfStoragePath:editing.pdfStoragePath||'', pdfFileName:editing.pdfFileName||''}; }
+  else { pdf={pdfUrl:'', pdfStoragePath:'', pdfFileName:''}; }
   return { title:t, description:d, internalNote:note, url:u, types, autoTypes,
-    source:isUpload?'upload':'link', storagePath:isUpload?up.storagePath:'' };
+    source:isUpload?'upload':'link', storagePath:isUpload?up.storagePath:'', ...pdf };
 }
 async function _vpLibCreate(data){
   const {collection,addDoc}=_fbFns;
@@ -8779,6 +8906,7 @@ async function _vpLibCreate(data){
     title:data.title||'', description:data.description||'', internalNote:data.internalNote||'', url:data.url||'',
     types:data.types||[], autoTypes:data.autoTypes||[],
     source:data.source||'link', storagePath:data.storagePath||'',
+    pdfUrl:data.pdfUrl||'', pdfStoragePath:data.pdfStoragePath||'', pdfFileName:data.pdfFileName||'',
     createdByUid:currentUser.uid, createdByName:currentUser.name||currentUser.email||'',
     created:Date.now(), updated:Date.now() }));
 }
@@ -8787,13 +8915,19 @@ async function _vpLibSaveClick(){
   if(!data.title||!data.url){ showToast('Add a title and a video link (or upload a file)','warning'); return; }
   try{
     if(window._vpLibEditing){
+      const prev=(_vpLibrary||[]).find(v=>v.id===window._vpLibEditing)||{};
       const {doc,setDoc}=_fbFns;
       await setDoc(doc(_fbDb,'videoLibrary',window._vpLibEditing), sanitizeForFirestore({
         title:data.title, description:data.description, internalNote:data.internalNote, url:data.url, types:data.types, autoTypes:data.autoTypes,
-        source:data.source, storagePath:data.storagePath, updated:Date.now() }), {merge:true});
+        source:data.source, storagePath:data.storagePath,
+        pdfUrl:data.pdfUrl, pdfStoragePath:data.pdfStoragePath, pdfFileName:data.pdfFileName, updated:Date.now() }), {merge:true});
+      // If the attached PDF was replaced or removed, delete the old Storage file.
+      if(prev.pdfStoragePath && prev.pdfStoragePath!==data.pdfStoragePath){
+        try{ const {ref,deleteObject}=_fbFns; await deleteObject(ref(_fbStorage,prev.pdfStoragePath)); }catch(e){ console.warn('[library] old pdf delete',e); }
+      }
       showToast('Video updated','success'); window._vpLibEditing=null;
     } else { await _vpLibCreate(data); showToast('Added to library','success'); }
-    window._vpLibUpload=null; _vpPaintLibrary();
+    window._vpLibUpload=null; window._vpLibPdfUpload=null; _vpPaintLibrary();
   }catch(err){ console.error('[library] save',err); showToast('Save failed: '+(err.message||err),'error'); }
 }
 // Import a built-in config.js preset into the editable Firestore library, then
@@ -8831,6 +8965,7 @@ async function _vpLibDelete(id){
   if(!confirm('Delete "'+(v.title||'this video')+'" from the shared library? This removes it for everyone.')) return;
   try{
     if(v.storagePath){ const {ref,deleteObject}=_fbFns; try{ await deleteObject(ref(_fbStorage,v.storagePath)); }catch(e){ console.warn('[library] storage delete',e); } }
+    if(v.pdfStoragePath){ const {ref,deleteObject}=_fbFns; try{ await deleteObject(ref(_fbStorage,v.pdfStoragePath)); }catch(e){ console.warn('[library] pdf delete',e); } }
     const {doc,deleteDoc}=_fbFns; await deleteDoc(doc(_fbDb,'videoLibrary',id));
     if(window._vpLibEditing===id) window._vpLibEditing=null;
     showToast('Deleted from library','success'); _vpPaintLibrary();
@@ -8843,6 +8978,8 @@ window._vpLibFilePicked=_vpLibFilePicked; window._vpLibSaveClick=_vpLibSaveClick
 window._vpLibCancelEdit=_vpLibCancelEdit; window._vpLibDelete=_vpLibDelete; window._vpLibImportBuiltin=_vpLibImportBuiltin;
 window._vpLibImportAllBuiltin=_vpLibImportAllBuiltin; window._vpBuildStarter=_vpBuildStarter; window._vpApplyBios=_vpApplyBios;
 window._vpIntroSave=_vpIntroSave; window._vpIntroFilePicked=_vpIntroFilePicked;
+window._vpLibPdfFilePicked=_vpLibPdfFilePicked; window._vpLibPdfRemove=_vpLibPdfRemove;
+window._vpCoverFilePicked=_vpCoverFilePicked; window._vpProposalPdfSave=_vpProposalPdfSave; window._vpCoverRemove=_vpCoverRemove;
 window.bootProposals=bootProposals; window._vpAdd=_vpAdd; window._vpEdit=_vpEdit; window._vpBack=_vpBack;
 window._vpToggleArchived=_vpToggleArchived; window._vpUpdatePhoto=_vpUpdatePhoto; window._vpSegMove=_vpSegMove;
 window._vpSegDel=_vpSegDel; window._vpAddPreset=_vpAddPreset; window._vpAddSeg=_vpAddSeg; window._vpSuggestPw=_vpSuggestPw;
