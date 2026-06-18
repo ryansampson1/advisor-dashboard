@@ -7731,6 +7731,8 @@ function _vpInjectStyles(){
   #vp-root .vpv-rec-time{font-variant-numeric:tabular-nums;font-weight:700;color:#374151;font-size:15px;min-width:46px}
   #vp-root .vpv-rec-time.live{color:#b91c1c}
   #vp-root .vpv-rec-audio{width:100%;margin-top:10px}
+  #vp-root .vpv-vid-prev{width:100%;max-height:220px;border-radius:11px;border:1px solid #d1d5db;background:#000;margin-top:10px;display:none}
+  #vp-root .vpv-vid-prev.show{display:block}
   `;
   const s=document.createElement('style'); s.id='vp-styles'; s.textContent=css; document.head.appendChild(s);
 }
@@ -7966,15 +7968,38 @@ function _vpPaintEditor(){
             <button type="button" data-mode="record" onclick="_vpvSetVoiceMode('record')">🎙 Record my own</button>
           </div>
 
-          <label style="margin-top:14px">Flyover style</label>
-          <div class="vpv-toggle" id="vpv-style">
-            <button type="button" data-style="satellite" onclick="_vpvSetStyle('satellite')">🛰 Satellite pan</button>
-            <button type="button" data-style="3d" onclick="_vpvSetStyle('3d')">⛰ 3D aerial orbit</button>
+          <label style="margin-top:14px">Background visual</label>
+          <div class="vpv-toggle" id="vpv-visual">
+            <button type="button" data-visual="flyover" onclick="_vpvSetVisual('flyover')">🛰 Property flyover</button>
+            <button type="button" data-visual="video" onclick="_vpvSetVisual('video')">🎞 My own video</button>
           </div>
 
-          <label style="margin-top:14px">Property location <span class="vp-hint" style="display:inline">— click the map to drop the pin</span></label>
-          <div id="vpv-map"></div>
-          <div class="vpv-coords" id="vpv-coords">No location set yet. Click the map, or it will center on the linked deal's address.</div>
+          <div id="vpv-flyover-controls">
+            <label style="margin-top:14px">Flyover style</label>
+            <div class="vpv-toggle" id="vpv-style">
+              <button type="button" data-style="satellite" onclick="_vpvSetStyle('satellite')">🛰 Satellite pan</button>
+              <button type="button" data-style="3d" onclick="_vpvSetStyle('3d')">⛰ 3D aerial orbit</button>
+            </div>
+
+            <label style="margin-top:14px">Property location <span class="vp-hint" style="display:inline">— click the map to drop the pin</span></label>
+            <div id="vpv-map"></div>
+            <div class="vpv-coords" id="vpv-coords">No location set yet. Click the map, or it will center on the linked deal's address.</div>
+          </div>
+
+          <div id="vpv-video-controls" style="display:none">
+            <input type="file" id="vpv-bgvideo-file" accept="video/*" style="display:none" onchange="_vpvBgVideoPicked(this.files&&this.files[0])">
+            <div class="vp-row2" style="margin-top:14px">
+              <button class="vp-btn full" type="button" onclick="document.getElementById('vpv-bgvideo-file').click()">🎞 Choose a video from your computer</button>
+              <button class="vp-btn full ghost" type="button" id="vpv-bgvideo-clear" onclick="_vpvBgVideoClear()" style="display:none">Remove video</button>
+            </div>
+            <video id="vpv-bgvideo-prev" class="vpv-vid-prev" controls muted playsinline></video>
+            <label style="margin-top:12px">When the voiceover ends</label>
+            <div class="vpv-toggle" id="vpv-videoend">
+              <button type="button" data-end="loop" onclick="_vpvSetVideoEnd('loop')">🔁 Loop to fill</button>
+              <button type="button" data-end="once" onclick="_vpvSetVideoEnd('once')">⏹ Play once</button>
+            </div>
+            <div class="vp-hint" style="margin-top:6px">The clip always lasts as long as the voiceover. <b>Loop</b> repeats your video to fill it; <b>Play once</b> plays it through and holds the last frame (or trims to the voiceover if your video is longer). Your video's own audio is muted — only the voiceover is heard.</div>
+          </div>
 
           <div id="vpv-tts-controls">
             <div class="vp-row2" style="margin-top:12px">
@@ -9116,6 +9141,11 @@ function _vpvPaint(){
   window._vpvVoiceMode = window._vpvVoiceMode || v.voiceMode || 'tts';
   _vpvSetVoiceMode(window._vpvVoiceMode, true);
   _vpvRenderRec();
+  window._vpvVisual = window._vpvVisual || v.visual || 'flyover';
+  window._vpvVideoEnd = window._vpvVideoEnd || v.videoEnd || 'loop';
+  _vpvSetVideoEnd(window._vpvVideoEnd);
+  _vpvSetVisual(window._vpvVisual);
+  _vpvRenderBgVideo();
   if(v.lat!=null && v.lng!=null){ window._vpvLat=v.lat; window._vpvLng=v.lng; }
   _vpvOnText();
   _vpvRenderCoords();
@@ -9189,6 +9219,40 @@ function _vpvRecReset(){
   if(window._vpvRecording){ try{ window._vpvRecorder.stop(); }catch(_){} }
   window._vpvRecBlob=null; window._vpvRecSec=0;
   _vpvRenderRec();
+}
+
+/* ---- Background visual: property flyover vs the advisor's own video ---- */
+function _vpvSetVisual(visual){
+  window._vpvVisual=visual;
+  document.querySelectorAll('#vpv-visual button').forEach(b=>b.classList.toggle('on', b.dataset.visual===visual));
+  const fly=document.getElementById('vpv-flyover-controls'), vid=document.getElementById('vpv-video-controls');
+  if(fly) fly.style.display=(visual==='flyover')?'':'none';
+  if(vid) vid.style.display=(visual==='video')?'':'none';
+  // Leaflet needs a resize nudge after being un-hidden.
+  if(visual==='flyover' && window._vpvMap){ setTimeout(()=>{ try{ window._vpvMap.invalidateSize(); }catch(_){} },60); }
+}
+function _vpvSetVideoEnd(end){
+  window._vpvVideoEnd=end;
+  document.querySelectorAll('#vpv-videoend button').forEach(b=>b.classList.toggle('on', b.dataset.end===end));
+}
+function _vpvBgVideoPicked(file){
+  if(!file) return;
+  if(!/^video\//.test(file.type)){ showToast('Please choose a video file','warning'); return; }
+  if(file.size > 200*1024*1024){ showToast('That video is over 200 MB — please use a smaller/shorter clip','warning'); return; }
+  window._vpvBgVideoBlob=file;
+  _vpvRenderBgVideo();
+  showToast('Background video added','success');
+}
+function _vpvBgVideoClear(){
+  window._vpvBgVideoBlob=null;
+  const fi=document.getElementById('vpv-bgvideo-file'); if(fi) fi.value='';
+  _vpvRenderBgVideo();
+}
+function _vpvRenderBgVideo(){
+  const prev=document.getElementById('vpv-bgvideo-prev'), clr=document.getElementById('vpv-bgvideo-clear');
+  const has=!!window._vpvBgVideoBlob;
+  if(prev){ if(has){ prev.src=URL.createObjectURL(window._vpvBgVideoBlob); prev.classList.add('show'); } else { prev.removeAttribute('src'); prev.classList.remove('show'); } }
+  if(clr) clr.style.display=has?'':'none';
 }
 function _vpvOnText(){
   const t=((document.getElementById('vpv-text')||{}).value||'').trim();
@@ -9324,21 +9388,24 @@ function _vpvDrawScene(ctx,W,H,bm,style,p,label){
   ctx.clearRect(0,0,W,H); ctx.fillStyle='#000'; ctx.fillRect(0,0,W,H);
   const bmS=bm.width;
   if(style==='3d'){
-    // Tilted orbiting aerial: rotate heading + vertical squash to fake tilt + slow push-in.
-    const sky=ctx.createLinearGradient(0,0,0,H*0.5); sky.addColorStop(0,'#7fb0d6'); sky.addColorStop(1,'#0b1f17');
-    ctx.fillStyle=sky; ctx.fillRect(0,0,W,H);
-    const heading=(-0.22+0.44*e);          // sweep ~25° across the orbit
-    const zoom=(0.92+0.30*e)*(W/bmS);       // push in
+    // Oblique aerial orbit. The tilted/rotated image is scaled so it ALWAYS
+    // covers the whole frame — there's no sky layer, so no blue corners while
+    // it spins. A dark base shows only if a frame ever fell short.
+    ctx.fillStyle='#05110b'; ctx.fillRect(0,0,W,H);
+    const heading=(-0.10+0.20*e);   // gentle ~6° orbit sweep
+    const ty=0.72;                  // oblique tilt (vertical compression)
+    const zoom=(1.02+0.22*e);       // push-in; >=1 keeps full coverage with rotation margin
     ctx.save();
-    ctx.translate(W/2, H*0.62);
+    ctx.translate(W/2, H*0.5);
     ctx.rotate(heading);
-    ctx.transform(1,0,0,0.58,0,0);          // tilt (vertical compression)
+    ctx.transform(1,0,0,ty,0,0);
     ctx.scale(zoom,zoom);
     ctx.drawImage(bm,-bmS/2,-bmS/2);
     ctx.restore();
-    // horizon haze + ground vignette
-    const hz=ctx.createLinearGradient(0,0,0,H); hz.addColorStop(0,'rgba(127,176,214,.35)'); hz.addColorStop(0.32,'rgba(0,0,0,0)'); hz.addColorStop(1,'rgba(0,0,0,.45)');
-    ctx.fillStyle=hz; ctx.fillRect(0,0,W,H);
+    // cinematic vignette for depth (no sky → no blue)
+    const vg=ctx.createRadialGradient(W/2,H/2,H*0.35,W/2,H/2,H*0.92);
+    vg.addColorStop(0,'rgba(0,0,0,0)'); vg.addColorStop(1,'rgba(0,0,0,.5)');
+    ctx.fillStyle=vg; ctx.fillRect(0,0,W,H);
   } else {
     // Flat Ken-Burns pan/zoom.
     const scale=(1.06+0.20*e)*(W/bmS<H/bmS?H/bmS:W/bmS);
@@ -9354,13 +9421,23 @@ function _vpvDrawScene(ctx,W,H,bm,style,p,label){
     const vg=ctx.createRadialGradient(W/2,H/2,H*0.3,W/2,H/2,H*0.75); vg.addColorStop(0,'rgba(0,0,0,0)'); vg.addColorStop(1,'rgba(0,0,0,.4)');
     ctx.fillStyle=vg; ctx.fillRect(0,0,W,H);
   }
-  // Lower-third caption
+  _vpvCaption(ctx,W,H,label);
+}
+function _vpvCaption(ctx,W,H,label){
   const grad=ctx.createLinearGradient(0,H-150,0,H); grad.addColorStop(0,'rgba(0,0,0,0)'); grad.addColorStop(1,'rgba(0,0,0,.8)');
   ctx.fillStyle=grad; ctx.fillRect(0,H-150,W,150);
   ctx.fillStyle='#00b2a9'; ctx.font='700 16px Inter, Arial, sans-serif'; ctx.textBaseline='alphabetic';
   ctx.fillText('PROPERTY VALUATION', 44, H-58);
   ctx.fillStyle='#fff'; ctx.font='800 34px "Playfair Display", Georgia, serif';
   ctx.fillText((label||'Your Property').slice(0,46), 44, H-26);
+}
+function _vpvDrawVideoFrame(ctx,W,H,videoEl,label){
+  ctx.fillStyle='#000'; ctx.fillRect(0,0,W,H);
+  const vw=videoEl.videoWidth||16, vh=videoEl.videoHeight||9;
+  const scale=Math.max(W/vw, H/vh);   // cover-fit (fills the frame, crops overflow)
+  const dw=vw*scale, dh=vh*scale;
+  try{ ctx.drawImage(videoEl, (W-dw)/2, (H-dh)/2, dw, dh); }catch(_){}
+  _vpvCaption(ctx,W,H,label);
 }
 
 /* ---- Ensure H.264 MP4 (transcode WebM via ffmpeg.wasm if needed) ---- */
@@ -9399,9 +9476,14 @@ function _vpvProgress(pct){ const b=document.getElementById('vpv-bar'); if(!b) r
 async function _vpvGenerate(){
   const cfg=_vpvCfg();
   const mode=window._vpvVoiceMode||'tts';
+  const visual=window._vpvVisual||'flyover';
   const text=((document.getElementById('vpv-text')||{}).value||'').trim();
-  if(window._vpvLat==null||window._vpvLng==null){ showToast('Click the property location on the map','warning'); return; }
   if(!(document.getElementById('vp-proj')||{}).value.trim()){ showToast('Add a project name first','warning'); return; }
+  if(visual==='video'){
+    if(!window._vpvBgVideoBlob){ showToast('Choose your background video first (🎞)','warning'); return; }
+  } else {
+    if(window._vpvLat==null||window._vpvLng==null){ showToast('Click the property location on the map','warning'); return; }
+  }
   if(mode==='record'){
     if(window._vpvRecording){ showToast('Stop the recording first','warning'); return; }
     if(!window._vpvRecBlob){ showToast('Record your voiceover first (🎙 Record)','warning'); return; }
@@ -9434,10 +9516,18 @@ async function _vpvGenerate(){
     }
     const vidSec=Math.max(8, audioDur+0.8);
 
-    _vpvStatus('Pulling in satellite imagery…'); _vpvProgress(0.24);
     const style=window._vpvStyle||cfg.defaultStyle;
-    const zoom=(style==='3d')?16:16;
-    const bm=await _vpvBuildBasemap(window._vpvLat, window._vpvLng, zoom, 1536);
+    let bm=null, bgVideo=null;
+    if(visual==='video'){
+      _vpvStatus('Loading your video…'); _vpvProgress(0.24);
+      bgVideo=document.createElement('video');
+      bgVideo.src=URL.createObjectURL(window._vpvBgVideoBlob);
+      bgVideo.muted=true; bgVideo.playsInline=true; bgVideo.loop=(window._vpvVideoEnd!=='once');
+      await new Promise((res,rej)=>{ bgVideo.onloadeddata=()=>res(); bgVideo.onerror=()=>rej(new Error('Could not read that video file.')); setTimeout(res,5000); });
+    } else {
+      _vpvStatus('Pulling in satellite imagery…'); _vpvProgress(0.24);
+      bm=await _vpvBuildBasemap(window._vpvLat, window._vpvLng, 16, 1536);
+    }
 
     _vpvStatus('Filming the flyover…'); _vpvProgress(0.4);
     const W=cfg.width, H=cfg.height, fps=cfg.fps;
@@ -9457,18 +9547,19 @@ async function _vpvGenerate(){
     const stopped=new Promise(r=>{ rec2.onstop=r; });
 
     // Pre-draw first frame so there's no black flash.
-    _vpvDrawScene(ctx,W,H,bm,style,0,label);
+    if(visual==='video'){ _vpvDrawVideoFrame(ctx,W,H,bgVideo,label); } else { _vpvDrawScene(ctx,W,H,bm,style,0,label); }
     try{ await ac.resume(); }catch(_){}   // context may start suspended after awaits
+    if(visual==='video' && bgVideo){ try{ bgVideo.currentTime=0; await bgVideo.play(); }catch(_){} }
     rec2.start();
     if(mode==='record'){ try{ mediaEl.currentTime=0; await mediaEl.play(); }catch(_){} }
     else { bufSrc.start(); }
     const t0=performance.now();
     await new Promise(resolve=>{
       function frame(now){ const t=(now-t0)/1000; const p=t/vidSec;
-        _vpvDrawScene(ctx,W,H,bm,style,p,label);
+        if(visual==='video'){ _vpvDrawVideoFrame(ctx,W,H,bgVideo,label); } else { _vpvDrawScene(ctx,W,H,bm,style,p,label); }
         _vpvProgress(0.4+0.35*Math.min(1,p));
         if(t<vidSec){ requestAnimationFrame(frame); }
-        else { try{ rec2.stop(); }catch(_){} try{ if(bufSrc) bufSrc.stop(); else mediaEl.pause(); }catch(_){} resolve(); }
+        else { try{ rec2.stop(); }catch(_){} try{ if(bufSrc) bufSrc.stop(); else mediaEl.pause(); }catch(_){} try{ if(bgVideo) bgVideo.pause(); }catch(_){} resolve(); }
       }
       requestAnimationFrame(frame);
     });
@@ -9486,7 +9577,8 @@ async function _vpvGenerate(){
     const snap=await uploadBytes(fbRef(_fbStorage,path), outBlob, {contentType:'video/mp4'});
     const url=await getDownloadURL(snap.ref);
 
-    window._vpValuation={ text, style, voiceMode:mode, lat:window._vpvLat, lng:window._vpvLng,
+    window._vpValuation={ text, style, visual, videoEnd:(window._vpvVideoEnd||'loop'), voiceMode:mode,
+      lat:window._vpvLat, lng:window._vpvLng,
       voice:(document.getElementById('vpv-voice')||{}).value||cfg.voice,
       rate:parseFloat((document.getElementById('vpv-rate')||{}).value||cfg.rate)||cfg.rate,
       videoUrl:url, videoStoragePath:path, durationSec:Math.round(vidSec), createdAt:Date.now() };
@@ -9533,6 +9625,7 @@ window._vpPhotoFile=_vpPhotoFile; window._vpPhotoClear=_vpPhotoClear;
 window._vpvOnText=_vpvOnText; window._vpvSetStyle=_vpvSetStyle; window._vpvPreviewVoice=_vpvPreviewVoice;
 window._vpvGenerate=_vpvGenerate; window._vpvRemove=_vpvRemove;
 window._vpvSetVoiceMode=_vpvSetVoiceMode; window._vpvRecToggle=_vpvRecToggle; window._vpvRecReset=_vpvRecReset;
+window._vpvSetVisual=_vpvSetVisual; window._vpvSetVideoEnd=_vpvSetVideoEnd; window._vpvBgVideoPicked=_vpvBgVideoPicked; window._vpvBgVideoClear=_vpvBgVideoClear;
 window._vpAgUpload=_vpAgUpload; window._vpAgPlace=_vpAgPlace; window._vpAgRemove=_vpAgRemove;
 window._vpSigOpen=_vpSigOpen; window._vpSigFinalize=_vpSigFinalize;
 
