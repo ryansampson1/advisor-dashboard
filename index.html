@@ -7725,6 +7725,12 @@ function _vpInjectStyles(){
   #vp-root .vpv-prev.show{display:block}
   #vp-root .vpv-setup{font-size:12px;color:#9a6a00;background:#fffbeb;border:1px solid #fde68a;border-radius:9px;padding:9px 11px;margin-top:8px}
   #vp-root .vpv-setup b{color:#92400e}
+  #vp-root .vpv-rec{display:flex;align-items:center;gap:12px;margin-top:12px}
+  #vp-root #vpv-rec-btn{font-weight:700}
+  #vp-root #vpv-rec-btn.recording{background:#fef2f2;border-color:#fca5a5;color:#b91c1c}
+  #vp-root .vpv-rec-time{font-variant-numeric:tabular-nums;font-weight:700;color:#374151;font-size:15px;min-width:46px}
+  #vp-root .vpv-rec-time.live{color:#b91c1c}
+  #vp-root .vpv-rec-audio{width:100%;margin-top:10px}
   `;
   const s=document.createElement('style'); s.id='vp-styles'; s.textContent=css; document.head.appendChild(s);
 }
@@ -7949,10 +7955,16 @@ function _vpPaintEditor(){
 
         <div class="vp-card" id="vpv-card">
           <h3 class="vp-sec">Property Valuation</h3>
-          <div class="vp-hint" style="margin-top:0;margin-bottom:10px">Type a short valuation narration, click the property on the map, and generate a flyover video with an AI voiceover. It saves as this proposal's Property Valuation video.</div>
-          <label>Valuation narration</label>
+          <div class="vp-hint" style="margin-top:0;margin-bottom:10px">Write a short valuation script, click the property on the map, and generate a flyover video. Use the AI cowboy voice, or record it in your own voice. It saves as this proposal's Property Valuation video.</div>
+          <label>Valuation script <span class="vp-hint" style="display:inline">— spoken by the AI voice, or your teleprompter if you record</span></label>
           <textarea id="vpv-text" placeholder="e.g. Welcome to this exceptional 120-acre parcel in the heart of Pasco County. Based on recent comparable sales, current entitlements, and frontage on Highway 52, we estimate a market value in the range of…" oninput="_vpvOnText()" style="min-height:120px"></textarea>
           <div class="vpv-meter" id="vpv-meter">About <b>0s</b> of narration · aim for <b>45–90s</b></div>
+
+          <label style="margin-top:14px">Voiceover</label>
+          <div class="vpv-toggle" id="vpv-voicemode">
+            <button type="button" data-mode="tts" onclick="_vpvSetVoiceMode('tts')">🤠 AI cowboy voice</button>
+            <button type="button" data-mode="record" onclick="_vpvSetVoiceMode('record')">🎙 Record my own</button>
+          </div>
 
           <label style="margin-top:14px">Flyover style</label>
           <div class="vpv-toggle" id="vpv-style">
@@ -7964,31 +7976,40 @@ function _vpPaintEditor(){
           <div id="vpv-map"></div>
           <div class="vpv-coords" id="vpv-coords">No location set yet. Click the map, or it will center on the linked deal's address.</div>
 
-          <div class="vp-row2" style="margin-top:12px">
-            <div><label>Voice</label>
-              <select id="vpv-voice">
-                <option value="en-US-Polyglot-1">Deep cowboy (Polyglot-1)</option>
-                <option value="en-US-Neural2-D">Rugged male (Neural2-D)</option>
-                <option value="en-US-Standard-J">Gravelly male (Standard-J)</option>
-                <option value="en-US-Standard-D">Classic male (Standard-D)</option>
-                <option value="en-US-Neural2-A">Neutral male (Neural2-A)</option>
-              </select>
+          <div id="vpv-tts-controls">
+            <div class="vp-row2" style="margin-top:12px">
+              <div><label>Voice</label>
+                <select id="vpv-voice">
+                  <option value="en-US-Polyglot-1">Deep cowboy (Polyglot-1)</option>
+                  <option value="en-US-Neural2-D">Rugged male (Neural2-D)</option>
+                  <option value="en-US-Standard-J">Gravelly male (Standard-J)</option>
+                  <option value="en-US-Standard-D">Classic male (Standard-D)</option>
+                  <option value="en-US-Neural2-A">Neutral male (Neural2-A)</option>
+                </select>
+              </div>
+              <div><label>Drawl (rate)</label>
+                <select id="vpv-rate">
+                  <option value="0.80">Slow drawl</option>
+                  <option value="0.88" selected>Easy cowboy</option>
+                  <option value="1.0">Natural</option>
+                </select>
+              </div>
             </div>
-            <div><label>Drawl (rate)</label>
-              <select id="vpv-rate">
-                <option value="0.80">Slow drawl</option>
-                <option value="0.88" selected>Easy cowboy</option>
-                <option value="1.0">Natural</option>
-              </select>
-            </div>
+            <button class="vp-btn full" type="button" id="vpv-preview-voice" onclick="_vpvPreviewVoice()" style="margin-top:10px">🔊 Preview voice</button>
+            <div id="vpv-setup" class="vpv-setup" style="display:none"></div>
           </div>
 
-          <div id="vpv-setup" class="vpv-setup" style="display:none"></div>
-
-          <div class="vp-row2" style="margin-top:12px">
-            <button class="vp-btn full" type="button" id="vpv-preview-voice" onclick="_vpvPreviewVoice()">🔊 Preview voice</button>
-            <button class="vp-btn full primary" type="button" id="vpv-generate" onclick="_vpvGenerate()">🎬 Generate valuation video</button>
+          <div id="vpv-rec-controls" style="display:none">
+            <div class="vpv-rec">
+              <button class="vp-btn" type="button" id="vpv-rec-btn" onclick="_vpvRecToggle()">● Record</button>
+              <span class="vpv-rec-time" id="vpv-rec-time">0:00</span>
+              <button class="vp-btn ghost" type="button" id="vpv-rec-reset" onclick="_vpvRecReset()" style="display:none">↺ Re-record</button>
+            </div>
+            <audio id="vpv-rec-audio" class="vpv-rec-audio" controls style="display:none"></audio>
+            <div class="vp-hint" style="margin-top:6px">Read your script above as the property flies by. Allow the mic when asked. Aim for 45–90 seconds — the video matches your recording length.</div>
           </div>
+
+          <button class="vp-btn full primary" type="button" id="vpv-generate" onclick="_vpvGenerate()" style="margin-top:12px">🎬 Generate valuation video</button>
           <div class="vpv-bar" id="vpv-bar"><i></i></div>
           <div class="vpv-status" id="vpv-status"></div>
           <video class="vpv-prev" id="vpv-prev" controls playsinline preload="metadata"></video>
@@ -9092,6 +9113,9 @@ function _vpvPaint(){
   const ra=document.getElementById('vpv-rate'); if(ra) ra.value=String(v.rate||cfg.rate);
   window._vpvStyle=v.style||cfg.defaultStyle;
   _vpvSetStyle(window._vpvStyle, true);
+  window._vpvVoiceMode = window._vpvVoiceMode || v.voiceMode || 'tts';
+  _vpvSetVoiceMode(window._vpvVoiceMode, true);
+  _vpvRenderRec();
   if(v.lat!=null && v.lng!=null){ window._vpvLat=v.lat; window._vpvLng=v.lng; }
   _vpvOnText();
   _vpvRenderCoords();
@@ -9110,6 +9134,61 @@ function _vpvSetupNotice(){
     'Deploy <code>tts-proxy</code> (see its README) and paste the worker URL into '+
     '<code>proposals/config.js → valuation.ttsProxyUrl</code>. Satellite imagery is keyless. '+
     'Until then you can still write narration and pick the location.';
+}
+
+/* ---- Voiceover mode: AI text-to-speech vs record-your-own ---- */
+function _vpvSetVoiceMode(mode, keep){
+  window._vpvVoiceMode = mode;
+  document.querySelectorAll('#vpv-voicemode button').forEach(b=>b.classList.toggle('on', b.dataset.mode===mode));
+  const tts=document.getElementById('vpv-tts-controls'), rec=document.getElementById('vpv-rec-controls');
+  if(tts) tts.style.display = (mode==='tts')?'':'none';
+  if(rec) rec.style.display = (mode==='record')?'':'none';
+}
+function _vpvFmtTime(s){ s=Math.max(0,Math.round(s)); return Math.floor(s/60)+':'+String(s%60).padStart(2,'0'); }
+function _vpvRenderRec(){
+  const audio=document.getElementById('vpv-rec-audio'), reset=document.getElementById('vpv-rec-reset'),
+        time=document.getElementById('vpv-rec-time'), btn=document.getElementById('vpv-rec-btn');
+  const has=!!window._vpvRecBlob;
+  if(audio){ if(has){ audio.src=URL.createObjectURL(window._vpvRecBlob); audio.style.display='block'; } else { audio.removeAttribute('src'); audio.style.display='none'; } }
+  if(reset) reset.style.display = has?'':'none';
+  if(time && !window._vpvRecording) time.textContent=_vpvFmtTime(window._vpvRecSec||0);
+  if(btn && !window._vpvRecording){ btn.classList.remove('recording'); btn.textContent = has?'● Record again':'● Record'; }
+}
+async function _vpvRecToggle(){
+  if(window._vpvRecording){ // stop
+    try{ window._vpvRecorder.stop(); }catch(_){}
+    return;
+  }
+  // start
+  let stream;
+  try{ stream=await navigator.mediaDevices.getUserMedia({audio:true}); }
+  catch(e){ showToast('Microphone access is needed to record. '+(e.message||''),'error'); return; }
+  const mime=['audio/webm;codecs=opus','audio/webm','audio/mp4'].find(m=>{ try{ return MediaRecorder.isTypeSupported(m); }catch(_){ return false; } })||'';
+  const mr=new MediaRecorder(stream, mime?{mimeType:mime}:undefined);
+  const chunks=[]; mr.ondataavailable=ev=>{ if(ev.data&&ev.data.size) chunks.push(ev.data); };
+  const start=performance.now();
+  window._vpvRecording=true; window._vpvRecorder=mr;
+  const btn=document.getElementById('vpv-rec-btn'), time=document.getElementById('vpv-rec-time'), reset=document.getElementById('vpv-rec-reset');
+  if(btn){ btn.classList.add('recording'); btn.textContent='■ Stop'; }
+  if(time){ time.classList.add('live'); }
+  if(reset) reset.style.display='none';
+  window._vpvRecTimer=setInterval(()=>{ if(time) time.textContent=_vpvFmtTime((performance.now()-start)/1000); },200);
+  mr.onstop=()=>{
+    clearInterval(window._vpvRecTimer);
+    window._vpvRecording=false;
+    window._vpvRecSec=(performance.now()-start)/1000;
+    window._vpvRecBlob=new Blob(chunks,{type:(mr.mimeType||mime||'audio/webm').split(';')[0]});
+    try{ stream.getTracks().forEach(t=>t.stop()); }catch(_){}
+    if(time) time.classList.remove('live');
+    _vpvRenderRec();
+    showToast('Recording captured ('+_vpvFmtTime(window._vpvRecSec)+')','success');
+  };
+  mr.start();
+}
+function _vpvRecReset(){
+  if(window._vpvRecording){ try{ window._vpvRecorder.stop(); }catch(_){} }
+  window._vpvRecBlob=null; window._vpvRecSec=0;
+  _vpvRenderRec();
 }
 function _vpvOnText(){
   const t=((document.getElementById('vpv-text')||{}).value||'').trim();
@@ -9319,11 +9398,17 @@ function _vpvProgress(pct){ const b=document.getElementById('vpv-bar'); if(!b) r
 /* ---- Main: generate the valuation video ---- */
 async function _vpvGenerate(){
   const cfg=_vpvCfg();
+  const mode=window._vpvVoiceMode||'tts';
   const text=((document.getElementById('vpv-text')||{}).value||'').trim();
-  if(!text){ showToast('Write the valuation narration first','warning'); return; }
   if(window._vpvLat==null||window._vpvLng==null){ showToast('Click the property location on the map','warning'); return; }
-  if(!cfg.ttsProxyUrl){ _vpvSetupNotice(); showToast('Set up the Text-to-Speech proxy first (see the note in the card)','warning'); return; }
   if(!(document.getElementById('vp-proj')||{}).value.trim()){ showToast('Add a project name first','warning'); return; }
+  if(mode==='record'){
+    if(window._vpvRecording){ showToast('Stop the recording first','warning'); return; }
+    if(!window._vpvRecBlob){ showToast('Record your voiceover first (🎙 Record)','warning'); return; }
+  } else {
+    if(!text){ showToast('Write the valuation script first','warning'); return; }
+    if(!cfg.ttsProxyUrl){ _vpvSetupNotice(); showToast('Set up the Text-to-Speech proxy first (see the note in the card)','warning'); return; }
+  }
   const btn=document.getElementById('vpv-generate'); const orig=btn?btn.textContent:'';
   if(btn){ btn.disabled=true; btn.textContent='Generating…'; }
   _vpvProgress(0.04); _vpvStatus('Saving the proposal…');
@@ -9332,11 +9417,22 @@ async function _vpvGenerate(){
     const rec=await _vpSave({silent:true});
     if(!rec||!rec.id) throw new Error('Could not save the proposal first.');
 
-    _vpvStatus('Recording the cowboy voiceover…'); _vpvProgress(0.12);
-    const ttsBuf=await _vpvFetchTTS(text);
+    _vpvStatus(mode==='record'?'Preparing your recording…':'Recording the cowboy voiceover…'); _vpvProgress(0.12);
     const ac=new (window.AudioContext||window.webkitAudioContext)();
-    const audioBuf=await ac.decodeAudioData(ttsBuf.slice(0));
-    const vidSec=Math.max(8, audioBuf.duration+0.8);
+    let audioBuf=null, mediaEl=null, audioDur;
+    if(mode==='record'){
+      mediaEl=new Audio(); mediaEl.src=URL.createObjectURL(window._vpvRecBlob); mediaEl.preload='auto';
+      audioDur=window._vpvRecSec||0;
+      if(!audioDur){ // fallback: read duration from metadata
+        await new Promise(res=>{ mediaEl.onloadedmetadata=()=>res(); setTimeout(res,1500); });
+        audioDur=isFinite(mediaEl.duration)?mediaEl.duration:30;
+      }
+    } else {
+      const ttsBuf=await _vpvFetchTTS(text);
+      audioBuf=await ac.decodeAudioData(ttsBuf.slice(0));
+      audioDur=audioBuf.duration;
+    }
+    const vidSec=Math.max(8, audioDur+0.8);
 
     _vpvStatus('Pulling in satellite imagery…'); _vpvProgress(0.24);
     const style=window._vpvStyle||cfg.defaultStyle;
@@ -9351,7 +9447,9 @@ async function _vpvGenerate(){
 
     const stream=canvas.captureStream(fps);
     const aDest=ac.createMediaStreamDestination();
-    const src=ac.createBufferSource(); src.buffer=audioBuf; src.connect(aDest);
+    let bufSrc=null;
+    if(mode==='record'){ const mes=ac.createMediaElementSource(mediaEl); mes.connect(aDest); }
+    else { bufSrc=ac.createBufferSource(); bufSrc.buffer=audioBuf; bufSrc.connect(aDest); }
     const aTrack=aDest.stream.getAudioTracks()[0]; if(aTrack) stream.addTrack(aTrack);
     const mime=_vpvPickMime();
     const rec2=new MediaRecorder(stream, mime?{mimeType:mime, videoBitsPerSecond:4500000}:undefined);
@@ -9361,14 +9459,16 @@ async function _vpvGenerate(){
     // Pre-draw first frame so there's no black flash.
     _vpvDrawScene(ctx,W,H,bm,style,0,label);
     try{ await ac.resume(); }catch(_){}   // context may start suspended after awaits
-    rec2.start(); src.start();
+    rec2.start();
+    if(mode==='record'){ try{ mediaEl.currentTime=0; await mediaEl.play(); }catch(_){} }
+    else { bufSrc.start(); }
     const t0=performance.now();
     await new Promise(resolve=>{
       function frame(now){ const t=(now-t0)/1000; const p=t/vidSec;
         _vpvDrawScene(ctx,W,H,bm,style,p,label);
         _vpvProgress(0.4+0.35*Math.min(1,p));
         if(t<vidSec){ requestAnimationFrame(frame); }
-        else { try{ rec2.stop(); }catch(_){} try{ src.stop(); }catch(_){} resolve(); }
+        else { try{ rec2.stop(); }catch(_){} try{ if(bufSrc) bufSrc.stop(); else mediaEl.pause(); }catch(_){} resolve(); }
       }
       requestAnimationFrame(frame);
     });
@@ -9386,7 +9486,7 @@ async function _vpvGenerate(){
     const snap=await uploadBytes(fbRef(_fbStorage,path), outBlob, {contentType:'video/mp4'});
     const url=await getDownloadURL(snap.ref);
 
-    window._vpValuation={ text, style, lat:window._vpvLat, lng:window._vpvLng,
+    window._vpValuation={ text, style, voiceMode:mode, lat:window._vpvLat, lng:window._vpvLng,
       voice:(document.getElementById('vpv-voice')||{}).value||cfg.voice,
       rate:parseFloat((document.getElementById('vpv-rate')||{}).value||cfg.rate)||cfg.rate,
       videoUrl:url, videoStoragePath:path, durationSec:Math.round(vidSec), createdAt:Date.now() };
@@ -9432,6 +9532,7 @@ window._vpDelete=_vpDelete;
 window._vpPhotoFile=_vpPhotoFile; window._vpPhotoClear=_vpPhotoClear;
 window._vpvOnText=_vpvOnText; window._vpvSetStyle=_vpvSetStyle; window._vpvPreviewVoice=_vpvPreviewVoice;
 window._vpvGenerate=_vpvGenerate; window._vpvRemove=_vpvRemove;
+window._vpvSetVoiceMode=_vpvSetVoiceMode; window._vpvRecToggle=_vpvRecToggle; window._vpvRecReset=_vpvRecReset;
 window._vpAgUpload=_vpAgUpload; window._vpAgPlace=_vpAgPlace; window._vpAgRemove=_vpAgRemove;
 window._vpSigOpen=_vpSigOpen; window._vpSigFinalize=_vpSigFinalize;
 
