@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<!-- esign-build-marker: ESIGN-FIX-20260618-B (module window-exposure fix for e-sign upload) -->
+<!-- esign-build-marker: ESIGN-FIX-20260618-C (field placement uses local PDF bytes, no Storage refetch) -->
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>Advisor Deal Dashboard · The Dirt Dog</title>
@@ -7879,6 +7879,7 @@ function _vpOpenEditor(id){
   window._vpBroker = (rec&&rec.broker)? {...rec.broker} : _vpDefaultBroker();
   window._vpType = rec && rec.type ? rec.type : _vpDefaultType();
   window._vpAgreement = (rec&&rec.agreement&&rec.agreement.pdfUrl)? JSON.parse(JSON.stringify(rec.agreement)) : null;
+  window._vpAgLocalBytes = null;
   _vpPaintEditor();
   // On a brand-new proposal, load the default type's ordered starter set.
   if(!rec) _vpBuildStarter(window._vpType, {replace:true, silent:true});
@@ -8185,6 +8186,9 @@ async function _vpAgUpload(file){
     const prev=window._vpAgreement||{};
     window._vpAgreement={ pdfUrl:url, pdfPath:path, fileName:file.name,
       fields:Array.isArray(prev.fields)?prev.fields:[], updated:Date.now() };
+    // Keep the just-uploaded bytes in memory so field placement renders the PDF
+    // directly, with no dependency on re-fetching it from Storage.
+    try{ window._vpAgLocalBytes=await file.arrayBuffer(); }catch(_){ window._vpAgLocalBytes=null; }
     _vpAgRender();
     showToast('Agreement uploaded — now place the sign/date fields','success');
     _vpAgPlace();
@@ -8193,7 +8197,7 @@ async function _vpAgUpload(file){
 }
 function _vpAgRemove(){
   if(!confirm('Remove the listing agreement from this proposal? The client will no longer see a Sign button.')) return;
-  window._vpAgreement=null; _vpAgRender(); showToast('Agreement removed','info');
+  window._vpAgreement=null; window._vpAgLocalBytes=null; _vpAgRender(); showToast('Agreement removed','info');
 }
 
 /* ---- Field-placement modal ---- */
@@ -8248,7 +8252,12 @@ async function _vpAgPlace(){
   const body=m.querySelector('#vpag-body');
   body.innerHTML='<div style="color:#cfd3d8;margin-top:30px">Loading document…</div>';
   try{
-    const bytes=new Uint8Array(await (await fetch(a.pdfUrl)).arrayBuffer());
+    // Prefer the bytes of the file the advisor JUST uploaded (no network round-trip,
+    // immune to Storage fetch/CORS/extension issues). Fall back to fetching the stored
+    // URL only when re-editing an existing agreement (no local file in memory).
+    let bytes;
+    if(window._vpAgLocalBytes){ bytes=new Uint8Array(window._vpAgLocalBytes.slice(0)); }
+    else { bytes=new Uint8Array(await (await fetch(a.pdfUrl)).arrayBuffer()); }
     const pdf=await pdfjsLib.getDocument({data:bytes}).promise;
     body.innerHTML='';
     for(let i=1;i<=pdf.numPages;i++){
