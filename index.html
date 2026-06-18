@@ -7995,18 +7995,54 @@ async function _vpLoadIntro(){
     if(ti&&ui){ const c=_vpIntroCur(); ti.value=c.title; ui.value=c.url; }
   }catch(e){ console.warn('[intro] load', (e&&e.message)||e); }
 }
+async function _vpIntroFilePicked(file){
+  if(!file) return;
+  if(!/^video\//.test(file.type)){ showToast('Please choose a video file','warning'); return; }
+  const MAX=500*1024*1024;
+  if(file.size>MAX){ showToast('That file is over 500 MB — use a YouTube/Vimeo link instead for large videos.','warning'); return; }
+  let waited=0; while(!_fbStorage&&waited<6000){ await new Promise(r=>setTimeout(r,200)); waited+=200; }
+  if(!_fbStorage){ showToast('Storage not ready — try again in a moment','error'); return; }
+  const info=document.getElementById('vp-intro-fileinfo'), prog=document.getElementById('vp-intro-progress'), bar=document.getElementById('vp-intro-progbar');
+  if(info) info.textContent='Uploading '+file.name+'…'; if(prog) prog.style.display='';
+  try{
+    const {ref,uploadBytesResumable,uploadBytes,getDownloadURL}=_fbFns;
+    const path='proposal-library/intro-'+Date.now()+'-'+file.name.replace(/[^\w.\-]+/g,'_');
+    let url;
+    if(uploadBytesResumable){
+      url=await new Promise((resolve,reject)=>{
+        const task=uploadBytesResumable(ref(_fbStorage,path),file,{contentType:file.type});
+        task.on('state_changed', s=>{ if(bar&&s.totalBytes) bar.style.width=Math.round(100*s.bytesTransferred/s.totalBytes)+'%'; }, reject,
+          async()=>{ try{ resolve(await getDownloadURL(task.snapshot.ref)); }catch(err){ reject(err); } });
+      });
+    } else { const snap=await uploadBytes(ref(_fbStorage,path),file); url=await getDownloadURL(snap.ref); }
+    window._vpIntroUpload={url,storagePath:path};
+    const ui=document.getElementById('vp-intro-url'); if(ui) ui.value=url;
+    const ti=document.getElementById('vp-intro-title'); if(ti&&!ti.value.trim()) ti.value=file.name.replace(/\.[^.]+$/,'');
+    if(info) info.textContent='✓ Uploaded: '+file.name+' — click "Save intro video" to apply.';
+    showToast('Intro video uploaded','success');
+  }catch(err){ console.error('[intro] upload',err); if(info) info.textContent='Upload failed: '+(err.message||err); showToast('Upload failed: '+(err.message||err),'error'); }
+  finally{ if(prog) setTimeout(()=>{ prog.style.display='none'; },800); }
+}
 async function _vpIntroSave(){
   if(!_vpCanDeleteLib()){ showToast('Only admins can change the company intro','warning'); return; }
   const t=(document.getElementById('vp-intro-title').value||'').trim();
   const u=(document.getElementById('vp-intro-url').value||'').trim();
-  if(!u){ showToast('Add the intro video link','warning'); return; }
+  if(!u){ showToast('Add the intro video link or upload a file','warning'); return; }
+  const up=window._vpIntroUpload;
+  const isUpload = up && up.url===u;
+  const prevPath = (_vpIntroSettings&&_vpIntroSettings.introStoragePath)||'';
   try{
     const {doc,getDoc,setDoc}=_fbFns; const ref=doc(_fbDb,'proposals','__introSettings');
     const existing=await getDoc(ref);
-    const data={ introTitle:t||'Welcome to The Dirt Dog', introUrl:u, kind:'introSettings', updated:Date.now() };
+    const data={ introTitle:t||'Welcome to The Dirt Dog', introUrl:u,
+      introSource:isUpload?'upload':'link', introStoragePath:isUpload?up.storagePath:'',
+      kind:'introSettings', updated:Date.now() };
     if(!existing.exists()){ data.advisorUid=currentUser.uid; data.advisorName=currentUser.name||''; data.created=Date.now(); }
     await setDoc(ref, sanitizeForFirestore(data), {merge:true});
-    _vpIntroSettings={...(_vpIntroSettings||{}), introTitle:data.introTitle, introUrl:u};
+    // Clean up the previously uploaded intro file if it was just replaced.
+    if(prevPath && prevPath!==data.introStoragePath){ try{ const {ref:sref,deleteObject}=_fbFns; await deleteObject(sref(_fbStorage,prevPath)); }catch(e){ console.warn('[intro] old file delete',e); } }
+    _vpIntroSettings={...(_vpIntroSettings||{}), introTitle:data.introTitle, introUrl:u, introSource:data.introSource, introStoragePath:data.introStoragePath};
+    window._vpIntroUpload=null;
     showToast('Intro video saved — applies to all proposals','success');
   }catch(e){ console.error('[intro] save',e); showToast('Save failed: '+(e.message||e),'error'); }
 }
@@ -8113,11 +8149,16 @@ function _vpPaintLibrary(){
   const introCard = _vpCanDeleteLib() ? `
     <div class="vp-card">
       <h3 class="vp-sec">Company Intro Video</h3>
-      <div class="vp-hint" style="margin-top:0">Plays first (★ START HERE) on <b>every</b> proposal. Changing it updates all proposals at once. Paste a YouTube/Vimeo/.mp4 link.</div>
+      <div class="vp-hint" style="margin-top:0">Plays first (★ START HERE) on <b>every</b> proposal. Changing it updates all proposals at once.</div>
       <div class="vp-row2" style="align-items:end">
         <div><label>Intro title</label><input type="text" id="vp-intro-title" value="${DD.esc(introCur.title||'')}" placeholder="Welcome to The Dirt Dog"></div>
         <div><label>Intro video link</label><input type="text" id="vp-intro-url" value="${DD.esc(introCur.url||'')}" placeholder="YouTube, Vimeo, or .mp4 link"></div>
       </div>
+      <div class="vp-hint" style="text-align:center;margin:8px 0">— or —</div>
+      <input type="file" id="vp-intro-file" accept="video/*" style="display:none" onchange="_vpIntroFilePicked(this.files&&this.files[0])">
+      <button class="vp-btn full" onclick="document.getElementById('vp-intro-file').click()">⬆ Upload an intro video file</button>
+      <div class="vp-hint" id="vp-intro-fileinfo">Tip: a YouTube/Vimeo link loads faster for clients than an uploaded file.</div>
+      <div id="vp-intro-progress" style="display:none"><div class="vp-prog"><div class="vp-prog-bar" id="vp-intro-progbar"></div></div></div>
       <button class="vp-btn primary" style="margin-top:12px" onclick="_vpIntroSave()">Save intro video</button>
     </div>` : '';
   const editing=window._vpLibEditing? (_vpLibrary.find(v=>v.id===window._vpLibEditing)||null):null;
@@ -8283,7 +8324,7 @@ window.bootLibrary=bootLibrary; window._vpOpenLibrary=_vpOpenLibrary; window._vp
 window._vpLoadStarter=_vpLoadStarter; window._vpAddFromLib=_vpAddFromLib; window._vpAddSegToLib=_vpAddSegToLib;
 window._vpLibFilePicked=_vpLibFilePicked; window._vpLibSaveClick=_vpLibSaveClick; window._vpLibEdit=_vpLibEdit;
 window._vpLibCancelEdit=_vpLibCancelEdit; window._vpLibDelete=_vpLibDelete; window._vpLibImportBuiltin=_vpLibImportBuiltin;
-window._vpIntroSave=_vpIntroSave;
+window._vpIntroSave=_vpIntroSave; window._vpIntroFilePicked=_vpIntroFilePicked;
 window.bootProposals=bootProposals; window._vpAdd=_vpAdd; window._vpEdit=_vpEdit; window._vpBack=_vpBack;
 window._vpToggleArchived=_vpToggleArchived; window._vpUpdatePhoto=_vpUpdatePhoto; window._vpSegMove=_vpSegMove;
 window._vpSegDel=_vpSegDel; window._vpAddPreset=_vpAddPreset; window._vpAddSeg=_vpAddSeg; window._vpSuggestPw=_vpSuggestPw;
