@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+<!-- esign-build-marker: ESIGN-FIX-20260618-A (verifies the complete file deployed) -->
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>Advisor Deal Dashboard · The Dirt Dog</title>
@@ -8401,7 +8402,8 @@ function _vpAllLibrary(){
   const fs=(_vpLibrary||[]).map(v=>({
     id:v.id, title:v.title||'', description:v.description||'', internalNote:v.internalNote||'', url:v.url||'',
     types:Array.isArray(v.types)?v.types:[], autoTypes:Array.isArray(v.autoTypes)?v.autoTypes:[],
-    source:v.source||'link', storagePath:v.storagePath||'', _builtin:false
+    source:v.source||'link', storagePath:v.storagePath||'',
+    pdfUrl:v.pdfUrl||'', pdfStoragePath:v.pdfStoragePath||'', pdfFileName:v.pdfFileName||'', _builtin:false
   })).sort((a,b)=>String(a.title).localeCompare(String(b.title)));
   // Hide a built-in config preset once a Firestore video with the same TITLE
   // exists (i.e. it's been imported/edited), so there's no duplicate. We do NOT
@@ -8572,7 +8574,7 @@ function _vpAddSegToLib(){
 }
 
 /* ================= LIBRARY MANAGER VIEW ================= */
-function _vpOpenLibrary(){ window._vpView='library'; window._vpLibEditing=null; window._vpLibUpload=null; _vpLoadIntro(); _vpPaintLibrary(); }
+function _vpOpenLibrary(){ window._vpView='library'; window._vpLibEditing=null; window._vpLibUpload=null; window._vpLibPdfUpload=null; _vpLoadIntro(); _vpPaintLibrary(); }
 function _vpCanDeleteLib(){ return !!(currentUser&&(currentUser.isAdmin||currentUser.isSuperAdmin)); }
 function _vpPaintLibrary(){
   const types=_vpTypes();
@@ -8618,6 +8620,17 @@ function _vpPaintLibrary(){
           <button class="vp-btn full" onclick="document.getElementById('vp-lib-file').click()">⬆ Upload a video file</button>
           <div class="vp-hint" id="vp-lib-fileinfo">${e.source==='upload'?'Current video is an uploaded file.':'Tip: for client-facing videos a YouTube/Vimeo link loads faster than an uploaded file.'}</div>
           <div id="vp-lib-progress" style="display:none"><div class="vp-prog"><div class="vp-prog-bar" id="vp-lib-progbar"></div></div></div>
+
+          <label style="margin-top:14px">Attached PDF (optional)</label>
+          <div class="vp-hint" style="margin-top:0">Attach this video's PDF (e.g. the marketing page for this segment). It's combined into the client's downloadable <b>Proposal PDF</b> in the order the videos play.</div>
+          <input type="file" id="vp-lib-pdf-file" accept="application/pdf,.pdf" style="display:none" onchange="_vpLibPdfFilePicked(this.files&&this.files[0])">
+          <div id="vp-lib-pdf-status"></div>
+          <div class="vp-row2" style="margin-top:8px">
+            <button class="vp-btn full" type="button" onclick="document.getElementById('vp-lib-pdf-file').click()">📄 Upload PDF</button>
+            <button class="vp-btn full ghost" type="button" id="vp-lib-pdf-remove" onclick="_vpLibPdfRemove()" style="display:none">Remove PDF</button>
+          </div>
+          <div id="vp-lib-pdf-progress" style="display:none"><div class="vp-prog"><div class="vp-prog-bar" id="vp-lib-pdf-progbar"></div></div></div>
+
           <label style="margin-top:14px">Applies to (suggested for these proposal types)</label>
           <div class="vp-checks">${typeChecks}</div>
           <label style="margin-top:12px">Auto-include on (★ pulled in automatically for these types)</label>
@@ -8640,6 +8653,61 @@ function _vpPaintLibrary(){
     </div>
   </div>`);
   _vpRenderLibList();
+  _vpLibPdfRender();
+}
+/* ---- attached-PDF state + upload for a library video ---- */
+function _vpLibCurrentPdf(){
+  // Pending upload (this session) wins; otherwise the editing record's saved PDF.
+  if(window._vpLibPdfUpload) return window._vpLibPdfUpload;
+  const editing=window._vpLibEditing?(_vpLibrary.find(v=>v.id===window._vpLibEditing)||null):null;
+  if(editing&&editing.pdfUrl) return {url:editing.pdfUrl,storagePath:editing.pdfStoragePath||'',fileName:editing.pdfFileName||'Document.pdf'};
+  return null;
+}
+function _vpLibPdfRender(){
+  const st=document.getElementById('vp-lib-pdf-status'); if(!st) return;
+  const rm=document.getElementById('vp-lib-pdf-remove');
+  const p=_vpLibCurrentPdf();
+  if(p&&p.url){
+    st.innerHTML='<div style="display:flex;align-items:center;gap:8px;padding:9px 11px;background:#ecfdf5;border:1px solid #a7f3d0;border-radius:9px;font-size:13px;color:#065f46;margin-top:8px">'
+      +'<span style="font-size:16px">📄</span><div><b>'+_vpEsc(p.fileName||'Document.pdf')+'</b><br>'
+      +'<span style="color:#065f46">Attached — included in the client’s Proposal PDF</span></div></div>';
+    if(rm) rm.style.display='';
+  } else {
+    st.innerHTML='';
+    if(rm) rm.style.display='none';
+  }
+}
+async function _vpLibPdfFilePicked(file){
+  if(!file) return;
+  if(file.type!=='application/pdf' && !/\.pdf$/i.test(file.name)){ showToast('Please choose a PDF file','warning'); return; }
+  if(file.size>25*1024*1024){ showToast('PDF is over 25 MB — please use a smaller file','warning'); return; }
+  let waited=0; while(!_fbStorage&&waited<6000){ await new Promise(r=>setTimeout(r,200)); waited+=200; }
+  if(!_fbStorage){ showToast('Storage not ready — try again in a moment','error'); return; }
+  const prog=document.getElementById('vp-lib-pdf-progress'), bar=document.getElementById('vp-lib-pdf-progbar');
+  const st=document.getElementById('vp-lib-pdf-status'); if(st) st.innerHTML='<div class="vp-hint" style="margin:8px 0 0">Uploading '+_vpEsc(file.name)+'…</div>';
+  if(prog) prog.style.display='';
+  try{
+    const {ref,uploadBytesResumable,uploadBytes,getDownloadURL}=_fbFns;
+    const path='proposal-library/pdf-'+Date.now()+'-'+file.name.replace(/[^\w.\-]+/g,'_');
+    let url;
+    if(uploadBytesResumable){
+      url=await new Promise((resolve,reject)=>{
+        const task=uploadBytesResumable(ref(_fbStorage,path),file,{contentType:'application/pdf'});
+        task.on('state_changed', s=>{ if(bar&&s.totalBytes) bar.style.width=Math.round(100*s.bytesTransferred/s.totalBytes)+'%'; }, reject,
+          async()=>{ try{ resolve(await getDownloadURL(task.snapshot.ref)); }catch(err){ reject(err); } });
+      });
+    } else { const snap=await uploadBytes(ref(_fbStorage,path),file,{contentType:'application/pdf'}); url=await getDownloadURL(snap.ref); }
+    window._vpLibPdfUpload={url,storagePath:path,fileName:file.name};
+    _vpLibPdfRender();
+    showToast('PDF attached — click "Save changes" to keep it','success');
+  }catch(err){ console.error('[library] pdf upload',err); if(st) st.innerHTML='<div class="vp-hint" style="margin:8px 0 0;color:#b91c1c">Upload failed: '+_vpEsc(err.message||err)+'</div>'; showToast('PDF upload failed: '+(err.message||err),'error'); }
+  finally{ if(prog) setTimeout(()=>{ prog.style.display='none'; },800); const fi=document.getElementById('vp-lib-pdf-file'); if(fi) fi.value=''; }
+}
+function _vpLibPdfRemove(){
+  // Clears the attachment from the form; persisted on the next "Save changes".
+  window._vpLibPdfUpload={url:'',storagePath:'',fileName:''};
+  _vpLibPdfRender();
+  showToast('PDF will be removed when you save','info');
 }
 function _vpRenderLibList(){
   const el=document.getElementById('vp-lib-list'); if(!el) return;
@@ -8649,6 +8717,7 @@ function _vpRenderLibList(){
   el.innerHTML=lib.map((v,i)=>{
     const tags=(v.types||[]).map(t=>`<span class="vp-vtype">${DD.esc(_vpTypeLabel(t))}${(v.autoTypes||[]).includes(t)?' ★':''}</span>`).join(' ');
     const src=v.source==='upload'?'<span class="vp-vtype">UPLOAD</span>':`<span class="vp-vtype">${_vpVtype(v.url)}</span>`;
+    const pdfTag=v.pdfUrl?' <span class="vp-vtype" title="'+DD.esc(v.pdfFileName||'PDF attached')+'">📄 PDF</span>':'';
     let acts='';
     if(v._builtin){
       // Built-in config.js preset → let advisors import a copy into the editable library.
@@ -8660,7 +8729,7 @@ function _vpRenderLibList(){
         ${v.description?`<div class="sd">${DD.esc(v.description)}</div>`:''}
         ${v.internalNote?`<div class="sd" style="color:#9a6a00">🔒 ${DD.esc(v.internalNote)}</div>`:''}
         <div class="su">${DD.esc(v.url)}</div>
-        <div style="margin-top:5px">${src} ${tags}</div>
+        <div style="margin-top:5px">${src}${pdfTag} ${tags}</div>
       </div><div class="vp-acts" style="margin-top:0">${acts}</div></div>`;
   }).join('');
 }
@@ -8754,8 +8823,8 @@ async function _vpLibImportAllBuiltin(){
   showToast('Added '+done+' video'+(done===1?'':'s')+' to the library','success');
   _vpPaintLibrary();
 }
-function _vpLibEdit(id){ window._vpLibEditing=id; window._vpLibUpload=null; _vpPaintLibrary(); window.scrollTo(0,0); }
-function _vpLibCancelEdit(){ window._vpLibEditing=null; window._vpLibUpload=null; _vpPaintLibrary(); }
+function _vpLibEdit(id){ window._vpLibEditing=id; window._vpLibUpload=null; window._vpLibPdfUpload=null; _vpPaintLibrary(); window.scrollTo(0,0); }
+function _vpLibCancelEdit(){ window._vpLibEditing=null; window._vpLibUpload=null; window._vpLibPdfUpload=null; _vpPaintLibrary(); }
 async function _vpLibDelete(id){
   if(!_vpCanDeleteLib()){ showToast('Only admins/staff can delete library videos','warning'); return; }
   const v=(_vpLibrary||[]).find(x=>x.id===id); if(!v) return;
