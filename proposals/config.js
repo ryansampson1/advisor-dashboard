@@ -64,7 +64,7 @@ window.DIRTDOG_CONFIG = {
   // with that title exists, its link is used. Two special tokens resolve to the
   // selected advisors' bio videos:
   //   "@advisorBio"   → the proposal owner's bio video (e.g. "Bio Sampson")
-  //   "@coAdvisorBio" → the first co-advisor's bio video (skipped if no co-advisor)
+  //   "@coAdvisorBio" → one bio video per co-advisor on the deal (none if no co-advisors)
   // The company Intro Video always plays first automatically, so it's NOT listed
   // here. Advisors can still reorder, add, or remove anything afterward.
   // Only the first two types have starter sets for now; add "land"/"general" later.

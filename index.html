@@ -7534,6 +7534,7 @@ function bootProposals(){
   const apply=(key,docs)=>{ _vpSources[key]=docs; const m=new Map();
     Object.values(_vpSources).forEach(arr=>arr.forEach(d=>m.set(d.id,d)));
     allProposals=[...m.values()];
+    if(typeof _vpSigRecompute==='function' && _vpPendingSigsRaw.length) _vpSigRecompute(false);
     if(currentView==='videoProposals' && window._vpView!=='editor') _vpRenderList();
   };
   const handle=key=>snap=>apply(key, snap.docs.map(d=>({id:d.id,...d.data()})));
@@ -7553,19 +7554,25 @@ function bootProposals(){
 }
 
 /* ---- Signed-agreement inbox: listen for client signatures awaiting finalize ---- */
-let _vpSigBooted=false, _vpPendingSigs=[], _vpSigSeen=new Set();
+let _vpSigBooted=false, _vpPendingSigs=[], _vpPendingSigsRaw=[], _vpSigSeen=new Set();
 function _vpBootSignatures(){
   if(_vpSigBooted || !currentUser || !_fbDb || !_fbFns) return; _vpSigBooted=true;
   const {collection,onSnapshot,query,where}=_fbFns;
   try{
     onSnapshot(query(collection(_fbDb,'signatureSubmissions'), where('status','==','pending')), snap=>{
-      _vpPendingSigs=snap.docs.map(d=>({id:d.id,...d.data()})).filter(_vpSigActable);
-      _vpPendingSigs.forEach(s=>{ if(!_vpSigSeen.has(s.id)){ _vpSigSeen.add(s.id);
-        showToast('✍️ '+(s.signerName||'A client')+' signed the agreement for '+(s.projectName||'a proposal')+' — review to finalize','success',7000); } });
-      _vpSigUpdateBadge();
-      if(currentView==='videoProposals' && window._vpView==='list') _vpRenderList();
+      _vpPendingSigsRaw=snap.docs.map(d=>({id:d.id,...d.data()}));
+      _vpSigRecompute(true);
     }, e=>console.warn('[signatures] listener', e&&e.message||e));
   }catch(e){ console.warn('[signatures] boot failed', e); _vpSigBooted=false; }
+}
+// Re-filter pending submissions to those the current user can act on. Called when
+// either the submissions OR the proposals list changes (proposals may load later).
+function _vpSigRecompute(notify){
+  _vpPendingSigs=_vpPendingSigsRaw.filter(_vpSigActable);
+  if(notify) _vpPendingSigs.forEach(s=>{ if(!_vpSigSeen.has(s.id)){ _vpSigSeen.add(s.id);
+    showToast('✍️ '+(s.signerName||'A client')+' signed the agreement for '+(s.projectName||'a proposal')+' — review to finalize','success',7000); } });
+  _vpSigUpdateBadge();
+  if(currentView==='videoProposals' && window._vpView==='list') _vpRenderList();
 }
 // Can the current user finalize this submission? (admins/staff, or the proposal's advisor/co-advisor.)
 function _vpSigActable(s){
@@ -8454,23 +8461,36 @@ function _vpAddFromLib(i){
    set") fills the video list with those titles IN ORDER, matched by title
    against the shared library. Two tokens resolve to advisor bio videos:
      "@advisorBio"   → the proposal owner's bio video
-     "@coAdvisorBio" → the first co-advisor's bio video (skipped if none)
+     "@coAdvisorBio" → one bio video per co-advisor on the deal (none if no co-advisors)
    Switching types only auto-reloads when the list is untouched, so a customized
    list is never silently wiped. */
 function _vpStarterSet(type){ const ss=(window.DIRTDOG_CONFIG&&window.DIRTDOG_CONFIG.starterSets)||{}; return Array.isArray(ss[type])?ss[type]:[]; }
 function _vpSegSig(segs){ return (segs||[]).map(s=>(s.title||'').trim().toLowerCase()).join('>>'); }
 function _vpLibFindByTitle(t){ const k=(t||'').trim().toLowerCase(); if(!k) return null; return _vpAllLibrary().find(v=>(v.title||'').trim().toLowerCase()===k)||null; }
 // Bio video for an advisor uid → {title,url,description} (url blank until the
-// matching library video has a file/link). Returns null if the advisor has no
-// mapped bio video at all.
+// matching library video has a file/link). Always returns a slot (never null
+// for a real uid): if the advisor isn't in ADVISOR_BIO_VIDEOS, it tries to match
+// a "Bio <Last>" / "Bio <First>" library video by name, and otherwise returns a
+// blank placeholder labelled with the advisor's name so the slot still appears.
+function _vpAdvisorInfo(uid){
+  const a=(typeof getDistinctAdvisors==='function'?getDistinctAdvisors():[]).find(x=>x.uid===uid);
+  const prof=(typeof allProfiles!=='undefined'&&allProfiles[uid])||{};
+  return { name:((a&&a.name)||prof.name||'').trim(), email:(((a&&a.email)||prof.email)||'').toLowerCase() };
+}
 function _vpBioVideoForUid(uid){
   if(!uid) return null;
-  const a=(typeof getDistinctAdvisors==='function'?getDistinctAdvisors():[]).find(x=>x.uid===uid);
-  const email=((a&&a.email)||(typeof allProfiles!=='undefined'&&allProfiles[uid]&&allProfiles[uid].email)||'').toLowerCase();
-  const title=(typeof ADVISOR_BIO_VIDEOS!=='undefined')?ADVISOR_BIO_VIDEOS[email]:null;
-  if(!title) return null;
-  const v=_vpLibFindByTitle(title);
-  return v?{title:v.title,url:v.url,description:v.description||''}:{title:title,url:'',description:''};
+  const {name,email}=_vpAdvisorInfo(uid);
+  // 1) explicit email → title map
+  let title=(typeof ADVISOR_BIO_VIDEOS!=='undefined')?ADVISOR_BIO_VIDEOS[email]:null;
+  if(title){ const v=_vpLibFindByTitle(title); return v?{title:v.title,url:v.url,description:v.description||''}:{title:title,url:'',description:''}; }
+  // 2) fall back to matching a "Bio <Last>" / "Bio <First>" library video by name
+  if(name){
+    const parts=name.split(/\s+/).filter(Boolean);
+    const cands=[parts[parts.length-1],parts[0]].filter(Boolean).map(p=>'Bio '+p);
+    for(const c of cands){ const v=_vpLibFindByTitle(c); if(v) return {title:v.title,url:v.url,description:v.description||''}; }
+  }
+  // 3) blank placeholder slot, labelled with the advisor's name
+  return {title:(name?('Bio — '+name):'Advisor Bio'),url:'',description:''};
 }
 function _vpApplyType(type){
   const nt=type||_vpDefaultType();
@@ -8489,14 +8509,18 @@ function _vpBuildStarter(type, opts){
   const segs=[];
   tmpl.forEach(item=>{
     if(item==='@advisorBio'){
-      const v=_vpBioVideoForUid(_vpOwnerUid());
-      segs.push(v?{...v,_bio:'advisor'}:{title:'Advisor Bio',url:'',description:'',_bio:'advisor'});
+      const owner=_vpOwnerUid();
+      const v=_vpBioVideoForUid(owner)||{title:'Advisor Bio',url:'',description:''};
+      segs.push({...v,_bio:'advisor',_bioUid:owner});
       return;
     }
     if(item==='@coAdvisorBio'){
-      const co=(window._vpCoAdvisors||[])[0];
-      if(co){ const v=_vpBioVideoForUid(co); segs.push(v?{...v,_bio:'co',_bioUid:co}:{title:'Co-advisor Bio',url:'',description:'',_bio:'co',_bioUid:co}); }
-      return; // no co-advisor → slot skipped
+      // One bio slot per co-advisor on the deal (skip the owner if also listed).
+      (window._vpCoAdvisors||[]).filter(u=>u&&u!==_vpOwnerUid()).forEach(uid=>{
+        const v=_vpBioVideoForUid(uid)||{title:'Co-advisor Bio',url:'',description:''};
+        segs.push({...v,_bio:'co',_bioUid:uid});
+      });
+      return; // no co-advisors → no slots
     }
     const v=_vpLibFindByTitle(item);
     segs.push(v?{title:v.title,url:v.url,description:v.description||''}:{title:item,url:'',description:''});
@@ -8507,25 +8531,27 @@ function _vpBuildStarter(type, opts){
   if(!opts.silent) showToast('Loaded '+_vpTypeLabel(type)+' starter set ('+segs.length+' videos)','success');
   return segs.length;
 }
-// Re-resolve the advisor/co-advisor bio slots after the owner or co-advisors
-// change. Only touches segments tagged _bio (i.e. ones a starter set created),
-// so manually built lists are left alone.
+// Re-resolve the advisor + co-advisor bio slots after the owner or the set of
+// co-advisors changes (e.g. linking a deal or toggling a co-advisor chip). Keeps
+// ONE bio slot per advisor on the deal: the owner's in the @advisorBio slot, and
+// one per co-advisor right after it. Only runs when the proposal already uses the
+// bio system (a starter set created _bio-tagged segments), so manually built
+// lists are left untouched.
 function _vpApplyBios(){
   const segs=window._vpSegments||[]; if(!segs.length) return;
-  let changed=false;
+  const hasBioSystem=segs.some(s=>s._bio==='advisor'||s._bio==='co');
+  if(!hasBioSystem) return;
+  const owner=_vpOwnerUid();
+  // 1) refresh the owner's advisor-bio slot in place
   const ai=segs.findIndex(s=>s._bio==='advisor');
-  if(ai>=0){ const av=_vpBioVideoForUid(_vpOwnerUid()); if(av){ segs[ai]={...av,_bio:'advisor'}; changed=true; } }
-  const co=(window._vpCoAdvisors||[])[0];
-  const ci=segs.findIndex(s=>s._bio==='co');
-  if(co){
-    const cv=_vpBioVideoForUid(co);
-    if(cv){
-      if(ci>=0) segs[ci]={...cv,_bio:'co',_bioUid:co};
-      else { const at=(ai>=0?ai+1:0); segs.splice(at,0,{...cv,_bio:'co',_bioUid:co}); }
-      changed=true;
-    } else if(ci>=0){ segs.splice(ci,1); changed=true; }
-  } else if(ci>=0){ segs.splice(ci,1); changed=true; }
-  if(changed){ window._vpSegments=segs; window._vpStarterSig=_vpSegSig(segs); _vpRenderSegList(); }
+  if(ai>=0){ const av=_vpBioVideoForUid(owner)||{title:'Advisor Bio',url:'',description:''}; segs[ai]={...av,_bio:'advisor',_bioUid:owner}; }
+  // 2) rebuild the co-advisor bio slots (one per co-advisor, in order)
+  const cos=(window._vpCoAdvisors||[]).filter(u=>u&&u!==owner);
+  const remaining=segs.filter(s=>s._bio!=='co');
+  const coSegs=cos.map(uid=>{ const cv=_vpBioVideoForUid(uid)||{title:'Co-advisor Bio',url:'',description:''}; return {...cv,_bio:'co',_bioUid:uid}; });
+  let at=remaining.findIndex(s=>s._bio==='advisor'); at=at>=0?at+1:0;
+  remaining.splice(at,0,...coSegs);
+  window._vpSegments=remaining; window._vpStarterSig=_vpSegSig(remaining); _vpRenderSegList(); _vpRenderLibraryChips();
 }
 function _vpLoadStarter(){
   const sel=document.getElementById('vp-type'); const type=sel?sel.value:(window._vpType||_vpDefaultType());
