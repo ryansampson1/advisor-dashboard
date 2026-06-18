@@ -7957,7 +7957,7 @@ function _vpPaintEditor(){
 
         <div class="vp-card" id="vpv-card">
           <h3 class="vp-sec">Property Valuation</h3>
-          <div class="vp-hint" style="margin-top:0;margin-bottom:10px">Write a short valuation script, click the property on the map, and generate a flyover video. Use the AI cowboy voice, or record it in your own voice. It saves as this proposal's Property Valuation video.</div>
+          <div class="vp-hint" style="margin-top:0;margin-bottom:10px">Write a short valuation script, click the property on the map, and generate the video. Use the AI cowboy voice or record your own; show a flyover or your own clip. It fills this proposal's <b>“Whats My Land Worth”</b> video slot below.</div>
           <label>Valuation script <span class="vp-hint" style="display:inline">— spoken by the AI voice, or your teleprompter if you record</span></label>
           <textarea id="vpv-text" placeholder="e.g. Welcome to this exceptional 120-acre parcel in the heart of Pasco County. Based on recent comparable sales, current entitlements, and frontage on Highway 52, we estimate a market value in the range of…" oninput="_vpvOnText()" style="min-height:120px"></textarea>
           <div class="vpv-meter" id="vpv-meter">About <b>0s</b> of narration · aim for <b>45–90s</b></div>
@@ -8135,7 +8135,7 @@ function _vpRenderSegList(){
   el.innerHTML=segs.map((s,i)=>`<div class="vp-seg"><div class="ord">
       <button onclick="_vpSegMove(${i},-1)" ${i===0?'disabled style=opacity:.3':''}>▲</button>
       <button onclick="_vpSegMove(${i},1)" ${i===segs.length-1?'disabled style=opacity:.3':''}>▼</button></div>
-      <div class="sbody"><div class="st">${i+1}. ${DD.esc(s.title)}${s._bio?' <span class="vp-vtype">AUTO BIO</span>':''}${s.pdfUrl?' <span class="vp-vtype">📄 PDF</span>':''}${(!s.url)?' <span class="vp-vtype" style="color:#d49a00">NO VIDEO YET</span>':''}</div>
+      <div class="sbody"><div class="st">${i+1}. ${DD.esc(s.title)}${s._bio?' <span class="vp-vtype">AUTO BIO</span>':''}${s._valuation?' <span class="vp-vtype" style="color:#00857c">VALUATION VIDEO</span>':''}${s.pdfUrl?' <span class="vp-vtype">📄 PDF</span>':''}${(!s.url)?' <span class="vp-vtype" style="color:#d49a00">NO VIDEO YET</span>':''}</div>
       ${s.description?`<div class="sd">${DD.esc(s.description)}</div>`:''}
       <div class="su">${DD.esc(s.url)}</div><span class="vp-vtype">${_vpVtype(s.url)}</span></div>
       <button class="x" onclick="_vpSegDel(${i})" title="Remove">×</button></div>`).join('');
@@ -9146,6 +9146,10 @@ function _vpvPaint(){
   _vpvSetVideoEnd(window._vpvVideoEnd);
   _vpvSetVisual(window._vpvVisual);
   _vpvRenderBgVideo();
+  // Back-fill: if this proposal already has a generated valuation video but it
+  // isn't on the "Whats My Land Worth" slot yet (older proposals), attach it.
+  if(v.videoUrl){ const _li=_vpvFindLandWorthSeg(); const _seg=(window._vpSegments||[])[_li];
+    if(!_seg || _seg.url!==v.videoUrl){ _vpvApplyToSegment(v.videoUrl); } }
   if(v.lat!=null && v.lng!=null){ window._vpvLat=v.lat; window._vpvLng=v.lng; }
   _vpvOnText();
   _vpvRenderCoords();
@@ -9253,6 +9257,40 @@ function _vpvRenderBgVideo(){
   const has=!!window._vpvBgVideoBlob;
   if(prev){ if(has){ prev.src=URL.createObjectURL(window._vpvBgVideoBlob); prev.classList.add('show'); } else { prev.removeAttribute('src'); prev.classList.remove('show'); } }
   if(clr) clr.style.display=has?'':'none';
+}
+
+/* ---- The valuation video fills the proposal's "Whats My Land Worth" slot ----
+   The Property Valuation generator IS how an advisor produces the "Whats My
+   Land Worth" video for a property, so the finished MP4 is written onto that
+   segment (matched by title; created if the proposal doesn't have it yet)
+   rather than shown as a separate playlist item. */
+function _vpvNorm(s){ return String(s||'').toLowerCase().replace(/[^a-z0-9]/g,''); }
+function _vpvFindLandWorthSeg(){
+  const segs=window._vpSegments||[];
+  return segs.findIndex(s=>_vpvNorm(s.title).indexOf('landworth')>=0);
+}
+function _vpvApplyToSegment(url){
+  const segs=window._vpSegments=window._vpSegments||[];
+  const i=_vpvFindLandWorthSeg();
+  if(i<0){
+    segs.push({title:'Whats My Land Worth', url:url, description:'', _valuation:true, _valuationCreated:true});
+  } else {
+    const s=segs[i];
+    if(!s._valuation) s._valuationPrevUrl=s.url||'';
+    s.url=url; s._valuation=true;
+  }
+  if(typeof _vpRenderSegList==='function') _vpRenderSegList();
+}
+function _vpvDetachSegment(url){
+  const segs=window._vpSegments||[];
+  let i=(url!=null)? segs.findIndex(s=>s.url&&s.url===url) : -1;
+  if(i<0) i=segs.findIndex(s=>s._valuation);
+  if(i<0) i=_vpvFindLandWorthSeg();
+  if(i<0) return;
+  const s=segs[i];
+  if(s._valuationCreated){ segs.splice(i,1); }
+  else { s.url=s._valuationPrevUrl||''; delete s._valuation; delete s._valuationPrevUrl; }
+  if(typeof _vpRenderSegList==='function') _vpRenderSegList();
 }
 function _vpvOnText(){
   const t=((document.getElementById('vpv-text')||{}).value||'').trim();
@@ -9577,6 +9615,8 @@ async function _vpvGenerate(){
     const snap=await uploadBytes(fbRef(_fbStorage,path), outBlob, {contentType:'video/mp4'});
     const url=await getDownloadURL(snap.ref);
 
+    // Put the finished video into the proposal's "Whats My Land Worth" slot.
+    _vpvApplyToSegment(url);
     window._vpValuation={ text, style, visual, videoEnd:(window._vpvVideoEnd||'loop'), voiceMode:mode,
       lat:window._vpvLat, lng:window._vpvLng,
       voice:(document.getElementById('vpv-voice')||{}).value||cfg.voice,
@@ -9599,7 +9639,9 @@ function _vpvRemove(){
   if(!window._vpValuation) return;
   if(!confirm('Remove the Property Valuation video from this proposal?')) return;
   const path=window._vpValuation.videoStoragePath;
+  const vurl=window._vpValuation.videoUrl;
   window._vpValuation=null;
+  _vpvDetachSegment(vurl);   // clear it from the Whats My Land Worth slot
   const prev=document.getElementById('vpv-prev'); if(prev){ prev.classList.remove('show'); prev.removeAttribute('src'); }
   const rm=document.getElementById('vpv-remove'); if(rm) rm.style.display='none';
   _vpvStatus('Removed. Save the proposal to apply.');
