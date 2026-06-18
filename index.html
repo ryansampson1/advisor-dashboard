@@ -13951,9 +13951,13 @@ function bootCRM(){
     clearTimeout(_crmRenderTimer);
     _crmRenderTimer = setTimeout(()=>{ if(currentView==='crm') viewCRM(); }, 80);
   };
-  // Contacts
+  // Contacts — soft-deleted contacts are held in a 30-day recycle bin and hidden
+  // from the live list (admins can restore them; they auto-purge after 30 days).
   onSnapshot(query(collection(_fbDb,'contacts'), orderBy('lastName','asc')), snap=>{
-    allContacts = snap.docs.map(d=>({id:d.id,...d.data()}));
+    const _all = snap.docs.map(d=>({id:d.id,...d.data()}));
+    window._crmDeletedContacts = _all.filter(c=>c._deleted);
+    allContacts = _all.filter(c=>!c._deleted);
+    try{ window._crmAutoPurgeDeletedContacts && window._crmAutoPurgeDeletedContacts(); }catch(e){}
     _crmScheduleRender();
   });
   // Groups
@@ -14015,6 +14019,13 @@ async function _crmEnsureContact(nameRaw, email, phone, company, dealId) {
     }
     return existing.id; // ← return the contact ID
   }
+  // Don't auto-recreate a contact that was deliberately moved to the recycle bin
+  const _delLow  = (email||'').toLowerCase().trim();
+  const _delName = (nameRaw||'').toLowerCase().trim();
+  if((window._crmDeletedContacts||[]).some(c =>
+       (_delLow && ((c.email||'').toLowerCase()===_delLow || (c.email2||'').toLowerCase()===_delLow)) ||
+       (_delName && [c.firstName,c.lastName].filter(Boolean).join(' ').toLowerCase()===_delName)
+     )) return null;
   // Create new contact
   if(!_fbDb || !_fbFns) return null;
   const {collection, addDoc} = _fbFns;
@@ -14340,6 +14351,7 @@ function viewCRM(){
       <button type="button" onclick="window.crmGmailSync()" class="border border-blue-200 rounded-lg px-3 py-1.5 text-sm text-blue-600 hover:bg-blue-50 whitespace-nowrap font-semibold" title="Last synced: ${typeof _GMAIL_SYNC_DATE!=='undefined'?_GMAIL_SYNC_DATE:'never'}">📧 Gmail Sync${typeof _GMAIL_SYNC_DATE!=='undefined'?` <span class="font-normal text-xs text-blue-400">(${_GMAIL_SYNC_DATE})</span>`:''}</button>
       ${(currentUser.isAdmin&&!adminViewAsAdvisor&&!staffViewMode)?`
         <button type="button" onclick="window.crmExportCSV()" class="border rounded-lg px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50">⬇ Export CSV</button>
+        <button type="button" onclick="window.crmOpenRecycleBin()" class="border rounded-lg px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50 whitespace-nowrap" title="Restore contacts deleted in the last 30 days">🗑 Recently Deleted${(window._crmDeletedContacts||[]).length?` <span class="inline-flex items-center justify-center min-w-4 h-4 px-1 text-xs font-bold text-white bg-gray-500 rounded-full ml-1">${window._crmDeletedContacts.length}</span>`:''}</button>
         ${(typeof _CRM_OUTREACH_IMPORTS!=='undefined'&&_CRM_OUTREACH_IMPORTS.filter(r=>!r.imported&&!r.skipped).length>0)?`<button type="button" onclick="window._crmShowOutreachImports()" class="border border-indigo-200 rounded-lg px-3 py-1.5 text-sm text-indigo-600 hover:bg-indigo-50 whitespace-nowrap font-semibold">📥 Outreach <span class="inline-flex items-center justify-center w-4 h-4 text-xs font-bold text-white bg-indigo-500 rounded-full ml-1">${_CRM_OUTREACH_IMPORTS.filter(r=>!r.imported&&!r.skipped).length}</span></button>`:''}`:''}
     </div>
     ${_alphaBarHtml}
@@ -15636,13 +15648,104 @@ window.saveContact = async () => {
   } catch(e){ showToast('Save failed — '+e.message,'error'); }
 };
 
+// ── Contact deletion → 30-day recycle bin (admin-recoverable) ──────
+window._CRM_DELETE_RETENTION_DAYS = 30;
+
 window.crmDeleteContact = async id => {
-  if(!confirm('Delete this contact? This cannot be undone.')) return;
+  if(!confirm('Move this contact to Recently Deleted?\n\nIt disappears from the list right away, and an admin can restore it for 30 days. After that it is permanently removed.')) return;
+  const {doc, updateDoc} = _fbFns;
+  try {
+    await updateDoc(doc(_fbDb,'contacts',id), {
+      _deleted:    true,
+      _deletedAt:  Date.now(),
+      _deletedBy:  (currentUser?.email || currentUser?.displayName || currentUser?.uid || 'unknown'),
+    });
+    showToast('Moved to Recently Deleted — restorable for 30 days','info');
+  } catch(e){ showToast('Delete failed — '+(e.message||e),'error'); }
+};
+
+// Restore a soft-deleted contact back into the live list (clears the bin flags).
+window.crmRestoreContact = async id => {
+  const {doc, updateDoc} = _fbFns;
+  try {
+    await updateDoc(doc(_fbDb,'contacts',id), {
+      _deleted:false, _deletedAt:null, _deletedBy:null, updatedAt:Date.now(),
+    });
+    showToast('Contact restored ✓','success');
+    setTimeout(()=>{ if(document.getElementById('crm-recycle-modal')) window.crmOpenRecycleBin(); }, 200);
+  } catch(e){ showToast('Restore failed — '+(e.message||e),'error'); }
+};
+
+// Permanently delete a single contact from the bin (admin choice, irreversible).
+window.crmPurgeContact = async id => {
+  if(!confirm('Permanently delete this contact now? This cannot be undone.')) return;
   const {doc, deleteDoc} = _fbFns;
   try {
     await deleteDoc(doc(_fbDb,'contacts',id));
-    showToast('Contact deleted','info');
-  } catch(e){ showToast('Delete failed','error'); }
+    showToast('Contact permanently deleted','info');
+    setTimeout(()=>{ if(document.getElementById('crm-recycle-modal')) window.crmOpenRecycleBin(); }, 200);
+  } catch(e){ showToast('Delete failed — '+(e.message||e),'error'); }
+};
+
+// Hard-delete any binned contact older than the retention window. Admin-only writes;
+// runs opportunistically each time the contacts snapshot refreshes.
+window._crmAutoPurgeDeletedContacts = async () => {
+  if(!(currentUser?.isAdmin && !adminViewAsAdvisor && !staffViewMode)) return;
+  if(window._crmPurgeRunning) return; window._crmPurgeRunning = true;
+  try {
+    const cutoff = Date.now() - window._CRM_DELETE_RETENTION_DAYS*24*60*60*1000;
+    const stale = (window._crmDeletedContacts||[]).filter(c=>(c._deletedAt||0) && c._deletedAt < cutoff);
+    if(stale.length){
+      const {doc, deleteDoc} = _fbFns;
+      for(const c of stale){ try{ await deleteDoc(doc(_fbDb,'contacts',c.id)); }catch(e){} }
+    }
+  } finally { window._crmPurgeRunning = false; }
+};
+
+// Admin-only Recently Deleted bin: list, restore, or permanently purge.
+window.crmOpenRecycleBin = () => {
+  if(!(currentUser?.isAdmin && !adminViewAsAdvisor && !staffViewMode)){ showToast('Admins only','error'); return; }
+  document.getElementById('crm-recycle-modal')?.remove();
+  const days = window._CRM_DELETE_RETENTION_DAYS;
+  const esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  const rows = (window._crmDeletedContacts||[]).slice().sort((a,b)=>(b._deletedAt||0)-(a._deletedAt||0));
+  const bodyRows = rows.length ? rows.map(c=>{
+    const name = esc([c.firstName,c.lastName].filter(Boolean).join(' ')||c.email||'(no name)');
+    const when = c._deletedAt ? new Date(c._deletedAt).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'2-digit'}) : '—';
+    const left = c._deletedAt ? Math.max(0, days - Math.floor((Date.now()-c._deletedAt)/(24*60*60*1000))) : days;
+    return `<tr class="border-b border-gray-100">
+      <td class="px-3 py-2"><div class="font-medium text-gray-800">${name}</div>${c.company?`<div class="text-xs text-gray-400">${esc(c.company)}</div>`:''}</td>
+      <td class="px-3 py-2 text-gray-600">${esc(c.email)||'—'}</td>
+      <td class="px-3 py-2 text-xs text-gray-500 whitespace-nowrap">${when}<div class="text-gray-400">by ${esc(c._deletedBy)||'—'}</div></td>
+      <td class="px-3 py-2 text-xs whitespace-nowrap ${left<=5?'text-rose-600 font-semibold':'text-gray-500'}">${left} day${left===1?'':'s'} left</td>
+      <td class="px-3 py-2 text-right whitespace-nowrap">
+        <button onclick="window.crmRestoreContact('${c.id}')" class="brand-btn text-white text-xs font-semibold px-3 py-1 rounded-lg mr-1">Restore</button>
+        <button onclick="window.crmPurgeContact('${c.id}')" class="text-xs text-rose-600 hover:underline px-2">Delete now</button>
+      </td></tr>`;
+  }).join('') : `<tr><td colspan="5" class="text-center text-gray-400 py-10">Nothing here — deleted contacts appear for ${days} days, then auto-purge.</td></tr>`;
+  const modal = document.createElement('div');
+  modal.id = 'crm-recycle-modal';
+  modal.className = 'fixed inset-0 z-50 flex items-center justify-center modal-bg bg-black/40 p-4';
+  modal.innerHTML = `
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[85vh] flex flex-col">
+      <div class="flex items-center justify-between p-5 border-b">
+        <div>
+          <h2 class="text-lg font-bold">🗑 Recently Deleted Contacts</h2>
+          <p class="text-xs text-gray-500 mt-0.5">Restorable for ${days} days after deletion, then permanently removed. Admins only.</p>
+        </div>
+        <button onclick="document.getElementById('crm-recycle-modal').remove()" class="text-gray-400 hover:text-gray-700 text-2xl leading-none">&times;</button>
+      </div>
+      <div class="overflow-y-auto">
+        <table class="w-full text-sm">
+          <thead class="bg-gray-50 text-left text-xs text-gray-500 uppercase tracking-wide sticky top-0">
+            <tr><th class="px-3 py-2 font-semibold">Name</th><th class="px-3 py-2 font-semibold">Email</th><th class="px-3 py-2 font-semibold">Deleted</th><th class="px-3 py-2 font-semibold">Expires</th><th class="px-3 py-2"></th></tr>
+          </thead>
+          <tbody>${bodyRows}</tbody>
+        </table>
+      </div>
+    </div>`;
+  modal.addEventListener('click', e=>{ if(e.target===modal) modal.remove(); });
+  document.body.appendChild(modal);
 };
 
 // ── Group modal ────────────────────────────────────────────────────
