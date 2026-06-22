@@ -5019,6 +5019,110 @@ function boContactSearch(value, dealKey){
 }
 window.boContactSearch = boContactSearch;
 
+// ── Buyer Opportunity — Search Active Listings for Matching Properties ────────
+window.runBuyerMatchSearch = async function(dealKey){
+  // Collect current form values (some may be unsaved)
+  const g = id => document.getElementById(id)?.value||'';
+  const buyerName  = g('sf-bo-buyer-name') || (allDeals.find(d=>d.id===dealKey)||{}).boBuyerName || 'Buyer';
+  const useType    = (g('sf-bo-use')||'').toLowerCase();
+  const submarket  = (g('sf-bo-submarket')||'').toLowerCase();
+  const minAcres   = parseFloat(g('sf-bo-min-acres'))||0;
+  const maxAcres   = parseFloat(g('sf-bo-max-acres'))||Infinity;
+  const maxBudget  = parseFloat(String(g('sf-bo-max-budget')||'').replace(/,/g,''))||Infinity;
+
+  // Active Listing-stage deals only
+  const listingDeals = (typeof allDeals !== 'undefined' ? allDeals : [])
+    .filter(d => /^listing$/i.test((d.stage||'').trim()));
+
+  if(!listingDeals.length){
+    showToast('No active listings found to compare against','warning');
+    return;
+  }
+
+  const matches = listingDeals.filter(d => {
+    // Acreage check
+    const ac = parseFloat(d.acreage)||0;
+    if(minAcres > 0 && ac > 0 && ac < minAcres) return false;
+    if(maxAcres < Infinity && ac > 0 && ac > maxAcres) return false;
+
+    // Budget check
+    const price = parseFloat(d.listedPrice||d.listPrice||d.askingPrice||d.proposedPrice||0);
+    if(maxBudget < Infinity && price > 0 && price > maxBudget) return false;
+
+    // Use type soft match (skip if buyer left blank)
+    if(useType){
+      const dUse = ((d.zoning||'')+(d.useType||'')+(d.propertyType||'')).toLowerCase();
+      if(dUse){
+        const words = useType.split(/[\s,\/]+/).filter(Boolean);
+        if(!words.some(w => dUse.includes(w))) return false;
+      }
+    }
+
+    // Submarket / area soft match
+    if(submarket){
+      const dLoc = ((d.propertyAddress||'')+(d.county||'')+(d.city||'')+(d.submarket||'')).toLowerCase();
+      if(dLoc){
+        const words = submarket.split(/[\s,\/]+/).filter(Boolean);
+        if(!words.some(w => dLoc.includes(w))) return false;
+      }
+    }
+
+    return true;
+  });
+
+  const fmt$ = n => n ? '$'+Number(n).toLocaleString('en-US',{maximumFractionDigits:0}) : '—';
+  const criteriaStr = [
+    minAcres ? `Min ${minAcres} ac` : '',
+    maxAcres < Infinity ? `Max ${maxAcres} ac` : '',
+    maxBudget < Infinity ? `Budget ≤ ${fmt$(maxBudget)}` : '',
+    g('sf-bo-use') || '',
+    g('sf-bo-submarket') || '',
+  ].filter(Boolean).join(' · ') || 'See buyer card';
+
+  if(!matches.length){
+    showToast('No current listings match — task created to revisit when new listings come in','info',5000);
+    const dueDate = new Date(); dueDate.setDate(dueDate.getDate()+14);
+    await Store.createTask({
+      title: `🔍 No Match Yet — Re-check listings for ${buyerName}`,
+      description: `No active listings currently match the buyer criteria for ${buyerName}.\n\n`
+        + `Criteria: ${criteriaStr}\n\n`
+        + `Re-run this search in 2 weeks or when new listings come in.`,
+      dealId: dealKey,
+      dueDate: dueDate.toISOString().slice(0,10),
+      status: 'pending',
+      createdBy: currentUser?.uid||'system',
+      createdByName: 'Automation',
+      createdAt: Date.now(),
+    });
+    return;
+  }
+
+  const matchLines = matches.map(d => {
+    const ac = d.acreage ? `${d.acreage} ac` : '—';
+    const pr = fmt$(d.listedPrice||d.listPrice||d.askingPrice||d.proposedPrice||0);
+    const addr = d.propertyAddress||d.projectName||d.id;
+    const advisor = d.advisorName ? ` | ${d.advisorName}` : '';
+    return `• ${addr} | ${ac} | ${pr}${advisor}`;
+  }).join('\n');
+
+  const dueDate = new Date(); dueDate.setDate(dueDate.getDate()+2);
+  await Store.createTask({
+    title: `🏡 ${matches.length} Listing Match${matches.length>1?'es':''} Found for ${buyerName}`,
+    description: `The following active listing${matches.length>1?'s':''} match the criteria for ${buyerName}:\n\n`
+      + matchLines + '\n\n'
+      + `Next step: Reach out to the buyer and share matching properties. If they want to pursue one, drag the Buyer Opportunity card to LOI or Under Contract and fill in the property details at that point.\n\n`
+      + `Criteria used: ${criteriaStr}`,
+    dealId: dealKey,
+    dueDate: dueDate.toISOString().slice(0,10),
+    status: 'pending',
+    createdBy: currentUser?.uid||'system',
+    createdByName: 'Automation',
+    createdAt: Date.now(),
+  });
+
+  showToast(`✅ ${matches.length} match${matches.length>1?'es':''} found — task created!`, 'success', 5000);
+};
+
 // ── Add-Card form: live CRM search on the Contact Name field ──────────────
 // Typing a name shows matching CRM contacts; picking one auto-fills the
 // contact name, phone, and email fields on the new-card form.
@@ -5234,19 +5338,49 @@ function renderStageFields(stage, data={}){
     </div>`;
   };
 
-  // ── BUYER OPPORTUNITIES — unique form kept as-is ──────────────────
+  // ── BUYER OPPORTUNITIES — structured criteria form ──────────────────
   if(stage==='Buyer Opportunities'){
-    const boContacts = (typeof allContacts !== 'undefined' ? allContacts : []).slice().sort((a,b)=>(a.name||'').localeCompare(b.name||''));
-    const contactOptions = boContacts.map(c=>`<option value="${c.id}" ${data.boContactId===c.id?'selected':''}>${c.name||c.email||'Unknown'}${c.company?' — '+c.company:''}</option>`).join('');
+    const boStatusOpts = [
+      {v:'searching', l:'Actively Searching'},
+      {v:'hold',      l:'On Hold'},
+      {v:'matched',   l:'Match Found — Pending Pursuit'},
+    ];
+    const boUseOpts = [
+      {v:'',                  l:'— Select use —'},
+      {v:'Multifamily',       l:'Multifamily / Residential'},
+      {v:'Industrial',        l:'Industrial / Warehouse'},
+      {v:'Retail / Commercial',l:'Retail / Commercial'},
+      {v:'Office',            l:'Office'},
+      {v:'Mixed-Use',         l:'Mixed-Use'},
+      {v:'Agricultural',      l:'Agricultural'},
+      {v:'Single Family',     l:'Single Family / Lots'},
+      {v:'Other',             l:'Other / Flexible'},
+    ];
+    const boTimelineOpts = [
+      {v:'',          l:'— Select urgency —'},
+      {v:'ASAP',      l:'ASAP — Ready to Move'},
+      {v:'0-3 months',l:'0–3 Months'},
+      {v:'3-6 months',l:'3–6 Months'},
+      {v:'6-12 months',l:'6–12 Months'},
+      {v:'1+ years',  l:'1+ Years / Exploratory'},
+    ];
+    const selBO = (id,label,opts,val) => `<div><label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">${label}</label>
+      <select id="${id}" class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-teal-300">
+        ${opts.map(o=>`<option value="${o.v}" ${val===o.v?'selected':''}>${o.l}</option>`).join('')}
+      </select></div>`;
     container.innerHTML=`
       <div class="border-t pt-4 mt-1">
-        <div class="text-xs font-bold text-teal-600 uppercase tracking-widest mb-3">🏢 Buyer Opportunity Details</div>
+        <div class="text-xs font-bold text-teal-600 uppercase tracking-widest mb-3">🏢 Buyer Opportunity</div>
+        <div class="text-xs text-gray-400 mb-4 leading-relaxed">No property assigned yet — capture the buyer's criteria below. Once you find a match and drag this card to a deal stage, you'll fill in the property details then.</div>
         <div class="space-y-3">
+
+          <!-- Buyer identity -->
           <div class="grid grid-cols-2 gap-3">
             ${inp('sf-bo-buyer-name','Buyer / Company Name','text','Acme Developers LLC',data.boBuyerName)}
-            ${inp('sf-bo-submarket','Submarket / Area','text','South Tampa, Wesley Chapel…',data.boSubmarket)}
+            ${selBO('sf-bo-status','Search Status',boStatusOpts,data.boStatus||'searching')}
           </div>
-          ${inp('sf-bo-use','Intended Use','text','Multifamily, Industrial, Retail…',data.boUse)}
+
+          <!-- CRM contact -->
           <div>
             <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Contact Person (CRM)</label>
             <div style="position:relative">
@@ -5259,12 +5393,65 @@ function renderStageFields(stage, data={}){
               <div id="bo-contact-dropdown" style="display:none;position:absolute;z-index:500;left:0;right:0;background:#fff;border:1px solid #e5e7eb;border-radius:8px;max-height:180px;overflow-y:auto;box-shadow:0 4px 16px rgba(0,0,0,.12);margin-top:2px"></div>
             </div>
           </div>
-          <div><label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Buyer Criteria</label>
-            <textarea id="sf-bo-criteria" rows="3" placeholder="e.g. 50–200 acres, multi-family or industrial zoning, within 30 miles of Tampa, price up to $5M…"
+
+          <!-- Criteria headline -->
+          <div class="text-xs font-bold text-gray-400 uppercase tracking-widest pt-1">Search Criteria</div>
+
+          <!-- Use type + timeline -->
+          <div class="grid grid-cols-2 gap-3">
+            ${selBO('sf-bo-use','Intended Use',boUseOpts,data.boUse||'')}
+            ${selBO('sf-bo-timeline','Urgency / Timeline',boTimelineOpts,data.boTimeline||'')}
+          </div>
+
+          <!-- Acreage range -->
+          <div>
+            <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Acreage Range</label>
+            <div class="grid grid-cols-2 gap-3">
+              <div class="flex items-center border rounded-lg overflow-hidden">
+                <span class="px-2 text-xs text-gray-400 bg-gray-50 border-r py-2">Min</span>
+                <input id="sf-bo-min-acres" type="number" min="0" step="1" placeholder="e.g. 10"
+                  value="${data.boMinAcres||''}"
+                  class="flex-1 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-teal-300"/>
+                <span class="px-2 text-xs text-gray-400 bg-gray-50 border-l py-2">ac</span>
+              </div>
+              <div class="flex items-center border rounded-lg overflow-hidden">
+                <span class="px-2 text-xs text-gray-400 bg-gray-50 border-r py-2">Max</span>
+                <input id="sf-bo-max-acres" type="number" min="0" step="1" placeholder="e.g. 200"
+                  value="${data.boMaxAcres||''}"
+                  class="flex-1 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-teal-300"/>
+                <span class="px-2 text-xs text-gray-400 bg-gray-50 border-l py-2">ac</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Max budget + submarket -->
+          <div class="grid grid-cols-2 gap-3">
+            <div><label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Max Budget ($)</label>
+              <input id="sf-bo-max-budget" type="text" placeholder="e.g. 5,000,000"
+                value="${data.boMaxBudget ? Number(data.boMaxBudget).toLocaleString() : ''}"
+                oninput="_fmtMoneyInput(this)"
+                class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-teal-300"/></div>
+            ${inp('sf-bo-submarket','Target Area / Submarket','text','South Tampa, Pasco, Hillsborough…',data.boSubmarket)}
+          </div>
+
+          <!-- Zoning preference -->
+          ${inp('sf-bo-zoning','Zoning Preference (optional)','text','e.g. RSF-2, PD, Agricultural, any entitleable…',data.boZoning)}
+
+          <!-- Notes -->
+          <div><label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Additional Criteria / Notes</label>
+            <textarea id="sf-bo-criteria" rows="3" placeholder="Any other must-haves, deal-breakers, or context…"
               class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-teal-300">${data.boCriteria||''}</textarea></div>
-          <div><label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Notes</label>
-            <textarea id="sf-bo-notes" rows="3" placeholder="Any additional context about this buyer…"
-              class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-teal-300">${data.boNotes||''}</textarea></div>
+          <textarea id="sf-bo-notes" class="hidden">${data.boNotes||''}</textarea>
+
+          <!-- Match search -->
+          <div class="pt-1">
+            <button type="button" onclick="runBuyerMatchSearch('${dealKey}')"
+              class="w-full inline-flex items-center justify-center gap-2 bg-teal-600 hover:bg-teal-700 text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">
+              🔍 Search Active Listings for a Match
+            </button>
+            <p class="text-xs text-gray-400 mt-1.5 text-center">Scans all active listings against the criteria above and creates a task if matches are found.</p>
+          </div>
+
         </div>
       </div>`;
     appendInlineGateFields(container, stage, data, dealKey);
@@ -6796,11 +6983,15 @@ function handleBuyerOpportunityAutomation(deal){
     description: `Reach out or connect with buyer: ${addr}.\n\n`
       + `Buyer: ${deal.boBuyerName||'—'}\n`
       + `Use: ${deal.boUse||'—'}\n`
-      + `Submarket: ${deal.boSubmarket||'—'}\n`
-      + `Criteria: ${deal.boCriteria||'—'}\n\n`
-      + `□ Send new listings that match buyer criteria\n`
+      + `Target Area: ${deal.boSubmarket||'—'}\n`
+      + `Acreage: ${deal.boMinAcres||'—'} – ${deal.boMaxAcres||'—'} ac\n`
+      + `Max Budget: ${deal.boMaxBudget ? '$'+Number(deal.boMaxBudget).toLocaleString() : '—'}\n`
+      + `Timeline: ${deal.boTimeline||'—'}\n`
+      + `Notes: ${deal.boCriteria||'—'}\n\n`
+      + `□ Open the Buyer Opportunity card and run "Search Active Listings for a Match"\n`
+      + `□ Send any new listings that fit criteria\n`
       + `□ Schedule call / meeting if warranted\n`
-      + `□ Update notes with any feedback`,
+      + `□ Update notes with any buyer feedback`,
     taskType: 'buyer_opp_followup',
     dealId: deal.id,
     dealAddress: deal.propertyAddress || deal.projectName,
@@ -24290,8 +24481,14 @@ function collectStageFields(){
     signOnProperty:   g('sf-sign-on-property'),
     // Buyer Opportunities
     boBuyerName:  g('sf-bo-buyer-name'),
+    boStatus:     g('sf-bo-status'),
     boSubmarket:  g('sf-bo-submarket'),
     boUse:        g('sf-bo-use'),
+    boTimeline:   g('sf-bo-timeline'),
+    boMinAcres:   parseFloat(g('sf-bo-min-acres'))||'',
+    boMaxAcres:   parseFloat(g('sf-bo-max-acres'))||'',
+    boMaxBudget:  parseFloat(String(g('sf-bo-max-budget')).replace(/,/g,''))||'',
+    boZoning:     g('sf-bo-zoning'),
     boContactId:  g('sf-bo-contact-id'),
     boContactName:g('sf-bo-contact-search'),
     boCriteria:   g('sf-bo-criteria'),
@@ -24335,8 +24532,8 @@ window.handleDealSubmit = async ev => {
     }
   }
 
-  // ── Parcel ID required on NEW deals only ────────────────────────────────
-  if(!id){
+  // ── Parcel ID required on NEW deals only (not for Buyer Opportunities — no property yet) ──
+  if(!id && stage !== 'Buyer Opportunities'){
     const _pPrimary = (document.getElementById('f-folio')?.value||'').trim();
     if(!_pPrimary){
       const el = document.getElementById('f-folio');
