@@ -21425,6 +21425,11 @@ function viewEOS(sub='rocks'){
     const allRocks  = eosGet('myRocks',{});
 
     body=`
+      <div class="flex justify-end mb-3">
+        <button onclick="printRocks()" class="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-50 transition" title="Print branded handout">
+          🖨 Print Rocks Handout
+        </button>
+      </div>
       <div class="grid md:grid-cols-2 gap-6">
         <!-- Company Rocks -->
         <div class="bg-white rounded-2xl border p-5">
@@ -21500,6 +21505,11 @@ function viewEOS(sub='rocks'){
         }
       </div>`;
     body=`
+      <div class="flex justify-end mb-3">
+        <button onclick="printVTO()" class="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-50 transition" title="Print branded VTO handout">
+          🖨 Print VTO Handout
+        </button>
+      </div>
       <div class="bg-white rounded-2xl border p-6 sm:p-8 w-full">
         <h3 class="font-bold text-gray-800 mb-6 text-lg">Vision/Traction Organizer</h3>
         <div class="space-y-5">
@@ -22998,6 +23008,159 @@ function viewEOS(sub='rocks'){
 }
 
 // EOS action handlers
+// ── EOS Print helpers ────────────────────────────────────────────────────────
+const _PRINT_BRAND_CSS = `
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'Inter',sans-serif;background:#fff;color:#0A0A0A;font-size:11pt;line-height:1.5;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  .page{max-width:8.5in;margin:0 auto;padding:.45in .55in .4in}
+  .hdr{display:flex;align-items:center;justify-content:space-between;border-bottom:3px solid #DA291C;padding-bottom:10px;margin-bottom:18px}
+  .hdr-left{display:flex;flex-direction:column;gap:1px}
+  .hdr-logo{font-size:18pt;font-weight:800;letter-spacing:-.5px;color:#0A0A0A;text-transform:uppercase}
+  .hdr-logo span{color:#DA291C}
+  .hdr-sub{font-size:8pt;color:#555;letter-spacing:.5px;text-transform:uppercase}
+  .hdr-right{text-align:right;font-size:8pt;color:#666;line-height:1.7}
+  .hdr-title{font-size:14pt;font-weight:800;color:#DA291C;text-transform:uppercase;letter-spacing:.5px;margin-bottom:2px}
+  .section{margin-bottom:14px}
+  .section-label{font-size:7.5pt;font-weight:800;text-transform:uppercase;letter-spacing:1px;color:#DA291C;margin-bottom:4px;padding-bottom:2px;border-bottom:1px solid #f5cac8}
+  .section-body{font-size:10pt;color:#111;white-space:pre-wrap;line-height:1.6}
+  .two-col{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .three-col{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}
+  .rock-group{margin-bottom:14px}
+  .rock-group-hdr{font-size:9pt;font-weight:800;text-transform:uppercase;letter-spacing:.5px;color:#0A0A0A;background:#f1f5f9;padding:4px 8px;border-radius:4px;margin-bottom:6px}
+  .rock-item{display:flex;align-items:flex-start;gap:8px;padding:5px 6px;border-radius:4px;margin-bottom:4px;font-size:10pt}
+  .rock-item.done{background:#f0fdf4}
+  .rock-item.open{background:#fafafa;border:1px solid #e5e7eb}
+  .rock-dot{width:14px;height:14px;border-radius:50%;flex-shrink:0;margin-top:2px}
+  .rock-dot.green{background:#16a34a}
+  .rock-dot.gray{background:#d1d5db;border:1px solid #9ca3af}
+  .rock-text{flex:1;line-height:1.4}
+  .rock-due{font-size:8pt;color:#888;margin-top:1px}
+  .rock-status{font-size:7pt;font-weight:700;color:#16a34a;white-space:nowrap;margin-top:1px}
+  .no-rocks{font-size:9pt;color:#aaa;font-style:italic}
+  .footer{margin-top:18px;padding-top:8px;border-top:1px solid #e5e7eb;display:flex;justify-content:space-between;align-items:center;font-size:7.5pt;color:#999}
+  .footer-brand{color:#DA291C;font-weight:700}
+  .quarter-badge{display:inline-block;background:#DA291C;color:#fff;font-size:7pt;font-weight:800;padding:2px 8px;border-radius:3px;text-transform:uppercase;letter-spacing:.5px}
+  @media print{
+    @page{margin:.4in .45in;size:letter portrait}
+    body{font-size:10pt}
+    .hdr-logo{font-size:15pt}
+  }`;
+
+window.printRocks = () => {
+  const compRocks = eosGet('compRocks',[]);
+  const allRocks  = eosGet('myRocks',{});
+  const advisors  = getDistinctAdvisors();
+  const now       = new Date();
+  const dateStr   = now.toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric',year:'numeric'});
+  const qNum      = Math.floor(now.getMonth()/3)+1;
+
+  const rockList = (rocks) => {
+    if(!rocks||!rocks.length) return '<div class="no-rocks">No rocks set.</div>';
+    return rocks.map(r=>`
+      <div class="rock-item ${r.status==='complete'?'done':'open'}">
+        <div class="rock-dot ${r.status==='complete'?'green':'gray'}"></div>
+        <div class="rock-text">
+          <div style="${r.status==='complete'?'text-decoration:line-through;color:#6b7280':''}">${r.text||''}</div>
+          ${r.dueDate?`<div class="rock-due">Due: ${r.dueDate}</div>`:''}
+        </div>
+        ${r.status==='complete'?'<div class="rock-status">✓ Done</div>':''}
+      </div>`).join('');
+  };
+
+  // Build advisor rock sections
+  let advisorSections = '';
+  const advWithRocks = advisors.filter(a=>(allRocks[a.uid]||[]).length>0);
+  if(advWithRocks.length){
+    const cols = advWithRocks.map(a=>`
+      <div>
+        <div class="rock-group-hdr">${a.name}</div>
+        ${rockList(allRocks[a.uid]||[])}
+      </div>`).join('');
+    advisorSections = `
+      <div class="section">
+        <div class="section-label">Advisor Rocks</div>
+        <div class="${advWithRocks.length>2?'three-col':'two-col'}" style="margin-top:8px">${cols}</div>
+      </div>`;
+  }
+
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>ELC Rocks — Q${qNum} ${now.getFullYear()}</title>
+  <style>${_PRINT_BRAND_CSS}</style></head><body><div class="page">
+    <div class="hdr">
+      <div class="hdr-left">
+        <div class="hdr-logo">Eshenbaugh <span>Land</span> Company</div>
+        <div class="hdr-sub">The Dirt Dog · Tampa, FL</div>
+      </div>
+      <div class="hdr-right">
+        <div class="hdr-title">🪨 Q${qNum} Rocks</div>
+        <div>${dateStr}</div>
+        <div><span class="quarter-badge">Q${qNum} ${now.getFullYear()}</span></div>
+      </div>
+    </div>
+    <div class="section">
+      <div class="section-label">Company Rocks</div>
+      <div style="margin-top:8px">${rockList(compRocks)}</div>
+    </div>
+    ${advisorSections}
+    <div class="footer">
+      <div><span class="footer-brand">Eshenbaugh Land Company</span> · EOS Rocks Handout</div>
+      <div>Printed ${dateStr}</div>
+    </div>
+  </div><script>window.onload=()=>window.print();<\/script></body></html>`;
+
+  const w = window.open('','_blank','width=900,height=700');
+  w.document.write(html);
+  w.document.close();
+};
+
+window.printVTO = () => {
+  const vto = eosGet('vto',{coreValues:'',focus:'',tenYear:'',threeYear:'',oneYear:'',issues:''});
+  const now = new Date();
+  const dateStr = now.toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric',year:'numeric'});
+  const qNum = Math.floor(now.getMonth()/3)+1;
+
+  const vtoField = (label, val) => `
+    <div class="section">
+      <div class="section-label">${label}</div>
+      <div class="section-body">${val||'<span style="color:#ccc;font-style:italic">Not set</span>'}</div>
+    </div>`;
+
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>ELC VTO — ${now.getFullYear()}</title>
+  <style>${_PRINT_BRAND_CSS}</style></head><body><div class="page">
+    <div class="hdr">
+      <div class="hdr-left">
+        <div class="hdr-logo">Eshenbaugh <span>Land</span> Company</div>
+        <div class="hdr-sub">The Dirt Dog · Tampa, FL</div>
+      </div>
+      <div class="hdr-right">
+        <div class="hdr-title">🗺 Vision/Traction Organizer</div>
+        <div>${dateStr}</div>
+        <div><span class="quarter-badge">Q${qNum} ${now.getFullYear()}</span></div>
+      </div>
+    </div>
+    <div class="two-col">
+      <div>
+        ${vtoField('Core Values', vto.coreValues)}
+        ${vtoField('Core Focus', vto.focus)}
+        ${vtoField('10-Year Target', vto.tenYear)}
+      </div>
+      <div>
+        ${vtoField('3-Year Picture', vto.threeYear)}
+        ${vtoField('1-Year Plan', vto.oneYear)}
+        ${vtoField('Issues (Org-Level)', vto.issues)}
+      </div>
+    </div>
+    <div class="footer">
+      <div><span class="footer-brand">Eshenbaugh Land Company</span> · Vision/Traction Organizer</div>
+      <div>Printed ${dateStr}</div>
+    </div>
+  </div><script>window.onload=()=>window.print();<\/script></body></html>`;
+
+  const w = window.open('','_blank','width=900,height=700');
+  w.document.write(html);
+  w.document.close();
+};
+
 window.saveVTO = () => {
   const g=id=>document.getElementById(id)?.value||'';
   eosSave('vto',{coreValues:g('vto-coreValues'),focus:g('vto-focus'),tenYear:g('vto-tenYear'),
