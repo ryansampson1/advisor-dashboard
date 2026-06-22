@@ -28,6 +28,19 @@ window.DIRTDOG_CONFIG = {
     websiteUrl: "https://www.thedirtdog.com"
   },
 
+  /* ---- EmailJS (OTP delivery for the client-facing proposal gate) ------- */
+  // Used to send the 6-digit verification code to the viewer's email address.
+  // 1. Go to https://www.emailjs.com → Account → API Keys → copy your Public Key
+  // 2. Create an Email Service and paste its Service ID
+  // 3. Create a template with variables: {{to_email}}, {{otp}}, {{proposal_name}}, {{advisor_name}}
+  //    Set "To Email" field to {{to_email}} in the template's Recipients section.
+  //    Copy the Template ID here as otpTemplateId.
+  emailjs: {
+    publicKey:     "YOUR_EMAILJS_PUBLIC_KEY",
+    serviceId:     "YOUR_EMAILJS_SERVICE_ID",
+    otpTemplateId: "YOUR_OTP_TEMPLATE_ID"
+  },
+
   /* ---- Broker backend login ------------------------------------------- */
   // No separate broker password: the builder runs inside the terra dashboard,
   // which already requires sign-in. The only password is the per-proposal one

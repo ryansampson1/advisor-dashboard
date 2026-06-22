@@ -33,7 +33,7 @@
   .cover-title .desc{margin-top:14px;max-width:520px;font-size:15px;line-height:1.5;color:#f0f2f4;
     text-shadow:0 2px 12px rgba(0,0,0,.65)}
 
-  /* Center password panel */
+  /* Center access panel */
   .cover-center{position:absolute;inset:0;z-index:3;display:flex;align-items:center;justify-content:center;padding:20px}
   .pwpanel{width:100%;max-width:384px;background:rgba(24,27,31,.86);border:1px solid rgba(255,255,255,.10);
     border-radius:16px;padding:24px 24px 22px;backdrop-filter:blur(10px);box-shadow:0 26px 70px rgba(0,0,0,.5);text-align:center}
@@ -42,13 +42,21 @@
   .pwpanel .divider{height:1px;background:rgba(255,255,255,.12);margin:0 0 18px}
   .pwpanel .lbl{font-size:13px;color:#cfd3d6;margin-bottom:11px;font-weight:600}
   .pwpanel input{width:100%;padding:14px 16px;border-radius:11px;border:1px solid rgba(255,255,255,.22);
-    background:rgba(0,0,0,.32);color:#fff;font-size:16px;text-align:center;letter-spacing:2px;outline:none}
-  .pwpanel input::placeholder{color:#aeb2b6;letter-spacing:1px}
+    background:rgba(0,0,0,.32);color:#fff;font-size:16px;text-align:center;outline:none}
+  .pwpanel input[type=email]{letter-spacing:0}
+  .pwpanel input[type=text]{letter-spacing:6px;font-size:22px;font-weight:700}
+  .pwpanel input::placeholder{color:#aeb2b6;letter-spacing:0;font-size:15px;font-weight:400}
   .pwpanel input:focus{border-color:var(--dd-accent);box-shadow:0 0 0 3px rgba(218,41,28,.28)}
   .pwpanel button{margin-top:12px;width:100%;padding:14px;border:0;border-radius:11px;cursor:pointer;
     background:var(--dd-accent);color:#fff;font-weight:800;font-size:15px;letter-spacing:.3px;font-family:var(--sans)}
-  .pwpanel button:hover{filter:brightness(1.08)}
+  .pwpanel button:hover:not(:disabled){filter:brightness(1.08)}
+  .pwpanel button:disabled{opacity:.5;cursor:default}
   .pwpanel .err{color:#ff9b9b;font-size:13px;min-height:18px;margin-top:10px}
+  .pwpanel .back-link{font-size:12px;color:#8a9096;margin-top:14px;cursor:pointer;text-decoration:underline}
+  .pwpanel .back-link:hover{color:#c9cdd1}
+  .pwpanel .sending{font-size:13px;color:#c9cdd1;margin-top:10px;min-height:18px}
+  #gate-step-email{display:block}
+  #gate-step-otp{display:none}
 
   /* Branded footer */
   .cover-foot{position:absolute;left:0;right:0;bottom:0;z-index:3;background:rgba(255,255,255,.75);color:#111;
@@ -146,15 +154,33 @@
     </div>
 
     <div class="cover-center">
-      <form class="pwpanel" id="gate-form">
+      <div class="pwpanel" id="gate-panel">
         <div class="appreciate">We're truly appreciative of the opportunity.</div>
         <div class="appreciate-sub" id="gate-appreciate-sub">Thank you for considering us to represent your property.</div>
         <div class="divider"></div>
-        <div class="lbl">Enter the password your advisor sent you</div>
-        <input id="gate-input" type="password" placeholder="Password" autocomplete="off" autofocus>
-        <div class="err" id="gate-err"></div>
-        <button type="submit">View My Proposal</button>
-      </form>
+
+        <!-- Step 1: email entry -->
+        <div id="gate-step-email">
+          <div class="lbl">Enter your email address to access your proposal</div>
+          <form id="gate-email-form" autocomplete="off">
+            <input id="gate-email-input" type="email" placeholder="your@email.com" autofocus required>
+            <div class="err" id="gate-email-err"></div>
+            <div class="sending" id="gate-sending"></div>
+            <button type="submit" id="gate-send-btn">Send Access Code</button>
+          </form>
+        </div>
+
+        <!-- Step 2: OTP entry -->
+        <div id="gate-step-otp">
+          <div class="lbl" id="gate-otp-lbl">We sent a 6-digit code to your email</div>
+          <form id="gate-otp-form" autocomplete="off">
+            <input id="gate-otp-input" type="text" placeholder="000000" maxlength="6" inputmode="numeric" pattern="[0-9]*">
+            <div class="err" id="gate-otp-err"></div>
+            <button type="submit" id="gate-verify-btn">View My Proposal</button>
+          </form>
+          <div class="back-link" id="gate-back-link">← Use a different email</div>
+        </div>
+      </div>
     </div>
 
     <div class="cover-foot">
@@ -217,6 +243,8 @@
     </div>
   </div>
 
+<!-- EmailJS (for OTP email delivery) -->
+<script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js"></script>
 <!-- Signature script font (loaded for the e-sign typed-signature option) -->
 <link href="https://fonts.googleapis.com/css2?family=Dancing+Script:wght@600;700&display=swap" rel="stylesheet">
 
@@ -520,17 +548,136 @@
   // P.segments below — no separate item needed.
   P.segments.forEach(s=>items.push({title:s.title||"Untitled", description:s.description||"", url:s.url||"", pdfUrl:s.pdfUrl||"", pdfFileName:s.pdfFileName||""}));
 
-  /* ---- Password gate ---- */
-  if(!P.pw){ unlock(); }
-  else {
-    document.getElementById("gate-form").addEventListener("submit",function(e){
-      e.preventDefault();
-      if(DD.hash(document.getElementById("gate-input").value) === P.pw){ unlock(); }
-      else { document.getElementById("gate-err").textContent="That password isn't right. Please try again."; document.getElementById("gate-input").select(); }
-    });
+  /* ---- Email OTP gate ---- */
+  let _viewerEmail = "";
+  let _otpCode = "";
+  let _otpExpiry = 0;
+
+  function genOTP(){ return String(Math.floor(100000 + Math.random()*900000)); }
+
+  async function sendOTP(email){
+    _otpCode = genOTP();
+    _otpExpiry = Date.now() + 10*60*1000; // 10 min
+    // Write OTP to Firestore so we have a server-side record (optional verify)
+    try{
+      const otpKey = (P.id||"enc") + "_" + email.replace(/[^a-z0-9]/gi,"_").toLowerCase();
+      await P._fs.setDoc(P._fs.doc(P._db,"proposalOTPs",otpKey),{
+        otp: _otpCode, email: email, proposalId: P.id||"encoded",
+        expiresAt: _otpExpiry, created: Date.now()
+      });
+    }catch(e){ console.warn("[otp] Firestore write failed",e); /* still proceed — code lives client-side */ }
+
+    // Send email via EmailJS
+    const ejsCfg = (window.DIRTDOG_CONFIG||{}).emailjs||{};
+    if(ejsCfg.publicKey && ejsCfg.serviceId && ejsCfg.otpTemplateId){
+      await window.emailjs.send(ejsCfg.serviceId, ejsCfg.otpTemplateId, {
+        to_email: email,
+        otp: _otpCode,
+        proposal_name: P.projectName||"Your Proposal",
+        advisor_name: (P.broker&&P.broker.name)||"Your Advisor"
+      }, ejsCfg.publicKey);
+    } else {
+      // Fallback: log to console in dev (remove in prod)
+      console.log("[OTP dev] Code for "+email+": "+_otpCode);
+    }
   }
 
-  function unlock(){
+  document.getElementById("gate-email-form").addEventListener("submit", async function(e){
+    e.preventDefault();
+    const email = document.getElementById("gate-email-input").value.trim().toLowerCase();
+    if(!email){ return; }
+    const btn = document.getElementById("gate-send-btn");
+    const sending = document.getElementById("gate-sending");
+    btn.disabled = true; btn.textContent = "Sending…";
+    sending.textContent = "";
+    document.getElementById("gate-email-err").textContent = "";
+    try{
+      await sendOTP(email);
+      _viewerEmail = email;
+      document.getElementById("gate-otp-lbl").textContent =
+        "We sent a 6-digit code to " + email;
+      document.getElementById("gate-step-email").style.display = "none";
+      document.getElementById("gate-step-otp").style.display = "block";
+      document.getElementById("gate-otp-input").focus();
+    }catch(err){
+      console.error("[gate] sendOTP error",err);
+      document.getElementById("gate-email-err").textContent =
+        "Couldn't send the code. Please try again or contact your advisor.";
+      btn.disabled = false; btn.textContent = "Send Access Code";
+    }
+  });
+
+  document.getElementById("gate-otp-form").addEventListener("submit", function(e){
+    e.preventDefault();
+    const entered = document.getElementById("gate-otp-input").value.trim();
+    if(Date.now() > _otpExpiry){
+      document.getElementById("gate-otp-err").textContent =
+        "That code expired. Please go back and request a new one.";
+      return;
+    }
+    if(entered === _otpCode){ unlock(_viewerEmail); }
+    else {
+      document.getElementById("gate-otp-err").textContent =
+        "That code doesn't match. Please try again.";
+      document.getElementById("gate-otp-input").select();
+    }
+  });
+
+  document.getElementById("gate-back-link").addEventListener("click", function(){
+    document.getElementById("gate-step-otp").style.display = "none";
+    document.getElementById("gate-step-email").style.display = "block";
+    document.getElementById("gate-otp-input").value = "";
+    document.getElementById("gate-otp-err").textContent = "";
+    const btn = document.getElementById("gate-send-btn");
+    btn.disabled = false; btn.textContent = "Send Access Code";
+  });
+
+  // Auto-format OTP input: digits only
+  document.getElementById("gate-otp-input").addEventListener("input", function(){
+    this.value = this.value.replace(/\D/g,"").slice(0,6);
+  });
+
+  /* ---- Analytics: write a view record on unlock ---- */
+  let _viewDocRef = null;
+  async function logView(email){
+    try{
+      const fs=P._fs, db=P._db;
+      _viewDocRef = await fs.addDoc(fs.collection(db,"proposalViews"),{
+        proposalId: P.id||"encoded",
+        proposalName: P.projectName||"",
+        email: email,
+        viewedAt: Date.now(),
+        userAgent: (navigator.userAgent||"").slice(0,300),
+        videos: []
+      });
+    }catch(e){ console.warn("[analytics] logView failed",e); }
+  }
+
+  /* ---- Video watch time tracking ---- */
+  let _watchStart = null, _watchIdx = null;
+  async function logVideoStop(){
+    if(_watchIdx===null||!_viewDocRef||!_watchStart) return;
+    const dur = Math.round((Date.now()-_watchStart)/1000);
+    const it = items[_watchIdx];
+    _watchStart=null; _watchIdx=null;
+    if(dur<2) return; // ignore accidental clicks
+    try{
+      const fs=P._fs;
+      const snap = await fs.getDoc(_viewDocRef);
+      const vids = (snap.exists()&&snap.data().videos)||[];
+      vids.push({ title:it.title, startedAt:Date.now()-dur*1000, endedAt:Date.now(), durationSec:dur });
+      await fs.updateDoc(_viewDocRef,{ videos: vids });
+    }catch(e){ console.warn("[analytics] logVideoStop failed",e); }
+  }
+  function logVideoStart(i){
+    logVideoStop(); // flush previous
+    _watchStart=Date.now(); _watchIdx=i;
+  }
+  window.addEventListener("visibilitychange",function(){ if(document.hidden) logVideoStop(); });
+  window.addEventListener("beforeunload",function(){ logVideoStop(); });
+
+  function unlock(email){
+    if(email) logView(email);
     const g=document.getElementById("gate");
     g.style.transition="opacity .4s"; g.style.opacity="0";
     setTimeout(()=>{ g.style.display="none"; }, 400);
@@ -598,6 +745,7 @@
   function go(i, autoplay){
     if(i<0||i>=items.length) return;
     current=i; watched.add(i);
+    logVideoStart(i);
     const it=items[i];
     document.getElementById("stage").innerHTML = DD.videoEmbedHTML(it.url,{autoplay:autoplay!==false});
     document.getElementById("meta-title").textContent = it.title;
