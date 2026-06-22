@@ -243,8 +243,6 @@
     </div>
   </div>
 
-<!-- EmailJS (for OTP email delivery) -->
-<script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js"></script>
 <!-- Signature script font (loaded for the e-sign typed-signature option) -->
 <link href="https://fonts.googleapis.com/css2?family=Dancing+Script:wght@600;700&display=swap" rel="stylesheet">
 
@@ -567,21 +565,21 @@
       });
     }catch(e){ console.warn("[otp] Firestore write failed",e); /* still proceed — code lives client-side */ }
 
-    // Send email via EmailJS
-    const ejsCfg = (window.DIRTDOG_CONFIG||{}).emailjs||{};
-    const ejsReady = ejsCfg.publicKey && !ejsCfg.publicKey.startsWith("YOUR_")
-      && ejsCfg.serviceId && !ejsCfg.serviceId.startsWith("YOUR_")
-      && ejsCfg.otpTemplateId && !ejsCfg.otpTemplateId.startsWith("YOUR_");
-    if(ejsReady){
-      await window.emailjs.send(ejsCfg.serviceId, ejsCfg.otpTemplateId, {
-        to_email: email,
+    // Send OTP via the ELC proxy worker (Resend)
+    const proxyBase = "https://elc-tts-proxy.dirtdog.workers.dev";
+    const res = await fetch(proxyBase + "/send-otp", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        to: email,
         otp: _otpCode,
-        proposal_name: P.projectName||"Your Proposal",
-        advisor_name: (P.broker&&P.broker.name)||"Your Advisor"
-      }, ejsCfg.publicKey);
-    } else {
-      // Fallback: log to console in dev (remove in prod)
-      console.log("[OTP dev] Code for "+email+": "+_otpCode);
+        proposalName: P.projectName||"Your Proposal",
+        advisorName: (P.broker&&P.broker.name)||"Your Advisor"
+      })
+    });
+    if(!res.ok){
+      const err = await res.text().catch(()=>"");
+      throw new Error("Resend error " + res.status + ": " + err);
     }
   }
 
