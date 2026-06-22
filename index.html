@@ -5663,8 +5663,8 @@ const FB = {
     try {
       const _gcred = GoogleAuthProvider.credentialFromResult(_signInResult);
       if(_gcred?.accessToken){
-        sessionStorage.setItem('gcal_token', _gcred.accessToken);
-        sessionStorage.setItem('gcal_token_exp', String(Date.now() + 3600*1000));
+        localStorage.setItem('gcal_token', _gcred.accessToken);
+        localStorage.setItem('gcal_token_exp', String(Date.now() + 3600*1000));
       }
     } catch(e){}
     return _signInResult;
@@ -13597,8 +13597,8 @@ function viewCommissionForecast(){
 function viewCalendar(){
   if(activeChart){ activeChart.destroy(); activeChart=null; }
   const email = currentUser.email || '';
-  const token = sessionStorage.getItem('gcal_token');
-  const tokenExp = parseInt(sessionStorage.getItem('gcal_token_exp')||'0');
+  const token = localStorage.getItem('gcal_token');
+  const tokenExp = parseInt(localStorage.getItem('gcal_token_exp')||'0');
   const hasWriteToken = token && Date.now() < tokenExp;
   const gcalUrl = email
     ? 'https://calendar.google.com/calendar/u/0/r?authuser=' + encodeURIComponent(email)
@@ -13670,8 +13670,8 @@ window._calEnableEditing = async function(){
     const result = await signInWithPopup(_fbAuth, provider);
     const cred = GoogleAuthProvider.credentialFromResult(result);
     if(cred && cred.accessToken){
-      sessionStorage.setItem('gcal_token', cred.accessToken);
-      sessionStorage.setItem('gcal_token_exp', String(Date.now() + 3600*1000));
+      localStorage.setItem('gcal_token', cred.accessToken);
+      localStorage.setItem('gcal_token_exp', String(Date.now() + 3600*1000));
       showToast('Calendar editing enabled ✓','success');
       if(currentView==='calendar') viewCalendar();
     } else {
@@ -13865,7 +13865,7 @@ window._dealRemoveMeetingActivity = async function(dealId, eventId){
 
 // ── Backfill: propose property links for meetings created outside the dashboard ──
 window._calBackfillMeetingLinks = async function(){
-  const token = sessionStorage.getItem('gcal_token');
+  const token = localStorage.getItem('gcal_token');
   if(!token){ showToast('Enable calendar editing first','error'); return; }
   document.getElementById('gcal-backfill-panel')?.remove();
   const panel = document.createElement('div');
@@ -13964,7 +13964,7 @@ window._calBackfillConfirmAll = async function(){
 
 // ── Calendar API helpers ─────────────────────────────────────────────────────
 window._calApiReq = async function(method, path, body){
-  const token = sessionStorage.getItem('gcal_token');
+  const token = localStorage.getItem('gcal_token');
   if(!token) throw new Error('No calendar token — click "Enable Calendar Editing" first');
   const resp = await fetch('https://www.googleapis.com/calendar/v3'+path, {
     method, headers: {'Authorization':'Bearer '+token, 'Content-Type':'application/json'},
@@ -13972,7 +13972,7 @@ window._calApiReq = async function(method, path, body){
   });
   if(!resp.ok){
     const err = await resp.json().catch(()=>({}));
-    if(resp.status===401){ sessionStorage.removeItem('gcal_token'); throw new Error('Calendar token expired — please re-enable calendar editing'); }
+    if(resp.status===401){ localStorage.removeItem('gcal_token'); throw new Error('Calendar token expired — please re-enable calendar editing'); }
     throw new Error(err.error?.message || 'Calendar API error '+resp.status);
   }
   return resp.status===204 ? null : resp.json();
@@ -13998,7 +13998,7 @@ window._calShowNewEvent = function(prefill={}){
 };
 
 window._calShowUpcoming = async function(){
-  const token = sessionStorage.getItem('gcal_token');
+  const token = localStorage.getItem('gcal_token');
   if(!token){ showToast('Enable calendar editing first','error'); return; }
   // Remove existing panel
   document.getElementById('gcal-upcoming-panel')?.remove();
@@ -21252,7 +21252,7 @@ function viewOfficeOverview(){
     const propPts  = aDeals.filter(d=>d.stage==='Proposal To Do'&&inPW(d)).reduce((s,d)=>s+splitPts(d,adv.uid,5),0);
     const listPts  = aDeals.filter(d=>d.stage==='Listing'&&inPW(d)).reduce((s,d)=>s+splitPts(d,adv.uid,10),0);
     const ctPts    = aDeals.filter(d=>/under.?contract/i.test(d.stage||'')&&inPW(d)).reduce((s,d)=>s+splitPts(d,adv.uid,30),0);
-    const score    = (qPct>=10?10:0)+Math.max(0,10-overdue*2)+(overdue===0?10:0)+prospPts+loiPts+propPts+listPts+ctPts+(wi.networkEvent==='yes'?10:0)+(wi.driveProperties==='yes'?10:0);
+    const score    = (qPct>=10?10:0)+Math.max(0,20-overdue*2)+prospPts+loiPts+propPts+listPts+ctPts+(wi.networkEvent==='yes'?10:0)+(wi.driveProperties==='yes'?10:0);
     return {adv, score, qPct, qVolA, qGoal, overdue, wi, prospPts, loiPts, propPts, listPts, ctPts};
   }).sort((a,b)=>b.score-a.score);
 
@@ -21785,18 +21785,17 @@ function viewEOS(sub='rocks'){
       const isOwnRow       = advUid === uid;  // advisor viewing their own row
       const isEditable     = isOwnRow && !isLocked;
 
-      // ── 10-point scoring (10 items × 10 pts = 100) ──────────────────
+      // ── 9-item scoring ──────────────────────────────────────────────
       const pts = [
         qPct >= 10 ? 10 : 0,                          // 1. Q Goal on pace
-        Math.max(0, 10 - overdueTaskCount * 2),        // 2. Overdue Tasks (10 − 2 per overdue task; future/no-due-date tasks not penalized)
-        (completedTasks + openTasks) === 0 ? 10 : Math.min(10, Math.round(completedTasks / (completedTasks + openTasks) * 10)),  // 3. Tasks Completed (% of the week's tasks completed × 10; full 10 if none open or all done)
-        prospectPts,                                   // 4. Prospects (1pt each, split)
-        loiPts,                                        // 5. LOIs (5pts each, split)
-        propPts,                                       // 6. Proposals (5pts each, split)
-        listingPts,                                    // 7. Listings (10pts each, split)
-        contractPts,                                   // 8. Contracts (20pts each, split)
-        networkEvent === 'yes' ? 10 : 0,               // 9. Network Event
-        driveProps === 'yes' ? 10 : 0,                 // 10. Drive Properties
+        Math.max(0, 20 - overdueTaskCount * 2),        // 2. Open Tasks (20 − 2 per overdue task; full 20 if no overdue)
+        prospectPts,                                   // 3. Prospects (5pts each, split)
+        loiPts,                                        // 4. LOIs (10pts each, split)
+        propPts,                                       // 5. Proposals (5pts each, split)
+        listingPts,                                    // 6. Listings (10pts each, split)
+        contractPts,                                   // 7. Contracts (30pts each, split)
+        networkEvent === 'yes' ? 10 : 0,               // 8. Network Event
+        driveProps === 'yes' ? 10 : 0,                 // 9. Drive Properties
       ];
       const weekScore = Math.round(pts.reduce((a,b)=>a+b,0));
       const grade = weekGrade(weekScore);
@@ -21933,12 +21932,11 @@ function viewEOS(sub='rocks'){
           </div>
         </td>
         ${cell(openTasks, null, pts[1])}
-        ${cell(completedTasks, 1, pts[2])}
-        ${cell(prospects + (prospectPts!==prospects*5?' ('+Math.round(prospectPts*10)/10+'pts)':''), prospectPts>0?1:null, pts[3])}
-        ${cell(newLOIs + (loiPts!==newLOIs*10?' ('+Math.round(loiPts*10)/10+'pts)':''), loiPts>0?1:null, pts[4])}
-        ${cell(newProps + (propPts!==newProps*5?' ('+Math.round(propPts*10)/10+'pts)':''), propPts>0?1:null, pts[5])}
-        ${cell(newListings + (listingPts!==newListings*10?' ('+Math.round(listingPts*10)/10+'pts)':''), listingPts>0?1:null, pts[6])}
-        ${cell(newContracts + (contractPts!==newContracts*30?' ('+Math.round(contractPts*10)/10+'pts)':''), contractPts>0?1:null, pts[7])}
+        ${cell(prospects + (prospectPts!==prospects*5?' ('+Math.round(prospectPts*10)/10+'pts)':''), prospectPts>0?1:null, pts[2])}
+        ${cell(newLOIs + (loiPts!==newLOIs*10?' ('+Math.round(loiPts*10)/10+'pts)':''), loiPts>0?1:null, pts[3])}
+        ${cell(newProps + (propPts!==newProps*5?' ('+Math.round(propPts*10)/10+'pts)':''), propPts>0?1:null, pts[4])}
+        ${cell(newListings + (listingPts!==newListings*10?' ('+Math.round(listingPts*10)/10+'pts)':''), listingPts>0?1:null, pts[5])}
+        ${cell(newContracts + (contractPts!==newContracts*30?' ('+Math.round(contractPts*10)/10+'pts)':''), contractPts>0?1:null, pts[6])}
         ${netEventCell}
         ${driveCell}
       </tr>`;
@@ -22119,7 +22117,6 @@ function viewEOS(sub='rocks'){
                 <th class="px-3 py-3 text-center text-xs font-bold text-gray-500 uppercase tracking-wide whitespace-nowrap">Score</th>
                 ${col('Q'+qNum+' Goal')}
                 ${col('Open Tasks')}
-                ${col('Tasks Done ✓')}
                 ${col('Prospects')}
                 ${col('New LOIs')}
                 ${col('Proposals')}
@@ -22132,8 +22129,7 @@ function viewEOS(sub='rocks'){
                 <th class="px-4 pb-2 text-left text-xs text-gray-400 font-normal sticky left-0 bg-gray-50/60 z-10 border-r border-gray-100">—</th>
                 <th class="px-3 pb-2 text-center text-xs text-gray-400 font-normal">A+≥100 A≥90 B≥80 C≥70</th>
                 <th class="px-3 pb-2 text-center text-xs text-gray-400 font-normal">≥10% = 10pts</th>
-                <th class="px-3 pb-2 text-center text-xs text-gray-400 font-normal">10 − 2 per task</th>
-                <th class="px-3 pb-2 text-center text-xs text-gray-400 font-normal">% done · 10 if none open</th>
+                <th class="px-3 pb-2 text-center text-xs text-gray-400 font-normal">20 − 2 per overdue</th>
                 <th class="px-3 pb-2 text-center text-xs text-gray-400 font-normal">5pts each</th>
                 <th class="px-3 pb-2 text-center text-xs text-gray-400 font-normal">10pts each</th>
                 <th class="px-3 pb-2 text-center text-xs text-gray-400 font-normal">5pts each</th>
@@ -22151,7 +22147,7 @@ function viewEOS(sub='rocks'){
           </table>
         </div>
         <div class="px-6 py-3 border-t bg-gray-50 flex flex-wrap gap-5 text-xs text-gray-400">
-          <span>Contracts = 30pts · Listings = 10pts · LOIs = 10pts · Proposals = 5pts · Prospects = 5pts · split on co-advisor deals · A+ ≥ 100</span>
+          <span>Open Tasks = 20pts (−2 per overdue) · Contracts = 30pts · Listings = 10pts · LOIs = 10pts · Proposals = 5pts · Prospects = 5pts · split on co-advisor deals</span>
           <span><span style="color:#059669;font-weight:700">●</span> Green = target met</span>
           <span><span style="color:#DA291C;font-weight:700">●</span> Red = below target</span>
           <span>Network Event &amp; Property Visit: advisors self-report weekly · Locks Sunday 9pm</span>
@@ -22196,7 +22192,7 @@ function viewEOS(sub='rocks'){
       // Per-week lock store: once a week has fully ended, its computed row is
       // snapshotted here and never recomputed — so past weeks stop drifting when
       // deals move columns or tasks change status. Keyed by uid → weekKey.
-      const SCORECARD_VER = 3; // bump to wipe locked-week cache and recompute with new point values
+      const SCORECARD_VER = 4; // bump to wipe locked-week cache and recompute with new point values
       const _scoreHist = eosGet('scoreHistory',{});
       const _storedVer = _scoreHist.__ver || 1;
       const _myHist    = (_scoreHist[uid] && _storedVer >= SCORECARD_VER) ? {..._scoreHist[uid]} : {};
@@ -22321,7 +22317,7 @@ function viewEOS(sub='rocks'){
           const wi = allProfiles[uid]?.weeklyInputs?.[wKey]||{};
           netEv = wi.networkEvent||''; drPr = wi.driveProperties||'';
 
-          const pts_w=[wQPct>=10?10:0, Math.max(0,10-overdueInWk*2), taskDonePts,
+          const pts_w=[wQPct>=10?10:0, Math.max(0,20-overdueInWk*2),
             pPts,lPts,prPts,lstPts,cPts, netEv==='yes'?10:0, drPr==='yes'?10:0];
           score = Math.round(pts_w.reduce((a,b)=>a+b,0));
           pLen=pDeals.length; lLen=lDeals.length; prLen=prDeals.length; lstLen=lstDls.length; cLen=cDeals.length;
@@ -22347,7 +22343,6 @@ function viewEOS(sub='rocks'){
             </div>
           </td>
           <td class="px-3 py-3 text-center text-xs font-bold" style="color:${qColor}">${wQPct}%</td>
-          <td class="px-3 py-3 text-center text-sm font-semibold" style="color:${doneT>0?'#059669':'#9ca3af'}">${doneT||'—'}</td>
           <td class="px-3 py-3 text-center text-sm text-gray-700">${openT||'—'}</td>
           <td class="px-3 py-3 text-center text-sm text-gray-700">${pLen||'—'}</td>
           <td class="px-3 py-3 text-center text-sm text-gray-700">${lLen||'—'}</td>
@@ -22374,7 +22369,6 @@ function viewEOS(sub='rocks'){
                 <th class="px-4 py-3 text-left">Week</th>
                 <th class="px-3 py-3 text-center">Grade</th>
                 <th class="px-3 py-3 text-center">Q Goal</th>
-                <th class="px-3 py-3 text-center">Tasks Done</th>
                 <th class="px-3 py-3 text-center">Open Tasks</th>
                 <th class="px-3 py-3 text-center">Prospects</th>
                 <th class="px-3 py-3 text-center">LOIs</th>
@@ -22390,7 +22384,7 @@ function viewEOS(sub='rocks'){
         </div>
         <div class="px-6 py-3 border-t bg-gray-50 text-xs text-gray-400 flex flex-wrap gap-4">
           <span>Score uses same formula as current week</span>
-          <span>Contracts = 20pts · Listings = 10pts · LOIs &amp; Props = 5pts · Prospects = 1pt</span>
+          <span>Open Tasks = 20pts (−2 per overdue) · Contracts = 30pts · LOIs = 10pts · Listings = 10pts · Props = 5pts · Prospects = 5pts</span>
           <span>Network Event &amp; Property Visit pulled from saved weekly inputs</span>
         </div>
       </div>`;
@@ -22609,7 +22603,7 @@ function viewEOS(sub='rocks'){
               const drvPts = wi.driveProperties==='yes'?10:0;
               // Score mirrors advRow: overdue penalty + % of week's tasks completed
               const score = Math.round(
-                (qPct>=10?10:0)+Math.max(0,10-overdueT*2)+taskDonePts2+
+                (qPct>=10?10:0)+Math.max(0,20-overdueT*2)+
                 prosPts+loiPts+propPts+listPts+conPts+netPts+drvPts
               );
               const g = gradeOf(score);
@@ -27095,8 +27089,8 @@ function _startCalendarReminders(){
 }
 
 async function _checkCalendarReminders(){
-  const token = sessionStorage.getItem('gcal_token');
-  const exp   = parseInt(sessionStorage.getItem('gcal_token_exp')||'0');
+  const token = localStorage.getItem('gcal_token');
+  const exp   = parseInt(localStorage.getItem('gcal_token_exp')||'0');
   if(!token || Date.now() > exp) return;
   try {
     const now = new Date();
@@ -27136,8 +27130,8 @@ window._reauthCalendarReminders = async function(){
     const result = await signInWithPopup(_fbAuth, provider);
     const cred = GoogleAuthProvider.credentialFromResult(result);
     if(cred?.accessToken){
-      sessionStorage.setItem('gcal_token', cred.accessToken);
-      sessionStorage.setItem('gcal_token_exp', String(Date.now() + 3600*1000));
+      localStorage.setItem('gcal_token', cred.accessToken);
+      localStorage.setItem('gcal_token_exp', String(Date.now() + 3600*1000));
       showToast('Calendar reminders enabled ✓', 'success');
       _startCalendarReminders();
     }
@@ -28623,8 +28617,8 @@ window._siState = { emails:[], labels:[], selected:null, suggestions:[], log:[],
 
 function _siEsc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function _siGmailToken(){
-  const t = sessionStorage.getItem('gmail_token');
-  const exp = parseInt(sessionStorage.getItem('gmail_token_exp')||'0');
+  const t = localStorage.getItem('gmail_token');
+  const exp = parseInt(localStorage.getItem('gmail_token_exp')||'0');
   if(!t || Date.now() > exp) return null;
   return t;
 }
@@ -28639,8 +28633,8 @@ window._siConnectGmail = async function(){
     const result = await signInWithPopup(_fbAuth, provider);
     const cred = GoogleAuthProvider.credentialFromResult(result);
     if(cred?.accessToken){
-      sessionStorage.setItem('gmail_token', cred.accessToken);
-      sessionStorage.setItem('gmail_token_exp', String(Date.now() + 3600*1000));
+      localStorage.setItem('gmail_token', cred.accessToken);
+      localStorage.setItem('gmail_token_exp', String(Date.now() + 3600*1000));
       showToast('Gmail connected ✓','success');
       window._siState.emails = [];
       viewSmartInbox();
@@ -28651,8 +28645,8 @@ window._siConnectGmail = async function(){
 };
 
 window._siDisconnect = function(){
-  sessionStorage.removeItem('gmail_token');
-  sessionStorage.removeItem('gmail_token_exp');
+  localStorage.removeItem('gmail_token');
+  localStorage.removeItem('gmail_token_exp');
   window._siState = { emails:[], selected:null, suggestions:[], log:[], analyzing:false };
   viewSmartInbox();
 };
@@ -29526,8 +29520,8 @@ function _siRenderSuggestions(email){
 }
 
 function _siCalToken(){
-  const t=sessionStorage.getItem('gcal_token');
-  const exp=parseInt(sessionStorage.getItem('gcal_token_exp')||'0');
+  const t=localStorage.getItem('gcal_token');
+  const exp=parseInt(localStorage.getItem('gcal_token_exp')||'0');
   return (t && Date.now()<exp) ? t : null;
 }
 function _siFmtTime(d){ return d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'}); }
@@ -29541,8 +29535,8 @@ window._siConnectCalendar = async function(){
     const result = await signInWithPopup(_fbAuth, provider);
     const cred = GoogleAuthProvider.credentialFromResult(result);
     if(cred && cred.accessToken){
-      sessionStorage.setItem('gcal_token', cred.accessToken);
-      sessionStorage.setItem('gcal_token_exp', String(Date.now()+3600*1000));
+      localStorage.setItem('gcal_token', cred.accessToken);
+      localStorage.setItem('gcal_token_exp', String(Date.now()+3600*1000));
       showToast('Calendar connected ✓','success');
       _siCheckAvailability();
     } else { showToast('Calendar permission not granted','error'); }
