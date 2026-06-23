@@ -3909,6 +3909,21 @@ window.removeLoiRow = (dealKey, id) => {
   window.refreshLoiManager(dealKey);
 };
 window.setLoiWinner = (dealKey, id) => { loiWinner[dealKey]=id; window.refreshLoiManager(dealKey); };
+
+// ── Multi-Seller row helpers ──────────────────────────────────────────────────
+window.addSellerRow = () => {
+  const list = document.getElementById('sf-sellers-list'); if(!list) return;
+  const row = document.createElement('div');
+  row.className = 'flex gap-2 items-center sf-seller-row';
+  row.innerHTML = `<input type="text" class="sf-seller-input flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-red-300" placeholder="Seller name or entity" value=""/>
+    <button type="button" onclick="window.removeSellerRow(this)"
+      class="shrink-0 w-7 h-7 flex items-center justify-center rounded-full hover:bg-red-50 text-gray-400 hover:text-red-500 transition-colors">✕</button>`;
+  list.appendChild(row);
+  row.querySelector('input')?.focus();
+};
+window.removeSellerRow = (btn) => {
+  btn.closest('.sf-seller-row')?.remove();
+};
 window.handleLoiRowFile = (ev, dealKey, id) => {
   const f = ev.target.files[0]; if(!f) return;
   const reader = new FileReader();
@@ -5595,6 +5610,32 @@ function renderStageFields(stage, data={}){
     <!-- ⑤ PARTIES ───────────────────────────────────────────────── -->
     <div>
       <div class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">Parties</div>
+
+      <!-- Sellers (multi) -->
+      <div class="mb-3">
+        <div class="flex items-center justify-between mb-1">
+          <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide">Seller(s)</label>
+          <button type="button" onclick="window.addSellerRow()"
+            class="text-xs font-semibold text-red-600 hover:text-red-800 flex items-center gap-1">
+            + Add Seller
+          </button>
+        </div>
+        <div id="sf-sellers-list" class="space-y-2">
+          ${(()=>{
+            const sellerArr = Array.isArray(data.sellers) && data.sellers.length
+              ? data.sellers
+              : (data.contactPerson ? [data.contactPerson] : ['']);
+            return sellerArr.map((s,i)=>`
+              <div class="flex gap-2 items-center sf-seller-row">
+                <input type="text" class="sf-seller-input flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-red-300"
+                  placeholder="Seller name or entity" value="${(s||'').replace(/"/g,'&quot;')}"/>
+                ${i===0?'<span class="w-7 shrink-0"></span>':`<button type="button" onclick="window.removeSellerRow(this)"
+                  class="shrink-0 w-7 h-7 flex items-center justify-center rounded-full hover:bg-red-50 text-gray-400 hover:text-red-500 transition-colors">✕</button>`}
+              </div>`).join('');
+          })()}
+        </div>
+      </div>
+
       <div class="grid grid-cols-2 gap-3">
         ${inp('sf-buyer','Buyer / Company','text','e.g. Pulte Group',data.buyer||data.loiBuyer||'')}
         ${inp('sf-buyer-broker','Buyer\'s Broker','text','e.g. ABC Realty',data.buyerBroker)}
@@ -10565,7 +10606,10 @@ window.openPropertyDetail = (dealId) => {
     deal.coAdvisors?.length ? row('Co-Advisors', deal.coAdvisors.map(c=>c.name||c.email).join(', ')) : '',
     row('Buyer',          deal.buyer || deal.loiBuyer),
     row('Buyer Use',      deal.buyerUse),
-    row('Seller/Contact', deal.contactPerson),
+    row('Seller(s)', (()=>{
+      const arr = Array.isArray(deal.sellers) && deal.sellers.length ? deal.sellers : (deal.contactPerson ? [deal.contactPerson] : []);
+      return arr.length ? arr.join(' · ') : null;
+    })()),
     row('Contact Phone',  deal.contactPhone),
     row('Contact Email',  deal.contactEmail ? `<a href="mailto:${deal.contactEmail}" style="color:#2563eb">${deal.contactEmail}</a>` : null),
     row('Escrow Agent',   deal.escrowAgent),
@@ -24419,7 +24463,12 @@ window._fmtMoneyInput = _fmtMoneyInput;
 function collectStageFields(){
   const g  = id => document.getElementById(id)?.value||'';
   const gf = id => parseFloat(String(g(id)).replace(/,/g,''))||0;
+  // Collect all seller rows
+  const _sellerInputs = [...document.querySelectorAll('#sf-sellers-list .sf-seller-input')];
+  const _sellers = _sellerInputs.map(el=>el.value.trim()).filter(Boolean);
   return {
+    // Sellers (multi) — primary seller also synced to contactPerson in handleDealSubmit
+    sellers: _sellers,
     // Proposal / Prospect
     // NOTE: projectName is intentionally NOT collected here. The project/marketing
     // name is set manually by the user via the f-project-name field and must never
@@ -24776,7 +24825,7 @@ window.handleDealSubmit = async ev => {
     zoning:(document.getElementById('f-zoning')?.value||'').trim(),
     futureLandUse:(document.getElementById('f-flu')?.value||'').trim(),
     representation:(document.getElementById('f-representation')?.value||'seller'),
-    contactPerson:(document.getElementById('f-contact-person')?.value||'').trim(),
+    contactPerson:(sf.sellers&&sf.sellers.length ? sf.sellers[0] : '') || (document.getElementById('f-contact-person')?.value||'').trim(),
     contactPhone:(document.getElementById('f-contact-phone')?.value||'').trim(),
     contactEmail:(document.getElementById('f-contact-email')?.value||'').trim(),
     dealType, ...leaseFields,
