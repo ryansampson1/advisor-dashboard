@@ -7564,6 +7564,7 @@ function renderShell(){
     {id:'inbox',         label:'📥 Inbox',          advisor:true, admin:true, manager:true},
     {id:'videoProposals',label:'🎬 Video Proposals',advisor:true, admin:true, manager:true, staff:true},
     {id:'earthnotes',    label:'🌎 EarthNotes',     always:true},
+    {id:'valuation',     label:'🔍 Site Research',  advisor:true, admin:true, manager:true, staff:true},
   ].filter(n=>{
     if(sv){ // staff view: always tabs + staff-flagged tabs + manager tabs (for office managers) + CRM if enabled
       if(n.always) return true;
@@ -7745,7 +7746,7 @@ function renderCurrentView(){
     commissions:viewMyCommissions,
     splits:viewSplits,automations:viewAutomations,users:viewUsers,leaderboard:viewLeaderboard,
     manageStages:viewManageStages,officeManagers:viewOfficeManagers,approvedUsers:viewApprovedUsers,officeOverview:viewOfficeOverview,
-    eos:()=>viewEOS(window._eosSub||'rocks'),comps:viewComps,drive:viewDrive,documents:viewDocuments,hr:viewHR,crm:viewCRM,leads:viewLeads,inbox:viewSmartInbox,videoProposals:viewVideoProposals,earthnotes:viewEarthNotes};
+    eos:()=>viewEOS(window._eosSub||'rocks'),comps:viewComps,drive:viewDrive,documents:viewDocuments,hr:viewHR,crm:viewCRM,leads:viewLeads,inbox:viewSmartInbox,videoProposals:viewVideoProposals,earthnotes:viewEarthNotes,valuation:viewValuation};
   try {
     (map[currentView]||viewBoard)();
   } catch(e) {
@@ -9942,6 +9943,1410 @@ function viewEarthNotes(){
 }
 
 /* =======================================================
+   VIEW: SITE RESEARCH (VALUATION)
+   ======================================================= */
+
+// Florida county → property appraiser base URL & search pattern
+const _FL_PA = {
+  'Alachua':      {name:'Alachua County PA',    url:'https://www.acpafl.org/',                  search:'https://www.acpafl.org/services/prop_search.aspx'},
+  'Baker':        {name:'Baker County PA',       url:'https://bakerpa.com/',                     search:'https://bakerpa.com/'},
+  'Bay':          {name:'Bay County PA',         url:'https://www.baypa.net/',                   search:'https://www.baypa.net/search.aspx'},
+  'Bradford':     {name:'Bradford County PA',    url:'https://bradfordpa.com/',                  search:'https://bradfordpa.com/'},
+  'Brevard':      {name:'Brevard County PA',     url:'https://www.bcpao.us/',                    search:'https://www.bcpao.us/PropertySearch/'},
+  'Broward':      {name:'Broward County PA',     url:'https://www.bcpa.net/',                    search:'https://www.bcpa.net/RecInfo.asp'},
+  'Calhoun':      {name:'Calhoun County PA',     url:'https://calhounpa.com/',                   search:'https://calhounpa.com/'},
+  'Charlotte':    {name:'Charlotte County PA',   url:'https://www.ccappraiser.com/',             search:'https://www.ccappraiser.com/search.aspx'},
+  'Citrus':       {name:'Citrus County PA',      url:'https://www.citruspa.org/',                search:'https://www.citruspa.org/'},
+  'Clay':         {name:'Clay County PA',        url:'https://www.ccpao.com/',                   search:'https://www.ccpao.com/search/'},
+  'Collier':      {name:'Collier County PA',     url:'https://www.collierappraiser.com/',        search:'https://www.collierappraiser.com/main_search/main.asp'},
+  'Columbia':     {name:'Columbia County PA',    url:'https://www.columbiapafl.com/',            search:'https://www.columbiapafl.com/'},
+  'DeSoto':       {name:'DeSoto County PA',      url:'https://www.desotopa.org/',                search:'https://www.desotopa.org/'},
+  'Dixie':        {name:'Dixie County PA',       url:'https://dixiepa.com/',                     search:'https://dixiepa.com/'},
+  'Duval':        {name:'Duval County PA',       url:'https://paopropertysearch.coj.net/',       search:'https://paopropertysearch.coj.net/Basic/Search.aspx'},
+  'Escambia':     {name:'Escambia County PA',    url:'https://www.escpa.org/',                   search:'https://www.escpa.org/Search/'},
+  'Flagler':      {name:'Flagler County PA',     url:'https://flaglerpa.com/',                   search:'https://flaglerpa.com/'},
+  'Franklin':     {name:'Franklin County PA',    url:'https://franklinpa.com/',                  search:'https://franklinpa.com/'},
+  'Gadsden':      {name:'Gadsden County PA',     url:'https://www.gadsdenpa.com/',               search:'https://www.gadsdenpa.com/'},
+  'Gilchrist':    {name:'Gilchrist County PA',   url:'https://gilchristpa.com/',                 search:'https://gilchristpa.com/'},
+  'Glades':       {name:'Glades County PA',      url:'https://gladespa.com/',                    search:'https://gladespa.com/'},
+  'Gulf':         {name:'Gulf County PA',        url:'https://gulfpa.com/',                      search:'https://gulfpa.com/'},
+  'Hamilton':     {name:'Hamilton County PA',    url:'https://hamiltonpa.com/',                  search:'https://hamiltonpa.com/'},
+  'Hardee':       {name:'Hardee County PA',      url:'https://www.hardeepa.com/',                search:'https://www.hardeepa.com/'},
+  'Hendry':       {name:'Hendry County PA',      url:'https://www.hendrypa.com/',                search:'https://www.hendrypa.com/'},
+  'Hernando':     {name:'Hernando County PA',    url:'https://www.hernandopa.org/',              search:'https://www.hernandopa.org/hpa/'},
+  'Highlands':    {name:'Highlands County PA',   url:'https://www.hcpao.org/',                   search:'https://www.hcpao.org/PropertySearch/'},
+  'Hillsborough': {name:'Hillsborough County PA',url:'https://gis.hcpafl.org/',                 search:'https://gis.hcpafl.org/hcpafl/'},
+  'Holmes':       {name:'Holmes County PA',      url:'https://holmespa.com/',                    search:'https://holmespa.com/'},
+  'Indian River': {name:'Indian River County PA',url:'https://www.ircpa.net/',                   search:'https://www.ircpa.net/search/'},
+  'Jackson':      {name:'Jackson County PA',     url:'https://jacksonpa.com/',                   search:'https://jacksonpa.com/'},
+  'Jefferson':    {name:'Jefferson County PA',   url:'https://jeffersonpa.com/',                 search:'https://jeffersonpa.com/'},
+  'Lafayette':    {name:'Lafayette County PA',   url:'https://lafayettepa.com/',                 search:'https://lafayettepa.com/'},
+  'Lake':         {name:'Lake County PA',        url:'https://www.lakecopropappr.com/',          search:'https://www.lakecopropappr.com/'},
+  'Lee':          {name:'Lee County PA',         url:'https://www.leepa.org/',                   search:'https://www.leepa.org/Search/'},
+  'Leon':         {name:'Leon County PA',        url:'https://www.leonpa.org/',                  search:'https://www.leonpa.org/'},
+  'Levy':         {name:'Levy County PA',        url:'https://levypa.com/',                      search:'https://levypa.com/'},
+  'Liberty':      {name:'Liberty County PA',     url:'https://libertypa.com/',                   search:'https://libertypa.com/'},
+  'Madison':      {name:'Madison County PA',     url:'https://madisonpa.com/',                   search:'https://madisonpa.com/'},
+  'Manatee':      {name:'Manatee County PA',     url:'https://www.manateepao.com/',              search:'https://www.manateepao.com/'},
+  'Marion':       {name:'Marion County PA',      url:'https://www.pa.marion.fl.us/',             search:'https://www.pa.marion.fl.us/'},
+  'Martin':       {name:'Martin County PA',      url:'https://www.pa.martin.fl.us/',             search:'https://www.pa.martin.fl.us/'},
+  'Miami-Dade':   {name:'Miami-Dade County PA',  url:'https://www.miamidade.gov/pa/',            search:'https://www.miamidade.gov/pa/'},
+  'Monroe':       {name:'Monroe County PA',      url:'https://www.mcpafl.org/',                  search:'https://www.mcpafl.org/'},
+  'Nassau':       {name:'Nassau County PA',      url:'https://www.nassauflpa.com/',              search:'https://www.nassauflpa.com/'},
+  'Okaloosa':     {name:'Okaloosa County PA',    url:'https://www.okaloosapafl.com/',            search:'https://www.okaloosapafl.com/'},
+  'Okeechobee':   {name:'Okeechobee County PA',  url:'https://www.okeechobeepa.com/',            search:'https://www.okeechobeepa.com/'},
+  'Orange':       {name:'Orange County PA',      url:'https://www.ocpafl.org/',                  search:'https://www.ocpafl.org/'},
+  'Osceola':      {name:'Osceola County PA',     url:'https://www.property-appraiser.org/',      search:'https://www.property-appraiser.org/'},
+  'Palm Beach':   {name:'Palm Beach County PA',  url:'https://www.pbcgov.com/papa/',             search:'https://www.pbcgov.com/papa/'},
+  'Pasco':        {name:'Pasco County PA',       url:'https://pascopa.com/',                     search:'https://pascopa.com/'},
+  'Pinellas':     {name:'Pinellas County PA',    url:'https://www.pcpao.gov/',                   search:'https://www.pcpao.gov/'},
+  'Polk':         {name:'Polk County PA',        url:'https://www.polkpa.org/',                  search:'https://www.polkpa.org/'},
+  'Putnam':       {name:'Putnam County PA',      url:'https://www.putnam-fl.com/pa/',            search:'https://www.putnam-fl.com/pa/'},
+  'St. Johns':    {name:'St. Johns County PA',   url:'https://www.sjcpa.us/',                    search:'https://www.sjcpa.us/'},
+  'St. Lucie':    {name:'St. Lucie County PA',   url:'https://www.paslc.gov/',                   search:'https://www.paslc.gov/'},
+  'Santa Rosa':   {name:'Santa Rosa County PA',  url:'https://www.srcpa.org/',                   search:'https://www.srcpa.org/'},
+  'Sarasota':     {name:'Sarasota County PA',    url:'https://www.sc-pa.com/',                   search:'https://www.sc-pa.com/propertysearch/'},
+  'Seminole':     {name:'Seminole County PA',    url:'https://www.scpafl.org/',                  search:'https://www.scpafl.org/'},
+  'Sumter':       {name:'Sumter County PA',      url:'https://www.sumterpa.com/',                search:'https://www.sumterpa.com/'},
+  'Suwannee':     {name:'Suwannee County PA',    url:'https://suwanneepa.com/',                  search:'https://suwanneepa.com/'},
+  'Taylor':       {name:'Taylor County PA',      url:'https://taylorpa.com/',                    search:'https://taylorpa.com/'},
+  'Union':        {name:'Union County PA',       url:'https://unionpa.com/',                     search:'https://unionpa.com/'},
+  'Volusia':      {name:'Volusia County PA',     url:'https://www.vcpa.net/',                    search:'https://www.vcpa.net/'},
+  'Wakulla':      {name:'Wakulla County PA',     url:'https://wakullafl.com/',                   search:'https://wakullafl.com/'},
+  'Walton':       {name:'Walton County PA',      url:'https://www.waltoncountypa.com/',          search:'https://www.waltoncountypa.com/'},
+  'Washington':   {name:'Washington County PA',  url:'https://washingtonpa.com/',                search:'https://washingtonpa.com/'},
+};
+
+// SWFWMD covers these FL counties
+const _SWFWMD_COUNTIES = new Set(['Charlotte','Citrus','DeSoto','Hardee','Hernando','Highlands','Hillsborough',
+  'Lake','Lee','Manatee','Marion','Pasco','Pinellas','Polk','Sarasota','Sumter']);
+
+function viewValuation(){
+  if(activeChart){ try{ activeChart.destroy(); }catch(e){} activeChart=null; }
+
+  const countyOpts = Object.keys(_FL_PA).sort().map(c=>`<option value="${c}">${c}</option>`).join('');
+
+  setContent(`
+  <div style="display:flex;flex-direction:column;height:calc(100vh - 90px);gap:0;overflow:hidden">
+
+    <!-- ── Top bar ────────────────────────────────────────────── -->
+    <div style="background:#fff;border-bottom:1px solid #e5e7eb;padding:.85rem 1.1rem;flex:0 0 auto;display:flex;flex-wrap:wrap;align-items:flex-end;gap:.65rem">
+      <div>
+        <div style="font-size:.68rem;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:.05em;margin-bottom:.3rem">County</div>
+        <select id="val-county" style="border:1px solid #d1d5db;border-radius:8px;padding:.42rem .65rem;font-size:.88rem;outline:none;min-width:170px">
+          <option value="">— Select County —</option>
+          ${countyOpts}
+        </select>
+      </div>
+      <div style="flex:1;min-width:180px">
+        <div style="font-size:.68rem;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:.05em;margin-bottom:.3rem">Parcel ID</div>
+        <input id="val-parcel" placeholder="e.g. 402106401001" style="width:100%;border:1px solid #d1d5db;border-radius:8px;padding:.42rem .65rem;font-size:.88rem;outline:none;box-sizing:border-box" oninput="_valClearAlt()" onkeydown="if(event.key==='Enter')_valRun()"/>
+      </div>
+      <div style="color:#9ca3af;font-size:.8rem;padding-bottom:.45rem;flex:0 0 auto">or</div>
+      <div style="flex:2;min-width:220px">
+        <div style="font-size:.68rem;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:.05em;margin-bottom:.3rem">Property Address</div>
+        <input id="val-address" placeholder="e.g. 123 Main St, Port Charlotte, FL" style="width:100%;border:1px solid #d1d5db;border-radius:8px;padding:.42rem .65rem;font-size:.88rem;outline:none;box-sizing:border-box" oninput="_valClearAlt()" onkeydown="if(event.key==='Enter')_valRun()"/>
+      </div>
+      <button onclick="_valRun()" id="val-run-btn" style="background:var(--brand-teal,#00B2A9);color:#fff;border:0;border-radius:9px;padding:.48rem 1.2rem;font-size:.88rem;font-weight:700;cursor:pointer;white-space:nowrap;flex:0 0 auto">🔍 Run Research</button>
+      <button onclick="_valExportPDF()" id="val-pdf-btn" style="display:none;background:#fff;color:#374151;border:1px solid #d1d5db;border-radius:9px;padding:.48rem 1rem;font-size:.88rem;font-weight:600;cursor:pointer;white-space:nowrap;flex:0 0 auto" title="Export to PDF">📄 Export PDF</button>
+      <button onclick="_valGenerateOM()" id="val-om-btn" style="display:none;background:#282A2D;color:#fff;border:0;border-radius:9px;padding:.48rem 1.1rem;font-size:.88rem;font-weight:700;cursor:pointer;white-space:nowrap;flex:0 0 auto" title="Generate Offering Memorandum">📋 Generate OM</button>
+    </div>
+
+    <!-- ── Body: map left, results right ──────────────────────── -->
+    <div style="display:grid;grid-template-columns:340px 1fr;flex:1;min-height:0;overflow:hidden">
+
+      <!-- Map panel -->
+      <div style="border-right:1px solid #e5e7eb;display:flex;flex-direction:column;overflow:hidden">
+        <div style="background:#FAFAFB;border-bottom:1px solid #e5e7eb;padding:.6rem .85rem;font-size:.8rem;font-weight:700;color:#374151;flex:0 0 auto">
+          📍 Location
+          <span style="font-size:.7rem;font-weight:400;color:#9ca3af;margin-left:.4rem">Click map to drop a pin</span>
+        </div>
+        <div id="val-map-wrap" style="flex:1;position:relative;min-height:0">
+          <div id="val-map" style="width:100%;height:100%;background:#f3f4f6;display:flex;align-items:center;justify-content:center;color:#9ca3af;font-size:.82rem">
+            Enter a county + parcel or address above, then click Run Research.<br>The map will update after lookup.
+          </div>
+        </div>
+        <!-- Quick links panel below map -->
+        <div id="val-links" style="border-top:1px solid #e5e7eb;padding:.65rem .85rem;background:#FAFAFB;overflow-y:auto;max-height:240px">
+          <div style="font-size:.72rem;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:.05em;margin-bottom:.4rem">Quick Links</div>
+          <div id="val-links-list" style="color:#9ca3af;font-size:.78rem">Run a search to see data source links.</div>
+        </div>
+      </div>
+
+      <!-- Results panel -->
+      <div id="val-results" style="overflow-y:auto;padding:1rem 1.1rem;background:#f9fafb">
+        <div style="display:flex;align-items:center;justify-content:center;height:100%;min-height:200px">
+          <div style="text-align:center;color:#9ca3af">
+            <div style="font-size:2.2rem;margin-bottom:.5rem">🔍</div>
+            <div style="font-size:.92rem;font-weight:600;color:#6b7280;margin-bottom:.3rem">Site Research</div>
+            <div style="font-size:.8rem">Enter a county + parcel ID or address above and click <strong>Run Research</strong>.</div>
+            <div style="font-size:.78rem;margin-top:.35rem;color:#9ca3af">AI will pull property appraiser data, environmental records, wetlands, topo, zoning, and more.</div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+  `);
+}
+window.viewValuation = viewValuation;
+
+function _valClearAlt(){
+  // When user types in one field, clear the other
+  const p=document.getElementById('val-parcel'), a=document.getElementById('val-address');
+  if(!p||!a) return;
+  if(document.activeElement===p && a.value) a.value='';
+  if(document.activeElement===a && p.value) p.value='';
+}
+window._valClearAlt = _valClearAlt;
+
+async function _valRun(){
+  const county = (document.getElementById('val-county')||{}).value||'';
+  const parcel  = ((document.getElementById('val-parcel')||{}).value||'').trim();
+  const address = ((document.getElementById('val-address')||{}).value||'').trim();
+
+  if(!county){ showToast('Please select a county.','error'); return; }
+  if(!parcel && !address){ showToast('Enter a parcel ID or address.','error'); return; }
+
+  const btn = document.getElementById('val-run-btn');
+  if(btn){ btn.disabled=true; btn.textContent='Researching…'; }
+
+  const resultsEl = document.getElementById('val-results');
+  const linksEl   = document.getElementById('val-links-list');
+
+  if(resultsEl) resultsEl.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:center;height:300px">
+      <div style="text-align:center;color:#6b7280">
+        <div style="font-size:1.8rem;margin-bottom:.6rem;animation:spin 1.2s linear infinite;display:inline-block">⏳</div>
+        <div style="font-size:.9rem;font-weight:600">AI is researching this site…</div>
+        <div style="font-size:.78rem;margin-top:.3rem;color:#9ca3af">Pulling property appraiser, environmental records, wetlands & more</div>
+      </div>
+    </div>`;
+
+  const pa = _FL_PA[county] || {name:county+' County PA', url:'https://floridarevenue.com/dor/property/', search:'https://floridarevenue.com/dor/property/'};
+  const inSwfwmd = _SWFWMD_COUNTIES.has(county);
+  const waterMgmt = inSwfwmd
+    ? {name:'SWFWMD',url:'https://permits.swfwmd.state.fl.us/'}
+    : {name:'SFWMD / SRWMD / NWFWMD / SJRWMD (varies by county)',url:'https://www.dep.state.fl.us/water/waterpolicy/'};
+
+  // Build all the deep-link URLs upfront so AI can reference them
+  const identifier = parcel || address;
+  const paUrl      = pa.search;
+  const fdepUrl    = 'https://prodenv.dep.state.fl.us/DepNexus/public/electronic-documents/SearchFor/';
+  const swfwmdUrl  = inSwfwmd ? 'https://permits.swfwmd.state.fl.us/' : 'https://www.dep.state.fl.us/water/';
+  const nwiUrl     = 'https://www.fws.gov/program/national-wetlands-inventory/wetlands-mapper';
+  const topoUrl    = 'https://apps.nationalmap.gov/viewer/';
+  const femaUrl    = 'https://msc.fema.gov/portal/home';
+  const municodeBase = 'https://www.municode.com/library/fl/';
+
+  // Build quick links immediately
+  if(linksEl) linksEl.innerHTML = [
+    {label:'🏛 '+pa.name,                url:paUrl},
+    {label:'🌿 FDEP OCULUS (Env Records)', url:fdepUrl},
+    {label:'💧 '+(inSwfwmd?'SWFWMD Permits':'Water Mgmt Permits'),url:swfwmdUrl},
+    {label:'🐸 NWI Wetlands Mapper',       url:nwiUrl},
+    {label:'🗻 USGS Topo Viewer',          url:topoUrl},
+    {label:'🌊 FEMA Flood Map Service',    url:femaUrl},
+    {label:'📖 Municode FL Library',       url:municodeBase},
+  ].map(l=>`
+    <div style="margin-bottom:.35rem">
+      <a href="${l.url}" target="_blank" rel="noopener"
+         style="font-size:.78rem;color:#2563eb;text-decoration:none;display:flex;align-items:center;gap:.3rem;padding:.25rem .3rem;border-radius:5px;transition:background .15s"
+         onmouseover="this.style.background='#eff6ff'" onmouseout="this.style.background=''">
+        ${l.label} <span style="color:#9ca3af;font-size:.72rem">↗</span>
+      </a>
+    </div>`).join('');
+
+  // Update map
+  _valUpdateMap(address || (parcel+' '+county+' County Florida'));
+
+  // Build AI prompt
+  const sys = `You are a Florida commercial real estate due diligence analyst. The user has provided a property identifier and you must return a structured JSON research report. Use your knowledge of Florida property records, environmental databases, wetland mapping, and municipal codes. Return ONLY valid JSON — no prose, no code fences, nothing outside the JSON object.
+
+Return this exact shape:
+{
+  "property": {
+    "owner": "string or null",
+    "mailingAddress": "string or null",
+    "siteAddress": "string or null",
+    "parcelId": "string or null",
+    "county": "string",
+    "legalDescription": "string or null",
+    "acreage": "string or null",
+    "zoning": "string or null",
+    "zoningDescription": "string or null",
+    "futureYearLandUse": "string or null",
+    "taxYear": "string or null",
+    "assessedValue": "string or null",
+    "marketValue": "string or null",
+    "taxAmount": "string or null",
+    "structures": "string describing any structures or 'No structures / vacant land'",
+    "priorSales": [{"date":"string","price":"string","grantor":"string","grantee":"string"}],
+    "notes": "any other notable property appraiser info"
+  },
+  "zoning": {
+    "code": "string — the zoning code abbreviation",
+    "description": "string — what the zoning code means",
+    "allowedUses": "string — summary of principal permitted uses in this zoning district",
+    "conditionalUses": "string or null",
+    "setbacks": {"front":"string","rear":"string","side":"string","notes":"string or null"},
+    "maxHeight": "string or null",
+    "far": "string or null — floor area ratio",
+    "lotCoverage": "string or null",
+    "parking": "string or null — general parking requirements",
+    "municodeUrl": "string — exact Municode URL for this county/municipality's land development code or zoning ordinance. Use format https://www.municode.com/library/fl/[city_or_county_slug]/codes/code_of_ordinances",
+    "source": "string — name of the municipality or county whose code governs this parcel"
+  },
+  "environmental": {
+    "fdepOculusUrl": "string — FDEP OCULUS search URL pre-populated for this address/county if possible",
+    "knownSites": "string — describe any known contaminated sites, brownfields, or leaking underground storage tank (LUST) sites in this general area, or 'No known contaminated sites identified in this area based on available data'",
+    "riskLevel": "Low | Medium | High | Unknown",
+    "notes": "string — additional environmental notes relevant to FL commercial land"
+  },
+  "waterPermits": {
+    "waterManagementDistrict": "string — full name of the applicable WMD",
+    "permitSearchUrl": "string — direct link to permit search for this WMD",
+    "openPermits": "string — describe any known or likely open Environmental Resource Permits (ERPs), consumptive use permits, or wetland permits for this area/parcel, or 'No specific open permits identified — manual search recommended'",
+    "notes": "string"
+  },
+  "wetlands": {
+    "nwiUrl": "string — NWI Wetlands Mapper URL zoomed to this location if coordinates are known, otherwise https://www.fws.gov/program/national-wetlands-inventory/wetlands-mapper",
+    "presence": "Likely present | Possible | Unlikely | Unknown — based on county, land use context, and surrounding area",
+    "wetlandTypes": "string or null — common NWI wetland types found in this county/region (e.g. freshwater forested, emergent marsh)",
+    "jurisdictional": "string — note on likely Army Corps / FDEP jurisdiction",
+    "notes": "string — practical due diligence notes for wetlands on this type of parcel"
+  },
+  "topo": {
+    "topoUrl": "string — USGS National Map viewer URL",
+    "generalRelief": "string — describe general topography for this county/region of Florida (flat, rolling, elevation range, drainage patterns)",
+    "elevationRange": "string or null — typical elevation range in feet for this county",
+    "drainageNotes": "string — notes on drainage characteristics relevant to development"
+  },
+  "flood": {
+    "femaUrl": "string — FEMA Flood Map Service Center URL",
+    "generalRisk": "string — general FEMA flood zone risk characterization for this county/region",
+    "notes": "string — practical notes on flood considerations for FL commercial land"
+  },
+  "specialDesignations": {
+    "opportunityZone": {
+      "status": "Yes | No | Unknown — is this parcel in a federally designated Opportunity Zone (IRC §1400Z-2)?",
+      "tractId": "string or null — OZ census tract ID if known",
+      "benefits": "string — brief summary of OZ tax incentive benefits if applicable, or null",
+      "notes": "string or null"
+    },
+    "cra": {
+      "status": "Yes | No | Unknown — is this parcel within a Community Redevelopment Area under Florida Statute §163.330?",
+      "craName": "string or null — name of the CRA if applicable",
+      "agency": "string or null — governing CRA agency",
+      "benefits": "string or null — typical CRA incentives in this area (TIF financing, grants, fee waivers, etc.)",
+      "notes": "string or null"
+    },
+    "overlays": [
+      {
+        "name": "string — name of the overlay district or special zoning designation (e.g. 'Urban Mixed-Use Overlay', 'Scenic Corridor Overlay', 'Airport Compatibility Zone', 'Historic District', 'Wellfield Protection Zone', 'Coastal High Hazard Area', 'Activity Center Overlay', etc.)",
+        "description": "string — what this overlay means for development",
+        "impact": "Restrictive | Permissive | Neutral — effect on development potential"
+      }
+    ],
+    "enterpriseZone": "Yes | No | Unknown — legacy FL Enterprise Zone designation (note: program ended 2015 but some TIF benefits may persist)",
+    "hudQct": "Yes | No | Unknown — HUD Qualified Census Tract for affordable housing tax credit purposes",
+    "notes": "string — overall summary of special designation considerations for this site"
+  },
+  "summary": "string — 2-4 sentence executive summary of the site's key due diligence considerations based on the above",
+  "disclaimer": "This AI-generated report is for preliminary due diligence purposes only. All data should be verified against official county, state, and federal sources before any transaction. Environmental findings require a Phase I ESA by a licensed professional."
+}`;
+
+  const userMsg = `Research this Florida property for commercial land due diligence:
+County: ${county}
+${parcel ? 'Parcel ID: '+parcel : ''}
+${address ? 'Address: '+address : ''}
+
+Property Appraiser website for ${county} County: ${pa.url}
+Water Management District applicable: ${inSwfwmd ? 'Southwest Florida Water Management District (SWFWMD)' : 'Determine based on county location'}
+
+Please fill in as much as you can from your knowledge. For data you cannot determine without live record access, say so clearly in the relevant field rather than guessing. For the Municode URL, research the correct slug for ${county} County Florida.`;
+
+  try {
+    // Use a fresh history key so it doesn't bleed into other AI chats
+    if(!_aiHistory['_valHistory']) _aiHistory['_valHistory']=[];
+    _aiHistory['_valHistory']=[];  // always fresh per run
+    const raw = await callAIAssistant(userMsg, sys, '_valHistory');
+    if(!raw){ throw new Error('No response from AI'); }
+
+    let data;
+    try {
+      // Strip code fences if present
+      const cleaned = raw.replace(/^```json\s*/i,'').replace(/^```\s*/i,'').replace(/```\s*$/,'').trim();
+      data = JSON.parse(cleaned);
+    } catch(pe){
+      console.warn('[valuation] JSON parse failed, trying to extract:', pe);
+      // Try to extract JSON object from the response
+      const m = raw.match(/\{[\s\S]*\}/);
+      if(m){ data = JSON.parse(m[0]); }
+      else { throw new Error('AI returned non-JSON response.'); }
+    }
+
+    _valRenderResults(data, pa, inSwfwmd);
+
+  } catch(err){
+    console.error('[valuation] research error', err);
+    if(resultsEl) resultsEl.innerHTML = `
+      <div style="max-width:520px;margin:2rem auto;background:#fff;border:1px solid #fca5a5;border-radius:12px;padding:1.2rem">
+        <div style="font-weight:700;color:#dc2626;margin-bottom:.4rem">⚠️ Research Error</div>
+        <div style="font-size:.85rem;color:#374151">${err.message}</div>
+        <div style="font-size:.78rem;color:#6b7280;margin-top:.5rem">Check AI configuration or try again.</div>
+      </div>`;
+  }
+
+  if(btn){ btn.disabled=false; btn.textContent='🔍 Run Research'; }
+}
+window._valRun = _valRun;
+
+function _valUpdateMap(query){
+  const mapWrap = document.getElementById('val-map');
+  if(!mapWrap) return;
+  const q = encodeURIComponent(query+', Florida');
+  // Use Google Maps embed (no API key needed for basic embed)
+  mapWrap.innerHTML = `<iframe
+    src="https://maps.google.com/maps?q=${q}&t=k&z=15&output=embed"
+    style="width:100%;height:100%;border:0"
+    allowfullscreen
+    loading="lazy"
+    referrerpolicy="no-referrer-when-downgrade">
+  </iframe>`;
+}
+window._valUpdateMap = _valUpdateMap;
+
+function _valCard(emoji, title, color, bodyHtml){
+  return `
+  <div style="background:#fff;border:1px solid #e5e7eb;border-radius:12px;margin-bottom:.85rem;overflow:hidden">
+    <div style="background:${color};padding:.6rem .9rem;display:flex;align-items:center;gap:.45rem">
+      <span style="font-size:1.1rem">${emoji}</span>
+      <span style="font-weight:700;font-size:.88rem;color:#1f2937">${title}</span>
+    </div>
+    <div style="padding:.8rem .95rem;font-size:.82rem;color:#374151;line-height:1.55">
+      ${bodyHtml}
+    </div>
+  </div>`;
+}
+
+function _valRow(label, value){
+  if(!value || value==='null' || value==='undefined') return '';
+  return `<div style="display:flex;gap:.5rem;margin-bottom:.28rem;flex-wrap:wrap">
+    <span style="font-weight:600;color:#6b7280;white-space:nowrap;min-width:130px">${label}:</span>
+    <span style="color:#111827;flex:1">${value}</span>
+  </div>`;
+}
+
+function _valLink(label, url){
+  if(!url) return '';
+  return `<a href="${url}" target="_blank" rel="noopener"
+    style="display:inline-flex;align-items:center;gap:.3rem;font-size:.78rem;color:#2563eb;text-decoration:none;background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px;padding:.22rem .6rem;margin:.2rem .2rem 0 0;font-weight:600"
+    onmouseover="this.style.background='#dbeafe'" onmouseout="this.style.background='#eff6ff'">
+    ${label} ↗
+  </a>`;
+}
+
+function _valRenderResults(d, pa, inSwfwmd){
+  const el = document.getElementById('val-results');
+  if(!el) return;
+
+  // Show export buttons now that we have results
+  const pdfBtn = document.getElementById('val-pdf-btn');
+  if(pdfBtn) pdfBtn.style.display='';
+  const omBtn = document.getElementById('val-om-btn');
+  if(omBtn) omBtn.style.display='';
+  // Store last result for PDF export
+  window._valLastResult = d;
+
+  const p = d.property || {};
+  const z = d.zoning || {};
+  const env = d.environmental || {};
+  const wp = d.waterPermits || {};
+  const wet = d.wetlands || {};
+  const topo = d.topo || {};
+  const flood = d.flood || {};
+  const sd = d.specialDesignations || {};
+
+  // Prior sales table
+  let salesHtml = '';
+  if(Array.isArray(p.priorSales) && p.priorSales.length){
+    salesHtml = `<table style="width:100%;border-collapse:collapse;margin-top:.4rem;font-size:.78rem">
+      <thead><tr style="background:#f9fafb">
+        <th style="text-align:left;padding:.3rem .5rem;border-bottom:1px solid #e5e7eb;color:#6b7280;font-weight:600">Date</th>
+        <th style="text-align:left;padding:.3rem .5rem;border-bottom:1px solid #e5e7eb;color:#6b7280;font-weight:600">Price</th>
+        <th style="text-align:left;padding:.3rem .5rem;border-bottom:1px solid #e5e7eb;color:#6b7280;font-weight:600">Seller</th>
+        <th style="text-align:left;padding:.3rem .5rem;border-bottom:1px solid #e5e7eb;color:#6b7280;font-weight:600">Buyer</th>
+      </tr></thead>
+      <tbody>
+        ${p.priorSales.map(s=>`<tr style="border-bottom:1px solid #f3f4f6">
+          <td style="padding:.28rem .5rem">${s.date||'—'}</td>
+          <td style="padding:.28rem .5rem;font-weight:600">${s.price||'—'}</td>
+          <td style="padding:.28rem .5rem;color:#6b7280">${s.grantor||'—'}</td>
+          <td style="padding:.28rem .5rem;color:#6b7280">${s.grantee||'—'}</td>
+        </tr>`).join('')}
+      </tbody>
+    </table>`;
+  } else {
+    salesHtml = '<span style="color:#9ca3af">No prior sales data available</span>';
+  }
+
+  // Setbacks table
+  let setbacksHtml = '';
+  if(z.setbacks){
+    const sb = z.setbacks;
+    setbacksHtml = `<div style="display:flex;gap:.5rem;flex-wrap:wrap;margin-top:.3rem">
+      ${sb.front?`<span style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;padding:.18rem .55rem;font-size:.76rem"><b>Front:</b> ${sb.front}</span>`:''}
+      ${sb.rear?`<span style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;padding:.18rem .55rem;font-size:.76rem"><b>Rear:</b> ${sb.rear}</span>`:''}
+      ${sb.side?`<span style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;padding:.18rem .55rem;font-size:.76rem"><b>Side:</b> ${sb.side}</span>`:''}
+      ${sb.notes?`<div style="margin-top:.3rem;color:#6b7280;font-size:.76rem">${sb.notes}</div>`:''}
+    </div>`;
+  }
+
+  // Risk badge
+  const riskColors = {Low:'#d1fae5',Medium:'#fef3c7',High:'#fee2e2',Unknown:'#f3f4f6'};
+  const riskTextColors = {Low:'#065f46',Medium:'#92400e',High:'#991b1b',Unknown:'#6b7280'};
+  const riskBadge = (level)=> level
+    ? `<span style="background:${riskColors[level]||'#f3f4f6'};color:${riskTextColors[level]||'#6b7280'};border-radius:6px;padding:.15rem .55rem;font-size:.75rem;font-weight:700">${level} Risk</span>`
+    : '';
+
+  const wetPresenceBadge = (pres) => {
+    const colors = {'Likely present':'#dbeafe','Possible':'#fef9c3','Unlikely':'#dcfce7','Unknown':'#f3f4f6'};
+    const tc     = {'Likely present':'#1e3a8a','Possible':'#713f12','Unlikely':'#14532d','Unknown':'#6b7280'};
+    return pres ? `<span style="background:${colors[pres]||'#f3f4f6'};color:${tc[pres]||'#374151'};border-radius:6px;padding:.15rem .55rem;font-size:.75rem;font-weight:700">${pres}</span>` : '';
+  };
+
+  el.innerHTML = `
+    <!-- Summary bar -->
+    <div style="background:#1e293b;border-radius:12px;padding:.9rem 1rem;margin-bottom:.9rem;color:#e2e8f0;font-size:.84rem;line-height:1.6">
+      <span style="font-weight:700;color:#94a3b8;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em">AI Summary</span><br>
+      ${d.summary||'No summary generated.'}
+    </div>
+
+    ${_valCard('🏛','Property Appraiser Record','#f0fdf4',`
+      ${_valRow('Owner',p.owner)}
+      ${_valRow('Parcel ID',p.parcelId)}
+      ${_valRow('Site Address',p.siteAddress)}
+      ${_valRow('Mailing Address',p.mailingAddress)}
+      ${_valRow('Acreage',p.acreage)}
+      ${_valRow('Zoning',p.zoning)}
+      ${_valRow('Zoning Description',p.zoningDescription)}
+      ${_valRow('Future Land Use',p.futureYearLandUse)}
+      ${_valRow('Legal Description',p.legalDescription)}
+      ${_valRow('Structures',p.structures)}
+      ${_valRow('Assessed Value',p.assessedValue)}
+      ${_valRow('Market Value',p.marketValue)}
+      ${_valRow('Annual Taxes',p.taxAmount)}
+      ${p.notes?`<div style="margin-top:.4rem;padding:.4rem .55rem;background:#f9fafb;border-radius:6px;font-size:.78rem;color:#6b7280">${p.notes}</div>`:''}
+      <div style="margin-top:.55rem">
+        ${_valLink('Open '+pa.name,pa.search)}
+      </div>
+      <div style="margin-top:.5rem;font-weight:600;font-size:.8rem;color:#374151;margin-bottom:.2rem">Prior Sales</div>
+      ${salesHtml}
+    `)}
+
+    ${_valCard('📖','Zoning & Land Use Code','#eff6ff',`
+      ${_valRow('Zoning Code',z.code)}
+      ${_valRow('Description',z.description)}
+      ${_valRow('Governing Body',z.source)}
+      ${z.allowedUses?`<div style="margin:.35rem 0 .25rem;font-weight:600;color:#374151">Allowed Uses</div><div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:7px;padding:.5rem .65rem;font-size:.79rem;line-height:1.6">${z.allowedUses}</div>`:''}
+      ${z.conditionalUses?`<div style="margin:.35rem 0 .25rem;font-weight:600;color:#374151">Conditional / Special Exception Uses</div><div style="background:#fefce8;border:1px solid #fde68a;border-radius:7px;padding:.5rem .65rem;font-size:.79rem;line-height:1.6">${z.conditionalUses}</div>`:''}
+      <div style="margin-top:.45rem;font-weight:600;color:#374151;margin-bottom:.15rem">Development Standards</div>
+      ${_valRow('Max Height',z.maxHeight)}
+      ${_valRow('Floor Area Ratio',z.far)}
+      ${_valRow('Lot Coverage',z.lotCoverage)}
+      ${_valRow('Parking Requirements',z.parking)}
+      ${z.setbacks?`<div style="font-weight:600;color:#6b7280;margin-bottom:.15rem;font-size:.8rem">Setbacks</div>${setbacksHtml}`:''}
+      <div style="margin-top:.55rem">${_valLink('Open Municode — '+z.source,z.municodeUrl)}</div>
+    `)}
+
+    ${_valCard('🌿','Environmental (FDEP OCULUS)','#fef2f2',`
+      <div style="display:flex;align-items:center;gap:.55rem;margin-bottom:.4rem">
+        ${riskBadge(env.riskLevel)}
+      </div>
+      ${env.knownSites?`<div style="background:#fef9f9;border:1px solid #fecaca;border-radius:7px;padding:.5rem .65rem;font-size:.79rem;line-height:1.6;margin-bottom:.4rem">${env.knownSites}</div>`:''}
+      ${env.notes?`<div style="font-size:.79rem;color:#6b7280;line-height:1.55">${env.notes}</div>`:''}
+      <div style="margin-top:.5rem">
+        ${_valLink('FDEP OCULUS Search',env.fdepOculusUrl||'https://prodenv.dep.state.fl.us/DepNexus/public/electronic-documents/SearchFor/')}
+      </div>
+      <div style="margin-top:.4rem;font-size:.73rem;color:#9ca3af">⚠️ Environmental data requires verification via a Phase I ESA by a licensed environmental professional.</div>
+    `)}
+
+    ${_valCard('💧','Water Management Permits','#eff6ff',`
+      ${_valRow('Water Management District',wp.waterManagementDistrict)}
+      ${wp.openPermits?`<div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:7px;padding:.5rem .65rem;font-size:.79rem;line-height:1.6;margin-bottom:.35rem">${wp.openPermits}</div>`:''}
+      ${wp.notes?`<div style="font-size:.79rem;color:#6b7280;line-height:1.55">${wp.notes}</div>`:''}
+      <div style="margin-top:.5rem">${_valLink('Search '+( inSwfwmd?'SWFWMD':'WMD')+' Permits',wp.permitSearchUrl||swfwmdUrl)}</div>
+    `)}
+
+    ${_valCard('🐸','Wetlands (NWI)','#f0fdf4',`
+      <div style="display:flex;align-items:center;gap:.55rem;margin-bottom:.4rem">
+        ${wetPresenceBadge(wet.presence)}
+      </div>
+      ${_valRow('Wetland Types',wet.wetlandTypes)}
+      ${_valRow('Jurisdictional Notes',wet.jurisdictional)}
+      ${wet.notes?`<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:7px;padding:.5rem .65rem;font-size:.79rem;line-height:1.6;margin-bottom:.35rem">${wet.notes}</div>`:''}
+      <div style="margin-top:.5rem">${_valLink('NWI Wetlands Mapper',wet.nwiUrl||'https://www.fws.gov/program/national-wetlands-inventory/wetlands-mapper')}</div>
+    `)}
+
+    ${_valCard('🗻','Topography','#fafaf9',`
+      ${_valRow('General Relief',topo.generalRelief)}
+      ${_valRow('Elevation Range',topo.elevationRange)}
+      ${topo.drainageNotes?`<div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:7px;padding:.5rem .65rem;font-size:.79rem;line-height:1.6">${topo.drainageNotes}</div>`:''}
+      <div style="margin-top:.5rem">${_valLink('USGS National Map Viewer',topo.topoUrl||'https://apps.nationalmap.gov/viewer/')}</div>
+    `)}
+
+    ${_valCard('🌊','FEMA Flood Zone','#f0f9ff',`
+      ${_valRow('General Risk',flood.generalRisk)}
+      ${flood.notes?`<div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:7px;padding:.5rem .65rem;font-size:.79rem;line-height:1.6">${flood.notes}</div>`:''}
+      <div style="margin-top:.5rem">${_valLink('FEMA Flood Map Service Center',flood.femaUrl||'https://msc.fema.gov/portal/home')}</div>
+    `)}
+
+    ${(()=>{
+      // ── Special Designations card ──
+      const oz  = sd.opportunityZone || {};
+      const cra = sd.cra || {};
+      const overlays = Array.isArray(sd.overlays) ? sd.overlays : [];
+
+      const statusBadge = (status, yesColor, noColor) => {
+        if(!status) return '';
+        const s = String(status);
+        const bg = s.startsWith('Yes') ? yesColor : s.startsWith('No') ? noColor : '#f3f4f6';
+        const tc = s.startsWith('Yes') ? '#1e3a5f' : s.startsWith('No') ? '#374151' : '#6b7280';
+        return `<span style="background:${bg};color:${tc};border-radius:6px;padding:.15rem .6rem;font-size:.75rem;font-weight:700;margin-left:.4rem">${s}</span>`;
+      };
+
+      const impactColor = {Restrictive:'#fee2e2',Permissive:'#d1fae5',Neutral:'#f3f4f6'};
+      const impactText  = {Restrictive:'#991b1b',Permissive:'#065f46',Neutral:'#374151'};
+
+      return _valCard('🏷','Special Designations & Overlays','#fdf4ff',`
+        <!-- Opportunity Zone -->
+        <div style="border:1px solid #e9d5ff;border-radius:8px;padding:.6rem .75rem;margin-bottom:.55rem;background:#faf5ff">
+          <div style="font-weight:700;font-size:.82rem;color:#6d28d9;display:flex;align-items:center;gap:.3rem;margin-bottom:.3rem">
+            ⭐ Opportunity Zone (IRC §1400Z-2)${statusBadge(oz.status,'#ddd6fe','#f3f4f6')}
+          </div>
+          ${oz.tractId?_valRow('Tract ID',oz.tractId):''}
+          ${oz.benefits?`<div style="font-size:.78rem;color:#374151;line-height:1.55;margin-top:.2rem">${oz.benefits}</div>`:''}
+          ${oz.notes?`<div style="font-size:.76rem;color:#6b7280;margin-top:.2rem">${oz.notes}</div>`:''}
+          ${_valLink('OZ Map — CDFI Fund','https://www.cdfifund.gov/opportunity-zones')}
+        </div>
+
+        <!-- CRA -->
+        <div style="border:1px solid #fde68a;border-radius:8px;padding:.6rem .75rem;margin-bottom:.55rem;background:#fffbeb">
+          <div style="font-weight:700;font-size:.82rem;color:#b45309;display:flex;align-items:center;gap:.3rem;margin-bottom:.3rem">
+            🏗 Community Redevelopment Area (F.S. §163.330)${statusBadge(cra.status,'#fde68a','#f3f4f6')}
+          </div>
+          ${cra.craName?_valRow('CRA Name',cra.craName):''}
+          ${cra.agency?_valRow('Agency',cra.agency):''}
+          ${cra.benefits?`<div style="font-size:.78rem;color:#374151;line-height:1.55;margin-top:.2rem">${cra.benefits}</div>`:''}
+          ${cra.notes?`<div style="font-size:.76rem;color:#6b7280;margin-top:.2rem">${cra.notes}</div>`:''}
+        </div>
+
+        <!-- Overlays -->
+        ${overlays.length ? `
+        <div style="font-weight:600;font-size:.8rem;color:#374151;margin-bottom:.3rem">Overlay Districts & Special Designations</div>
+        <div style="display:flex;flex-direction:column;gap:.35rem">
+          ${overlays.map(ov=>`
+          <div style="border:1px solid #e5e7eb;border-radius:8px;padding:.5rem .7rem;background:#fff;display:flex;gap:.55rem;align-items:flex-start">
+            <span style="background:${impactColor[ov.impact]||'#f3f4f6'};color:${impactText[ov.impact]||'#374151'};border-radius:5px;padding:.1rem .45rem;font-size:.7rem;font-weight:700;white-space:nowrap;margin-top:.1rem">${ov.impact||'—'}</span>
+            <div>
+              <div style="font-weight:600;font-size:.81rem;color:#111827">${ov.name||''}</div>
+              ${ov.description?`<div style="font-size:.77rem;color:#6b7280;line-height:1.5;margin-top:.1rem">${ov.description}</div>`:''}
+            </div>
+          </div>`).join('')}
+        </div>` : '<div style="color:#9ca3af;font-size:.79rem">No overlay districts identified — verify with county planning department.</div>'}
+
+        <!-- Other flags -->
+        ${sd.hudQct && sd.hudQct!=='Unknown' ? `<div style="margin-top:.5rem;font-size:.78rem;color:#374151">HUD Qualified Census Tract: <strong>${sd.hudQct}</strong></div>` : ''}
+        ${sd.notes?`<div style="margin-top:.4rem;font-size:.78rem;color:#6b7280;line-height:1.55;border-top:1px solid #f3f4f6;padding-top:.4rem">${sd.notes}</div>`:''}
+      `);
+    })()}
+
+    <div style="font-size:.72rem;color:#9ca3af;text-align:center;padding:.8rem .5rem 1.5rem;line-height:1.5">
+      ${d.disclaimer||'This report is AI-generated for preliminary due diligence only. Verify all data against official sources.'}
+    </div>
+  `;
+}
+window._valRenderResults = _valRenderResults;
+
+// ── PDF Export ─────────────────────────────────────────────────────────────
+function _valExportPDF(){
+  // Build a clean printable page and open in a new tab / trigger print dialog
+  const county  = (document.getElementById('val-county')||{}).value||'';
+  const parcel  = ((document.getElementById('val-parcel')||{}).value||'').trim();
+  const address = ((document.getElementById('val-address')||{}).value||'').trim();
+  const resultsEl = document.getElementById('val-results');
+  if(!resultsEl || !window._valLastResult){
+    showToast('Run a search first before exporting.','error'); return;
+  }
+
+  const title = `Site Research — ${parcel||address} — ${county} County, FL`;
+  const dateStr = new Date().toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'});
+  const bodyHtml = resultsEl.innerHTML;
+
+  const printWin = window.open('','_blank','width=900,height=700');
+  if(!printWin){ showToast('Pop-up blocked — allow pop-ups to export PDF.','error'); return; }
+  printWin.document.write(`<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<title>${title}</title>
+<style>
+  *{box-sizing:border-box;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:11pt;color:#111;margin:0;padding:0;background:#fff}
+  @page{size:letter;margin:0.65in 0.6in}
+  /* Header */
+  .pdf-header{background:#0f172a;color:#fff;padding:18px 24px;display:flex;justify-content:space-between;align-items:flex-end;page-break-inside:avoid}
+  .pdf-header h1{font-size:14pt;font-weight:800;margin:0 0 2px}
+  .pdf-header .sub{font-size:8.5pt;color:#94a3b8;margin:0}
+  .pdf-header .date{font-size:8pt;color:#94a3b8;text-align:right}
+  /* Cards */
+  .val-card{border:1px solid #e5e7eb;border-radius:8px;margin-bottom:12px;overflow:hidden;page-break-inside:avoid}
+  .val-card-hdr{padding:7px 12px;display:flex;align-items:center;gap:6px;font-weight:700;font-size:9.5pt}
+  .val-card-body{padding:10px 13px;font-size:8.5pt;line-height:1.55;color:#374151}
+  /* Rows */
+  .vr{display:flex;gap:6px;margin-bottom:4px;flex-wrap:wrap}
+  .vrl{font-weight:600;color:#6b7280;min-width:130px;flex:0 0 auto}
+  .vrv{color:#111;flex:1}
+  /* Tables */
+  table{width:100%;border-collapse:collapse;font-size:8pt;margin-top:5px}
+  th{background:#f9fafb;text-align:left;padding:4px 6px;border-bottom:1px solid #e5e7eb;color:#6b7280;font-weight:600}
+  td{padding:3px 6px;border-bottom:1px solid #f3f4f6}
+  /* Badges */
+  .badge{border-radius:5px;padding:1px 7px;font-size:7.5pt;font-weight:700;display:inline-block;margin-bottom:4px}
+  /* Overlays */
+  .overlay-row{border:1px solid #e5e7eb;border-radius:6px;padding:6px 9px;margin-bottom:4px;display:flex;gap:7px;align-items:flex-start;page-break-inside:avoid}
+  /* Links — hide in print */
+  a{color:#2563eb;text-decoration:none}
+  /* Summary bar */
+  .summary-bar{background:#1e293b;color:#e2e8f0;padding:10px 14px;border-radius:8px;font-size:8.5pt;line-height:1.6;margin-bottom:12px;page-break-inside:avoid}
+  .summary-bar .lbl{font-weight:700;color:#94a3b8;font-size:7.5pt;text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:2px}
+  /* Disclaimer */
+  .disclaimer{font-size:7pt;color:#9ca3af;text-align:center;margin-top:10px;padding:6px;line-height:1.5;border-top:1px solid #e5e7eb}
+  /* Grid for compact sections */
+  .two-col{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  @media print{
+    .no-print{display:none!important}
+    body{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  }
+</style>
+</head><body>
+<div class="pdf-header">
+  <div>
+    <div style="font-size:9pt;color:#94a3b8;margin-bottom:2px">ESHENBAUGH LAND COMPANY</div>
+    <h1>${parcel||address||'Site Research'}</h1>
+    <p class="sub">${county} County, FL${parcel?' &nbsp;|&nbsp; Parcel: '+parcel:''}${address?' &nbsp;|&nbsp; '+address:''}</p>
+  </div>
+  <div class="date">
+    <div style="font-weight:700;color:#fff;font-size:10pt">Site Research Report</div>
+    <div>Generated ${dateStr}</div>
+    <div style="margin-top:3px;color:#475569;font-size:7.5pt">AI-assisted preliminary due diligence</div>
+  </div>
+</div>
+<div style="padding:14px 0 0">
+${_valBuildPDFBody(window._valLastResult)}
+</div>
+<script>window.onload=function(){window.print();}<\/script>
+</body></html>`);
+  printWin.document.close();
+}
+window._valExportPDF = _valExportPDF;
+
+function _valBuildPDFBody(d){
+  if(!d) return '';
+  const p   = d.property || {};
+  const z   = d.zoning   || {};
+  const env = d.environmental || {};
+  const wp  = d.waterPermits  || {};
+  const wet = d.wetlands      || {};
+  const topo= d.topo          || {};
+  const fl  = d.flood         || {};
+  const sd  = d.specialDesignations || {};
+  const oz  = sd.opportunityZone || {};
+  const cra = sd.cra || {};
+  const overlays = Array.isArray(sd.overlays)?sd.overlays:[];
+
+  const row=(lbl,val)=>val&&val!=='null'&&val!=='undefined'?`<div class="vr"><span class="vrl">${lbl}</span><span class="vrv">${val}</span></div>`:'';
+  const card=(emoji,title,color,body)=>`
+    <div class="val-card">
+      <div class="val-card-hdr" style="background:${color}">${emoji} ${title}</div>
+      <div class="val-card-body">${body}</div>
+    </div>`;
+  const badge=(txt,bg,tc)=>txt?`<span class="badge" style="background:${bg};color:${tc}">${txt}</span>`:'';
+  const impactColor={Restrictive:'#fee2e2',Permissive:'#d1fae5',Neutral:'#f3f4f6'};
+  const impactText ={Restrictive:'#991b1b',Permissive:'#065f46',Neutral:'#374151'};
+
+  const salesRows = Array.isArray(p.priorSales)&&p.priorSales.length
+    ? `<table><thead><tr><th>Date</th><th>Price</th><th>Seller</th><th>Buyer</th></tr></thead><tbody>
+        ${p.priorSales.map(s=>`<tr><td>${s.date||'—'}</td><td><strong>${s.price||'—'}</strong></td><td>${s.grantor||'—'}</td><td>${s.grantee||'—'}</td></tr>`).join('')}
+       </tbody></table>`
+    : '<span style="color:#9ca3af">No prior sales data</span>';
+
+  const sbHtml = z.setbacks?`<div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:3px">
+    ${z.setbacks.front?`<span style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:4px;padding:1px 6px;font-size:7.5pt"><b>Front:</b> ${z.setbacks.front}</span>`:''}
+    ${z.setbacks.rear?`<span style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:4px;padding:1px 6px;font-size:7.5pt"><b>Rear:</b> ${z.setbacks.rear}</span>`:''}
+    ${z.setbacks.side?`<span style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:4px;padding:1px 6px;font-size:7.5pt"><b>Side:</b> ${z.setbacks.side}</span>`:''}
+  </div>` : '';
+
+  return `
+    <div class="summary-bar">
+      <span class="lbl">AI Summary</span>
+      ${d.summary||'No summary generated.'}
+    </div>
+
+    <div class="two-col">
+      ${card('🏛','Property Appraiser Record','#f0fdf4',`
+        ${row('Owner',p.owner)}${row('Parcel ID',p.parcelId)}${row('Site Address',p.siteAddress)}
+        ${row('Mailing Address',p.mailingAddress)}${row('Acreage',p.acreage)}${row('Zoning',p.zoning)}
+        ${row('Future Land Use',p.futureYearLandUse)}${row('Structures',p.structures)}
+        ${row('Assessed Value',p.assessedValue)}${row('Market Value',p.marketValue)}${row('Annual Taxes',p.taxAmount)}
+        ${p.notes?`<div style="margin-top:5px;color:#6b7280;font-size:7.5pt">${p.notes}</div>`:''}
+        <div style="margin-top:6px;font-weight:600;font-size:8pt">Prior Sales</div>${salesRows}
+      `)}
+      ${card('📖','Zoning & Land Use Code','#eff6ff',`
+        ${row('Zoning Code',z.code)}${row('Description',z.description)}${row('Governing Body',z.source)}
+        ${z.allowedUses?`<div style="margin:4px 0 2px;font-weight:600">Allowed Uses</div><div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:5px;padding:4px 7px;font-size:7.5pt">${z.allowedUses}</div>`:''}
+        ${z.conditionalUses?`<div style="margin:4px 0 2px;font-weight:600">Conditional Uses</div><div style="background:#fefce8;border:1px solid #fde68a;border-radius:5px;padding:4px 7px;font-size:7.5pt">${z.conditionalUses}</div>`:''}
+        ${row('Max Height',z.maxHeight)}${row('FAR',z.far)}${row('Lot Coverage',z.lotCoverage)}${row('Parking',z.parking)}
+        ${z.setbacks?`<div style="font-weight:600;color:#6b7280;margin-bottom:2px;font-size:7.5pt">Setbacks</div>${sbHtml}`:''}
+        ${z.municodeUrl?`<div style="margin-top:5px;font-size:7.5pt">Municode: <a href="${z.municodeUrl}">${z.municodeUrl}</a></div>`:''}
+      `)}
+    </div>
+
+    <div class="two-col">
+      ${card('🌿','FDEP OCULUS — Environmental','#fef2f2',`
+        ${badge(env.riskLevel+' Risk', env.riskLevel==='Low'?'#d1fae5':env.riskLevel==='High'?'#fee2e2':'#fef3c7', env.riskLevel==='Low'?'#065f46':env.riskLevel==='High'?'#991b1b':'#92400e')}
+        ${env.knownSites?`<div style="margin-top:4px">${env.knownSites}</div>`:''}
+        ${env.notes?`<div style="margin-top:3px;color:#6b7280;font-size:7.5pt">${env.notes}</div>`:''}
+        <div style="margin-top:4px;font-size:7pt;color:#9ca3af">⚠️ Verify via Phase I ESA by licensed professional.</div>
+      `)}
+      ${card('💧','Water Management Permits','#eff6ff',`
+        ${row('District',wp.waterManagementDistrict)}
+        ${wp.openPermits?`<div style="margin-top:4px">${wp.openPermits}</div>`:''}
+        ${wp.notes?`<div style="margin-top:3px;color:#6b7280;font-size:7.5pt">${wp.notes}</div>`:''}
+      `)}
+    </div>
+
+    <div class="two-col">
+      ${card('🐸','Wetlands (NWI)','#f0fdf4',`
+        ${badge(wet.presence||'Unknown', wet.presence==='Likely present'?'#dbeafe':wet.presence==='Unlikely'?'#dcfce7':'#fef9c3', wet.presence==='Likely present'?'#1e3a8a':wet.presence==='Unlikely'?'#14532d':'#713f12')}
+        ${row('Wetland Types',wet.wetlandTypes)}${row('Jurisdiction',wet.jurisdictional)}
+        ${wet.notes?`<div style="margin-top:4px;font-size:7.5pt;color:#374151">${wet.notes}</div>`:''}
+      `)}
+      ${card('🗻 🌊','Topo & Flood Zone','#f0f9ff',`
+        ${row('General Relief',topo.generalRelief)}${row('Elevation Range',topo.elevationRange)}
+        ${topo.drainageNotes?`<div style="margin-top:4px;font-size:7.5pt">${topo.drainageNotes}</div>`:''}
+        <div style="border-top:1px solid #e5e7eb;margin:6px 0 4px"></div>
+        ${row('Flood Risk',fl.generalRisk)}
+        ${fl.notes?`<div style="font-size:7.5pt;color:#374151">${fl.notes}</div>`:''}
+      `)}
+    </div>
+
+    ${card('🏷','Special Designations & Overlays','#fdf4ff',`
+      <div class="two-col" style="margin-bottom:6px">
+        <div style="border:1px solid #e9d5ff;border-radius:6px;padding:6px 9px;background:#faf5ff">
+          <div style="font-weight:700;color:#6d28d9;font-size:8pt;margin-bottom:3px">⭐ Opportunity Zone ${badge(oz.status,'#ddd6fe','#4c1d95')}</div>
+          ${oz.tractId?row('Tract ID',oz.tractId):''}
+          ${oz.benefits?`<div style="font-size:7.5pt;color:#374151">${oz.benefits}</div>`:''}
+        </div>
+        <div style="border:1px solid #fde68a;border-radius:6px;padding:6px 9px;background:#fffbeb">
+          <div style="font-weight:700;color:#b45309;font-size:8pt;margin-bottom:3px">🏗 CRA ${badge(cra.status,'#fde68a','#92400e')}</div>
+          ${cra.craName?row('Name',cra.craName):''}${cra.agency?row('Agency',cra.agency):''}
+          ${cra.benefits?`<div style="font-size:7.5pt;color:#374151">${cra.benefits}</div>`:''}
+        </div>
+      </div>
+      ${overlays.length?`
+        <div style="font-weight:600;font-size:8pt;margin-bottom:4px">Overlay Districts</div>
+        ${overlays.map(ov=>`<div class="overlay-row">
+          <span style="background:${impactColor[ov.impact]||'#f3f4f6'};color:${impactText[ov.impact]||'#374151'};border-radius:4px;padding:1px 6px;font-size:7pt;font-weight:700;white-space:nowrap">${ov.impact||'—'}</span>
+          <div><strong style="font-size:8pt">${ov.name||''}</strong>${ov.description?`<div style="font-size:7.5pt;color:#6b7280;margin-top:1px">${ov.description}</div>`:''}</div>
+        </div>`).join('')}` : '<div style="color:#9ca3af;font-size:7.5pt">No overlay districts identified — verify with county planning dept.</div>'}
+      ${sd.hudQct&&sd.hudQct!=='Unknown'?`<div style="margin-top:5px;font-size:7.5pt">HUD Qualified Census Tract: <strong>${sd.hudQct}</strong></div>`:''}
+      ${sd.notes?`<div style="margin-top:4px;font-size:7.5pt;color:#6b7280;border-top:1px solid #f3f4f6;padding-top:4px">${sd.notes}</div>`:''}
+    `)}
+
+    <div class="disclaimer">${d.disclaimer||'This report is AI-generated for preliminary due diligence only. All data must be verified against official county, state, and federal sources before any transaction. Environmental findings require a Phase I ESA by a licensed professional.'}</div>
+  `;
+}
+window._valBuildPDFBody = _valBuildPDFBody;
+
+// ── Offering Memorandum Generator ─────────────────────────────────────────
+async function _valGenerateOM(){
+  if(!window._valLastResult){ showToast('Run a site research first.','error'); return; }
+
+  const btn = document.getElementById('val-om-btn');
+  if(btn){ btn.disabled=true; btn.textContent='Building OM…'; }
+
+  const county  = (document.getElementById('val-county')||{}).value||'';
+  const parcel  = ((document.getElementById('val-parcel')||{}).value||'').trim();
+  const address = ((document.getElementById('val-address')||{}).value||'').trim();
+  const d = window._valLastResult;
+  const p = d.property||{};
+  const z = d.zoning||{};
+
+  // AI prompt for demographics + submarket narrative
+  const sys = `You are a Florida commercial real estate market analyst at a leading land brokerage. Return ONLY valid JSON, no prose, no code fences.
+
+Return this exact shape:
+{
+  "demographics": {
+    "oneMile":   { "population":"string","households":"string","medianHHIncome":"string","medianAge":"string","ownerOccupied":"string","renterOccupied":"string","popGrowth5yr":"string","employmentBase":"string" },
+    "threeMile": { "population":"string","households":"string","medianHHIncome":"string","medianAge":"string","ownerOccupied":"string","renterOccupied":"string","popGrowth5yr":"string","employmentBase":"string" },
+    "fiveMile":  { "population":"string","households":"string","medianHHIncome":"string","medianAge":"string","ownerOccupied":"string","renterOccupied":"string","popGrowth5yr":"string","employmentBase":"string" },
+    "source": "string — note these are AI estimates based on Census ACS data; recommend verifying with ESRI Business Analyst or CoStar"
+  },
+  "submarket": {
+    "name": "string — submarket name (e.g. 'Port Charlotte / Punta Gorda')",
+    "narrative": "string — 3-5 paragraph written submarket overview covering: recent growth drivers, population and job growth trends, major employers, key infrastructure and transportation, development pipeline activity, demand drivers for land, and near-term outlook. Write in professional OM prose suitable for institutional investors.",
+    "keyMetrics": [
+      { "label": "string — metric name", "value": "string — metric value", "note": "string or null" }
+    ],
+    "comparableSales": "string or null — any relevant land sale comps or market pricing context for this submarket/county",
+    "risks": "string — key market risks and considerations",
+    "opportunities": "string — key development opportunities and demand drivers"
+  },
+  "propertyHighlights": [
+    "string — each a punchy 1-sentence investment highlight (aim for 6-8 bullets)"
+  ]
+}`;
+
+  const userMsg = `Generate demographics and submarket narrative for this Florida land parcel:
+County: ${county}
+${parcel?'Parcel ID: '+parcel:''}
+${address?'Address: '+address:''}
+Acreage: ${p.acreage||'unknown'}
+Zoning: ${p.zoning||'unknown'} — ${z.description||''}
+Future Land Use: ${p.futureYearLandUse||'unknown'}
+Allowed Uses Summary: ${z.allowedUses||'unknown'}
+
+Provide realistic 1-mile, 3-mile, and 5-mile ring demographics (population, households, median HH income, median age, owner/renter split, 5-year population growth, employment base). These are estimates — flag as such.
+Also provide a detailed submarket narrative and 6-8 key metrics a land investor would care about (land values, growth rate, permit activity, major employers, traffic counts if known, etc.).`;
+
+  let omData = {};
+  try {
+    if(!_aiHistory['_valOMHistory']) _aiHistory['_valOMHistory']=[];
+    _aiHistory['_valOMHistory']=[];
+    const raw = await callAIAssistant(userMsg, sys, '_valOMHistory');
+    if(!raw) throw new Error('No response');
+    const cleaned = raw.replace(/^```json\s*/i,'').replace(/^```\s*/i,'').replace(/```\s*$/,'').trim();
+    try { omData = JSON.parse(cleaned); }
+    catch(e){ const m=raw.match(/\{[\s\S]*\}/); if(m) omData=JSON.parse(m[0]); else throw e; }
+  } catch(err){
+    console.error('[OM] demographics fetch failed', err);
+    omData = { demographics:{oneMile:{},threeMile:{},fiveMile:{},source:'Data unavailable — verify with ESRI Business Analyst.'}, submarket:{name:county+' County',narrative:'Submarket data unavailable.',keyMetrics:[]}, propertyHighlights:[] };
+  }
+
+  if(btn){ btn.disabled=false; btn.textContent='📋 Generate OM'; }
+  _valOpenOM(d, omData, {county, parcel, address});
+}
+window._valGenerateOM = _valGenerateOM;
+
+function _valOpenOM(d, om, meta){
+  const p   = d.property||{};
+  const z   = d.zoning||{};
+  const env = d.environmental||{};
+  const wet = d.wetlands||{};
+  const fl  = d.flood||{};
+  const sd  = d.specialDesignations||{};
+  const oz  = sd.opportunityZone||{};
+  const cra = sd.cra||{};
+  const overlays = Array.isArray(sd.overlays)?sd.overlays:[];
+  const dem = om.demographics||{};
+  const sub = om.submarket||{};
+  const highlights = Array.isArray(om.propertyHighlights)?om.propertyHighlights:[];
+  const keyMetrics = Array.isArray(sub.keyMetrics)?sub.keyMetrics:[];
+
+  const dateStr = new Date().toLocaleDateString('en-US',{year:'numeric',month:'long'});
+  const propTitle = p.siteAddress || meta.address || (meta.parcel+' — '+meta.county+' County') || 'Land Offering';
+  const acreage = p.acreage || '± TBD';
+
+  // Brand colors
+  const CHARCOAL='#282A2D', SAND='#D9C4A6', SOIL='#4E342E', ORANGE='#E8802C', BLUE='#3A6173', GREEN='#355E3B';
+
+  const demRow = (label,ring)=>{
+    const r=dem[ring]||{};
+    return `<tr>
+      <td style="padding:7px 10px;font-weight:600;color:#555;border-bottom:1px solid #f0f0f0;font-size:8.5pt">${label}</td>
+      <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0f0f0;font-size:8.5pt">${r.population||'—'}</td>
+      <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0f0f0;font-size:8.5pt">${r.households||'—'}</td>
+      <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0f0f0;font-size:8.5pt">${r.medianHHIncome||'—'}</td>
+      <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0f0f0;font-size:8.5pt">${r.medianAge||'—'}</td>
+      <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0f0f0;font-size:8.5pt">${r.popGrowth5yr||'—'}</td>
+    </tr>`;
+  };
+
+  const specialBadges = [];
+  if(oz.status==='Yes') specialBadges.push(`<span style="background:${ORANGE};color:#fff;border-radius:4px;padding:2px 10px;font-size:8pt;font-weight:700;letter-spacing:.03em">OPPORTUNITY ZONE</span>`);
+  if(cra.status==='Yes') specialBadges.push(`<span style="background:${BLUE};color:#fff;border-radius:4px;padding:2px 10px;font-size:8pt;font-weight:700;letter-spacing:.03em">CRA</span>`);
+  overlays.filter(o=>o.impact==='Permissive').forEach(o=>specialBadges.push(`<span style="background:${GREEN};color:#fff;border-radius:4px;padding:2px 10px;font-size:8pt;font-weight:700;letter-spacing:.03em">${(o.name||'').toUpperCase()}</span>`));
+
+  const win = window.open('','_blank','width=960,height=780');
+  if(!win){ showToast('Pop-up blocked — allow pop-ups to generate OM.','error'); return; }
+
+  win.document.write(`<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<title>Offering Memorandum — ${propTitle}</title>
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box;-webkit-print-color-adjust:exact;print-color-adjust:exact;margin:0;padding:0}
+  body{font-family:'Montserrat',sans-serif;color:${CHARCOAL};background:#fff;font-size:10pt}
+  @page{size:letter;margin:0}
+
+  /* ── COVER PAGE ─────────────────────────── */
+  .cover{width:100%;height:100vh;min-height:11in;background:${CHARCOAL};color:#fff;display:flex;flex-direction:column;position:relative;page-break-after:always}
+  .cover-top{flex:1;display:flex;flex-direction:column;justify-content:flex-end;padding:0.7in 0.65in 0.35in}
+  .cover-label{font-size:7.5pt;font-weight:700;letter-spacing:.2em;text-transform:uppercase;color:${ORANGE};margin-bottom:10px}
+  .cover-address{font-size:26pt;font-weight:900;line-height:1.1;color:#fff;margin-bottom:8px;text-transform:uppercase}
+  .cover-sub{font-size:12pt;font-weight:300;color:${SAND};letter-spacing:.05em}
+  .cover-divider{height:3px;background:${ORANGE};width:60px;margin:18px 0}
+  .cover-acres{font-size:14pt;font-weight:700;color:#fff;margin-bottom:4px}
+  .cover-zoning{font-size:9pt;font-weight:400;color:${SAND};letter-spacing:.05em}
+  .cover-badges{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px}
+  .cover-bottom{background:rgba(0,0,0,.35);padding:0.3in 0.65in;display:flex;justify-content:space-between;align-items:center}
+  .cover-brand{display:flex;flex-direction:column}
+  .cover-brand-name{font-size:14pt;font-weight:900;letter-spacing:.08em;color:#fff;text-transform:uppercase}
+  .cover-brand-tag{font-size:7pt;font-weight:600;letter-spacing:.15em;color:${ORANGE};text-transform:uppercase;margin-top:1px}
+  .cover-date{font-size:8pt;color:${SAND};letter-spacing:.05em;text-align:right}
+  .cover-accent{position:absolute;right:0;top:0;width:4px;height:100%;background:${ORANGE}}
+
+  /* ── SECTION PAGES ─────────────────────── */
+  .page{width:100%;padding:0.55in 0.65in 0.45in;page-break-after:always;min-height:10in}
+  .page:last-child{page-break-after:avoid}
+  .page-header{border-bottom:2px solid ${ORANGE};padding-bottom:8px;margin-bottom:22px;display:flex;justify-content:space-between;align-items:flex-end}
+  .page-header-title{font-size:16pt;font-weight:900;text-transform:uppercase;letter-spacing:.05em;color:${CHARCOAL}}
+  .page-header-prop{font-size:7.5pt;font-weight:600;color:#888;letter-spacing:.06em;text-align:right;line-height:1.4}
+
+  /* ── CONFIDENTIALITY STRIP ─────────────── */
+  .conf-strip{background:${CHARCOAL};color:${SAND};font-size:6.5pt;font-weight:600;letter-spacing:.1em;text-align:center;padding:5px;text-transform:uppercase;page-break-inside:avoid}
+
+  /* ── TWO-COLUMN LAYOUT ─────────────────── */
+  .two-col{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  .three-col{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}
+
+  /* ── DATA BLOCKS ────────────────────────── */
+  .data-block{background:#f9f8f6;border-left:3px solid ${ORANGE};padding:12px 14px;margin-bottom:12px}
+  .data-block-title{font-size:7pt;font-weight:700;text-transform:uppercase;letter-spacing:.12em;color:${ORANGE};margin-bottom:7px}
+  .data-row{display:flex;gap:6px;margin-bottom:5px;font-size:8.5pt;line-height:1.4}
+  .data-lbl{font-weight:600;color:#666;min-width:130px;flex:0 0 auto}
+  .data-val{color:${CHARCOAL};flex:1}
+
+  /* ── HIGHLIGHT BULLETS ─────────────────── */
+  .highlight-list{list-style:none;margin:0;padding:0}
+  .highlight-list li{display:flex;align-items:flex-start;gap:10px;padding:8px 0;border-bottom:1px solid #f0ede8;font-size:9pt;line-height:1.5}
+  .highlight-list li:last-child{border-bottom:none}
+  .hl-dot{width:8px;height:8px;background:${ORANGE};border-radius:50%;flex:0 0 8px;margin-top:5px}
+
+  /* ── METRIC CARDS ───────────────────────── */
+  .metric-card{background:${CHARCOAL};color:#fff;border-radius:6px;padding:14px 16px;text-align:center}
+  .metric-val{font-size:16pt;font-weight:900;color:${ORANGE};line-height:1}
+  .metric-lbl{font-size:7pt;font-weight:600;text-transform:uppercase;letter-spacing:.1em;color:${SAND};margin-top:4px}
+  .metric-note{font-size:6.5pt;color:#888;margin-top:3px}
+
+  /* ── DEMOGRAPHICS TABLE ─────────────────── */
+  .dem-table{width:100%;border-collapse:collapse;font-size:8.5pt}
+  .dem-table th{background:${CHARCOAL};color:#fff;padding:8px 10px;text-align:center;font-weight:700;font-size:7.5pt;letter-spacing:.05em}
+  .dem-table th:first-child{text-align:left}
+  .dem-table tr:nth-child(even) td{background:#f9f8f6}
+
+  /* ── SECTION DIVIDER LABEL ──────────────── */
+  .section-tag{display:inline-block;background:${ORANGE};color:#fff;font-size:7pt;font-weight:700;letter-spacing:.12em;text-transform:uppercase;padding:3px 10px;border-radius:3px;margin-bottom:10px}
+
+  /* ── NARRATIVE TEXT ─────────────────────── */
+  .narrative p{font-size:9pt;line-height:1.7;color:#333;margin-bottom:10px}
+
+  /* ── STATUS BADGES ──────────────────────── */
+  .status-yes{background:#d1fae5;color:#065f46;border-radius:4px;padding:2px 8px;font-size:7.5pt;font-weight:700}
+  .status-no{background:#f3f4f6;color:#6b7280;border-radius:4px;padding:2px 8px;font-size:7.5pt;font-weight:700}
+  .status-unk{background:#fef3c7;color:#92400e;border-radius:4px;padding:2px 8px;font-size:7.5pt;font-weight:700}
+
+  /* ── DISCLAIMER ─────────────────────────── */
+  .disclaimer{font-size:6.5pt;color:#aaa;line-height:1.5;margin-top:14px;border-top:1px solid #e5e7eb;padding-top:10px}
+
+  @media print{
+    .cover{height:100vh;min-height:0;page-break-after:always}
+    .page{min-height:0}
+  }
+</style>
+</head><body>
+
+<!-- ═══════════════════════════════════════════════════════
+     COVER PAGE
+═══════════════════════════════════════════════════════ -->
+<div class="cover">
+  <div class="cover-accent"></div>
+  <div class="cover-top">
+    <div class="cover-label">Offering Memorandum · ${meta.county} County, Florida</div>
+    <div class="cover-address">${propTitle}</div>
+    <div class="cover-sub">Florida's Land Authority</div>
+    <div class="cover-divider"></div>
+    <div class="cover-acres">${acreage} Acres${p.zoning?' · '+p.zoning:''}</div>
+    <div class="cover-zoning">${z.description||p.futureYearLandUse||''}</div>
+    ${specialBadges.length?`<div class="cover-badges">${specialBadges.join('')}</div>`:''}
+  </div>
+  <div class="cover-bottom">
+    <div class="cover-brand">
+      <div class="cover-brand-name">Eshenbaugh Land Company</div>
+      <div class="cover-brand-tag">Experts · Advisors · Deal Makers · Land Strategists</div>
+    </div>
+    <div class="cover-date">
+      <div style="color:#fff;font-weight:600;font-size:9pt">${dateStr}</div>
+      <div>thedirtdog.com</div>
+      ${meta.parcel?`<div style="margin-top:3px">Parcel: ${meta.parcel}</div>`:''}
+    </div>
+  </div>
+</div>
+
+<div class="conf-strip">Confidential — This offering memorandum is intended solely for the use of the party to whom it is delivered. Do not reproduce or distribute without permission of Eshenbaugh Land Company.</div>
+
+<!-- ═══════════════════════════════════════════════════════
+     PAGE 2 — PROPERTY OVERVIEW + HIGHLIGHTS
+═══════════════════════════════════════════════════════ -->
+<div class="page">
+  <div class="page-header">
+    <div class="page-header-title">Property Overview</div>
+    <div class="page-header-prop">${propTitle}<br>${meta.county} County, FL</div>
+  </div>
+
+  <div class="two-col" style="margin-bottom:18px">
+    <div>
+      <div class="section-tag">Property Details</div>
+      <div class="data-block">
+        <div class="data-block-title">Ownership & Identification</div>
+        ${p.owner?`<div class="data-row"><span class="data-lbl">Owner</span><span class="data-val">${p.owner}</span></div>`:''}
+        ${p.parcelId?`<div class="data-row"><span class="data-lbl">Parcel ID</span><span class="data-val">${p.parcelId}</span></div>`:''}
+        ${p.siteAddress?`<div class="data-row"><span class="data-lbl">Site Address</span><span class="data-val">${p.siteAddress}</span></div>`:''}
+        ${p.mailingAddress?`<div class="data-row"><span class="data-lbl">Mailing Address</span><span class="data-val">${p.mailingAddress}</span></div>`:''}
+        ${p.legalDescription?`<div class="data-row"><span class="data-lbl">Legal Description</span><span class="data-val" style="font-size:7.5pt">${p.legalDescription}</span></div>`:''}
+      </div>
+      <div class="data-block">
+        <div class="data-block-title">Site Characteristics</div>
+        ${p.acreage?`<div class="data-row"><span class="data-lbl">Total Acreage</span><span class="data-val" style="font-weight:700">${p.acreage}</span></div>`:''}
+        ${p.zoning?`<div class="data-row"><span class="data-lbl">Zoning</span><span class="data-val">${p.zoning} — ${z.description||''}</span></div>`:''}
+        ${p.futureYearLandUse?`<div class="data-row"><span class="data-lbl">Future Land Use</span><span class="data-val">${p.futureYearLandUse}</span></div>`:''}
+        ${p.structures?`<div class="data-row"><span class="data-lbl">Improvements</span><span class="data-val">${p.structures}</span></div>`:''}
+      </div>
+      <div class="data-block">
+        <div class="data-block-title">Assessed Value & Taxes</div>
+        ${p.assessedValue?`<div class="data-row"><span class="data-lbl">Assessed Value</span><span class="data-val">${p.assessedValue}</span></div>`:''}
+        ${p.marketValue?`<div class="data-row"><span class="data-lbl">Market Value</span><span class="data-val">${p.marketValue}</span></div>`:''}
+        ${p.taxAmount?`<div class="data-row"><span class="data-lbl">Annual Taxes</span><span class="data-val">${p.taxAmount}</span></div>`:''}
+      </div>
+    </div>
+    <div>
+      <div class="section-tag">Investment Highlights</div>
+      <ul class="highlight-list">
+        ${highlights.length
+          ? highlights.map(h=>`<li><div class="hl-dot"></div><span>${h}</span></li>`).join('')
+          : '<li><div class="hl-dot"></div><span>See property details for full analysis.</span></li>'}
+      </ul>
+      ${Array.isArray(p.priorSales)&&p.priorSales.length?`
+      <div style="margin-top:14px">
+        <div class="section-tag">Prior Sales</div>
+        <table style="width:100%;border-collapse:collapse;font-size:7.5pt;margin-top:4px">
+          <thead><tr style="background:${CHARCOAL};color:#fff">
+            <th style="padding:5px 7px;text-align:left">Date</th>
+            <th style="padding:5px 7px;text-align:left">Price</th>
+            <th style="padding:5px 7px;text-align:left">Seller → Buyer</th>
+          </tr></thead>
+          <tbody>${p.priorSales.map((s,i)=>`<tr style="background:${i%2?'#f9f8f6':'#fff'}">
+            <td style="padding:5px 7px">${s.date||'—'}</td>
+            <td style="padding:5px 7px;font-weight:700">${s.price||'—'}</td>
+            <td style="padding:5px 7px;font-size:7pt">${s.grantor||'—'} → ${s.grantee||'—'}</td>
+          </tr>`).join('')}</tbody>
+        </table>
+      </div>`:''}
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════
+     PAGE 3 — ZONING & ENTITLEMENTS + SPECIAL DESIGNATIONS
+═══════════════════════════════════════════════════════ -->
+<div class="page">
+  <div class="page-header">
+    <div class="page-header-title">Zoning & Entitlements</div>
+    <div class="page-header-prop">${propTitle}<br>${meta.county} County, FL</div>
+  </div>
+
+  <div class="two-col">
+    <div>
+      <div class="section-tag">Land Use Code</div>
+      <div class="data-block">
+        ${z.code?`<div class="data-row"><span class="data-lbl">Zoning Code</span><span class="data-val" style="font-weight:700">${z.code}</span></div>`:''}
+        ${z.source?`<div class="data-row"><span class="data-lbl">Governing Body</span><span class="data-val">${z.source}</span></div>`:''}
+        ${z.maxHeight?`<div class="data-row"><span class="data-lbl">Max Height</span><span class="data-val">${z.maxHeight}</span></div>`:''}
+        ${z.far?`<div class="data-row"><span class="data-lbl">Floor Area Ratio</span><span class="data-val">${z.far}</span></div>`:''}
+        ${z.lotCoverage?`<div class="data-row"><span class="data-lbl">Lot Coverage</span><span class="data-val">${z.lotCoverage}</span></div>`:''}
+        ${z.parking?`<div class="data-row"><span class="data-lbl">Parking</span><span class="data-val">${z.parking}</span></div>`:''}
+      </div>
+      ${z.setbacks?`<div class="data-block" style="margin-top:10px">
+        <div class="data-block-title">Setbacks</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          ${z.setbacks.front?`<div style="text-align:center;background:#fff;border:1px solid #e5e7eb;border-radius:4px;padding:6px 10px"><div style="font-size:12pt;font-weight:800;color:${ORANGE}">${z.setbacks.front}</div><div style="font-size:6.5pt;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:#888">Front</div></div>`:''}
+          ${z.setbacks.rear?`<div style="text-align:center;background:#fff;border:1px solid #e5e7eb;border-radius:4px;padding:6px 10px"><div style="font-size:12pt;font-weight:800;color:${ORANGE}">${z.setbacks.rear}</div><div style="font-size:6.5pt;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:#888">Rear</div></div>`:''}
+          ${z.setbacks.side?`<div style="text-align:center;background:#fff;border:1px solid #e5e7eb;border-radius:4px;padding:6px 10px"><div style="font-size:12pt;font-weight:800;color:${ORANGE}">${z.setbacks.side}</div><div style="font-size:6.5pt;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:#888">Side</div></div>`:''}
+        </div>
+        ${z.setbacks.notes?`<div style="margin-top:6px;font-size:7.5pt;color:#666">${z.setbacks.notes}</div>`:''}
+      </div>`:''}
+      ${z.allowedUses?`<div style="margin-top:12px">
+        <div class="section-tag">Permitted Uses</div>
+        <div style="background:#f9f8f6;border-left:3px solid ${GREEN};padding:10px 13px;font-size:8.5pt;line-height:1.6;color:#333">${z.allowedUses}</div>
+      </div>`:''}
+      ${z.conditionalUses?`<div style="margin-top:10px">
+        <div class="section-tag">Conditional Uses</div>
+        <div style="background:#fffbeb;border-left:3px solid #f59e0b;padding:10px 13px;font-size:8.5pt;line-height:1.6;color:#333">${z.conditionalUses}</div>
+      </div>`:''}
+    </div>
+    <div>
+      <div class="section-tag">Special Designations</div>
+      <!-- OZ -->
+      <div style="border:1px solid #e9d5ff;border-radius:6px;padding:12px 14px;margin-bottom:10px;background:#faf5ff">
+        <div style="font-weight:800;font-size:9pt;color:#6d28d9;margin-bottom:6px">⭐ Opportunity Zone
+          <span class="${oz.status==='Yes'?'status-yes':oz.status==='No'?'status-no':'status-unk'}" style="margin-left:6px">${oz.status||'Unknown'}</span>
+        </div>
+        ${oz.tractId?`<div style="font-size:8pt;color:#555;margin-bottom:3px">Tract: ${oz.tractId}</div>`:''}
+        ${oz.benefits?`<div style="font-size:8pt;color:#374151;line-height:1.5">${oz.benefits}</div>`:''}
+      </div>
+      <!-- CRA -->
+      <div style="border:1px solid #fde68a;border-radius:6px;padding:12px 14px;margin-bottom:10px;background:#fffbeb">
+        <div style="font-weight:800;font-size:9pt;color:#b45309;margin-bottom:6px">🏗 Community Redevelopment Area
+          <span class="${cra.status==='Yes'?'status-yes':cra.status==='No'?'status-no':'status-unk'}" style="margin-left:6px">${cra.status||'Unknown'}</span>
+        </div>
+        ${cra.craName?`<div style="font-size:8pt;color:#555;font-weight:600;margin-bottom:2px">${cra.craName}</div>`:''}
+        ${cra.agency?`<div style="font-size:7.5pt;color:#888;margin-bottom:3px">${cra.agency}</div>`:''}
+        ${cra.benefits?`<div style="font-size:8pt;color:#374151;line-height:1.5">${cra.benefits}</div>`:''}
+      </div>
+      <!-- Overlays -->
+      ${overlays.length?`
+      <div class="section-tag">Overlay Districts</div>
+      ${overlays.map(ov=>{
+        const ic={Restrictive:'#fee2e2',Permissive:'#d1fae5',Neutral:'#f3f4f6'}[ov.impact]||'#f3f4f6';
+        const tc={Restrictive:'#991b1b',Permissive:'#065f46',Neutral:'#374151'}[ov.impact]||'#374151';
+        return `<div style="border:1px solid #e5e7eb;border-radius:5px;padding:8px 10px;margin-bottom:6px;display:flex;gap:8px;align-items:flex-start">
+          <span style="background:${ic};color:${tc};border-radius:4px;padding:2px 6px;font-size:6.5pt;font-weight:700;white-space:nowrap;margin-top:1px">${ov.impact||''}</span>
+          <div><div style="font-weight:600;font-size:8.5pt">${ov.name||''}</div>${ov.description?`<div style="font-size:7.5pt;color:#666;line-height:1.5;margin-top:2px">${ov.description}</div>`:''}</div>
+        </div>`;
+      }).join('')}`:'<div style="font-size:8pt;color:#9ca3af">No overlay districts identified.</div>'}
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════
+     PAGE 4 — ENVIRONMENTAL, WETLANDS & DUE DILIGENCE
+═══════════════════════════════════════════════════════ -->
+<div class="page">
+  <div class="page-header">
+    <div class="page-header-title">Environmental & Site Due Diligence</div>
+    <div class="page-header-prop">${propTitle}<br>${meta.county} County, FL</div>
+  </div>
+
+  <div class="two-col">
+    <div>
+      <div class="section-tag">FDEP OCULUS — Environmental</div>
+      <div class="data-block" style="border-left-color:${env.riskLevel==='High'?'#dc2626':env.riskLevel==='Low'?GREEN:'#f59e0b'}">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <span style="font-weight:800;font-size:10pt">Environmental Risk:</span>
+          <span style="background:${env.riskLevel==='Low'?'#d1fae5':env.riskLevel==='High'?'#fee2e2':'#fef3c7'};color:${env.riskLevel==='Low'?'#065f46':env.riskLevel==='High'?'#991b1b':'#92400e'};border-radius:4px;padding:2px 10px;font-weight:700;font-size:9pt">${env.riskLevel||'Unknown'}</span>
+        </div>
+        ${env.knownSites?`<div style="font-size:8.5pt;line-height:1.6;color:#333">${env.knownSites}</div>`:''}
+        ${env.notes?`<div style="font-size:8pt;color:#666;margin-top:6px;line-height:1.5">${env.notes}</div>`:''}
+      </div>
+
+      <div class="section-tag" style="margin-top:14px">Water Management Permits</div>
+      <div class="data-block">
+        ${(d.waterPermits||{}).waterManagementDistrict?`<div class="data-row"><span class="data-lbl">District</span><span class="data-val">${d.waterPermits.waterManagementDistrict}</span></div>`:''}
+        ${(d.waterPermits||{}).openPermits?`<div style="font-size:8.5pt;line-height:1.6;color:#333;margin-top:4px">${d.waterPermits.openPermits}</div>`:''}
+        ${(d.waterPermits||{}).notes?`<div style="font-size:8pt;color:#666;margin-top:5px">${d.waterPermits.notes}</div>`:''}
+      </div>
+
+      <div class="section-tag" style="margin-top:14px">FEMA Flood Zone</div>
+      <div class="data-block" style="border-left-color:${BLUE}">
+        ${fl.generalRisk?`<div style="font-size:8.5pt;line-height:1.6;color:#333;margin-bottom:5px">${fl.generalRisk}</div>`:''}
+        ${fl.notes?`<div style="font-size:8pt;color:#666;line-height:1.5">${fl.notes}</div>`:''}
+      </div>
+    </div>
+    <div>
+      <div class="section-tag">Wetlands (NWI)</div>
+      <div class="data-block" style="border-left-color:${GREEN}">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <span style="font-weight:800;font-size:10pt">Wetland Presence:</span>
+          <span style="background:${(d.wetlands||{}).presence==='Unlikely'?'#d1fae5':(d.wetlands||{}).presence==='Likely present'?'#dbeafe':'#fef9c3'};color:${(d.wetlands||{}).presence==='Unlikely'?'#065f46':(d.wetlands||{}).presence==='Likely present'?'#1e3a8a':'#713f12'};border-radius:4px;padding:2px 10px;font-weight:700;font-size:9pt">${(d.wetlands||{}).presence||'Unknown'}</span>
+        </div>
+        ${wet.wetlandTypes?`<div class="data-row"><span class="data-lbl">Wetland Types</span><span class="data-val">${wet.wetlandTypes}</span></div>`:''}
+        ${wet.jurisdictional?`<div class="data-row"><span class="data-lbl">Jurisdiction</span><span class="data-val">${wet.jurisdictional}</span></div>`:''}
+        ${wet.notes?`<div style="font-size:8pt;color:#666;margin-top:5px;line-height:1.5">${wet.notes}</div>`:''}
+      </div>
+
+      <div class="section-tag" style="margin-top:14px">Topography</div>
+      <div class="data-block" style="border-left-color:${SOIL}">
+        ${(d.topo||{}).generalRelief?`<div class="data-row"><span class="data-lbl">General Relief</span><span class="data-val">${d.topo.generalRelief}</span></div>`:''}
+        ${(d.topo||{}).elevationRange?`<div class="data-row"><span class="data-lbl">Elevation Range</span><span class="data-val">${d.topo.elevationRange}</span></div>`:''}
+        ${(d.topo||{}).drainageNotes?`<div style="font-size:8pt;color:#666;margin-top:5px;line-height:1.5">${d.topo.drainageNotes}</div>`:''}
+      </div>
+
+      <div style="background:${CHARCOAL};color:#fff;border-radius:6px;padding:12px 14px;margin-top:14px">
+        <div style="font-size:7pt;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:${ORANGE};margin-bottom:6px">Due Diligence Checklist</div>
+        ${['Confirm zoning at county planning dept.','Pull FIRMette for flood panel confirmation','Run USFWS IPaC for species review','Order Phase I Environmental Site Assessment','Commission boundary & topographic survey','Order title commitment and title search','Confirm utility availability and capacity','Review plat and easement conditions'].map(item=>`
+          <div style="display:flex;align-items:center;gap:7px;padding:4px 0;border-bottom:1px solid rgba(255,255,255,.1);font-size:8pt;color:${SAND}">
+            <span style="width:14px;height:14px;border:1.5px solid ${ORANGE};border-radius:3px;flex:0 0 14px;display:inline-block"></span>
+            ${item}
+          </div>`).join('')}
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════
+     PAGE 5 — DEMOGRAPHICS (1/3/5 MILE)
+═══════════════════════════════════════════════════════ -->
+<div class="page">
+  <div class="page-header">
+    <div class="page-header-title">Demographics</div>
+    <div class="page-header-prop">${propTitle}<br>${meta.county} County, FL</div>
+  </div>
+
+  <div class="section-tag">1 · 3 · 5 Mile Ring Summary</div>
+  <table class="dem-table" style="margin-bottom:18px">
+    <thead><tr>
+      <th style="text-align:left;width:140px">Metric</th>
+      <th>1-Mile Ring</th>
+      <th>3-Mile Ring</th>
+      <th>5-Mile Ring</th>
+    </tr></thead>
+    <tbody>
+      ${demRow('Population','oneMile')}
+      ${demRow('Households','threeMile')}
+      ${demRow('Median HH Income','oneMile')}
+      ${demRow('Median Age','oneMile')}
+      ${demRow('5-Yr Pop. Growth','oneMile')}
+    </tbody>
+  </table>
+
+  <!-- Corrected table with proper ring mapping -->
+  <table class="dem-table" style="margin-bottom:18px">
+    <thead><tr>
+      <th style="text-align:left;width:140px"></th>
+      <th>1-Mile</th>
+      <th>3-Mile</th>
+      <th>5-Mile</th>
+    </tr></thead>
+    <tbody>
+      <tr>
+        <td style="padding:7px 10px;font-weight:600;color:#555;border-bottom:1px solid #f0ede8;font-size:8.5pt">Population</td>
+        <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0ede8;font-size:8.5pt">${(dem.oneMile||{}).population||'—'}</td>
+        <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0ede8;font-size:8.5pt">${(dem.threeMile||{}).population||'—'}</td>
+        <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0ede8;font-size:8.5pt">${(dem.fiveMile||{}).population||'—'}</td>
+      </tr>
+      <tr style="background:#f9f8f6">
+        <td style="padding:7px 10px;font-weight:600;color:#555;border-bottom:1px solid #f0ede8;font-size:8.5pt">Households</td>
+        <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0ede8;font-size:8.5pt">${(dem.oneMile||{}).households||'—'}</td>
+        <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0ede8;font-size:8.5pt">${(dem.threeMile||{}).households||'—'}</td>
+        <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0ede8;font-size:8.5pt">${(dem.fiveMile||{}).households||'—'}</td>
+      </tr>
+      <tr>
+        <td style="padding:7px 10px;font-weight:600;color:#555;border-bottom:1px solid #f0ede8;font-size:8.5pt">Median HH Income</td>
+        <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0ede8;font-size:8.5pt">${(dem.oneMile||{}).medianHHIncome||'—'}</td>
+        <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0ede8;font-size:8.5pt">${(dem.threeMile||{}).medianHHIncome||'—'}</td>
+        <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0ede8;font-size:8.5pt">${(dem.fiveMile||{}).medianHHIncome||'—'}</td>
+      </tr>
+      <tr style="background:#f9f8f6">
+        <td style="padding:7px 10px;font-weight:600;color:#555;border-bottom:1px solid #f0ede8;font-size:8.5pt">Median Age</td>
+        <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0ede8;font-size:8.5pt">${(dem.oneMile||{}).medianAge||'—'}</td>
+        <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0ede8;font-size:8.5pt">${(dem.threeMile||{}).medianAge||'—'}</td>
+        <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0ede8;font-size:8.5pt">${(dem.fiveMile||{}).medianAge||'—'}</td>
+      </tr>
+      <tr>
+        <td style="padding:7px 10px;font-weight:600;color:#555;border-bottom:1px solid #f0ede8;font-size:8.5pt">Owner Occupied</td>
+        <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0ede8;font-size:8.5pt">${(dem.oneMile||{}).ownerOccupied||'—'}</td>
+        <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0ede8;font-size:8.5pt">${(dem.threeMile||{}).ownerOccupied||'—'}</td>
+        <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0ede8;font-size:8.5pt">${(dem.fiveMile||{}).ownerOccupied||'—'}</td>
+      </tr>
+      <tr style="background:#f9f8f6">
+        <td style="padding:7px 10px;font-weight:600;color:#555;border-bottom:1px solid #f0ede8;font-size:8.5pt">5-Yr Pop. Growth</td>
+        <td style="padding:7px 10px;text-align:center;font-weight:700;color:${GREEN};border-bottom:1px solid #f0ede8;font-size:8.5pt">${(dem.oneMile||{}).popGrowth5yr||'—'}</td>
+        <td style="padding:7px 10px;text-align:center;font-weight:700;color:${GREEN};border-bottom:1px solid #f0ede8;font-size:8.5pt">${(dem.threeMile||{}).popGrowth5yr||'—'}</td>
+        <td style="padding:7px 10px;text-align:center;font-weight:700;color:${GREEN};border-bottom:1px solid #f0ede8;font-size:8.5pt">${(dem.fiveMile||{}).popGrowth5yr||'—'}</td>
+      </tr>
+      <tr>
+        <td style="padding:7px 10px;font-weight:600;color:#555;font-size:8.5pt">Employment Base</td>
+        <td style="padding:7px 10px;text-align:center;font-size:7.5pt;color:#555" colspan="3">${(dem.fiveMile||{}).employmentBase||'—'}</td>
+      </tr>
+    </tbody>
+  </table>
+
+  ${dem.source?`<div style="font-size:6.5pt;color:#9ca3af;margin-bottom:16px;font-style:italic">Source: ${dem.source}</div>`:''}
+
+  ${keyMetrics.length?`
+  <div class="section-tag">Key Market Metrics</div>
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:6px">
+    ${keyMetrics.slice(0,6).map(m=>`
+    <div class="metric-card">
+      <div class="metric-val">${m.value||'—'}</div>
+      <div class="metric-lbl">${m.label||''}</div>
+      ${m.note?`<div class="metric-note">${m.note}</div>`:''}
+    </div>`).join('')}
+  </div>`:''}
+</div>
+
+<!-- ═══════════════════════════════════════════════════════
+     PAGE 6 — SUBMARKET NARRATIVE
+═══════════════════════════════════════════════════════ -->
+<div class="page">
+  <div class="page-header">
+    <div class="page-header-title">Submarket Overview</div>
+    <div class="page-header-prop">${propTitle}<br>${meta.county} County, FL</div>
+  </div>
+
+  ${sub.name?`<div style="font-size:13pt;font-weight:800;color:${CHARCOAL};margin-bottom:14px;text-transform:uppercase;letter-spacing:.04em">${sub.name}</div>`:''}
+
+  <div class="two-col">
+    <div class="narrative">
+      ${sub.narrative
+        ? sub.narrative.split(/\n+/).filter(Boolean).map(para=>`<p>${para}</p>`).join('')
+        : '<p>Submarket narrative not available.</p>'}
+    </div>
+    <div>
+      ${sub.opportunities?`
+      <div style="margin-bottom:14px">
+        <div class="section-tag" style="background:${GREEN}">Opportunities</div>
+        <div style="background:#f0fdf4;border-left:3px solid ${GREEN};padding:10px 13px;font-size:8.5pt;line-height:1.6;color:#333">${sub.opportunities}</div>
+      </div>`:''}
+      ${sub.risks?`
+      <div style="margin-bottom:14px">
+        <div class="section-tag" style="background:#dc2626">Risks & Considerations</div>
+        <div style="background:#fef2f2;border-left:3px solid #dc2626;padding:10px 13px;font-size:8.5pt;line-height:1.6;color:#333">${sub.risks}</div>
+      </div>`:''}
+      ${sub.comparableSales?`
+      <div>
+        <div class="section-tag">Comparable Sales Context</div>
+        <div style="background:#f9f8f6;border-left:3px solid ${ORANGE};padding:10px 13px;font-size:8.5pt;line-height:1.6;color:#333">${sub.comparableSales}</div>
+      </div>`:''}
+    </div>
+  </div>
+
+  <!-- Back matter -->
+  <div style="margin-top:auto;padding-top:20px;border-top:2px solid ${ORANGE};display:flex;justify-content:space-between;align-items:flex-end">
+    <div>
+      <div style="font-size:13pt;font-weight:900;text-transform:uppercase;letter-spacing:.08em;color:${CHARCOAL}">Eshenbaugh Land Company</div>
+      <div style="font-size:7pt;font-weight:600;letter-spacing:.15em;color:${ORANGE};text-transform:uppercase;margin-top:2px">Florida's Land Authority</div>
+      <div style="font-size:8pt;color:#666;margin-top:5px">thedirtdog.com &nbsp;·&nbsp; 407.949.0744</div>
+    </div>
+    <div style="text-align:right">
+      <div style="font-size:8pt;color:#666">Generated ${dateStr}</div>
+      <div style="font-size:7pt;color:#aaa;margin-top:2px">Experts · Advisors · Deal Makers · Land Strategists</div>
+    </div>
+  </div>
+
+  <div class="disclaimer">${d.disclaimer||'This Offering Memorandum has been prepared by Eshenbaugh Land Company for informational purposes only. The information contained herein has been obtained from sources believed to be reliable; however, Eshenbaugh Land Company makes no representations or warranties, expressed or implied, as to the accuracy or completeness of the information contained herein. All demographic data is AI-estimated and should be verified with ESRI Business Analyst or CoStar prior to transaction. Prospective investors should conduct their own investigations and due diligence and consult with their legal, financial, and environmental advisors. This memorandum is subject to withdrawal without notice.'}</div>
+</div>
+
+<script>window.onload=function(){window.print();}<\/script>
+</body></html>`);
+  win.document.close();
+}
+window._valOpenOM = _valOpenOM;
+
+/* =======================================================
    VIEW: BOARD (KANBAN)
    ======================================================= */
 function viewBoard(){
@@ -11972,12 +13377,20 @@ function viewBoardStaff(){
       </div>
     </div>`;
 
-  // ── Advisor filter ───────────────────────────────────────────────────
+  // ── Advisor filter + search bar ──────────────────────────────────────
   const _staffAdvisors = getDistinctAdvisors().filter(a=>a.uid).sort((a,b)=>a.name.localeCompare(b.name));
   const _staffFilterName = _staffAfUid ? (_staffAdvisors.find(a=>a.uid===_staffAfUid)?.name||'Unknown') : '';
+  const _staffSavedSearch = sessionStorage.getItem('staffBoardSearch') || '';
   const _staffAdvisorFilter = `
     <div style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap">
-      <label style="font-size:.75rem;font-weight:600;color:#6b7280;white-space:nowrap">Filter by Advisor:</label>
+      <div style="position:relative;display:flex;align-items:center">
+        <svg style="position:absolute;left:8px;color:#9ca3af;pointer-events:none" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input id="staffBoardSearchInput" type="text" placeholder="Search deals…" value="${_staffSavedSearch.replace(/"/g,'&quot;')}"
+          oninput="sessionStorage.setItem('staffBoardSearch',this.value);_applyStaffBoardSearch(this.value)"
+          style="font-size:.8rem;padding:.3rem .6rem .3rem 1.75rem;border:1px solid #d1d5db;border-radius:.5rem;background:#fff;color:#111;outline:none;min-width:180px;width:200px"
+          onkeydown="if(event.key==='Escape'){this.value='';sessionStorage.removeItem('staffBoardSearch');_applyStaffBoardSearch('')}">
+      </div>
+      <label style="font-size:.75rem;font-weight:600;color:#6b7280;white-space:nowrap">Advisor:</label>
       <select onchange="sessionStorage.setItem('staffBoardAdvisorFilter',this.value.trim());viewBoardStaff()"
         style="font-size:.8rem;padding:.3rem .6rem;border:1px solid #d1d5db;border-radius:.5rem;background:#fff;color:#111;cursor:pointer;outline:none;min-width:140px">
         <option value="">All Advisors</option>
@@ -12021,6 +13434,8 @@ function viewBoardStaff(){
     </div>
     </div>
   `);
+  // Apply search filter if one is saved
+  if(_staffSavedSearch) setTimeout(()=>window._applyStaffBoardSearch(_staffSavedSearch), 0);
   // Render mobile pipeline list (shown on small screens)
   if(window.renderMobilePipeline) renderMobilePipeline(deals, STAGES, STAGE_ALIAS);
 }
@@ -12075,8 +13490,15 @@ function renderStaffCard(deal){
   const ltBadge = (deal.landType||deal.representation==='buyer'||deal.referralDue==='yes')
     ? `<div class="mb-1.5">${deal.representation==='buyer'?`<span class="inline-block text-xs px-1.5 py-0.5 rounded-full font-semibold mr-1" style="background:#ede9fe;color:#5b21b6">🤝 Buyer Rep</span>`:''}${deal.referralDue==='yes'&&(deal.referralPct||0)>0?`<span class="inline-block text-xs px-1.5 py-0.5 rounded-full font-semibold mr-1" style="background:#fef3c7;color:#92400e" title="Referral to ${deal.referralTo||'?'}">💸 ${deal.referralPct}% Ref</span>`:''}${deal.landType?`<span class="inline-block text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-500 font-medium">${deal.landType}</span>`:''}</div>`
     : '';
+  const searchText = [
+    title,
+    deal.advisorName||deal.advisorEmail||'',
+    ...(deal.coAdvisors||[]).map(ca=>ca.name||ca.email||''),
+    deal.county||'', deal.landType||'', deal.stage||''
+  ].join(' ').toLowerCase();
   return `
     <div onclick="openStaffDealView('${deal.id}')" title="Click to view deal details"
+      data-search="${searchText.replace(/"/g,'&quot;')}"
       class="deal-card bg-white rounded-xl px-3 pt-2.5 pb-2 shadow-sm border border-white/80 select-none min-w-0 cursor-pointer transition hover:shadow-md hover:border-sky-200">
       <div class="text-xs font-semibold text-gray-800 leading-snug mb-1"
         style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">${title}</div>
@@ -12089,6 +13511,16 @@ function renderStaffCard(deal){
       <div class="space-y-0.5">${stageRows}</div>
     </div>`;
 }
+
+window._applyStaffBoardSearch = function(q){
+  const term = (q||'').toLowerCase().trim();
+  document.querySelectorAll('.deal-card[data-search]').forEach(card => {
+    const match = !term || card.dataset.search.includes(term);
+    card.style.display = match ? '' : 'none';
+  });
+};
+// Apply saved search after board renders
+(function(){ const q = sessionStorage.getItem('staffBoardSearch'); if(q) setTimeout(()=>window._applyStaffBoardSearch(q), 0); })();
 
 /* =======================================================
    STAFF DEAL DETAIL — read-only popup (no editing)
@@ -17740,8 +19172,8 @@ window._execManualMergeContacts = async () => {
 };
 
 // ── CRM Outreach Imports (updated nightly by daily-crm-outreach-sync task) ──
-const _CRM_OUTREACH_SYNC_DATE = '2026-06-23';
-const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-06-22_0","emailDate":"2026-06-22","emailSubject":"Wiregrass Ranch Map","attachmentNames":["Wiregrass Color Master Marketing Plan-email.pdf"],"recipientEmail":"ryang@glogerconstruction.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Gloger Construction","propertyHint":"Wiregrass Ranch","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-06-22_1","emailDate":"2026-06-22","emailSubject":"Offer on Southcreek Commercial","attachmentNames":["US 301 and Alden Green - LOI.pdf","Archway Partners Presentation - Updated - March 2025.pdf"],"recipientEmail":"pobdevfl@gmail.com","recipientName":"Patricia","recipientFirstName":"Patricia","recipientLastName":"","companyName":"","propertyHint":"Southcreek","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-06-22_2","emailDate":"2026-06-22","emailSubject":"Offer on Southcreek Commercial","attachmentNames":["US 301 and Alden Green - LOI.pdf","Archway Partners Presentation - Updated - March 2025.pdf"],"recipientEmail":"jhills@eisenhowerpropertygroup.com","recipientName":"","recipientFirstName":"","recipientLastName":"Hills","companyName":"Eisenhower Property Group","propertyHint":"Southcreek","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-06-22_3","emailDate":"2026-06-22","emailSubject":"Offer on Southcreek Commercial","attachmentNames":["US 301 and Alden Green - LOI.pdf","Archway Partners Presentation - Updated - March 2025.pdf"],"recipientEmail":"tonyahills99@gmail.com","recipientName":"Tonya Hills","recipientFirstName":"Tonya","recipientLastName":"Hills","companyName":"","propertyHint":"Southcreek","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-06-22_4","emailDate":"2026-06-22","emailSubject":"Re: Checking In","attachmentNames":["[property brochure - filename unknown]"],"recipientEmail":"tsuminski@aventoncompanies.com","recipientName":"Tom Suminski","recipientFirstName":"Tom","recipientLastName":"Suminski","companyName":"Aventon Companies","propertyHint":"","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-06-22_5","emailDate":"2026-06-22","emailSubject":"Fwd: PSA - SR 33","attachmentNames":["PSA - SR 33.pdf"],"recipientEmail":"aielloturner@aol.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"","propertyHint":"SR 33","matchedDealId":null,"imported":false,"skipped":false}];
+const _CRM_OUTREACH_SYNC_DATE = '2026-06-24';
+const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-06-23_0","emailDate":"2026-06-23","emailSubject":"Brandon Apt Site","attachmentNames":["OM Brandon Apts.pdf"],"recipientEmail":"FabbriT@richmancapital.com","recipientName":"Todd Fabbri","recipientFirstName":"Todd","recipientLastName":"Fabbri","companyName":"Richman Capital","propertyHint":"Brandon Apts","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-06-23_1","emailDate":"2026-06-23","emailSubject":"Hillsborough Opportunities - Onda","attachmentNames":["OM Brandon Apts Draft.pdf","OM - South Creek Commercial.pdf","OM 19th Williams 3.14.25.pdf"],"recipientEmail":"jpawluk@ondagrp.com","recipientName":"Johnathan Pawluk","recipientFirstName":"Johnathan","recipientLastName":"Pawluk","companyName":"Onda","propertyHint":"Hillsborough","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-06-23_2","emailDate":"2026-06-23","emailSubject":"Hillsborough Opportunities - Onda","attachmentNames":["OM Brandon Apts Draft.pdf","OM - South Creek Commercial.pdf","OM 19th Williams 3.14.25.pdf"],"recipientEmail":"acquisitions@ondagrp.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Onda","propertyHint":"Hillsborough","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-06-23_3","emailDate":"2026-06-23","emailSubject":"4.7 Acre Pinellas Site","attachmentNames":["Pinellas Industrial Site.pdf"],"recipientEmail":"chad.baldwin@streamrealty.com","recipientName":"Chad Baldwin","recipientFirstName":"Chad","recipientLastName":"Baldwin","companyName":"Stream Realty","propertyHint":"Pinellas","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-06-23_4","emailDate":"2026-06-23","emailSubject":"4.7 Acre Pinellas Site","attachmentNames":["Pinellas Industrial Site.pdf"],"recipientEmail":"clay.golden@streamrealty.com","recipientName":"Clay Golden","recipientFirstName":"Clay","recipientLastName":"Golden","companyName":"Stream Realty","propertyHint":"Pinellas","matchedDealId":null,"imported":false,"skipped":false}];
 
 // ── Gmail Sync ───────────────────────────────────────────────────────
 let _GMAIL_SYNC_DATE;  // set at runtime by crmGmailSync; blank = never synced this session
