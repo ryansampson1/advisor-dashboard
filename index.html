@@ -10115,9 +10115,13 @@ function viewValuation(){
         <input id="val-parcel" placeholder="e.g. 402106401001" style="width:100%;border:1px solid #d1d5db;border-radius:8px;padding:.42rem .65rem;font-size:.88rem;outline:none;box-sizing:border-box" oninput="_valClearAlt()" onkeydown="if(event.key==='Enter')_valRun()"/>
       </div>
       <div style="color:#9ca3af;font-size:.8rem;padding-bottom:.45rem;flex:0 0 auto">or</div>
-      <div style="flex:2;min-width:220px">
+      <div style="flex:2;min-width:220px;position:relative">
         <div style="font-size:.68rem;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:.05em;margin-bottom:.3rem">Property Address</div>
-        <input id="val-address" placeholder="e.g. 123 Main St, Port Charlotte, FL" style="width:100%;border:1px solid #d1d5db;border-radius:8px;padding:.42rem .65rem;font-size:.88rem;outline:none;box-sizing:border-box" oninput="_valClearAlt()" onkeydown="if(event.key==='Enter')_valRun()"/>
+        <input id="val-address" placeholder="e.g. 123 Main St, Port Charlotte, FL" autocomplete="off"
+          style="width:100%;border:1px solid #d1d5db;border-radius:8px;padding:.42rem .65rem;font-size:.88rem;outline:none;box-sizing:border-box"
+          oninput="_valClearAlt();_valAddressInput(this.value)"
+          onkeydown="if(event.key==='Enter'){_valAcClose();_valRun();}if(event.key==='Escape')_valAcClose();if(event.key==='ArrowDown'){event.preventDefault();_valAcMove(1);}if(event.key==='ArrowUp'){event.preventDefault();_valAcMove(-1);}"/>
+        <div id="val-ac-list" style="display:none;position:absolute;left:0;right:0;top:100%;z-index:999;background:#fff;border:1px solid #d1d5db;border-top:0;border-radius:0 0 8px 8px;box-shadow:0 4px 12px rgba(0,0,0,.1);max-height:220px;overflow-y:auto"></div>
       </div>
       <button onclick="_valRun()" id="val-run-btn" style="background:var(--brand-teal,#00B2A9);color:#fff;border:0;border-radius:9px;padding:.48rem 1.2rem;font-size:.88rem;font-weight:700;cursor:pointer;white-space:nowrap;flex:0 0 auto">🔍 Run Research</button>
       <button onclick="_valExportPDF()" id="val-pdf-btn" style="display:none;background:#fff;color:#374151;border:1px solid #d1d5db;border-radius:9px;padding:.48rem 1rem;font-size:.88rem;font-weight:600;cursor:pointer;white-space:nowrap;flex:0 0 auto" title="Export to PDF">📄 Export PDF</button>
@@ -10129,14 +10133,12 @@ function viewValuation(){
 
       <!-- Map panel -->
       <div style="border-right:1px solid #e5e7eb;display:flex;flex-direction:column;overflow:hidden">
-        <div style="background:#FAFAFB;border-bottom:1px solid #e5e7eb;padding:.6rem .85rem;font-size:.8rem;font-weight:700;color:#374151;flex:0 0 auto">
-          📍 Location
-          <span style="font-size:.7rem;font-weight:400;color:#9ca3af;margin-left:.4rem">Click map to drop a pin</span>
+        <div style="background:#FAFAFB;border-bottom:1px solid #e5e7eb;padding:.6rem .85rem;font-size:.8rem;font-weight:700;color:#374151;flex:0 0 auto;display:flex;align-items:center;justify-content:space-between">
+          <span>📍 Location</span>
+          <span id="val-map-hint" style="font-size:.68rem;font-weight:400;color:#9ca3af">Click map to drop a pin — or enter address above</span>
         </div>
         <div id="val-map-wrap" style="flex:1;position:relative;min-height:0">
-          <div id="val-map" style="width:100%;height:100%;background:#f3f4f6;display:flex;align-items:center;justify-content:center;color:#9ca3af;font-size:.82rem">
-            Enter a county + parcel or address above, then click Run Research.<br>The map will update after lookup.
-          </div>
+          <div id="val-map" style="width:100%;height:100%"></div>
         </div>
         <!-- Quick links panel below map -->
         <div id="val-links" style="border-top:1px solid #e5e7eb;padding:.65rem .85rem;background:#FAFAFB;overflow-y:auto;max-height:240px">
@@ -10162,6 +10164,9 @@ function viewValuation(){
   `);
 }
 window.viewValuation = viewValuation;
+// Reset map instance when tab re-renders (setContent wipes the DOM node)
+_valMap = null; _valMarker = null;
+setTimeout(_valInitMap, 80);
 
 function _valClearAlt(){
   // When user types in one field, clear the other
@@ -10452,6 +10457,8 @@ Use ONLY data found via live web search. If a specific field is not found in sea
       else { throw new Error('AI returned non-JSON response.'); }
     }
 
+    // Stash URL vars so _valRenderResults (separate scope) can access them
+    window._valCtx = { parcel, address, county, pa, paDeepLink, fdepUrl, swfwmdUrl, femaUrl, municodeUrl, addrEncoded, inSwfwmd };
     _valRenderResults(data, pa, inSwfwmd);
 
   } catch(err){
@@ -10468,20 +10475,208 @@ Use ONLY data found via live web search. If a specific field is not found in sea
 }
 window._valRun = _valRun;
 
-function _valUpdateMap(query){
-  const mapWrap = document.getElementById('val-map');
-  if(!mapWrap) return;
-  const q = encodeURIComponent(query+', Florida');
-  // Use Google Maps embed (no API key needed for basic embed)
-  mapWrap.innerHTML = `<iframe
-    src="https://maps.google.com/maps?q=${q}&t=k&z=15&output=embed"
-    style="width:100%;height:100%;border:0"
-    allowfullscreen
-    loading="lazy"
-    referrerpolicy="no-referrer-when-downgrade">
-  </iframe>`;
+// ── Leaflet map instance (persists across searches) ──────────────────────────
+let _valMap = null, _valMarker = null, _valMapReady = false;
+
+function _valInitMap(){
+  if(_valMap) return; // already initialized
+  const el = document.getElementById('val-map');
+  if(!el) return;
+
+  // Load Leaflet CSS + JS if not already present
+  if(!document.getElementById('leaflet-css')){
+    const lnk = document.createElement('link');
+    lnk.id='leaflet-css'; lnk.rel='stylesheet';
+    lnk.href='https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css';
+    document.head.appendChild(lnk);
+  }
+
+  const doInit = () => {
+    if(_valMap) return;
+    // Florida center
+    _valMap = L.map('val-map', {zoomControl:true, attributionControl:false}).setView([27.8, -81.6], 7);
+
+    // Esri satellite tiles (no API key)
+    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+      maxZoom:20, attribution:'Esri'
+    }).addTo(_valMap);
+
+    // Esri label overlay so roads/places are visible
+    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}', {
+      maxZoom:20, opacity:0.85
+    }).addTo(_valMap);
+
+    // Click to drop pin
+    _valMap.on('click', async (e) => {
+      _valPlacePin(e.latlng.lat, e.latlng.lng, true);
+    });
+
+    _valMapReady = true;
+  };
+
+  if(window.L){ doInit(); return; }
+
+  const s = document.createElement('script');
+  s.src='https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js';
+  s.onload = doInit;
+  document.head.appendChild(s);
+}
+window._valInitMap = _valInitMap;
+
+// Place/move marker and optionally reverse-geocode to fill address field
+async function _valPlacePin(lat, lng, reverseGeocode=false){
+  if(!_valMap) return;
+
+  const icon = L.divIcon({
+    className:'',
+    html:`<div style="width:28px;height:28px;background:#E8802C;border:3px solid #fff;border-radius:50% 50% 50% 0;transform:rotate(-45deg);box-shadow:0 2px 8px rgba(0,0,0,.4)"><div style="width:8px;height:8px;background:#fff;border-radius:50%;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%) rotate(45deg)"></div></div>`,
+    iconSize:[28,28], iconAnchor:[14,28], popupAnchor:[0,-28]
+  });
+
+  if(_valMarker){ _valMarker.setLatLng([lat,lng]); }
+  else { _valMarker = L.marker([lat,lng],{icon,draggable:true}).addTo(_valMap); }
+
+  // Update hint
+  const hint = document.getElementById('val-map-hint');
+  if(hint) hint.textContent = `Pin: ${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+
+  // Draggable pin updates on dragend
+  _valMarker.off('dragend').on('dragend', async (ev) => {
+    const p = ev.target.getLatLng();
+    await _valPlacePin(p.lat, p.lng, true);
+  });
+
+  if(reverseGeocode){
+    try {
+      const r = await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&addressdetails=1`,
+        {headers:{'User-Agent':'ELC-Dashboard/1.0'}});
+      const d = await r.json();
+      if(d && d.display_name){
+        const addrEl = document.getElementById('val-address');
+        if(addrEl){
+          // Build a clean address string
+          const a = d.address||{};
+          const street = [a.house_number, a.road].filter(Boolean).join(' ');
+          const city = a.city||a.town||a.village||a.county||'';
+          const state = a.state_abbr || (a.state==='Florida'?'FL':'');
+          const addr = [street, city, state].filter(Boolean).join(', ');
+          addrEl.value = addr || d.display_name.split(',').slice(0,3).join(',').trim();
+          // Auto-select county if we can match it
+          const countyName = (a.county||'').replace(' County','').trim();
+          const countyEl = document.getElementById('val-county');
+          if(countyEl && countyName){
+            const opt = Array.from(countyEl.options).find(o=>o.value===countyName);
+            if(opt) countyEl.value = countyName;
+          }
+        }
+      }
+    } catch(e){ console.warn('[val pin] reverse geocode failed',e); }
+  }
+
+  _valMap.setView([lat,lng], Math.max(_valMap.getZoom(), 15));
+}
+window._valPlacePin = _valPlacePin;
+
+// Move map to geocoded location after search (replaces iframe approach)
+async function _valUpdateMap(query){
+  if(!_valMap){ _valInitMap(); await new Promise(r=>setTimeout(r,600)); }
+  if(!_valMap) return;
+  try {
+    const r = await fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query+', Florida')}&format=json&limit=1`,
+      {headers:{'User-Agent':'ELC-Dashboard/1.0'}});
+    const d = await r.json();
+    if(d&&d[0]){ _valPlacePin(parseFloat(d[0].lat), parseFloat(d[0].lon), false); }
+  } catch(e){ console.warn('[val map] geocode failed',e); }
 }
 window._valUpdateMap = _valUpdateMap;
+
+// ── Address autocomplete (Nominatim) ─────────────────────────────────────────
+let _valAcTimer = null, _valAcIdx = -1, _valAcResults = [];
+
+function _valAddressInput(val){
+  clearTimeout(_valAcTimer);
+  if(val.length < 4){ _valAcClose(); return; }
+  _valAcTimer = setTimeout(()=>_valAcFetch(val), 320);
+}
+window._valAddressInput = _valAddressInput;
+
+async function _valAcFetch(query){
+  try {
+    const r = await fetch(
+      `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query+' Florida')}&countrycodes=us&limit=6&format=json&addressdetails=1`,
+      {headers:{'User-Agent':'ELC-Dashboard/1.0'}}
+    );
+    _valAcResults = await r.json();
+    _valAcRender();
+  } catch(e){ _valAcClose(); }
+}
+
+function _valAcRender(){
+  const list = document.getElementById('val-ac-list');
+  if(!list||!_valAcResults.length){ _valAcClose(); return; }
+  _valAcIdx = -1;
+  list.innerHTML = _valAcResults.map((item,i) => {
+    const parts = item.display_name.split(',');
+    const main = parts.slice(0,2).join(',').trim();
+    const sub  = parts.slice(2,4).join(',').trim();
+    return `<div data-i="${i}" onclick="_valAcPick(${i})"
+      style="padding:.5rem .75rem;cursor:pointer;border-bottom:1px solid #f3f4f6;transition:background .1s"
+      onmouseover="this.style.background='#eff6ff'" onmouseout="this.style.background=''">
+      <div style="font-size:.83rem;font-weight:600;color:#1f2937">${main}</div>
+      <div style="font-size:.72rem;color:#9ca3af">${sub}</div>
+    </div>`;
+  }).join('');
+  list.style.display='block';
+}
+
+function _valAcPick(i){
+  const item = _valAcResults[i];
+  if(!item) return;
+  const a = item.address||{};
+  const street = [a.house_number, a.road].filter(Boolean).join(' ');
+  const city = a.city||a.town||a.village||a.county||'';
+  const addr = [street, city, 'FL'].filter(Boolean).join(', ');
+  const addrEl = document.getElementById('val-address');
+  if(addrEl) addrEl.value = addr || item.display_name.split(',').slice(0,3).join(',').trim();
+  // Auto-select county
+  const countyName = (a.county||'').replace(' County','').trim();
+  const countyEl = document.getElementById('val-county');
+  if(countyEl && countyName){
+    const opt = Array.from(countyEl.options).find(o=>o.value===countyName);
+    if(opt) countyEl.value = countyName;
+  }
+  _valAcClose();
+  // Move map pin to selected location
+  _valPlacePin(parseFloat(item.lat), parseFloat(item.lon), false);
+}
+window._valAcPick = _valAcPick;
+
+function _valAcClose(){
+  const list = document.getElementById('val-ac-list');
+  if(list) list.style.display='none';
+  _valAcResults=[]; _valAcIdx=-1;
+}
+window._valAcClose = _valAcClose;
+
+function _valAcMove(dir){
+  const list = document.getElementById('val-ac-list');
+  if(!list||list.style.display==='none') return;
+  const items = list.querySelectorAll('[data-i]');
+  if(!items.length) return;
+  _valAcIdx = Math.max(0, Math.min(items.length-1, _valAcIdx+dir));
+  items.forEach((el,i)=>{ el.style.background = i===_valAcIdx?'#eff6ff':''; });
+  if(_valAcIdx>=0){
+    const addrEl = document.getElementById('val-address');
+    const item = _valAcResults[_valAcIdx];
+    if(addrEl&&item){
+      const a=item.address||{};
+      const street=[a.house_number,a.road].filter(Boolean).join(' ');
+      const city=a.city||a.town||a.village||a.county||'';
+      addrEl.value=[street,city,'FL'].filter(Boolean).join(', ')||item.display_name.split(',').slice(0,3).join(',').trim();
+    }
+  }
+}
+window._valAcMove = _valAcMove;
 
 function _valCard(emoji, title, color, bodyHtml){
   return `
@@ -10516,6 +10711,17 @@ function _valLink(label, url){
 function _valRenderResults(d, pa, inSwfwmd){
   const el = document.getElementById('val-results');
   if(!el) return;
+  // Pull URL context stashed by _valRun (separate function scope)
+  const ctx = window._valCtx || {};
+  const parcel      = ctx.parcel      || '';
+  const address     = ctx.address     || '';
+  const county      = ctx.county      || (pa&&pa.name?pa.name.replace(' County PA',''):'');
+  const paDeepLink  = ctx.paDeepLink  || pa.search || pa.url || '#';
+  const fdepUrl     = ctx.fdepUrl     || 'https://prodenv.dep.state.fl.us/DepNexus/public/electronic-documents/SearchFor/';
+  const swfwmdUrl   = ctx.swfwmdUrl   || 'https://permits.swfwmd.state.fl.us/';
+  const femaUrl     = ctx.femaUrl     || 'https://msc.fema.gov/portal/home';
+  const municodeUrl = ctx.municodeUrl || (_FL_MUNICODE&&_FL_MUNICODE[county]) || 'https://library.municode.com/fl';
+  const addrEncoded = ctx.addrEncoded || encodeURIComponent(address||parcel||'');
 
   // Show export buttons now that we have results
   const pdfBtn = document.getElementById('val-pdf-btn');
