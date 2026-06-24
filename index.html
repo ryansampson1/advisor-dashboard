@@ -10100,6 +10100,44 @@ function _valClearAlt(){
 }
 window._valClearAlt = _valClearAlt;
 
+// Direct Gemini call for valuation — bypasses callAIAssistant's 1024-token cap
+// and adds thinkingBudget:0 so Gemini 2.5 Flash returns text not blank thinking output.
+async function _valCallAI(userText, systemPrompt){
+  const proxyUrl = APP_CONFIG.ai?.geminiProxyUrl || '';
+  const cfgKey   = APP_CONFIG.ai?.geminiKey || '';
+  const payload = {
+    system_instruction: { parts: [{text: systemPrompt}] },
+    contents: [{role:'user', parts:[{text: userText}]}],
+    generationConfig: {
+      maxOutputTokens: 8192,
+      temperature: 0.2,
+      thinkingConfig: { thinkingBudget: 0 },
+    },
+  };
+  let resp;
+  if(proxyUrl){
+    resp = await fetch(proxyUrl, {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(payload)});
+  } else {
+    let key = cfgKey || localStorage.getItem('geminiApiKey') || '';
+    if(!key){
+      key = prompt('Enter your Google Gemini API key to enable AI features:\n(get one free at aistudio.google.com)');
+      if(key && key.trim()){ localStorage.setItem('geminiApiKey', key.trim()); key = key.trim(); }
+      else { alert('AI features require a configured proxy or a Gemini API key.'); return null; }
+    }
+    resp = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key='+encodeURIComponent(key),
+      {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(payload)});
+  }
+  if(!resp.ok){ const t=await resp.text().catch(()=>''); throw new Error('AI error '+resp.status+': '+t.slice(0,200)); }
+  const json = await resp.json();
+  // Handle both proxy-wrapped and raw Gemini response shapes
+  if(json.reply) return json.reply;
+  const cand = json.candidates?.[0];
+  if(!cand) throw new Error('Empty AI response');
+  if(cand.finishReason==='SAFETY') throw new Error('AI response blocked by safety filter');
+  return cand.content?.parts?.map(p=>p.text||'').join('') || '';
+}
+window._valCallAI = _valCallAI;
+
 async function _valRun(){
   const county = (document.getElementById('val-county')||{}).value||'';
   const parcel  = ((document.getElementById('val-parcel')||{}).value||'').trim();
@@ -10267,10 +10305,7 @@ Water Management District applicable: ${inSwfwmd ? 'Southwest Florida Water Mana
 Please fill in as much as you can from your knowledge. For data you cannot determine without live record access, say so clearly in the relevant field rather than guessing. For the Municode URL, research the correct slug for ${county} County Florida.`;
 
   try {
-    // Use a fresh history key so it doesn't bleed into other AI chats
-    if(!_aiHistory['_valHistory']) _aiHistory['_valHistory']=[];
-    _aiHistory['_valHistory']=[];  // always fresh per run
-    const raw = await callAIAssistant(userMsg, sys, '_valHistory');
+    const raw = await _valCallAI(userMsg, sys);
     if(!raw){ throw new Error('No response from AI'); }
 
     let data;
@@ -10823,9 +10858,7 @@ Also provide a detailed submarket narrative and 6-8 key metrics a land investor 
 
   let omData = {};
   try {
-    if(!_aiHistory['_valOMHistory']) _aiHistory['_valOMHistory']=[];
-    _aiHistory['_valOMHistory']=[];
-    const raw = await callAIAssistant(userMsg, sys, '_valOMHistory');
+    const raw = await _valCallAI(userMsg, sys);
     if(!raw) throw new Error('No response');
     const cleaned = raw.replace(/^```json\s*/i,'').replace(/^```\s*/i,'').replace(/```\s*$/,'').trim();
     try { omData = JSON.parse(cleaned); }
