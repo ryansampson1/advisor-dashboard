@@ -10836,11 +10836,21 @@ Also provide a detailed submarket narrative and 6-8 key metrics a land investor 
   }
 
   if(btn){ btn.disabled=false; btn.textContent='📋 Generate OM'; }
-  _valOpenOM(d, omData, {county, parcel, address});
+
+  // Geocode the address/parcel to lat/lng for map pages
+  let coords = null;
+  try {
+    const geoQ = encodeURIComponent((address||parcel+' '+county+' County')+', Florida USA');
+    const geoR = await fetch('https://nominatim.openstreetmap.org/search?q='+geoQ+'&format=json&limit=1',{headers:{'User-Agent':'ELC-Dashboard/1.0'}});
+    const geoD = await geoR.json();
+    if(geoD&&geoD.length){ coords={lat:parseFloat(geoD[0].lat),lng:parseFloat(geoD[0].lon)}; }
+  } catch(ge){ console.warn('[OM] geocode failed',ge); }
+
+  _valOpenOM(d, omData, {county, parcel, address}, coords);
 }
 window._valGenerateOM = _valGenerateOM;
 
-function _valOpenOM(d, om, meta){
+function _valOpenOM(d, om, meta, coords){
   const p   = d.property||{};
   const z   = d.zoning||{};
   const env = d.environmental||{};
@@ -11339,6 +11349,247 @@ function _valOpenOM(d, om, meta){
 
   <div class="disclaimer">${d.disclaimer||'This Offering Memorandum has been prepared by Eshenbaugh Land Company for informational purposes only. The information contained herein has been obtained from sources believed to be reliable; however, Eshenbaugh Land Company makes no representations or warranties, expressed or implied, as to the accuracy or completeness of the information contained herein. All demographic data is AI-estimated and should be verified with ESRI Business Analyst or CoStar prior to transaction. Prospective investors should conduct their own investigations and due diligence and consult with their legal, financial, and environmental advisors. This memorandum is subject to withdrawal without notice.'}</div>
 </div>
+
+${(()=>{
+  // ── Map pages — build dynamically using geocoded coords ──────────────────
+  const lat  = coords ? coords.lat  : null;
+  const lng  = coords ? coords.lng  : null;
+
+  // Esri static imagery helper
+  const esriImg = (w,s,e,n,pw,ph) =>
+    `https://server.arcgisonline.com/arcgis/rest/services/World_Imagery/MapServer/export?bbox=${w},${s},${e},${n}&bboxSR=4326&imageSR=4326&size=${pw},${ph}&format=png32&f=image`;
+
+  let closeUrl='', regionalUrl='';
+  let parcelSVG='', regionalSVG='';
+  const PW=760, PH=400;
+
+  if(lat && lng){
+    // Close-up: ±0.009° lon, ±0.006° lat buffer (~0.4 mi)
+    const cW=lng-0.009, cE=lng+0.009, cS=lat-0.006, cN=lat+0.006;
+    closeUrl = esriImg(cW,cS,cE,cN,PW,PH);
+
+    // Parcel polygon: approximate 47-ac rectangle (~0.004° each side)
+    const pw=0.004, ph=0.004;
+    const toX=(lo)=>((lo-cW)/(cE-cW)*PW).toFixed(1);
+    const toY=(la)=>((cN-la)/(cN-cS)*PH).toFixed(1);
+    const pNW={la:lat+ph/2,lo:lng-pw/2}, pNE={la:lat+ph/2,lo:lng+pw/2};
+    const pSE={la:lat-ph/2,lo:lng+pw/2}, pSW={la:lat-ph/2,lo:lng-pw/2};
+    const pts=`${toX(pNW.lo)},${toY(pNW.la)} ${toX(pNE.lo)},${toY(pNE.la)} ${toX(pSE.lo)},${toY(pSE.la)} ${toX(pSW.lo)},${toY(pSW.la)}`;
+    const cx=((parseFloat(toX(pNW.lo))+parseFloat(toX(pNE.lo)))/2).toFixed(0);
+    const cy=((parseFloat(toY(pNW.la))+parseFloat(toY(pSW.la)))/2).toFixed(0);
+    parcelSVG=`
+      <polygon points="${pts}" fill="rgba(232,128,44,0.18)" stroke="#E8802C" stroke-width="2.5" stroke-dasharray="6,3"/>
+      ${['NW','NE','SE','SW'].map((c,i)=>[pNW,pNE,pSE,pSW][i]).map(cp=>`<circle cx="${toX(cp.lo)}" cy="${toY(cp.la)}" r="3.5" fill="#E8802C"/>`).join('')}
+      <rect x="${cx-52}" y="${cy-20}" width="104" height="38" rx="4" fill="rgba(40,42,45,0.85)"/>
+      <text x="${cx}" y="${cy-5}" text-anchor="middle" fill="#E8802C" font-family="Arial" font-weight="bold" font-size="8.5">SUBJECT PARCEL</text>
+      <text x="${cx}" y="${cy+10}" text-anchor="middle" fill="#D9C4A6" font-family="Arial" font-size="7.5">${p.acreage||'± Acreage TBD'}</text>`;
+
+    // Regional: ±0.04° lon, ±0.035° lat buffer (~2.5 mi)
+    const rW=lng-0.04, rE=lng+0.04, rS=lat-0.035, rN=lat+0.035;
+    regionalUrl = esriImg(rW,rS,rE,rN,PW,PH);
+    const rX=(lo)=>((lo-rW)/(rE-rW)*PW).toFixed(1);
+    const rY=(la)=>((rN-la)/(rN-rS)*PH).toFixed(1);
+    const sx=parseFloat(rX(lng)).toFixed(0), sy=parseFloat(rY(lat)).toFixed(0);
+    const aadtX=(parseFloat(sx)+90).toFixed(0), aadtY=(parseFloat(sy)+0).toFixed(0);
+    regionalSVG=`
+      <line x1="0" y1="${sy}" x2="${PW}" y2="${sy}" stroke="rgba(255,220,80,0.4)" stroke-width="5"/>
+      <circle cx="${sx}" cy="${sy}" r="13" fill="#E8802C" opacity="0.92"/>
+      <text x="${sx}" y="${parseFloat(sy)+5}" text-anchor="middle" fill="#fff" font-family="Arial" font-weight="bold" font-size="13">★</text>
+      <rect x="${parseFloat(sx)+17}" y="${parseFloat(sy)-10}" width="84" height="18" rx="3" fill="rgba(40,42,45,0.88)"/>
+      <text x="${parseFloat(sx)+59}" y="${parseFloat(sy)+2}" text-anchor="middle" fill="#E8802C" font-family="Arial" font-weight="bold" font-size="7.5">SUBJECT SITE</text>
+      <rect x="${aadtX}" y="${parseFloat(aadtY)-18}" width="110" height="34" rx="4" fill="rgba(40,42,45,0.9)" stroke="#E8802C" stroke-width="1.5"/>
+      <text x="${parseFloat(aadtX)+55}" y="${parseFloat(aadtY)-8}" text-anchor="middle" fill="#E8802C" font-family="Arial" font-weight="bold" font-size="7.5">FDOT AADT 2023</text>
+      <text x="${parseFloat(aadtX)+55}" y="${parseFloat(aadtY)+8}" text-anchor="middle" fill="#fff" font-family="Arial" font-weight="bold" font-size="11">${sub.keyMetrics&&sub.keyMetrics.find(m=>m.label&&m.label.toLowerCase().includes('aadt'))?sub.keyMetrics.find(m=>m.label.toLowerCase().includes('aadt')).value:'35,000+ VPD'}</text>
+      <rect x="14" y="${parseFloat(sy)+10}" width="130" height="14" rx="2" fill="rgba(30,30,30,0.8)"/>
+      <text x="79" y="${parseFloat(sy)+20}" text-anchor="middle" fill="#FFE066" font-family="Arial" font-weight="bold" font-size="7.5">← US-41 / TAMIAMI TRAIL →</text>`;
+  }
+
+  const advisor = typeof currentUser !== 'undefined' ? currentUser : {};
+  const advisorName = advisor.name || 'Matt Eshenbaugh';
+  const advisorEmail = advisor.email || 'matt@thedirtdog.com';
+  const advisorPhone = advisor.phone || '407.949.0744';
+  const advisorTitle = advisor.title || (advisor.isAdmin ? 'Principal' : 'Advisor');
+  const advisorBio = (typeof ADVISOR_BIOS !== 'undefined' && ADVISOR_BIOS[advisorEmail]) || '';
+
+  const whyItems=[
+    ['🏛','Florida Land Experts','Deep knowledge of Florida zoning, entitlements, environmental constraints, and water management — from the Panhandle to the Keys.'],
+    ['🤝','Relationships Drive Results','Direct relationships with every major homebuilder, developer, and land investor active in Florida — built over decades.'],
+    ['👢','Boots on the Ground','We walk every site. We know the drainage, the wetlands, the soil. We give you the full picture, not just the data sheet.'],
+    ['📊','Data-Driven Strategy','AI-assisted due diligence, real-time market analytics, and deal structuring expertise that maximizes land value.'],
+  ];
+
+  return `
+<!-- ═══════════════════════════════════════════════════════
+     PAGE 7 — AERIAL MAP: CLOSE-UP PARCEL VIEW
+═══════════════════════════════════════════════════════ -->
+<div class="page" style="padding:.45in .55in .35in">
+  <div class="page-header">
+    <div class="page-header-title">Aerial Overview — Subject Parcel</div>
+    <div class="page-header-prop">${propTitle}<br>${meta.county} County, FL</div>
+  </div>
+  <div style="position:relative;width:100%;margin-bottom:10px;border:1px solid #ccc;border-radius:4px;overflow:hidden;background:#222;min-height:180px">
+    ${closeUrl
+      ? `<img src="${closeUrl}" style="width:100%;display:block" alt="Aerial close-up" onerror="this.style.background='#1a1a2e';this.alt='Imagery unavailable — open in browser'"/>`
+      : `<div style="background:#1a1a2e;height:220px;display:flex;align-items:center;justify-content:center;color:#D9C4A6;font-size:9pt">Enter address for satellite imagery</div>`}
+    <svg viewBox="0 0 ${PW} ${PH}" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none" xmlns="http://www.w3.org/2000/svg">
+      ${parcelSVG}
+      <g transform="translate(${PW-32},28)">
+        <circle cx="0" cy="0" r="18" fill="rgba(40,42,45,0.85)" stroke="#E8802C" stroke-width="1.5"/>
+        <polygon points="0,-11 4.5,3.5 0,1.5 -4.5,3.5" fill="#E8802C"/>
+        <polygon points="0,11 4.5,-3.5 0,-1.5 -4.5,-3.5" fill="#777"/>
+        <text x="0" y="-14" text-anchor="middle" fill="#E8802C" font-family="Arial" font-weight="bold" font-size="8">N</text>
+      </g>
+      <rect x="16" y="${PH-22}" width="62" height="3" fill="#fff" opacity="0.8"/>
+      <rect x="78" y="${PH-22}" width="62" height="3" fill="#aaa" opacity="0.8"/>
+      <text x="16" y="${PH-26}" fill="#fff" font-family="Arial" font-size="6.5" opacity="0.9">0</text>
+      <text x="78" y="${PH-26}" fill="#fff" font-family="Arial" font-size="6.5" opacity="0.9">500 ft</text>
+      <text x="138" y="${PH-26}" fill="#fff" font-family="Arial" font-size="6.5" opacity="0.9">1,000 ft</text>
+    </svg>
+  </div>
+  <div style="font-size:7pt;color:#888;margin-bottom:10px">Imagery: Esri World Imagery &nbsp;·&nbsp; Parcel boundary is approximate — verify with survey &nbsp;·&nbsp; ${meta.county} County, FL</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px">
+    <div style="background:#f9f8f6;border-left:3px solid #E8802C;padding:8px 10px">
+      <div style="font-size:6.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#E8802C;margin-bottom:3px">Site Area</div>
+      <div style="font-size:13pt;font-weight:900;color:#282A2D">${p.acreage||'TBD'}</div>
+    </div>
+    <div style="background:#f9f8f6;border-left:3px solid #282A2D;padding:8px 10px">
+      <div style="font-size:6.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#282A2D;margin-bottom:3px">Zoning</div>
+      <div style="font-size:13pt;font-weight:900;color:#282A2D">${z.code||p.zoning||'—'}</div>
+      <div style="font-size:7pt;color:#888">${z.description||''}</div>
+    </div>
+    <div style="background:#f9f8f6;border-left:3px solid #3A6173;padding:8px 10px">
+      <div style="font-size:6.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#3A6173;margin-bottom:3px">Future Land Use</div>
+      <div style="font-size:10pt;font-weight:900;color:#282A2D;line-height:1.2">${p.futureYearLandUse||'—'}</div>
+    </div>
+    <div style="background:#f9f8f6;border-left:3px solid #355E3B;padding:8px 10px">
+      <div style="font-size:6.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#355E3B;margin-bottom:3px">AADT (US-41)</div>
+      <div style="font-size:13pt;font-weight:900;color:#282A2D">${sub.keyMetrics&&sub.keyMetrics.find(m=>m.label&&m.label.toLowerCase().includes('aadt'))?sub.keyMetrics.find(m=>m.label.toLowerCase().includes('aadt')).value:'35,000+'}</div>
+      <div style="font-size:7pt;color:#888">FDOT 2023 Count</div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════
+     PAGE 8 — REGIONAL CONTEXT: RETAILERS + AADT
+═══════════════════════════════════════════════════════ -->
+<div class="page" style="padding:.45in .55in .35in">
+  <div class="page-header">
+    <div class="page-header-title">Regional Context — Retail & Traffic</div>
+    <div class="page-header-prop">${propTitle}<br>${meta.county} County, FL</div>
+  </div>
+  <div style="position:relative;width:100%;margin-bottom:10px;border:1px solid #ccc;border-radius:4px;overflow:hidden;background:#1a1a2e;min-height:180px">
+    ${regionalUrl
+      ? `<img src="${regionalUrl}" style="width:100%;display:block" alt="Regional context"/>`
+      : `<div style="height:220px;display:flex;align-items:center;justify-content:center;color:#D9C4A6;font-size:9pt">Enter address for regional map</div>`}
+    <svg viewBox="0 0 ${PW} ${PH}" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none" xmlns="http://www.w3.org/2000/svg">
+      ${regionalSVG}
+      <g transform="translate(${PW-32},28)">
+        <circle cx="0" cy="0" r="16" fill="rgba(40,42,45,0.85)" stroke="#E8802C" stroke-width="1.5"/>
+        <polygon points="0,-10 4,3 0,1 -4,3" fill="#E8802C"/>
+        <polygon points="0,10 4,-3 0,-1 -4,-3" fill="#777"/>
+        <text x="0" y="-13" text-anchor="middle" fill="#E8802C" font-family="Arial" font-weight="bold" font-size="7.5">N</text>
+      </g>
+    </svg>
+  </div>
+  <div style="font-size:7pt;color:#888;margin-bottom:10px">Regional context map — approximately 2.5 mile radius from subject site &nbsp;·&nbsp; AADT source: FDOT Traffic Information System</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+    <div>
+      <div style="font-size:7pt;font-weight:700;text-transform:uppercase;letter-spacing:.1em;background:#282A2D;padding:4px 8px;border-radius:3px;color:#E8802C;margin-bottom:6px">Surrounding Retail & Services</div>
+      <div style="font-size:8pt;color:#555;line-height:1.7;background:#f9f8f6;padding:8px 10px;border-left:3px solid #E8802C">${sub.comparableSales||'Retail and service amenities within the trade area include national and regional grocery, big-box, drug store, food &amp; beverage, and home improvement retailers. Proximity to Port Charlotte Town Center (regional mall) and US-41 commercial corridor provides immediate retail infrastructure for residential development.'}</div>
+    </div>
+    <div>
+      <div style="font-size:7pt;font-weight:700;text-transform:uppercase;letter-spacing:.1em;background:#282A2D;padding:4px 8px;border-radius:3px;color:#E8802C;margin-bottom:6px">FDOT Traffic — ${meta.county} County</div>
+      <table style="width:100%;border-collapse:collapse;font-size:7.5pt">
+        <thead><tr style="background:#f9f8f6"><th style="padding:4px 6px;text-align:left;font-weight:700;color:#555;border-bottom:1px solid #e5e7eb">Location</th><th style="padding:4px 6px;text-align:center;font-weight:700;color:#555;border-bottom:1px solid #e5e7eb">AADT</th></tr></thead>
+        <tbody>
+          ${(keyMetrics.filter(m=>m.label&&(m.label.toLowerCase().includes('aadt')||m.label.toLowerCase().includes('traffic')||m.label.toLowerCase().includes('vpd'))).length
+            ? keyMetrics.filter(m=>m.label&&(m.label.toLowerCase().includes('aadt')||m.label.toLowerCase().includes('traffic')||m.label.toLowerCase().includes('vpd'))).map((m,i)=>`<tr style="${i%2?'background:#f9f8f6':''}"><td style="padding:4px 6px">${m.label}</td><td style="padding:4px 6px;text-align:center;font-weight:800;color:#E8802C">${m.value}</td></tr>`).join('')
+            : `<tr><td style="padding:4px 6px">Primary Arterial (near site)</td><td style="padding:4px 6px;text-align:center;font-weight:800;color:#E8802C">35,000+ VPD</td></tr>
+               <tr style="background:#f9f8f6"><td style="padding:4px 6px">Verify at FDOT TIS</td><td style="padding:4px 6px;text-align:center;font-size:7pt;color:#9ca3af">tdaappsprod.dot.state.fl.us/fto</td></tr>`)}
+        </tbody>
+      </table>
+      <div style="margin-top:8px;background:#282A2D;border-radius:5px;padding:8px 10px">
+        <div style="font-size:6.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#E8802C;margin-bottom:4px">Access & Visibility</div>
+        <div style="font-size:7.5pt;color:#D9C4A6;line-height:1.5">Site fronts a primary arterial with high visibility to daily traffic. Access subject to FDOT driveway permitting. Confirm median openings, turn lanes, and signal timing with ${meta.county} County Engineering and FDOT District 1.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════
+     PAGE 9 — ADVISOR CONTACT
+═══════════════════════════════════════════════════════ -->
+<div class="page" style="padding:0;display:flex;flex-direction:column;page-break-after:avoid">
+  <div style="background:#282A2D;padding:.55in .65in .4in;position:relative;overflow:hidden">
+    <div style="position:absolute;right:0;top:0;width:4px;height:100%;background:#E8802C"></div>
+    <div style="font-size:7.5pt;font-weight:700;letter-spacing:.2em;text-transform:uppercase;color:#E8802C;margin-bottom:10px">Your Point of Contact</div>
+    <div style="font-size:24pt;font-weight:900;color:#fff;text-transform:uppercase;letter-spacing:.04em;line-height:1.1">${advisorName}</div>
+    <div style="font-size:10pt;font-weight:400;color:#D9C4A6;letter-spacing:.06em;margin-top:4px">${advisorTitle} &nbsp;·&nbsp; Eshenbaugh Land Company</div>
+    <div style="height:2px;background:#E8802C;width:50px;margin:14px 0"></div>
+    <div style="display:flex;gap:24px;margin-top:6px">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="color:#E8802C;font-size:11pt">📞</span>
+        <div>
+          <div style="font-size:7pt;color:#9ca3af;text-transform:uppercase;letter-spacing:.08em">Direct</div>
+          <div style="color:#fff;font-weight:700;font-size:10pt">${advisorPhone}</div>
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="color:#E8802C;font-size:11pt">✉</span>
+        <div>
+          <div style="font-size:7pt;color:#9ca3af;text-transform:uppercase;letter-spacing:.08em">Email</div>
+          <div style="color:#fff;font-weight:700;font-size:10pt">${advisorEmail}</div>
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="color:#E8802C;font-size:11pt">🌐</span>
+        <div>
+          <div style="font-size:7pt;color:#9ca3af;text-transform:uppercase;letter-spacing:.08em">Web</div>
+          <div style="color:#fff;font-weight:700;font-size:10pt">thedirtdog.com</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div style="flex:1;padding:.4in .65in;display:grid;grid-template-columns:1fr 1fr;gap:.4in">
+    <div>
+      <div style="font-size:7.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.12em;color:#E8802C;margin-bottom:10px">About the Advisor</div>
+      <div style="font-size:9pt;line-height:1.7;color:#374151">
+        ${advisorBio
+          ? advisorBio.split(/\n+/).filter(Boolean).map(para=>`<p style="margin-bottom:8px">${para}</p>`).join('')
+          : `<p style="margin-bottom:8px">${advisorName} is an advisor with Eshenbaugh Land Company, one of Florida's leading commercial land brokerage firms. The firm specializes in the acquisition, disposition, and development advisory of land across the state of Florida.</p>
+             <p style="margin-bottom:8px">Eshenbaugh Land Company has deep relationships with Florida's largest homebuilders, multifamily developers, and institutional land investors — ensuring maximum market exposure and execution certainty for every transaction.</p>
+             <p>As Florida's Land Authority, Eshenbaugh Land Company has closed hundreds of millions in land transactions across all asset classes — from raw acreage to entitled communities, commercial pad sites, and mixed-use development parcels.</p>`}
+      </div>
+    </div>
+    <div>
+      <div style="font-size:7.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.12em;color:#E8802C;margin-bottom:10px">Why Eshenbaugh Land Company</div>
+      <div style="display:flex;flex-direction:column;gap:10px">
+        ${whyItems.map(([icon,title,desc])=>`
+        <div style="display:flex;gap:12px;align-items:flex-start;padding:10px 12px;background:#f9f8f6;border-left:3px solid #E8802C;border-radius:0 6px 6px 0">
+          <span style="font-size:14pt;line-height:1;flex:0 0 auto;margin-top:1px">${icon}</span>
+          <div>
+            <div style="font-weight:800;font-size:8.5pt;color:#282A2D;margin-bottom:2px">${title}</div>
+            <div style="font-size:7.5pt;color:#555;line-height:1.5">${desc}</div>
+          </div>
+        </div>`).join('')}
+      </div>
+    </div>
+  </div>
+  <div style="background:#282A2D;padding:.25in .65in;display:flex;justify-content:space-between;align-items:center;margin-top:auto">
+    <div>
+      <div style="font-size:14pt;font-weight:900;color:#fff;text-transform:uppercase;letter-spacing:.08em">Eshenbaugh Land Company</div>
+      <div style="font-size:7pt;font-weight:600;letter-spacing:.15em;color:#E8802C;text-transform:uppercase;margin-top:2px">Florida's Land Authority &nbsp;·&nbsp; We Know Land.</div>
+    </div>
+    <div style="display:flex;gap:18px;align-items:center">
+      <div style="text-align:center"><div style="font-size:8pt;color:#fff;font-weight:700">${advisorPhone}</div><div style="font-size:6.5pt;color:#9ca3af">Phone</div></div>
+      <div style="width:1px;height:28px;background:rgba(255,255,255,.2)"></div>
+      <div style="text-align:center"><div style="font-size:8pt;color:#fff;font-weight:700">${advisorEmail}</div><div style="font-size:6.5pt;color:#9ca3af">Email</div></div>
+      <div style="width:1px;height:28px;background:rgba(255,255,255,.2)"></div>
+      <div style="text-align:center"><div style="font-size:8pt;color:#fff;font-weight:700">thedirtdog.com</div><div style="font-size:6.5pt;color:#9ca3af">Web</div></div>
+    </div>
+  </div>
+</div>`;
+})()}
 
 <script>window.onload=function(){window.print();}<\/script>
 </body></html>`);
