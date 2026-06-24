@@ -10437,8 +10437,12 @@ Use ONLY data found via live web search. If a specific field is not found in sea
 
     let data;
     try {
-      // Strip code fences if present
-      const cleaned = raw.replace(/^```json\s*/i,'').replace(/^```\s*/i,'').replace(/```\s*$/,'').trim();
+      // Strip code fences, then sanitize control characters inside JSON string values
+      let cleaned = raw.replace(/^```json\s*/i,'').replace(/^```\s*/i,'').replace(/```\s*$/,'').trim();
+      // Replace literal control chars (newlines, tabs, etc.) inside JSON strings with escaped versions
+      cleaned = cleaned.replace(/"((?:[^"\\]|\\.)*)"/gs, (match, inner) =>
+        '"' + inner.replace(/\n/g,'\\n').replace(/\r/g,'\\r').replace(/\t/g,'\\t').replace(/[\x00-\x1f\x7f]/g, c => '\\u'+c.charCodeAt(0).toString(16).padStart(4,'0')) + '"'
+      );
       data = JSON.parse(cleaned);
     } catch(pe){
       console.warn('[valuation] JSON parse failed, trying to extract:', pe);
@@ -11010,7 +11014,10 @@ Also provide a detailed submarket narrative and 6-8 key metrics a land investor 
   try {
     const raw = await _valCallAI(userMsg, sys);
     if(!raw) throw new Error('No response');
-    const cleaned = raw.replace(/^```json\s*/i,'').replace(/^```\s*/i,'').replace(/```\s*$/,'').trim();
+    let cleaned = raw.replace(/^```json\s*/i,'').replace(/^```\s*/i,'').replace(/```\s*$/,'').trim();
+    cleaned = cleaned.replace(/"((?:[^"\\]|\\.)*)"/gs, (match, inner) =>
+      '"' + inner.replace(/\n/g,'\\n').replace(/\r/g,'\\r').replace(/\t/g,'\\t').replace(/[\x00-\x1f\x7f]/g, c => '\\u'+c.charCodeAt(0).toString(16).padStart(4,'0')) + '"'
+    );
     try { omData = JSON.parse(cleaned); }
     catch(e){ const m=raw.match(/\{[\s\S]*\}/); if(m) omData=JSON.parse(m[0]); else throw e; }
   } catch(err){
