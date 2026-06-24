@@ -2551,6 +2551,111 @@ async function _prGeocode(addr){
       tractName:tract.NAME||'',countyFips:cnty.GEOID||'',countyName:cnty.NAME||''};
   }catch(e){return null;}
 }
+// ── Direct Property Appraiser API calls (no AI, no scraping) ─────────────────
+// Returns normalized {owner,parcelId,siteAddress,mailingAddress,acreage,landUse,
+//   marketValue,assessedValue,legalDescription,taxDistrict,salesHistory,structures,pin}
+// or null if county not supported / fetch fails.
+
+async function _prPA_Hillsborough(address, parcelId){
+  try {
+    // Step 1: BasicSearch to get PIN (required for detail call)
+    const query = parcelId
+      ? encodeURIComponent(parcelId)
+      : encodeURIComponent(address);
+    const searchParam = parcelId ? `folio=${query}` : `address=${query}`;
+    const sr = await fetch(
+      `https://gis.hcpafl.org/CommonServices/property/search/BasicSearch?${searchParam}&pagesize=1&page=1`,
+      {headers:{'Accept':'application/json'}}
+    );
+    if(!sr.ok) return null;
+    const results = await sr.json();
+    if(!results || results.length === 0) return null;
+    const hit = results[0];
+    const pin = hit.pin;
+    if(!pin) return null;
+
+    // Step 2: ParcelData for full detail using PIN
+    const dr = await fetch(
+      `https://gis.hcpafl.org/CommonServices/property/search/ParcelData?pin=${encodeURIComponent(pin)}`,
+      {headers:{'Accept':'application/json'}}
+    );
+    if(!dr.ok) return null;
+    const d = await dr.json();
+    const pc = d.propertyCard || {};
+
+    // Build mailing address string
+    const ma = d.mailingAddress || {};
+    const mailingStr = [ma.addr1, ma.addr2, ma.city, ma.state, ma.zip].filter(Boolean).join(', ');
+
+    // Market/assessed value — use highest sequence (county roll)
+    const valRow = (d.valueSummary||[]).find(v=>v.taxDist==='County') || (d.valueSummary||[])[0];
+    const marketValue = valRow ? '$'+Number(valRow.marketVal).toLocaleString() : null;
+    const assessedValue = valRow ? '$'+Number(valRow.assessedVal).toLocaleString() : null;
+
+    // Sales history
+    const salesHistory = (d.salesHistory||[]).slice(0,5).map(s=>({
+      date: s.saleDate ? new Date(s.saleDate).toLocaleDateString('en-US') : '—',
+      price: s.salePrice ? '$'+Number(s.salePrice).toLocaleString() : '—',
+      grantor: s.grantor||'—',
+      grantee: s.grantee||'—',
+    }));
+
+    // Structures from buildings array
+    const bldgs = d.buildings||[];
+    const structureDesc = bldgs.length
+      ? bldgs.map(b=>`${b.buildingDescription||'Building'} (${b.heatSqFt||'?'} sq ft, built ${b.yearBuilt||'?'})`).join('; ')
+      : 'No structures / vacant land';
+
+    // Municipality from taxDist
+    const taxDist = d.taxDist || pc.taxDist || {};
+    const municipality = taxDist.description
+      ? (taxDist.description.trim() === 'HILLSBOROUGH' || taxDist.description.trim() === 'UNINCORPORATED'
+          ? 'Hillsborough County (Unincorporated)'
+          : 'City of '+_titleCase(taxDist.description.trim()))
+      : null;
+
+    return {
+      _source: 'HCPAFL_API',
+      _municipality: municipality,  // used to set governing body
+      pin: hit.displayPin || pin,
+      parcelId: hit.displayFolio || pc.displayFolio || null,
+      owner: (d.owner||'').replace(/;\s*$/,'').trim() || null,
+      siteAddress: d.siteAddress || null,
+      mailingAddress: mailingStr || null,
+      acreage: d.acreage ? d.acreage+' acres' : null,
+      landUse: d.landUse ? `${d.landUse.code} — ${d.landUse.description}` : null,
+      legalDescription: pc.legalDescription || null,
+      marketValue,
+      assessedValue,
+      taxDistrict: municipality,
+      structures: structureDesc,
+      salesHistory,
+      // Tax year from certified date
+      taxYear: pc.certified && pc.certified._date ? pc.certified._date.slice(-4) : null,
+    };
+  } catch(e) {
+    console.warn('[_prPA_Hillsborough]', e);
+    return null;
+  }
+}
+
+function _titleCase(str){
+  return str.toLowerCase().replace(/\b\w/g, c=>c.toUpperCase());
+}
+
+// Registry: county name → PA fetcher function
+const _PA_FETCHERS = {
+  'Hillsborough': _prPA_Hillsborough,
+  // Add other counties as their APIs are discovered
+};
+
+// Entry point: fetch PA data for the given county
+async function _fetchCountyPA(county, address, parcelId){
+  const fn = _PA_FETCHERS[county];
+  if(!fn) return null;
+  return fn(address, parcelId);
+}
+
 async function _prFEMA(lat,lon){
   try{
     const r=await fetch(`https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer/28/query?geometry=${lon},${lat}&geometryType=esriGeometryPoint&spatialRel=esriSpatialRelIntersects&outFields=FLD_ZONE,ZONE_SUBTY,SFHA_TF&f=json&distance=100&units=esriSRUnit_Meter&inSR=4326`);
@@ -10494,6 +10599,20 @@ async function _valRun(){
   // Update map
   _valUpdateMap(address || (parcel+' '+county+' County Florida'));
 
+  // ── Direct PA API call (runs in parallel with map geocoding) ──────────────
+  const paApiData = await _fetchCountyPA(county, address, parcel);
+  if(paApiData) {
+    // Municipality from PA record → update deep link if we now have parcel ID
+    if(paApiData.parcelId && !parcel){
+      // Refresh paDeepLink with real parcel ID
+      const cleanFolio = (paApiData.parcelId||'').replace(/[^0-9]/g,'');
+      const paDeepLinkUpdated = `https://www.hcpafl.org/Search/Default.aspx?SearchValue=${cleanFolio}&SearchType=PARCEL`;
+      window._valCtx = window._valCtx || {};
+      window._valCtx.paDeepLink = paDeepLinkUpdated;
+    }
+    console.log('[SiteResearch] PA API confirmed:', paApiData.owner, paApiData.parcelId);
+  }
+
   // Build AI prompt
   const sys = `You are a Florida commercial real estate due diligence analyst with live web search access. The user has provided a property identifier. You MUST search the web to find current, accurate data — do NOT rely on training data for property-specific facts like owner name, assessed value, acreage, prior sales, or zoning. Search the county property appraiser website directly, then FDEP OCULUS, SWFWMD, and Municode. Return ONLY valid JSON — no prose, no code fences, nothing outside the JSON object.
 
@@ -10590,39 +10709,57 @@ Return this exact shape:
   "disclaimer": "This AI-generated report is for preliminary due diligence purposes only. All data should be verified against official county, state, and federal sources before any transaction. Environmental findings require a Phase I ESA by a licensed professional."
 }`;
 
+  // Build confirmed PA data block for AI prompt
+  const paConfirmedBlock = paApiData ? `
+CONFIRMED FROM ${county.toUpperCase()} COUNTY PROPERTY APPRAISER API — do NOT re-search or override these fields:
+- Owner: ${paApiData.owner||'N/A'}
+- Parcel ID / Folio: ${paApiData.parcelId||'N/A'}
+- PIN: ${paApiData.pin||'N/A'}
+- Site Address: ${paApiData.siteAddress||'N/A'}
+- Mailing Address: ${paApiData.mailingAddress||'N/A'}
+- Acreage: ${paApiData.acreage||'N/A'}
+- Land Use Code: ${paApiData.landUse||'N/A'}
+- Market Value: ${paApiData.marketValue||'N/A'}
+- Assessed Value: ${paApiData.assessedValue||'N/A'}
+- Legal Description: ${paApiData.legalDescription||'N/A'}
+- Structures: ${paApiData.structures||'N/A'}
+- Municipality / Tax District: ${paApiData._municipality||'N/A'}
+- Prior Sales: ${paApiData.salesHistory&&paApiData.salesHistory.length ? paApiData.salesHistory.map(s=>s.date+' — '+s.price).join('; ') : 'N/A'}
+Use these exact values in the "property" object verbatim. Do NOT search for them again.
+${paApiData._municipality ? 'The governing body is "'+paApiData._municipality+'" — set z.source to this exact value and search THIS jurisdiction\'s zoning code, not the county\'s.' : ''}
+` : 'PA API not available for '+county+' County. Search '+pa.url+' for: owner, parcel ID, acreage, assessed value, market value, structures, legal description, prior sales.';
+
+  const zoningGuidance = paApiData&&paApiData._municipality&&!paApiData._municipality.toLowerCase().includes('unincorporated')
+    ? 'The property is in '+paApiData._municipality+'. Search that city\'s official zoning/GIS portal for this specific parcel\'s zoning code and Future Land Use. For City of Tampa use https://maps.tampagov.net/tampaatlas/ or https://www.tampagov.net/zoning. Do NOT use county zoning when a city governs.'
+    : 'Search '+county+' County\'s official zoning GIS portal for this parcel\'s zoning code and Future Land Use designation.';
+
   const userMsg = `Research this Florida property for commercial land due diligence:
 County: ${county}
 ${parcel ? 'Parcel ID: '+parcel : ''}
 ${address ? 'Address: '+address : ''}
+Water Management District: ${inSwfwmd ? 'Southwest Florida Water Management District (SWFWMD)' : 'Determine from county location'}
 
-Property Appraiser website for ${county} County: ${pa.url}
-Water Management District applicable: ${inSwfwmd ? 'Southwest Florida Water Management District (SWFWMD)' : 'Determine based on county location'}
+${paConfirmedBlock}
 
-IMPORTANT: Search the web NOW for live data. Follow this exact order:
+YOUR ONLY JOB — search the web for ONLY these remaining fields (PA data above is already confirmed):
 
-1. DETERMINE GOVERNING MUNICIPALITY FIRST. Search the ${county} County Property Appraiser website (${pa.url}) to find the property record. The PA record will show the city/municipality name. If the property is inside an incorporated city (e.g. City of Tampa, City of St. Petersburg, City of Clearwater), that city's zoning code governs — NOT the county's. If unincorporated, the county governs. Set z.source to the exact governing body name (e.g. "City of Tampa" or "Hillsborough County").
+1. ZONING & LAND USE: ${zoningGuidance}
+   Set p.zoning, p.zoningDescription, p.futureYearLandUse, z.code, z.description, z.allowedUses, z.setbacks, z.maxHeight, z.far, z.conditionalUses from actual records found. Never guess.
 
-2. PULL ZONING AND LAND USE FROM THE CORRECT SOURCE. If the property is in an incorporated city, look up zoning and FLU from that city's official zoning/GIS portal or city code — not the county's. Do not guess zoning from county code when a city governs. Set p.zoning, p.zoningDescription, and p.futureYearLandUse from actual records found via search.
+2. FLOOD ZONE: Search FEMA MSC (msc.fema.gov) or NFHL for the specific FIRM flood zone for this address (Zone X, Zone AE, Zone AH, etc.). Include FIRM panel number and effective date if found. Set flood.generalRisk to the actual zone designation found, not a generalization.
 
-3. PROPERTY APPRAISER DATA: Get current owner, acreage, assessed value, market value, tax amount, structures, and prior sales from ${pa.url}.
+3. WETLANDS: Search USFWS NWI (fws.gov/wetlands) or county GIS for wetlands ON or within 500 ft of this specific parcel. Report what you actually find — not county-level generalizations.
 
-4. ENVIRONMENTAL: Search FDEP OCULUS for environmental records at the address.
+4. ENVIRONMENTAL: Search FDEP OCULUS and EPA EnviroFacts for contamination, LUST tanks, or brownfields at or near this address. Return actual site names and statuses found, or confirm none found.
 
-5. FLOOD ZONE: Search FEMA NFHL, FEMA MSC (msc.fema.gov), or the county flood maps to find the specific FIRM flood zone for THIS parcel (e.g. Zone AE, Zone X, Zone AH, Zone VE). Set flood.generalRisk to the ACTUAL zone found, not a generic statement. If you find the zone in search results, include the FIRM panel number and effective date.
-
-6. WETLANDS: Search the USFWS National Wetlands Inventory or the county's GIS to determine if wetlands are mapped on or near THIS parcel. Do not make a generic county-level statement — search for the specific parcel location.
-
-7. ENVIRONMENTAL: Search FDEP OCULUS and EPA EnviroMapper for contamination sites, LUST (leaking underground storage tanks), or brownfields at or near THIS address. Return actual site names and status if found.
+5. SPECIAL DESIGNATIONS: Search for Opportunity Zone status, CRA boundaries, and overlay districts for this specific parcel.
 
 CRITICAL RULES:
-- NEVER return county-level generalizations when parcel-specific data is available via search.
-- NEVER guess flood zones, wetland presence, or contamination. Search for it specifically.
-- NEVER say "typical for this county" — look up THIS property.
-- If a field truly cannot be found after searching, set it to "Not found via web search — verify at [specific URL]".
+- Use the confirmed PA data above exactly as provided. Do NOT override it with search results.
+- NEVER guess or generalize. If a field is not found after searching, set it to "Not found via web search — verify at [specific URL]".
+- NEVER say "typical for this county/region" for flood zone or wetlands — look up this specific parcel.
 
-DO NOT generate URLs for municodeUrl, fdepOculusUrl, permitSearchUrl, femaUrl, nwiUrl, or topoUrl — those fields will be overridden by hardcoded values. Focus all effort on finding property-specific data.
-
-Use ONLY data found via live web search. The current year is ${new Date().getFullYear()} — use current assessment data only.`;
+DO NOT generate values for municodeUrl, fdepOculusUrl, permitSearchUrl, femaUrl, nwiUrl, or topoUrl — those are overridden. Current year: ${new Date().getFullYear()}.`;
 
   try {
     const raw = await _valCallAI(userMsg, sys);
@@ -10643,6 +10780,29 @@ Use ONLY data found via live web search. The current year is ${new Date().getFul
       const m = raw.match(/\{[\s\S]*\}/);
       if(m){ data = JSON.parse(m[0]); }
       else { throw new Error('AI returned non-JSON response.'); }
+    }
+
+    // ── Merge confirmed PA API data over AI response (API data always wins) ──
+    if(paApiData) {
+      data.property = data.property || {};
+      if(paApiData.owner)            data.property.owner            = paApiData.owner;
+      if(paApiData.parcelId)         data.property.parcelId         = paApiData.parcelId;
+      if(paApiData.siteAddress)      data.property.siteAddress      = paApiData.siteAddress;
+      if(paApiData.mailingAddress)   data.property.mailingAddress   = paApiData.mailingAddress;
+      if(paApiData.acreage)          data.property.acreage          = paApiData.acreage;
+      if(paApiData.marketValue)      data.property.marketValue      = paApiData.marketValue;
+      if(paApiData.assessedValue)    data.property.assessedValue    = paApiData.assessedValue;
+      if(paApiData.legalDescription) data.property.legalDescription = paApiData.legalDescription;
+      if(paApiData.structures)       data.property.structures       = paApiData.structures;
+      if(paApiData.salesHistory&&paApiData.salesHistory.length) data.property.priorSales = paApiData.salesHistory;
+      if(paApiData.taxYear)          data.property.taxYear          = paApiData.taxYear;
+      if(paApiData.landUse)          data.property.notes = (data.property.notes||'') + ' | PA Land Use: '+paApiData.landUse;
+      if(paApiData._municipality) {
+        data.zoning = data.zoning || {};
+        if(!data.zoning.source || data.zoning.source.toLowerCase().includes('not found')) {
+          data.zoning.source = paApiData._municipality;
+        }
+      }
     }
 
     // Stash URL vars so _valRenderResults (separate scope) can access them
