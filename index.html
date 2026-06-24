@@ -10100,9 +10100,10 @@ function _valClearAlt(){
 }
 window._valClearAlt = _valClearAlt;
 
-// Direct Gemini call for valuation — bypasses callAIAssistant's 1024-token cap
-// and adds thinkingBudget:0 so Gemini 2.5 Flash returns text not blank thinking output.
-async function _valCallAI(userText, systemPrompt){
+// Direct Gemini call for valuation — uses Google Search grounding for live data,
+// bypasses callAIAssistant's 1024-token cap, and sets thinkingBudget low so
+// Gemini 2.5 Flash doesn't burn output tokens on internal reasoning.
+async function _valCallAI(userText, systemPrompt, useSearch=true){
   const proxyUrl = APP_CONFIG.ai?.geminiProxyUrl || '';
   const cfgKey   = APP_CONFIG.ai?.geminiKey || '';
   const payload = {
@@ -10110,9 +10111,11 @@ async function _valCallAI(userText, systemPrompt){
     contents: [{role:'user', parts:[{text: userText}]}],
     generationConfig: {
       maxOutputTokens: 8192,
-      temperature: 0.2,
-      thinkingConfig: { thinkingBudget: 0 },
+      temperature: 0.1,
+      thinkingConfig: { thinkingBudget: useSearch ? 512 : 0 },
     },
+    // Google Search grounding — Gemini searches the live web before answering
+    tools: useSearch ? [{ googleSearch: {} }] : [],
   };
   let resp;
   if(proxyUrl){
@@ -10127,14 +10130,23 @@ async function _valCallAI(userText, systemPrompt){
     resp = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key='+encodeURIComponent(key),
       {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(payload)});
   }
-  if(!resp.ok){ const t=await resp.text().catch(()=>''); throw new Error('AI error '+resp.status+': '+t.slice(0,200)); }
+  if(!resp.ok){
+    const t=await resp.text().catch(()=>'');
+    // If grounding is blocked (e.g. proxy doesn't support tools), retry without search
+    if(useSearch && (resp.status===400||resp.status===422)){
+      console.warn('[valCallAI] Search grounding failed, retrying without grounding');
+      return _valCallAI(userText, systemPrompt, false);
+    }
+    throw new Error('AI error '+resp.status+': '+t.slice(0,200));
+  }
   const json = await resp.json();
   // Handle both proxy-wrapped and raw Gemini response shapes
   if(json.reply) return json.reply;
   const cand = json.candidates?.[0];
   if(!cand) throw new Error('Empty AI response');
   if(cand.finishReason==='SAFETY') throw new Error('AI response blocked by safety filter');
-  return cand.content?.parts?.map(p=>p.text||'').join('') || '';
+  // Extract text parts only (skip grounding metadata parts)
+  return cand.content?.parts?.filter(p=>p.text).map(p=>p.text).join('') || '';
 }
 window._valCallAI = _valCallAI;
 
@@ -10199,7 +10211,7 @@ async function _valRun(){
   _valUpdateMap(address || (parcel+' '+county+' County Florida'));
 
   // Build AI prompt
-  const sys = `You are a Florida commercial real estate due diligence analyst. The user has provided a property identifier and you must return a structured JSON research report. Use your knowledge of Florida property records, environmental databases, wetland mapping, and municipal codes. Return ONLY valid JSON — no prose, no code fences, nothing outside the JSON object.
+  const sys = `You are a Florida commercial real estate due diligence analyst with live web search access. The user has provided a property identifier. You MUST search the web to find current, accurate data — do NOT rely on training data for property-specific facts like owner name, assessed value, acreage, prior sales, or zoning. Search the county property appraiser website directly, then FDEP OCULUS, SWFWMD, and Municode. Return ONLY valid JSON — no prose, no code fences, nothing outside the JSON object.
 
 Return this exact shape:
 {
@@ -10302,7 +10314,7 @@ ${address ? 'Address: '+address : ''}
 Property Appraiser website for ${county} County: ${pa.url}
 Water Management District applicable: ${inSwfwmd ? 'Southwest Florida Water Management District (SWFWMD)' : 'Determine based on county location'}
 
-Please fill in as much as you can from your knowledge. For data you cannot determine without live record access, say so clearly in the relevant field rather than guessing. For the Municode URL, research the correct slug for ${county} County Florida.`;
+IMPORTANT: Search the web NOW for live data. Start with the ${county} County Property Appraiser website (${pa.url}) to get the current owner, acreage, zoning, assessed value, market value, tax amount, structures, and prior sales. Then search FDEP OCULUS for environmental records. Then search SWFWMD or the correct WMD for permits. Then find the correct Municode URL for ${county} County Florida. Use ONLY data you find via live search — if a field is not found in search results, set it to "Not found in public records" rather than guessing.`;
 
   try {
     const raw = await _valCallAI(userMsg, sys);
