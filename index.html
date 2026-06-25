@@ -2965,8 +2965,117 @@ async function _prPA_Volusia(address, parcelId){
   } catch(e){ console.warn('[_prPA_Volusia]',e); return null; }
 }
 
-// Registry: county name → PA fetcher function
-// Supported: Hillsborough, Pinellas, Manatee, Orange, Osceola, Brevard, Seminole, Volusia
+
+// ── Putnam County PA (pamap.putnam-fl.gov — ArcGIS FeatureServer) ─────────────
+async function _prPA_Putnam(address, parcelId){
+  try {
+    const base = 'https://pamap.putnam-fl.gov/server/rest/services/CadastralData/FeatureServer/3/query';
+    const where = parcelId
+      ? `PARID='${parcelId}'`
+      : `UPPER(SITEADDRESS) LIKE UPPER('%${address.replace(/'/g,"''")}%')`;
+    const url = `${base}?where=${encodeURIComponent(where)}&outFields=*&resultRecordCount=1&f=json`;
+    const r = await fetch(url, {headers:{'Accept':'application/json'}});
+    if(!r.ok) return null;
+    const d = await r.json();
+    const feat = (d.features||[])[0];
+    if(!feat) return null;
+    const a = feat.attributes;
+    return {
+      _source: 'PUTNAM_ARCGIS',
+      _municipality: null,
+      pin: null,
+      parcelId: a.PARID||null,
+      owner: a.OWNER||null,
+      siteAddress: a.SITEADDRESS||null,
+      mailingAddress: null,
+      acreage: a.ACREAGE ? a.ACREAGE+' acres' : null,
+      landUse: null,
+      legalDescription: null,
+      marketValue: a.TOTALVAL ? '$'+Number(a.TOTALVAL).toLocaleString() : null,
+      assessedValue: null,
+      taxDistrict: null,
+      structures: null,
+      salesHistory: [],
+      taxYear: null,
+    };
+  } catch(e){ console.warn('[_prPA_Putnam]',e); return null; }
+}
+
+// ── Florida Statewide ArcGIS Parcel Layer (FDOR annual rollup, CORS: open) ────
+// Covers all 67 counties. Used as fallback when no native API exists.
+// Source: FDOR NAL (National Assessors List) — refreshed annually.
+// Fields: PARCEL_ID, OWN_NAME, PHY_ADDR1, PHY_CITY, JV (market), Acres, S_LEGAL,
+//         SALE_PRC1, SALE_YR1, TOT_LVG_AR, EFF_YR_BLT, CountyName, LND_VAL
+async function _prPA_FL_Statewide(county, address, parcelId){
+  try {
+    const base = 'https://services5.arcgis.com/GcvM6vDlR2gM4x31/arcgis/rest/services/FL_Parcels/FeatureServer/0/query';
+    const fields = 'PARCEL_ID,OWN_NAME,OWN_ADDR1,OWN_ADDR2,PHY_ADDR1,PHY_CITY,PHY_ZIPCD,JV,LND_VAL,Acres,S_LEGAL,SALE_PRC1,SALE_YR1,SALE_PRC2,SALE_YR2,TOT_LVG_AR,EFF_YR_BLT,ACT_YR_BLT,DOR_UC,CountyName,NBRHD,MUN';
+
+    let where;
+    if(parcelId){
+      where = `PARCEL_ID='${parcelId.replace(/'/g,"''")}' AND CountyName='${county}'`;
+    } else {
+      // Parse address into number + street for better matching
+      const addrM = (address||'').trim().match(/^(\d+)\s+(.+)/);
+      if(addrM) {
+        const num = addrM[1];
+        // Take first 2 meaningful words of street to avoid direction/type mismatches
+        const streetParts = addrM[2].trim().split(/\s+/).slice(0,2).join(' ').replace(/'/g,"''");
+        where = `CountyName='${county}' AND PHY_ADDR1 LIKE '${num} %${streetParts}%'`;
+      } else {
+        where = `CountyName='${county}' AND PHY_ADDR1 LIKE '%${(address||'').replace(/'/g,"''")}%'`;
+      }
+    }
+
+    const url = `${base}?where=${encodeURIComponent(where)}&outFields=${encodeURIComponent(fields)}&resultRecordCount=1&f=json`;
+    const r = await fetch(url, {headers:{'Accept':'application/json'}});
+    if(!r.ok) return null;
+    const d = await r.json();
+    const feat = (d.features||[])[0];
+    if(!feat) return null;
+    const a = feat.attributes;
+
+    const mailingStr = [a.OWN_ADDR1, a.OWN_ADDR2].filter(Boolean).join(', ');
+
+    // Municipality from MUN field
+    const mun = a.MUN ? _titleCase((a.MUN||'').trim()) : null;
+    const muniResolved = mun && mun.length > 1
+      ? (mun.toLowerCase().includes('uninc') || mun === county ? county+' (Unincorporated)' : 'City of '+mun)
+      : null;
+
+    const salesHistory = [];
+    if(a.SALE_YR1 && a.SALE_PRC1) salesHistory.push({date: a.SALE_YR1, price:'$'+Number(a.SALE_PRC1).toLocaleString(), grantor:'—', grantee:'—'});
+    if(a.SALE_YR2 && a.SALE_PRC2) salesHistory.push({date: a.SALE_YR2, price:'$'+Number(a.SALE_PRC2).toLocaleString(), grantor:'—', grantee:'—'});
+
+    const hasBldg = a.TOT_LVG_AR || a.EFF_YR_BLT || a.ACT_YR_BLT;
+    const structures = hasBldg
+      ? `${a.TOT_LVG_AR ? a.TOT_LVG_AR+' sq ft living area' : ''} ${a.ACT_YR_BLT||a.EFF_YR_BLT ? '(built '+(a.ACT_YR_BLT||a.EFF_YR_BLT)+')' : ''}`.trim()
+      : 'No structures / vacant land';
+
+    return {
+      _source: 'FL_STATEWIDE_ARCGIS',
+      _sourceNote: 'FDOR annual rollup — not real-time PA data',
+      _municipality: muniResolved,
+      pin: null,
+      parcelId: a.PARCEL_ID||null,
+      owner: a.OWN_NAME||null,
+      siteAddress: a.PHY_ADDR1 ? [a.PHY_ADDR1, a.PHY_CITY, 'FL', a.PHY_ZIPCD].filter(Boolean).join(', ') : null,
+      mailingAddress: mailingStr||null,
+      acreage: a.Acres ? Number(a.Acres).toFixed(2)+' acres' : null,
+      landUse: a.DOR_UC ? 'DOR Code '+a.DOR_UC : null,
+      legalDescription: a.S_LEGAL||null,
+      marketValue: a.JV ? '$'+Number(a.JV).toLocaleString() : null,
+      assessedValue: null,
+      taxDistrict: mun,
+      structures,
+      salesHistory,
+      taxYear: null,
+    };
+  } catch(e){ console.warn('[_prPA_FL_Statewide]',e); return null; }
+}
+
+// Registry: county name → native PA API fetcher
+// Counties not listed fall back to _prPA_FL_Statewide (FDOR ArcGIS, all 67 counties)
 const _PA_FETCHERS = {
   'Hillsborough': _prPA_Hillsborough,
   'Pinellas':     _prPA_Pinellas,
@@ -2976,14 +3085,95 @@ const _PA_FETCHERS = {
   'Brevard':      _prPA_Brevard,
   'Seminole':     _prPA_Seminole,
   'Volusia':      _prPA_Volusia,
-  // Pasco, Polk, Lake, Sarasota: no public JSON API available
+  'Putnam':       _prPA_Putnam,
 };
 
-// Entry point: fetch PA data for the given county
+// Map dashboard county names → CountyName values used in the FL statewide ArcGIS layer
+// Most match exactly; a few differ (e.g. "St. Johns" vs "St Johns")
+const _FL_STATEWIDE_COUNTY_MAP = {
+  'St. Johns':    'St Johns',
+  'St. Lucie':    'St Lucie',
+  'Miami-Dade':   'Miami-Dade',
+  'Palm Beach':   'Palm Beach',
+  'Indian River': 'Indian River',
+  'Santa Rosa':   'Santa Rosa',
+  'Bay':          'Bay',
+  'Alachua':      'Alachua',
+  'Brevard':      'Brevard',
+  'Broward':      'Broward',
+  'Charlotte':    'Charlotte',
+  'Citrus':       'Citrus',
+  'Clay':         'Clay',
+  'Collier':      'Collier',
+  'Columbia':     'Columbia',
+  'DeSoto':       'DeSoto',
+  'Dixie':        'Dixie',
+  'Duval':        'Duval',
+  'Escambia':     'Escambia',
+  'Flagler':      'Flagler',
+  'Franklin':     'Franklin',
+  'Gadsden':      'Gadsden',
+  'Gilchrist':    'Gilchrist',
+  'Glades':       'Glades',
+  'Gulf':         'Gulf',
+  'Hamilton':     'Hamilton',
+  'Hardee':       'Hardee',
+  'Hendry':       'Hendry',
+  'Hernando':     'Hernando',
+  'Highlands':    'Highlands',
+  'Hillsborough': 'Hillsborough',
+  'Holmes':       'Holmes',
+  'Jackson':      'Jackson',
+  'Jefferson':    'Jefferson',
+  'Lafayette':    'Lafayette',
+  'Lake':         'Lake',
+  'Lee':          'Lee',
+  'Leon':         'Leon',
+  'Levy':         'Levy',
+  'Liberty':      'Liberty',
+  'Madison':      'Madison',
+  'Manatee':      'Manatee',
+  'Marion':       'Marion',
+  'Martin':       'Martin',
+  'Monroe':       'Monroe',
+  'Nassau':       'Nassau',
+  'Okaloosa':     'Okaloosa',
+  'Okeechobee':   'Okeechobee',
+  'Orange':       'Orange',
+  'Osceola':      'Osceola',
+  'Palm Beach':   'Palm Beach',
+  'Pasco':        'Pasco',
+  'Pinellas':     'Pinellas',
+  'Polk':         'Polk',
+  'Putnam':       'Putnam',
+  'Sarasota':     'Sarasota',
+  'Seminole':     'Seminole',
+  'Sumter':       'Sumter',
+  'Suwannee':     'Suwannee',
+  'Taylor':       'Taylor',
+  'Union':        'Union',
+  'Volusia':      'Volusia',
+  'Wakulla':      'Wakulla',
+  'Walton':       'Walton',
+  'Washington':   'Washington',
+  'Bradford':     'Bradford',
+  'Baker':        'Baker',
+  'Calhoun':      'Calhoun',
+};
+
+// Entry point: fetch PA data for the given county.
+// Tries the native API first; falls back to FL statewide ArcGIS layer for unregistered counties.
 async function _fetchCountyPA(county, address, parcelId){
-  const fn = _PA_FETCHERS[county];
-  if(!fn) return null;
-  return fn(address, parcelId);
+  const nativeFn = _PA_FETCHERS[county];
+  if(nativeFn){
+    const result = await nativeFn(address, parcelId);
+    if(result) return result;
+    // Native API returned null — fall through to statewide
+    console.warn('[PA] Native API failed for '+county+', trying statewide fallback');
+  }
+  // Statewide FDOR ArcGIS fallback (all 67 FL counties, CORS open)
+  const arcgisCounty = _FL_STATEWIDE_COUNTY_MAP[county] || county;
+  return _prPA_FL_Statewide(arcgisCounty, address, parcelId);
 }
 
 async function _prFEMA(lat,lon){
@@ -11127,6 +11317,9 @@ DO NOT generate values for municodeUrl, fdepOculusUrl, permitSearchUrl, femaUrl,
       if(paApiData.salesHistory&&paApiData.salesHistory.length) data.property.priorSales = paApiData.salesHistory;
       if(paApiData.taxYear)          data.property.taxYear          = paApiData.taxYear;
       if(paApiData.landUse)          data.property.notes = (data.property.notes||'') + ' | PA Land Use: '+paApiData.landUse;
+      if(paApiData._source==='FL_STATEWIDE_ARCGIS'){
+        data.property.notes = (data.property.notes||'') + ' | Source: FDOR statewide parcel layer (annual rollup — verify current values at county PA website)';
+      }
       if(paApiData._municipality) {
         data.zoning = data.zoning || {};
         if(!data.zoning.source || data.zoning.source.toLowerCase().includes('not found')) {
@@ -20543,8 +20736,8 @@ window._execManualMergeContacts = async () => {
 };
 
 // ── CRM Outreach Imports (updated nightly by daily-crm-outreach-sync task) ──
-const _CRM_OUTREACH_SYNC_DATE = '2026-06-24';
-const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-06-23_0","emailDate":"2026-06-23","emailSubject":"Brandon Apt Site","attachmentNames":["OM Brandon Apts.pdf"],"recipientEmail":"FabbriT@richmancapital.com","recipientName":"Todd Fabbri","recipientFirstName":"Todd","recipientLastName":"Fabbri","companyName":"Richman Capital","propertyHint":"Brandon Apts","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-06-23_1","emailDate":"2026-06-23","emailSubject":"Hillsborough Opportunities - Onda","attachmentNames":["OM Brandon Apts Draft.pdf","OM - South Creek Commercial.pdf","OM 19th Williams 3.14.25.pdf"],"recipientEmail":"jpawluk@ondagrp.com","recipientName":"Johnathan Pawluk","recipientFirstName":"Johnathan","recipientLastName":"Pawluk","companyName":"Onda","propertyHint":"Hillsborough","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-06-23_2","emailDate":"2026-06-23","emailSubject":"Hillsborough Opportunities - Onda","attachmentNames":["OM Brandon Apts Draft.pdf","OM - South Creek Commercial.pdf","OM 19th Williams 3.14.25.pdf"],"recipientEmail":"acquisitions@ondagrp.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Onda","propertyHint":"Hillsborough","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-06-23_3","emailDate":"2026-06-23","emailSubject":"4.7 Acre Pinellas Site","attachmentNames":["Pinellas Industrial Site.pdf"],"recipientEmail":"chad.baldwin@streamrealty.com","recipientName":"Chad Baldwin","recipientFirstName":"Chad","recipientLastName":"Baldwin","companyName":"Stream Realty","propertyHint":"Pinellas","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-06-23_4","emailDate":"2026-06-23","emailSubject":"4.7 Acre Pinellas Site","attachmentNames":["Pinellas Industrial Site.pdf"],"recipientEmail":"clay.golden@streamrealty.com","recipientName":"Clay Golden","recipientFirstName":"Clay","recipientLastName":"Golden","companyName":"Stream Realty","propertyHint":"Pinellas","matchedDealId":null,"imported":false,"skipped":false}];
+const _CRM_OUTREACH_SYNC_DATE = '2026-06-25';
+const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-06-24_0","emailDate":"2026-06-24","emailSubject":"This is the one they sent back","attachmentNames":["Kenton Pointe LOI v2.pdf"],"recipientEmail":"zrecon2@gmail.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"","propertyHint":"Kenton Pointe","matchedDealId":null,"imported":false,"skipped":false}];
 
 // ── Gmail Sync ───────────────────────────────────────────────────────
 let _GMAIL_SYNC_DATE;  // set at runtime by crmGmailSync; blank = never synced this session
