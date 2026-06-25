@@ -2643,10 +2643,340 @@ function _titleCase(str){
   return str.toLowerCase().replace(/\b\w/g, c=>c.toUpperCase());
 }
 
+
+// ── Pinellas County PA (pcpao.gov) ───────────────────────────────────────────
+async function _prPA_Pinellas(address, parcelId){
+  try {
+    const input = parcelId || address;
+    const option = parcelId ? 'parcel' : 'address';
+    const sr = await fetch('https://www.pcpao.gov/dal/quicksearch/homeSearch', {
+      method: 'POST',
+      headers: {'Content-Type':'application/x-www-form-urlencoded','Accept':'application/json'},
+      body: 'input='+encodeURIComponent(input)+'&option='+option
+    });
+    if(!sr.ok) return null;
+    const results = await sr.json();
+    if(!results||!results.length) return null;
+    const hit = results[0];
+    // hit: {name, s, pn, sa, l}
+    const siteAddress = hit.sa || null;
+    const owner = hit.name || null;
+    const folioId = hit.pn || null;  // formatted parcel number
+    const sNum = hit.s || null;      // numeric s-value for detail URL
+
+    // Pinellas detail is HTML-only — scrape key fields from property page
+    let acreage = null, marketValue = null, assessedValue = null, legalDesc = null;
+    if(sNum) {
+      try {
+        const dr = await fetch('https://www.pcpao.gov/property-details?s='+sNum, {headers:{'Accept':'text/html'}});
+        const html = await dr.text();
+        const acres = html.match(/(\d+\.\d+)\s*(?:Acres|acres)/);
+        if(acres) acreage = acres[1]+' acres';
+        const mkt = html.match(/Just Market Value[^$]*\$([\d,]+)/i);
+        if(mkt) marketValue = '$'+mkt[1];
+        const asd = html.match(/Assessed Value[^$]*\$([\d,]+)/i);
+        if(asd) assessedValue = '$'+asd[1];
+        const legal = html.match(/Legal Description[^<]*<[^>]+>([^<]{10,200})</i);
+        if(legal) legalDesc = legal[1].trim();
+      } catch(e){}
+    }
+
+    return {
+      _source: 'PCPAO_API',
+      _municipality: null,  // Pinellas doesn't return taxDist — AI determines from city
+      pin: sNum,
+      parcelId: folioId,
+      owner,
+      siteAddress,
+      mailingAddress: null,
+      acreage,
+      landUse: null,
+      legalDescription: legalDesc,
+      marketValue,
+      assessedValue,
+      taxDistrict: null,
+      structures: null,
+      salesHistory: [],
+      taxYear: null,
+    };
+  } catch(e){ console.warn('[_prPA_Pinellas]',e); return null; }
+}
+
+// ── Manatee County PA (manateepao.gov — ArcGIS REST) ─────────────────────────
+async function _prPA_Manatee(address, parcelId){
+  try {
+    const base = 'https://gis.manateepao.gov/arcgis/rest/services/Website/WebLayers/MapServer/0/query';
+    const where = parcelId
+      ? `PARID='${parcelId}'`
+      : `UPPER(SITUS_ADDRESS) LIKE UPPER('%${address}%')`;
+    const fields = 'PARID,PAR_OWNER_NAME1,PAR_OWNER_NAME2,SITUS_ADDRESS,CER_JUST_VALUE,LAND_ACREAGE_CAMA,CER_TAXABLE_CTY,SALE_DATE_LQ,SALE_PRICE_LQ,TAXPARCELTYPE,PAR_NBHD_NAME,LEGAL_LINES,MAILING_ADDRESS,MAILING_CITY,MAILING_STATE,MAILING_ZIP,MUN_NAME';
+    const url = `${base}?where=${encodeURIComponent(where)}&outFields=${encodeURIComponent(fields)}&resultRecordCount=1&f=json`;
+    const r = await fetch(url, {headers:{'Accept':'application/json'}});
+    if(!r.ok) return null;
+    const d = await r.json();
+    const feat = (d.features||[])[0];
+    if(!feat) return null;
+    const a = feat.attributes;
+
+    const municipality = a.MUN_NAME ? _titleCase(a.MUN_NAME.trim()) : null;
+    const mailingStr = [a.MAILING_ADDRESS, a.MAILING_CITY, a.MAILING_STATE, a.MAILING_ZIP].filter(Boolean).join(', ');
+    const saleDate = a.SALE_DATE_LQ ? new Date(a.SALE_DATE_LQ).toLocaleDateString('en-US') : null;
+
+    return {
+      _source: 'MANATEE_ARCGIS',
+      _municipality: municipality ? (municipality.toLowerCase().includes('uninc')||municipality.toLowerCase().includes('county') ? 'Manatee County (Unincorporated)' : 'City of '+municipality) : null,
+      pin: null,
+      parcelId: a.PARID || null,
+      owner: [a.PAR_OWNER_NAME1, a.PAR_OWNER_NAME2].filter(Boolean).join('; ') || null,
+      siteAddress: a.SITUS_ADDRESS || null,
+      mailingAddress: mailingStr || null,
+      acreage: a.LAND_ACREAGE_CAMA ? a.LAND_ACREAGE_CAMA+' acres' : null,
+      landUse: a.TAXPARCELTYPE || null,
+      legalDescription: a.LEGAL_LINES || null,
+      marketValue: a.CER_JUST_VALUE ? '$'+Number(a.CER_JUST_VALUE).toLocaleString() : null,
+      assessedValue: a.CER_TAXABLE_CTY ? '$'+Number(a.CER_TAXABLE_CTY).toLocaleString() : null,
+      taxDistrict: municipality,
+      structures: null,
+      salesHistory: saleDate ? [{date:saleDate, price:a.SALE_PRICE_LQ?'$'+Number(a.SALE_PRICE_LQ).toLocaleString():'—', grantor:'—', grantee:'—'}] : [],
+      taxYear: null,
+    };
+  } catch(e){ console.warn('[_prPA_Manatee]',e); return null; }
+}
+
+// ── Orange County PA (ocpafl.org — Azure CDN REST) ───────────────────────────
+async function _prPA_Orange(address, parcelId){
+  try {
+    const base = 'https://ocpa-mainsite-afd-standard.azurefd.net/api';
+    // Search
+    const sq = parcelId ? `parcelId=${encodeURIComponent(parcelId)}` : `address=${encodeURIComponent(address)}&page=1&size=1&sortBy=ParcelID&sortDir=ASC`;
+    const sr = await fetch(`${base}/QuickSearch/GetSearchInfoByAddress?${sq}`, {headers:{'Accept':'application/json'}});
+    if(!sr.ok) return null;
+    const sdata = await sr.json();
+    const hit = (sdata.propertyInfos||sdata||[])[0] || (Array.isArray(sdata) ? sdata[0] : null);
+    if(!hit) return null;
+    const pid = hit.parcelId || hit.ParcelID;
+    if(!pid) return null;
+
+    // Detail
+    const dr = await fetch(`${base}/PRC/GetPRCGeneralInfo?pid=${encodeURIComponent(pid)}`, {headers:{'Accept':'application/json'}});
+    if(!dr.ok) return null;
+    const d = await dr.json();
+
+    // Values
+    let marketValue = null, assessedValue = null;
+    try {
+      const vr = await fetch(`${base}/PRC/GetPRCPropertyValues?PID=${encodeURIComponent(pid)}&TaxYear=0&ShowAllFlag=1`, {headers:{'Accept':'application/json'}});
+      if(vr.ok){
+        const vdata = await vr.json();
+        const row = (vdata||[])[0] || vdata;
+        if(row){
+          const mkt = row.justValue||row.JustValue||row.marketValue||row.MarketValue;
+          const asd = row.assessedValue||row.AssessedValue;
+          if(mkt) marketValue = '$'+Number(mkt).toLocaleString();
+          if(asd) assessedValue = '$'+Number(asd).toLocaleString();
+        }
+      }
+    } catch(e){}
+
+    const mailingStr = [d.mailAddress, d.mailCity, d.mailState, d.mailZip].filter(Boolean).join(', ');
+    const municipality = d.cityDescription ? _titleCase((d.cityDescription||'').trim()) : null;
+    const muniResolved = municipality && !municipality.toLowerCase().includes('unincorp')
+      ? 'City of '+municipality
+      : 'Orange County (Unincorporated)';
+
+    return {
+      _source: 'OCPA_API',
+      _municipality: muniResolved,
+      pin: pid,
+      parcelId: pid,
+      owner: d.ownerName || hit.ownerName || null,
+      siteAddress: d.propertyAddress || hit.propertyAddress || null,
+      mailingAddress: mailingStr || null,
+      acreage: null,  // not in general info — would need stats endpoint
+      landUse: d.dorDescription ? `${d.dorCode} — ${d.dorDescription}` : null,
+      legalDescription: null,
+      marketValue,
+      assessedValue,
+      taxDistrict: municipality,
+      structures: null,
+      salesHistory: [],
+      taxYear: d.taxYear ? String(d.taxYear) : null,
+    };
+  } catch(e){ console.warn('[_prPA_Orange]',e); return null; }
+}
+
+// ── Osceola County PA (search.property-appraiser.org — OData REST) ────────────
+async function _prPA_Osceola(address, parcelId){
+  try {
+    const base = 'https://search.property-appraiser.org/api/v1/ParcelMarket';
+    const filter = parcelId
+      ? `strap eq '${parcelId}'`
+      : `contains(Situs, '${address.replace(/'/g,"''")}')`;
+    const url = `${base}?$format=json&$top=1&$filter=${encodeURIComponent(filter)}`;
+    const r = await fetch(url, {headers:{'Accept':'application/json'}});
+    if(!r.ok) return null;
+    const d = await r.json();
+    const hit = (d.value||[])[0];
+    if(!hit) return null;
+
+    const municipality = hit.situsCity ? _titleCase((hit.situsCity||'').trim()) : null;
+    const saleDate = hit.dos ? new Date(hit.dos).toLocaleDateString('en-US') : null;
+    const owners = Array.isArray(hit.Owners) ? hit.Owners.map(o=>o.name||o.Name||'').filter(Boolean).join('; ') : (hit.Owners||'');
+    const legals = Array.isArray(hit.Legals) ? hit.Legals.map(l=>l.text||l.Text||'').join(' ') : (hit.Legals||'');
+
+    return {
+      _source: 'OSCEOLA_ODATA',
+      _municipality: municipality ? (municipality.toLowerCase().includes('uninc') ? 'Osceola County (Unincorporated)' : 'City of '+municipality) : null,
+      pin: hit.strap,
+      parcelId: hit.dsp_strap || hit.strap,
+      owner: owners || null,
+      siteAddress: hit.Situs || null,
+      mailingAddress: null,
+      acreage: hit.totalAcres ? hit.totalAcres+' acres' : null,
+      landUse: hit.dorDescription || hit.dorCode || null,
+      legalDescription: legals || null,
+      marketValue: hit.currJustValue ? '$'+Number(hit.currJustValue).toLocaleString() : null,
+      assessedValue: hit.currassessedvalue ? '$'+Number(hit.currassessedvalue).toLocaleString() : null,
+      taxDistrict: municipality,
+      structures: hit.numofbuildings ? `${hit.numofbuildings} building(s), ${hit.grossBldArea||'?'} sq ft gross` : (hit.totalAcres ? 'No structures / vacant land' : null),
+      salesHistory: saleDate ? [{date:saleDate, price:hit.price?'$'+Number(hit.price).toLocaleString():'—', grantor:'—', grantee:'—'}] : [],
+      taxYear: hit.taxyear ? String(hit.taxyear) : null,
+    };
+  } catch(e){ console.warn('[_prPA_Osceola]',e); return null; }
+}
+
+// ── Brevard County PA (bcpao.us — REST API v1) ────────────────────────────────
+async function _prPA_Brevard(address, parcelId){
+  try {
+    const base = 'https://www.bcpao.us/api/v1';
+    // Search
+    const sq = parcelId ? `pid=${encodeURIComponent(parcelId)}` : `address=${encodeURIComponent(address)}&activeonly=true&size=1&page=1`;
+    const sr = await fetch(`${base}/search?${sq}`, {headers:{'Accept':'application/json'}});
+    if(!sr.ok) return null;
+    const sdata = await sr.json();
+    const hit = (sdata.results||[])[0] || (Array.isArray(sdata)?sdata[0]:null);
+    if(!hit) return null;
+    const account = hit.account;
+    if(!account) return null;
+
+    // Detail
+    const dr = await fetch(`${base}/account/${encodeURIComponent(account)}`, {headers:{'Accept':'application/json'}});
+    if(!dr.ok) return null;
+    const d = await dr.json();
+
+    const municipality = d.taxingDistrict||hit.taxingDistrict || null;
+    const mailingStr = d.mailingAddress ? [d.mailingAddress.address1, d.mailingAddress.address2, d.mailingAddress.city, d.mailingAddress.state, d.mailingAddress.zip].filter(Boolean).join(', ') : null;
+    const sales = (d.saleInfo||[]).slice(0,5).map(s=>({
+      date: s.saleDate ? new Date(s.saleDate).toLocaleDateString('en-US') : '—',
+      price: s.salePrice ? '$'+Number(s.salePrice).toLocaleString() : '—',
+      grantor: s.grantor||'—', grantee: s.grantee||'—',
+    }));
+    const bldgDesc = d.totalBuildings
+      ? `${d.totalBuildings} building(s)${d.rollYear?' ('+d.rollYear+' roll)':''}`
+      : 'No structures / vacant land';
+
+    const muniClean = municipality ? _titleCase(municipality.trim()) : null;
+    const muniResolved = muniClean
+      ? (muniClean.toLowerCase().includes('uninc')||muniClean.toLowerCase().includes('county') ? 'Brevard County (Unincorporated)' : 'City of '+muniClean)
+      : null;
+
+    return {
+      _source: 'BCPAO_API',
+      _municipality: muniResolved,
+      pin: d.parcelID||hit.parcelID||null,
+      parcelId: d.parcelID||hit.parcelID||null,
+      owner: (d.owner||hit.owners||'').toString().replace(/;\s*$/,'') || null,
+      siteAddress: d.siteAddress||hit.siteAddress||null,
+      mailingAddress: mailingStr,
+      acreage: d.acreage!=null ? d.acreage+' acres' : (hit.acreage!=null?hit.acreage+' acres':null),
+      landUse: d.landUseCode||hit.landUseCode||null,
+      legalDescription: d.legalDescription||null,
+      marketValue: d.marketValue ? '$'+Number(d.marketValue).toLocaleString() : (hit.marketValue?'$'+Number(hit.marketValue).toLocaleString():null),
+      assessedValue: null,
+      taxDistrict: muniClean,
+      structures: bldgDesc,
+      salesHistory: sales,
+      taxYear: d.rollYear ? String(d.rollYear) : null,
+    };
+  } catch(e){ console.warn('[_prPA_Brevard]',e); return null; }
+}
+
+// ── Seminole County PA (scpafl.org) — stub, API was unreliable during discovery
+async function _prPA_Seminole(address, parcelId){
+  try {
+    const q = parcelId ? `Strap=${encodeURIComponent(parcelId)}&SearchType=0` : `AddressKeywords=${encodeURIComponent(address)}&SearchType=0`;
+    const r = await fetch(`https://www.scpafl.org/propertysearch/api/srch/Results?${q}`, {headers:{'Accept':'application/json'}});
+    if(!r.ok) return null;
+    const d = await r.json();
+    const hit = (d.results||d||[])[0];
+    if(!hit) return null;
+    return {
+      _source: 'SCPAFL_API',
+      _municipality: null,
+      pin: hit.Strap||hit.strap||null,
+      parcelId: hit.Strap||hit.strap||null,
+      owner: hit.OwnerName||hit.ownerName||null,
+      siteAddress: hit.SiteAddress||hit.siteAddress||null,
+      mailingAddress: null,
+      acreage: null,
+      landUse: null,
+      legalDescription: null,
+      marketValue: null,
+      assessedValue: null,
+      taxDistrict: null,
+      structures: null,
+      salesHistory: [],
+      taxYear: null,
+    };
+  } catch(e){ console.warn('[_prPA_Seminole]',e); return null; }
+}
+
+// ── Volusia County PA (vcpa.vcgov.org) — search only, detail is HTML ──────────
+async function _prPA_Volusia(address, parcelId){
+  try {
+    const body = 'draw=1&start=0&length=1&search%5Bvalue%5D='+encodeURIComponent(parcelId||address)+'&search%5Bregex%5D=false';
+    const r = await fetch('https://vcpa.vcgov.org/api/search/real-property', {
+      method:'POST',
+      headers:{'Content-Type':'application/x-www-form-urlencoded','Accept':'application/json'},
+      body
+    });
+    if(!r.ok) return null;
+    const d = await r.json();
+    const hit = (d.data||[])[0];
+    if(!hit) return null;
+    return {
+      _source: 'VCPA_API',
+      _municipality: null,
+      pin: hit.altkey||null,
+      parcelId: hit.parcel||hit.altkey||null,
+      owner: hit.owner||null,
+      siteAddress: hit.street||null,
+      mailingAddress: null,
+      acreage: null,
+      landUse: null,
+      legalDescription: null,
+      marketValue: null,
+      assessedValue: null,
+      taxDistrict: null,
+      structures: null,
+      salesHistory: [],
+      taxYear: null,
+    };
+  } catch(e){ console.warn('[_prPA_Volusia]',e); return null; }
+}
+
 // Registry: county name → PA fetcher function
+// Supported: Hillsborough, Pinellas, Manatee, Orange, Osceola, Brevard, Seminole, Volusia
 const _PA_FETCHERS = {
   'Hillsborough': _prPA_Hillsborough,
-  // Add other counties as their APIs are discovered
+  'Pinellas':     _prPA_Pinellas,
+  'Manatee':      _prPA_Manatee,
+  'Orange':       _prPA_Orange,
+  'Osceola':      _prPA_Osceola,
+  'Brevard':      _prPA_Brevard,
+  'Seminole':     _prPA_Seminole,
+  'Volusia':      _prPA_Volusia,
+  // Pasco, Polk, Lake, Sarasota: no public JSON API available
 };
 
 // Entry point: fetch PA data for the given county
