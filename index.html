@@ -2148,8 +2148,24 @@ async function handleDDAutomation(deal){
       createdBy:currentUser?.uid||'system',createdByName:'Automation',createdAt:Date.now(),
     }).catch(()=>{});
     Store.createTask({
-      title:'Confirm deposit received & title ordered — '+addr,
-      description:'Confirm deposit has been received by escrow agent and title has been ordered.\nSee contract for escrow agent name, phone, email, and address.',
+      title:'Track ALL deposit deadlines — '+addr,
+      description:'Review the PSA and calendar every deposit deadline. For each deposit:\n\n'
+        +'□ Initial deposit: $____  due ____  escrow agent: ____\n'
+        +'□ Additional deposit(s): list each amount and due date below\n'
+        +'   ___________________________________\n'
+        +'   ___________________________________\n\n'
+        +'For EACH deposit deadline:\n'
+        +'1. Create a calendar reminder for the due date\n'
+        +'2. Follow up with buyer 1 day before to confirm wire is going out\n'
+        +'3. Call escrow agent on the due date to confirm receipt\n'
+        +'4. Log confirmation in deal notes',
+      assignedTo:deal.advisorUid,assignedToName:deal.advisorName||deal.advisorEmail,
+      dealId:deal.id,dealAddress:deal.propertyAddress,dueDate:dueDate(1),status:'pending',
+      createdBy:currentUser?.uid||'system',createdByName:'Automation',createdAt:Date.now(),
+    }).catch(()=>{});
+    Store.createTask({
+      title:'Confirm initial deposit received & title ordered — '+addr,
+      description:'Confirm the initial deposit has been received by the escrow agent and title has been ordered.\nSee contract for escrow agent name, phone, email, and address.',
       assignedTo:deal.advisorUid,assignedToName:deal.advisorName||deal.advisorEmail,
       dealId:deal.id,dealAddress:deal.propertyAddress,dueDate:dueDate(3),status:'pending',
       createdBy:currentUser?.uid||'system',createdByName:'Automation',createdAt:Date.now(),
@@ -2264,7 +2280,35 @@ async function handleDDAutomation(deal){
       createdBy:currentUser?.uid||'system',createdByName:'Automation',createdAt:Date.now(),
     });
 
-    // Task 4: Add critical dates to Google Calendar
+    // Tasks 4+: Per-deposit due-date reminders (one "Due" task + one "Confirm" task per deposit)
+    const depositRows=dateRows.filter(r=>/deposit|earnest/i.test(r.item));
+    for(const dep of depositRows){
+      const depDate=dep.date;
+      if(!depDate||depDate==='N/A'||!/^\d{4}-\d{2}-\d{2}$/.test(depDate)) continue;
+      await Store.createTask({
+        title:'⚠️ Deposit Due — '+dep.item+' — '+addr,
+        description:dep.item+' is due on '+depDate+'.\n\n'+(dep.notes?'Amount / Notes: '+dep.notes+'\n\n':'')
+          +'ESCROW AGENT:\n'+(escrowSec||'See contract for escrow agent details.')+'\n\n'
+          +'Action: Confirm the buyer has wired / delivered the deposit to the escrow agent by end of day.',
+        assignedTo:deal.advisorUid,assignedToName:deal.advisorName||deal.advisorEmail,
+        dealId:deal.id,dealAddress:deal.propertyAddress,dueDate:depDate,status:'pending',
+        createdBy:currentUser?.uid||'system',createdByName:'Automation',createdAt:Date.now(),
+      }).catch(e=>console.error('[DD-deposit-due]',e));
+      // Follow-up: confirm deposit received the next business day
+      const confirmDate=(()=>{const d=new Date(depDate+'T12:00:00');d.setDate(d.getDate()+1);return d.toISOString().slice(0,10);})();
+      await Store.createTask({
+        title:'Confirm deposit received by escrow — '+dep.item+' — '+addr,
+        description:'Confirm the escrow agent received the '+dep.item.toLowerCase()+' that was due on '+depDate+'.\n\n'
+          +(dep.notes?'Amount: '+dep.notes+'\n\n':'')
+          +'ESCROW AGENT:\n'+(escrowSec||'See contract for escrow agent details.')+'\n\n'
+          +'Action items:\n- Call or email escrow agent to confirm deposit received\n- Log confirmation in deal notes',
+        assignedTo:deal.advisorUid,assignedToName:deal.advisorName||deal.advisorEmail,
+        dealId:deal.id,dealAddress:deal.propertyAddress,dueDate:confirmDate,status:'pending',
+        createdBy:currentUser?.uid||'system',createdByName:'Automation',createdAt:Date.now(),
+      }).catch(e=>console.error('[DD-deposit-confirm]',e));
+    }
+
+    // Task: Add critical dates to Google Calendar
     const calLinks=dateRows.slice(0,10).map(r=>{
       const parts=(r.date||'').split('-').map(Number);
       if(parts.length<3||!parts[0])return'';
@@ -2295,8 +2339,24 @@ async function handleDDAutomation(deal){
       createdBy:currentUser?.uid||'system',createdByName:'Automation',createdAt:Date.now(),
     }).catch(()=>{});
     Store.createTask({
-      title:'Confirm deposit received & title ordered — '+addr,
-      description:'Confirm deposit has been received by escrow agent and title has been ordered.\nSee contract for escrow agent contact information.',
+      title:'Track ALL deposit deadlines — '+addr,
+      description:'AI contract reading failed — manually review the PSA for every deposit deadline.\n\n'
+        +'□ Initial deposit: $____  due ____  escrow agent: ____\n'
+        +'□ Additional deposit(s): list each amount and due date below\n'
+        +'   ___________________________________\n'
+        +'   ___________________________________\n\n'
+        +'For EACH deposit deadline:\n'
+        +'1. Create a calendar reminder for the due date\n'
+        +'2. Follow up with buyer 1 day before to confirm wire is going out\n'
+        +'3. Call escrow agent on the due date to confirm receipt\n'
+        +'4. Log confirmation in deal notes',
+      assignedTo:deal.advisorUid,assignedToName:deal.advisorName||deal.advisorEmail,
+      dealId:deal.id,dealAddress:deal.propertyAddress,dueDate:dueDate(1),status:'pending',
+      createdBy:currentUser?.uid||'system',createdByName:'Automation',createdAt:Date.now(),
+    }).catch(()=>{});
+    Store.createTask({
+      title:'Confirm initial deposit received & title ordered — '+addr,
+      description:'Confirm the initial deposit has been received by escrow agent and title has been ordered.\nSee contract for escrow agent contact information.',
       assignedTo:deal.advisorUid,assignedToName:deal.advisorName||deal.advisorEmail,
       dealId:deal.id,dealAddress:deal.propertyAddress,dueDate:dueDate(3),status:'pending',
       createdBy:currentUser?.uid||'system',createdByName:'Automation',createdAt:Date.now(),
