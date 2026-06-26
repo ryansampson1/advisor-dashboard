@@ -11348,6 +11348,8 @@ DO NOT generate values for municodeUrl, fdepOculusUrl, permitSearchUrl, femaUrl,
     // Stash URL vars so _valRenderResults (separate scope) can access them
     window._valCtx = { parcel, address, county, pa, paDeepLink, fdepUrl, swfwmdUrl, femaUrl, municodeUrl, addrEncoded, inSwfwmd };
     _valRenderResults(data, pa, inSwfwmd);
+    // Init FEMA flood mini-map after HTML is in the DOM
+    setTimeout(_valInitFloodMinimap, 150);
     // After AI returns, geocoding has had time to complete — rebuild coordinate-sensitive quick links
     _valRefreshCoordLinks(county, pa, paDeepLink, fdepUrl, swfwmdUrl, inSwfwmd, municodeUrl);
 
@@ -11806,17 +11808,10 @@ function _valRenderResults(d, pa, inSwfwmd){
     ${_valCard('🌊','FEMA Flood Zone','#f0f9ff',`
       ${_valRow('General Risk',flood.generalRisk)}
       ${flood.notes?`<div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:7px;padding:.5rem .65rem;font-size:.79rem;line-height:1.6;margin-bottom:.5rem">${flood.notes}</div>`:''}
-      <!-- FEMA NFHL flood zone map via ArcGIS REST -->
+      <!-- FEMA NFHL flood zone map — Leaflet mini-map with live NFHL tiles -->
       <div style="margin:.5rem 0 .4rem;font-size:.75rem;font-weight:600;color:#374151">FEMA Flood Hazard Layer (NFHL) — Live Map</div>
       <div style="position:relative;border-radius:8px;overflow:hidden;border:1px solid #bae6fd;background:#dbeafe">
-        <iframe
-          src="https://hazards.fema.gov/femaportal/wps/portal/NATIONAL_FLOODSEARCH_WFSB?AddressQuery=${addrEncoded}"
-          style="width:100%;height:260px;border:0;display:block"
-          title="FEMA Flood Map"
-          sandbox="allow-scripts allow-same-origin allow-forms"
-          onerror="this.style.display='none'"
-        ></iframe>
-        <!-- Static NFHL tile image fallback — always visible, shows flood zone colors -->
+        <div id="val-flood-minimap" style="width:100%;height:260px"></div>
         <div style="margin-top:4px;font-size:.7rem;color:#6b7280;padding:0 2px">
           Map colors: <span style="background:#6baed6;color:#fff;padding:1px 5px;border-radius:3px;font-size:.67rem">AE/100-yr</span>
           <span style="background:#9ecae1;color:#333;padding:1px 5px;border-radius:3px;font-size:.67rem">AH/AO</span>
@@ -11897,6 +11892,43 @@ function _valRenderResults(d, pa, inSwfwmd){
   `;
 }
 window._valRenderResults = _valRenderResults;
+
+// ── FEMA NFHL flood zone mini-map (Leaflet, initialized after results render) ─
+function _valInitFloodMinimap(){
+  const el = document.getElementById('val-flood-minimap');
+  if(!el) return;
+
+  const latlng = _valMarker ? _valMarker.getLatLng() : null;
+  if(!latlng){
+    el.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#6b7280;font-size:.8rem">Geocoding needed — run search with a full address to see map.</div>';
+    return;
+  }
+
+  if(!window.L){ setTimeout(_valInitFloodMinimap, 400); return; }
+
+  if(el._floodMap){ try{ el._floodMap.remove(); }catch(e){} el._floodMap=null; }
+
+  const fm = L.map(el, {zoomControl:true, attributionControl:false, scrollWheelZoom:false})
+    .setView([latlng.lat, latlng.lng], 15);
+
+  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    {maxZoom:20}).addTo(fm);
+
+  L.tileLayer('https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer/tile/{z}/{y}/{x}',
+    {maxZoom:20, opacity:0.65}).addTo(fm);
+
+  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
+    {maxZoom:20, opacity:0.7}).addTo(fm);
+
+  const icon = L.divIcon({
+    className:'',
+    html:'<div style="width:14px;height:14px;background:#E8802C;border:3px solid #fff;border-radius:50%;box-shadow:0 1px 4px rgba(0,0,0,.5)"></div>',
+    iconSize:[14,14], iconAnchor:[7,7]
+  });
+  L.marker([latlng.lat, latlng.lng], {icon}).addTo(fm);
+  el._floodMap = fm;
+}
+window._valInitFloodMinimap = _valInitFloodMinimap;
 
 // ── PDF Export ─────────────────────────────────────────────────────────────
 function _valExportPDF(){
@@ -20753,8 +20785,8 @@ window._execManualMergeContacts = async () => {
 };
 
 // ── CRM Outreach Imports (updated nightly by daily-crm-outreach-sync task) ──
-const _CRM_OUTREACH_SYNC_DATE = '2026-06-25';
-const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-06-24_0","emailDate":"2026-06-24","emailSubject":"This is the one they sent back","attachmentNames":["Kenton Pointe LOI v2.pdf"],"recipientEmail":"zrecon2@gmail.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"","propertyHint":"Kenton Pointe","matchedDealId":null,"imported":false,"skipped":false}];
+const _CRM_OUTREACH_SYNC_DATE = '2026-06-26';
+const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-06-25_0","emailDate":"2026-06-25","emailSubject":"Brandon Site","attachmentNames":["OM Brandon Apts.pdf"],"recipientEmail":"eteran@mcdhousing.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Mcd Housing","propertyHint":"Brandon Apts","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-06-25_1","emailDate":"2026-06-25","emailSubject":"Brandon Apt Info","attachmentNames":["OM Brandon Apts.pdf","01936.0081 LENOX 2 ALTA UPDATE (SIGNED 11-17-2022).pdf","C3.0 - OA SITE PLAN.pdf"],"recipientEmail":"jlynch1360@gmail.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"","propertyHint":"Brandon Apts","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-06-25_2","emailDate":"2026-06-25","emailSubject":"Brandon Zoning","attachmentNames":["21-1327 ZV Ltr 10-7-21.pdf"],"recipientEmail":"fabbritc@richmancapital.com","recipientName":"Todd Fabbri","recipientFirstName":"Todd","recipientLastName":"Fabbri","companyName":"Richman Capital","propertyHint":"Brandon","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-06-25_3","emailDate":"2026-06-25","emailSubject":"Re: 5416 ROBERT TOLLE DR","attachmentNames":["21-1327 ZV Ltr 10-7-21.pdf"],"recipientEmail":"islavin@portmanholdings.com","recipientName":"Ian Slavin","recipientFirstName":"Ian","recipientLastName":"Slavin","companyName":"Portman Holdings","propertyHint":"Robert Tolle","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-06-25_4","emailDate":"2026-06-25","emailSubject":"Fwd: Kenton Pointe LOI v2.pdf","attachmentNames":["Kenton Pointe LOI v2.pdf"],"recipientEmail":"drew.nelson@pultegroup.com","recipientName":"Drew Nelson","recipientFirstName":"Drew","recipientLastName":"Nelson","companyName":"Pulte Group","propertyHint":"Kenton Pointe","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-06-25_5","emailDate":"2026-06-25","emailSubject":"Fwd: Kenton Pointe LOI v2.pdf","attachmentNames":["Kenton Pointe LOI v2.pdf"],"recipientEmail":"shaun.rogozinski@pultegroup.com","recipientName":"Shaun Rogozinski","recipientFirstName":"Shaun","recipientLastName":"Rogozinski","companyName":"Pulte Group","propertyHint":"Kenton Pointe","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-06-25_6","emailDate":"2026-06-25","emailSubject":"Fwd: Changes to Paulette","attachmentNames":["Kenton Pointe LOI v2.pdf"],"recipientEmail":"drew.nelson@pultegroup.com","recipientName":"Drew Nelson","recipientFirstName":"Drew","recipientLastName":"Nelson","companyName":"Pulte Group","propertyHint":"Kenton Pointe","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-06-25_7","emailDate":"2026-06-25","emailSubject":"Re: Changes to Paulette","attachmentNames":["Kenton Pointe LOI v2.pdf"],"recipientEmail":"zrecon2@gmail.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"","propertyHint":"Kenton Pointe","matchedDealId":null,"imported":false,"skipped":false}];
 
 // ── Gmail Sync ───────────────────────────────────────────────────────
 let _GMAIL_SYNC_DATE;  // set at runtime by crmGmailSync; blank = never synced this session
