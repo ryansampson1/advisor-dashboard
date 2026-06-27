@@ -30112,6 +30112,38 @@ window._buyersSwitchTab = function(id){
   viewBuyers();
 };
 
+// ── Group name → development use synonym table ────────────────────────────────
+function _inferUsesFromGroupName(name){
+  const n = (name||'').toLowerCase();
+  const uses = [];
+  if(/apt|apartment|multifamily|multi.family|multi.fam/.test(n))         uses.push('Apartments / Multifamily');
+  if(/townhome|town.home|townhouse/.test(n))                             uses.push('Townhomes');
+  if(/single.fam|sfr|sfh|single family|homebuilder|home builder/.test(n)) uses.push('Single-Family Homes');
+  if(/\boffice\b/.test(n))                                               uses.push('Office');
+  if(/retail|shopping|strip|outparcel/.test(n))                          uses.push('Retail');
+  if(/hotel|hospit|motel|hospitality/.test(n))                           uses.push('Hotel / Hospitality');
+  if(/storage|self.stor/.test(n))                                        uses.push('Storage / Self-Storage');
+  if(/industr|warehouse|logistics|flex/.test(n))                         uses.push('Industrial / Warehouse');
+  if(/medical|healthcare|health.care|clinic|hospital|medi/.test(n))      uses.push('Medical / Healthcare');
+  if(/mixed.use|mixeduse/.test(n))                                       uses.push('Mixed-Use');
+  if(/data.cent/.test(n))                                                uses.push('Data Center');
+  if(/senior.liv|senior housing|55\+/.test(n))                          uses.push('Senior Living');
+  if(/assisted.liv|alh|alf/.test(n))                                     uses.push('Assisted Living');
+  if(/car.wash/.test(n))                                                  uses.push('Car Wash');
+  if(/gas.stat|c.store|convenience/.test(n))                             uses.push('Gas Station / C-Store');
+  return uses;
+}
+
+function _inferBuyerTypeFromGroupName(name){
+  const n = (name||'').toLowerCase();
+  if(/builder|homebuilder/.test(n))  return 'Builder';
+  if(/broker|agent/.test(n))         return 'Broker / Agent';
+  if(/investor|fund|reit/.test(n))   return 'Investor';
+  if(/owner.user/.test(n))           return 'Owner-User';
+  if(/dev(elop)?/.test(n))           return 'Developer';
+  return '';
+}
+
 // ── MATCH A PROPERTY ─────────────────────────────────────────────────────────
 function _buyersRenderMatch(){
   const p = window._buyersMatchProp || {};
@@ -30136,11 +30168,11 @@ function _buyersRenderMatch(){
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
           <div>
             <div style="font-size:12px;font-weight:600;color:#374151;margin-bottom:4px;">Acres</div>
-            <input id="bm-acres" type="number" placeholder="e.g. 287" value="${p.acres||''}" style="width:100%;padding:7px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;">
+            <input id="bm-acres" type="number" placeholder="e.g. 10" value="${p.acres||''}" style="width:100%;padding:7px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;">
           </div>
           <div>
             <div style="font-size:12px;font-weight:600;color:#374151;margin-bottom:4px;">Asking price ($)</div>
-            <input id="bm-price" type="number" placeholder="e.g. 1800000" value="${p.price||''}" style="width:100%;padding:7px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;">
+            <input id="bm-price" type="number" placeholder="e.g. 3500000" value="${p.price||''}" style="width:100%;padding:7px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;">
           </div>
         </div>
 
@@ -30155,7 +30187,7 @@ function _buyersRenderMatch(){
         </div>
 
         <div>
-          <div style="font-size:12px;font-weight:600;color:#374151;margin-bottom:6px;">Site requirements</div>
+          <div style="font-size:12px;font-weight:600;color:#374151;margin-bottom:6px;">Site characteristics</div>
           <div style="display:flex;flex-wrap:wrap;gap:6px;">
             ${['Already zoned / entitled','Will rezone','Corner lot','Road frontage','Utilities at site','Traffic signal access','Signalized intersection','Infill / in-fill','Flat / graded','No wetlands','High visibility','Interstate access','Near residential density','Pad-ready'].map(t=>`
               <button onclick="window._bmToggleTag(this,'feat')" data-tag="${t}" style="padding:4px 10px;border-radius:20px;font-size:11px;font-weight:600;cursor:pointer;border:1px solid ${(p.features||[]).includes(t)?'#3b82f6':'#d1d5db'};background:${(p.features||[]).includes(t)?'#eff6ff':'#f9fafb'};color:${(p.features||[]).includes(t)?'#1d4ed8':'#6b7280'};">
@@ -30170,8 +30202,8 @@ function _buyersRenderMatch(){
         </div>
 
         <div>
-          <div style="font-size:12px;font-weight:600;color:#374151;margin-bottom:4px;">Additional notes for AI</div>
-          <textarea id="bm-notes" placeholder="e.g. Corner lot at signalized intersection, utilities at site, in path of growth..." rows="3" style="width:100%;padding:7px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;resize:none;line-height:1.5;">${p.notes||''}</textarea>
+          <div style="font-size:12px;font-weight:600;color:#374151;margin-bottom:4px;">Additional notes</div>
+          <textarea id="bm-notes" placeholder="e.g. Corner lot at signalized intersection, utilities at site, path of growth..." rows="3" style="width:100%;padding:7px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;resize:none;line-height:1.5;">${p.notes||''}</textarea>
         </div>
 
       </div>
@@ -30180,16 +30212,34 @@ function _buyersRenderMatch(){
       </button>
     </div>
 
+    <!-- Results + chat panel -->
     <div style="flex:1;display:flex;flex-direction:column;overflow:hidden;">
-      <div style="padding:10px 16px;border-bottom:1px solid #e5e7eb;display:flex;align-items:center;justify-content:space-between;">
+
+      <!-- Results -->
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-bottom:1px solid #e5e7eb;flex-shrink:0;">
         <span style="font-size:11px;font-weight:700;color:#9ca3af;letter-spacing:.06em;text-transform:uppercase;">Matched buyers</span>
         <span id="bm-count" style="font-size:12px;font-weight:600;background:#dcfce7;color:#166534;padding:2px 10px;border-radius:20px;display:none;"></span>
       </div>
-      <div id="bm-results" style="flex:1;overflow-y:auto;padding:12px 16px;">
+      <div id="bm-results" style="flex:1;overflow-y:auto;padding:12px 16px;min-height:0;">
         <div style="color:#9ca3af;font-size:14px;text-align:center;margin-top:60px;">
           Enter property details and click <strong>Find matching buyers</strong> to see who in your database is looking for something similar.
         </div>
       </div>
+
+      <!-- AI Refine Chat -->
+      <div id="bm-chat-panel" style="border-top:1px solid #e5e7eb;display:none;flex-direction:column;max-height:300px;flex-shrink:0;">
+        <div style="padding:8px 14px;background:#f8faff;border-bottom:1px solid #e5e7eb;display:flex;align-items:center;gap:8px;">
+          <span style="font-size:18px;">🤖</span>
+          <span style="font-size:12px;font-weight:700;color:#1d4ed8;">AI Buyer Refinement</span>
+          <span style="font-size:11px;color:#6b7280;margin-left:4px;">— ask follow-up questions to narrow results</span>
+        </div>
+        <div id="bm-chat-messages" style="flex:1;overflow-y:auto;padding:10px 14px;display:flex;flex-direction:column;gap:8px;max-height:200px;"></div>
+        <div style="padding:8px 14px;border-top:1px solid #e5e7eb;display:flex;gap:8px;">
+          <input id="bm-chat-input" type="text" placeholder="e.g. Only market-rate apartments, or only Tampa area..." style="flex:1;padding:7px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;" onkeydown="if(event.key==='Enter') window._bmChatSend()">
+          <button onclick="window._bmChatSend()" style="padding:7px 14px;background:#1d4ed8;border:none;border-radius:6px;font-size:12px;font-weight:700;color:#fff;cursor:pointer;">Send</button>
+        </div>
+      </div>
+
     </div>
   `;
 }
@@ -30208,6 +30258,120 @@ window._bmToggleTag = function(btn, kind){
   btn.style.color = on ? '#1d4ed8' : '#6b7280';
 };
 
+// Shared Gemini caller for buyer matching
+async function _bmCallGemini(system, user){
+  const proxyUrl = APP_CONFIG.ai?.geminiProxyUrl || '';
+  if(!proxyUrl) throw new Error('No AI proxy configured');
+  const payload = {
+    system_instruction:{parts:[{text:system}]},
+    contents:[{role:'user',parts:[{text:user}]}],
+    generationConfig:{maxOutputTokens:2500, temperature:0.3, thinkingConfig:{thinkingBudget:0}},
+  };
+  const resp = await fetch(proxyUrl,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});
+  if(!resp.ok) throw new Error('AI error '+resp.status);
+  const data = await resp.json();
+  return (data.candidates?.[0]?.content?.parts||[]).map(x=>x.text||'').join('').trim();
+}
+
+// Build buyer candidate list from ALL contacts + CRM groups (no explicit buyerProfile required)
+async function _bmBuildCandidates(){
+  const {collection, getDocs} = _fbFns;
+
+  // Build groupId → {name, uses, buyerType} map from live allCRMGroups
+  const groupMeta = {};
+  (window.allCRMGroups||[]).forEach(g=>{
+    const uses = _inferUsesFromGroupName(g.name);
+    const btype = _inferBuyerTypeFromGroupName(g.name);
+    if(uses.length || btype) groupMeta[g.id] = {name:g.name, uses, buyerType:btype};
+  });
+
+  const allSnap = await getDocs(collection(_fbDb,'contacts'));
+  const candidates = [];
+
+  allSnap.forEach(d=>{
+    const c = {id:d.id, ...d.data()};
+    if(!c.email && !c.name) return; // skip empty records
+
+    const bp = c.buyerProfile || {};
+
+    // Gather uses and buyer type from group membership
+    const groupUses = [], groupNames = [], groupBuyerTypes = [];
+    (c.groups||[]).forEach(gid=>{
+      const g = groupMeta[gid];
+      if(g){ groupUses.push(...g.uses); groupNames.push(g.name); if(g.buyerType) groupBuyerTypes.push(g.buyerType); }
+    });
+
+    const allUses     = [...new Set([...(bp.propertyTypes||[]), ...groupUses])];
+    const buyerType   = bp.buyerType || groupBuyerTypes[0] || '';
+    const hasSignal   = bp.isBuyer || groupUses.length > 0;
+
+    if(!hasSignal) return; // skip contacts with no dev-related signal at all
+
+    candidates.push({
+      id: c.id,
+      name: c.name||'',
+      email: c.email||'',
+      buyerType,
+      counties:    bp.counties||[],
+      acreageMin:  bp.acreageMin||0,
+      acreageMax:  bp.acreageMax||0,
+      budgetMin:   bp.budgetMin||0,
+      budgetMax:   bp.budgetMax||0,
+      intendedUses: allUses,
+      siteReqs:    bp.features||[],
+      notes:       bp.notes||'',
+      groupNames,
+      source: bp.isBuyer ? (groupUses.length?'both':'profile') : 'group',
+    });
+  });
+
+  return candidates;
+}
+
+function _bmRenderResults(matches, propDesc){
+  const res = document.getElementById('bm-results');
+  const cnt = document.getElementById('bm-count');
+  const chat = document.getElementById('bm-chat-panel');
+  if(!res) return;
+
+  if(!matches.length){
+    res.innerHTML = `<div style="text-align:center;padding:60px;color:#6b7280;font-size:14px;">No matches found for this property.<br><br>Try broadening the development use selection, or send a <strong>quarterly survey</strong> to update buyer preferences.</div>`;
+    if(cnt) cnt.style.display='none';
+    return;
+  }
+
+  if(cnt){ cnt.textContent=`${matches.length} match${matches.length===1?'':'es'}`; cnt.style.display='inline'; }
+
+  const p = window._buyersMatchProp||{};
+  res.innerHTML = matches.map(m=>{
+    const strong = m.strength==='strong';
+    const srcLabel = m.source==='both' ? 'profile + group' : m.source==='group' ? 'CRM group' : 'buyer profile';
+    return `
+    <div style="background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:12px 14px;margin-bottom:10px;">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:6px;">
+        <div>
+          <div style="font-size:14px;font-weight:700;color:#111;">${_esc(m.name||m.email||m.contactId)}</div>
+          <div style="font-size:12px;color:#6b7280;margin-top:1px;">${m.buyerType?_esc(m.buyerType)+' · ':''}via ${srcLabel}</div>
+        </div>
+        <span style="font-size:11px;font-weight:700;padding:3px 10px;border-radius:20px;flex-shrink:0;margin-left:10px;${strong?'background:#dcfce7;color:#166534;':'background:#fef9c3;color:#854d0e;'}">
+          ${strong?'Strong match':'Possible match'}
+        </span>
+      </div>
+      <div style="font-size:12px;color:#6b7280;border-left:2px solid #e5e7eb;padding-left:10px;margin-bottom:10px;font-style:italic;">${_esc(m.reason)}</div>
+      <div style="display:flex;gap:7px;flex-wrap:wrap;">
+        <button onclick="window._bmEmailBuyer('${_esc(m.email||'')}','${_esc(m.name||'')}','${_esc(p.county||'')} development site')" style="padding:4px 12px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;background:#eff6ff;border:1px solid #bfdbfe;color:#1d4ed8;">✉️ Email about property</button>
+      </div>
+    </div>`;
+  }).join('');
+
+  // Show chat panel and kick off proactive AI question
+  if(chat){ chat.style.display='flex'; chat.style.flexDirection='column'; }
+  const msgs = document.getElementById('bm-chat-messages');
+  if(msgs && !msgs.children.length){
+    _bmChatAddMsg('ai', `Found ${matches.length} match${matches.length===1?'':'es'}. Want to narrow these down? For example, I can filter by apartment type (market-rate, affordable, senior), deal size, specific counties, or any other criteria — just ask.`);
+  }
+}
+
 window._bmFindMatches = async function(){
   const p = window._buyersMatchProp || {};
   p.county  = document.getElementById('bm-county')?.value || '';
@@ -30220,45 +30384,16 @@ window._bmFindMatches = async function(){
   const cnt = document.getElementById('bm-count');
   if(!res) return;
 
-  res.innerHTML = `<div style="text-align:center;padding:40px;color:#6b7280;font-size:14px;"><div style="font-size:24px;margin-bottom:10px;">⏳</div>Searching contacts and email history...</div>`;
-  if(cnt){ cnt.style.display='none'; }
+  res.innerHTML = `<div style="text-align:center;padding:40px;color:#6b7280;font-size:14px;"><div style="font-size:24px;margin-bottom:10px;">⏳</div>Scanning contacts and CRM groups...</div>`;
+  if(cnt) cnt.style.display='none';
+  const chat = document.getElementById('bm-chat-panel');
+  if(chat) chat.style.display='none';
 
   try {
     if(!_fbDb||!_fbFns) throw new Error('Firebase not ready');
-    const {collection, getDocs, query, where, collectionGroup} = _fbFns;
 
-    // 1. Load contacts with explicit buyer profiles
-    const allContactsSnap = await getDocs(collection(_fbDb,'contacts'));
-    const buyers = [];
-    allContactsSnap.forEach(d=>{
-      const c = {id:d.id, ...d.data()};
-      if(c.buyerProfile?.isBuyer) buyers.push(c);
-    });
+    const candidates = await _bmBuildCandidates();
 
-    // 2. Sample recent email activities for signals (collectionGroup)
-    let emailSignals = [];
-    try {
-      const actSnap = await getDocs(query(
-        collectionGroup(_fbDb,'activities'),
-        where('type','in',['email','sent_email','note'])
-      ));
-      // Collect up to 200 recent activities that mention buying/land
-      const keywords = ['buy','looking for','interested in','want','acr','land','hunt','timber','farm','ranch','property'];
-      actSnap.forEach(d=>{
-        const a = d.data();
-        const body = (a.body||a.text||a.gmailSubject||'').toLowerCase();
-        if(keywords.some(k=>body.includes(k))){
-          const parts = d.ref.path.split('/');
-          const contactId = parts[1]; // contacts/{id}/activities/{actId}
-          if(contactId && parts[0]==='contacts') {
-            emailSignals.push({contactId, subject:a.gmailSubject||'', body:(a.body||a.text||'').slice(0,300), date:a.gmailDate||a.at||0});
-          }
-        }
-        if(emailSignals.length>=200) return;
-      });
-    } catch(e){ console.warn('[buyers] email signals query failed',e); }
-
-    // 3. Build Gemini prompt
     const propDesc = [
       p.county  ? `County: ${p.county}, FL` : '',
       p.acres   ? `Acres: ${p.acres}` : '',
@@ -30269,80 +30404,97 @@ window._bmFindMatches = async function(){
       p.notes   ? `Notes: ${p.notes}` : '',
     ].filter(Boolean).join('\n');
 
-    const buyerSummaries = buyers.map(b=>{
-      const bp = b.buyerProfile;
-      return `CONTACT: ${b.name||b.email||b.id}
-Email: ${b.email||''}
-Buyer type: ${bp.buyerType||'unknown'}
-Profile: counties=${(bp.counties||[]).join(',')||'any'}, acres=${bp.acreageMin||0}-${bp.acreageMax||'any'}, budget=$${(bp.budgetMin||0).toLocaleString()}-$${(bp.budgetMax||'?').toLocaleString()}, intended uses=${(bp.propertyTypes||[]).join(',')}, site requirements=${(bp.features||[]).join(',')}, notes="${bp.notes||''}"`;
-    }).join('\n\n');
+    window._bmLastPropDesc = propDesc;
+    window._bmLastCandidates = candidates;
+    window._bmChatHistory = []; // reset chat on new search
 
-    const emailSummaries = emailSignals.slice(0,80).map(e=>{
-      const contact = allContactsSnap.docs.find(d=>d.id===e.contactId)?.data();
-      const name = contact?.name || e.contactId;
-      return `EMAIL_SIGNAL: contact="${name}" (id:${e.contactId}) subject="${e.subject}" snippet="${e.body.slice(0,150)}"`;
-    }).join('\n');
-
-    const system = `You are a land brokerage assistant for Eshenbaugh Land Company, a Florida development land specialist. You help match available land parcels to the right buyers — builders, developers, brokers, investors, and owner-users looking for commercial, residential, or mixed-use development sites.
-You will receive a PROPERTY description and a list of known BUYERS (with stated buyer type, intended development uses, and site requirements) and EMAIL SIGNALS (contacts whose email history suggests buying interest).
-A strong match means: the buyer's intended use fits the property's location/size/zoning, their budget and acreage range overlap, and their county preferences include or are close to the property. Buyer type matters: a builder looking for single-family lots is NOT a match for a hotel development site.
-Return a JSON array of matches. Each match: {"contactId":"...", "name":"...", "email":"...", "strength":"strong"|"possible", "reason":"1-2 sentences citing the specific overlap (e.g. buyer type, intended use, geography, size)", "source":"profile"|"email_signal"|"both"}.
-Order by strength (strong first), then by recency of interest. Max 12 results. Only include contacts with genuine relevance. Omit weak/irrelevant contacts entirely.
-Return ONLY valid JSON array, no markdown.`;
-
-    const user = `PROPERTY:\n${propDesc||'No details provided'}\n\nKNOWN BUYER PROFILES:\n${buyerSummaries||'None on file'}\n\nEMAIL SIGNALS:\n${emailSummaries||'None found'}`;
-
-    const proxyUrl = APP_CONFIG.ai?.geminiProxyUrl || '';
-    if(!proxyUrl) throw new Error('No AI proxy configured');
-
-    const payload = {
-      system_instruction:{parts:[{text:system}]},
-      contents:[{role:'user',parts:[{text:user}]}],
-      generationConfig:{maxOutputTokens:2000, temperature:0.3, thinkingConfig:{thinkingBudget:0}},
-    };
-    const resp = await fetch(proxyUrl,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});
-    if(!resp.ok) throw new Error('AI error '+resp.status);
-    const data = await resp.json();
-    const raw  = (data.candidates?.[0]?.content?.parts||[]).map(x=>x.text||'').join('').trim();
-
-    // Parse JSON (tolerant)
-    const m = raw.match(/\[[\s\S]*\]/);
-    if(!m) throw new Error('AI returned unexpected format');
-    const matches = JSON.parse(m[0]);
-
-    // Render results
-    if(!matches.length){
-      res.innerHTML = `<div style="text-align:center;padding:60px;color:#6b7280;font-size:14px;">No strong matches found in your current database for this property.<br><br>Consider sending a <strong>quarterly survey</strong> to refresh buyer preferences.</div>`;
-      return;
-    }
-
-    if(cnt){ cnt.textContent=`${matches.length} match${matches.length===1?'':'es'}`; cnt.style.display='inline'; }
-
-    res.innerHTML = matches.map(m=>{
-      const strong = m.strength==='strong';
-      const srcLabel = m.source==='both' ? 'profile + email' : m.source==='email_signal' ? 'email history' : 'buyer profile';
-      return `
-      <div style="background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:12px 14px;margin-bottom:10px;">
-        <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:6px;">
-          <div>
-            <div style="font-size:14px;font-weight:700;color:#111;">${_esc(m.name||m.email||m.contactId)}</div>
-            <div style="font-size:12px;color:#6b7280;margin-top:1px;">source: ${srcLabel}</div>
-          </div>
-          <span style="font-size:11px;font-weight:700;padding:3px 10px;border-radius:20px;flex-shrink:0;margin-left:10px;${strong?'background:#dcfce7;color:#166534;':'background:#fef9c3;color:#854d0e;'}">
-            ${strong?'Strong match':'Possible match'}
-          </span>
-        </div>
-        <div style="font-size:12px;color:#6b7280;border-left:2px solid #e5e7eb;padding-left:10px;margin-bottom:10px;font-style:italic;">${_esc(m.reason)}</div>
-        <div style="display:flex;gap:7px;flex-wrap:wrap;">
-          <button onclick="window._bmEmailBuyer('${_esc(m.email||'')}','${_esc(m.name||'')}','${_esc(p.county||'')} land')" style="padding:4px 12px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;background:#eff6ff;border:1px solid #bfdbfe;color:#1d4ed8;">✉️ Email about property</button>
-          ${m.email?`<button onclick="window.open('mailto:${_esc(m.email)}')" style="padding:4px 12px;border-radius:6px;font-size:12px;cursor:pointer;background:#f9fafb;border:1px solid #d1d5db;color:#374151;">View email</button>`:''}
-        </div>
-      </div>`;
-    }).join('');
+    const matches = await _bmRunMatch(propDesc, candidates, []);
+    _bmRenderResults(matches, propDesc);
 
   } catch(e){
     console.error('[buyers]',e);
     res.innerHTML = `<div style="color:#dc2626;padding:20px;font-size:13px;">⚠️ ${_esc(e.message)}</div>`;
+  }
+};
+
+// Core match runner — called both by initial search and by chat refinements
+async function _bmRunMatch(propDesc, candidates, chatMessages){
+  const candidateSummaries = candidates.map(c=>`CONTACT id="${c.id}" name="${c.name}" email="${c.email}"
+buyerType="${c.buyerType}" groups=[${c.groupNames.join(', ')}]
+counties=[${c.counties.join(',')||'any'}] acres=${c.acreageMin||0}-${c.acreageMax||'any'} budget=$${(c.budgetMin||0).toLocaleString()}-$${(c.budgetMax||'?').toLocaleString()}
+intendedUses=[${c.intendedUses.join(', ')}] siteReqs=[${c.siteReqs.join(', ')}]
+notes="${c.notes}" source="${c.source}"`).join('\n\n');
+
+  const chatContext = chatMessages.length
+    ? `\n\nREFINEMENT CONVERSATION SO FAR:\n${chatMessages.map(m=>`${m.role==='user'?'User':'Assistant'}: ${m.text}`).join('\n')}`
+    : '';
+
+  const system = `You are a land brokerage assistant for Eshenbaugh Land Company, a Florida development land specialist. Match available land parcels to buyers — builders, developers, brokers, investors seeking commercial/residential/mixed-use development sites.
+
+IMPORTANT: Contacts may be identified by CRM group membership (e.g., group "Apt Dev" = apartment developer = interested in Apartments/Multifamily). Treat group names as strong signals of buyer intent even if no formal buyer profile exists. "Apt dev", "apartment developer", "multifamily" groups → match for multifamily/apartment sites. "Builder" groups → SFH/townhome sites. "Storage dev" → storage sites. Use common sense on group name abbreviations.
+
+A STRONG match: buyer's intended use or group clearly fits the property use, geography is right (or unspecified = assume open), no obvious budget/size mismatch.
+A POSSIBLE match: related use, adjacent geography, or inferred interest from group name.
+
+Return JSON array. Each item: {"contactId":"<id>","name":"<name>","email":"<email>","buyerType":"<type>","strength":"strong"|"possible","reason":"1-2 sentences specific to why they match this property"}.
+Max 15 results. Strong matches first. Omit truly irrelevant contacts.
+Return ONLY valid JSON array, no markdown fences.`;
+
+  const user = `PROPERTY:\n${propDesc||'(no details — match broadly)'}\n\nCANDIDATES:\n${candidateSummaries||'None found'}${chatContext}`;
+
+  const raw = await _bmCallGemini(system, user);
+  const m = raw.match(/\[[\s\S]*\]/);
+  if(!m) throw new Error('AI returned unexpected format');
+
+  const parsed = JSON.parse(m[0]);
+  // Backfill source from candidates map
+  const cMap = new Map(candidates.map(c=>[c.id, c]));
+  return parsed.map(r=>({...r, source: cMap.get(r.contactId)?.source||'group', buyerType: r.buyerType||cMap.get(r.contactId)?.buyerType||''}));
+}
+
+// ── AI Chat refinement ────────────────────────────────────────────────────────
+window._bmChatHistory = [];
+
+function _bmChatAddMsg(role, text){
+  const msgs = document.getElementById('bm-chat-messages');
+  if(!msgs) return;
+  const isAI = role==='ai';
+  const div = document.createElement('div');
+  div.style.cssText = `display:flex;gap:8px;align-items:flex-start;${isAI?'':'flex-direction:row-reverse;'}`;
+  div.innerHTML = `
+    <div style="width:26px;height:26px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:13px;${isAI?'background:#eff6ff;':'background:#dcfce7;'}">
+      ${isAI?'🤖':'👤'}
+    </div>
+    <div style="max-width:85%;padding:8px 11px;border-radius:10px;font-size:12px;line-height:1.5;${isAI?'background:#f1f5ff;color:#1e3a8a;':'background:#f0fdf4;color:#166534;text-align:right;'}">
+      ${_esc(text)}
+    </div>`;
+  msgs.appendChild(div);
+  msgs.scrollTop = msgs.scrollHeight;
+  window._bmChatHistory.push({role, text});
+}
+
+window._bmChatSend = async function(){
+  const inp = document.getElementById('bm-chat-input');
+  if(!inp) return;
+  const msg = inp.value.trim();
+  if(!msg) return;
+  inp.value = '';
+  _bmChatAddMsg('user', msg);
+
+  const res = document.getElementById('bm-results');
+  if(res) res.innerHTML = `<div style="text-align:center;padding:30px;color:#6b7280;font-size:13px;">⏳ Refining results...</div>`;
+
+  try {
+    if(!window._bmLastCandidates?.length) throw new Error('Run an initial search first');
+    const matches = await _bmRunMatch(window._bmLastPropDesc||'', window._bmLastCandidates, window._bmChatHistory.slice(-10));
+    _bmRenderResults(matches, window._bmLastPropDesc||'');
+    // AI follow-up
+    const followUp = matches.length
+      ? `Updated — showing ${matches.length} result${matches.length===1?'':'s'} based on your refinement. Want to narrow further?`
+      : `No results match those criteria. Try loosening the filter or removing a requirement.`;
+    _bmChatAddMsg('ai', followUp);
+  } catch(e){
+    _bmChatAddMsg('ai', 'Sorry, something went wrong: '+e.message);
   }
 };
 
