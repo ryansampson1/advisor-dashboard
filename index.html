@@ -1969,6 +1969,283 @@ window.markAllCommissionsPaid = async function(){
   showToast(`✅ Marked ${done} commission${done===1?'':'s'} as paid${errs>0?' ('+errs+' errors — check console)':''}`, done>0?'success':'error', 6000);
 };
 
+// ── Sold Commission Confirmation Modal ──────────────────────────────────
+// Fired when a deal is dragged to Sold. Requires closing statement upload,
+// commission verification, cobroke/referral disclosure. On confirm, fires a
+// detailed payment task to Michael then completes the stage move.
+window.handleSoldConfirmation = function(id, deal, onConfirmed){
+  const addr    = deal.propertyAddress||deal.projectName||deal.address||'property';
+  const gross   = getEffectiveRevenue(deal);
+  const fmt     = n => '$'+Math.round(n||0).toLocaleString();
+  const price   = deal.purchasePrice||deal.contractPrice||deal.suggestedPrice||0;
+  const commPct = deal.elcCommissionPct||deal.dealCommissionPct||deal.commissionPct||0;
+
+  const overlay = document.createElement('div');
+  overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;display:flex;align-items:center;justify-content:center;padding:1rem;overflow-y:auto';
+
+  const card = document.createElement('div');
+  card.style.cssText='background:#fff;border-radius:18px;padding:1.75rem;width:100%;max-width:530px;box-shadow:0 24px 70px rgba(0,0,0,.35);font-family:inherit;max-height:90vh;overflow-y:auto';
+
+  card.innerHTML=`
+    <div style="display:flex;align-items:center;gap:.625rem;margin-bottom:.3rem">
+      <span style="font-size:1.5rem">🏆</span>
+      <h3 style="font-weight:800;color:#111827;font-size:1.1rem;margin:0">Confirm Closing</h3>
+    </div>
+    <p style="color:#6b7280;font-size:.85rem;margin:0 0 1.25rem;line-height:1.5"><strong style="color:#374151">${addr}</strong></p>
+
+    <!-- Closing Statement Upload -->
+    <div style="margin-bottom:1.1rem">
+      <div style="font-size:.68rem;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:.06em;margin-bottom:.45rem">Closing Statement <span style="color:#dc2626">*</span></div>
+      <div id="scc-cs-zone" style="border:2px dashed #d1d5db;border-radius:10px;padding:1rem 1.25rem;text-align:center;cursor:pointer;transition:all .15s;background:#f9fafb"
+        onclick="document.getElementById('scc-cs-input').click()"
+        ondragover="event.preventDefault();document.getElementById('scc-cs-zone').style.borderColor='#6366f1';document.getElementById('scc-cs-zone').style.background='#f5f3ff'"
+        ondragleave="document.getElementById('scc-cs-zone').style.borderColor='#d1d5db';document.getElementById('scc-cs-zone').style.background='#f9fafb'"
+        ondrop="_sccHandleDrop(event)">
+        <input id="scc-cs-input" type="file" accept=".pdf,.doc,.docx" style="display:none" onchange="_sccHandleFile(event)"/>
+        <div id="scc-cs-label" style="font-size:.85rem;color:#9ca3af">📄 Drop closing statement here or click to upload</div>
+      </div>
+    </div>
+
+    <!-- Commission Verification -->
+    <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:12px;padding:1rem;margin-bottom:1rem">
+      <div style="font-size:.68rem;font-weight:700;color:#166534;text-transform:uppercase;letter-spacing:.06em;margin-bottom:.65rem">Commission Verification</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:.5rem;margin-bottom:.8rem">
+        <div style="background:#fff;border-radius:8px;padding:.6rem;border:1px solid #d1fae5;text-align:center">
+          <div style="font-size:.68rem;color:#6b7280;margin-bottom:.2rem">Sale Price</div>
+          <div style="font-weight:700;color:#111827;font-size:.88rem">${price>0?fmt(price):'—'}</div>
+        </div>
+        <div style="background:#fff;border-radius:8px;padding:.6rem;border:1px solid #d1fae5;text-align:center">
+          <div style="font-size:.68rem;color:#6b7280;margin-bottom:.2rem">Commission %</div>
+          <div style="font-weight:700;color:#111827;font-size:.88rem">${commPct>0?commPct+'%':'—'}</div>
+        </div>
+        <div style="background:#fff;border-radius:8px;padding:.6rem;border:1px solid #d1fae5;text-align:center">
+          <div style="font-size:.68rem;color:#6b7280;margin-bottom:.2rem">Projected Gross</div>
+          <div style="font-weight:700;color:#16a34a;font-size:.88rem">${gross>0?fmt(gross):'—'}</div>
+        </div>
+      </div>
+      <label style="display:flex;align-items:center;gap:.5rem;margin-bottom:.6rem;cursor:pointer">
+        <input type="checkbox" id="scc-comm-confirmed" style="width:1rem;height:1rem;accent-color:#16a34a" onchange="_sccToggleOverride()"/>
+        <span style="font-size:.85rem;font-weight:600;color:#166534">Commission confirmed — matches closing statement</span>
+      </label>
+      <div id="scc-override-row" style="display:flex;align-items:center;gap:.5rem">
+        <label style="font-size:.8rem;color:#374151;white-space:nowrap;flex-shrink:0">Actual gross commission ($):</label>
+        <div style="display:flex;align-items:center;border:1px solid #d1d5db;border-radius:8px;overflow:hidden;flex:1">
+          <span style="padding:.38rem .5rem;background:#f9fafb;color:#6b7280;font-size:.85rem;border-right:1px solid #d1d5db">$</span>
+          <input id="scc-comm-override" type="number" min="0" step="100" placeholder="${gross>0?gross:''}" style="flex:1;padding:.38rem .6rem;font-size:.85rem;border:none;outline:none"/>
+        </div>
+      </div>
+    </div>
+
+    <!-- Cobroke / Referral / Co-advisor -->
+    <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:12px;padding:1rem;margin-bottom:1.1rem">
+      <div style="font-size:.68rem;font-weight:700;color:#92400e;text-transform:uppercase;letter-spacing:.06em;margin-bottom:.45rem">Co-Advisor / Cobroke / Referral</div>
+      <p style="font-size:.82rem;color:#78350f;margin:0 0 .65rem">Any co-advisor fee, cobroke, or referral due to be paid out of this commission?</p>
+      <div style="display:flex;gap:.5rem;margin-bottom:.7rem">
+        <button id="scc-payout-no"  type="button" onclick="_sccPayoutToggle('no')"
+          style="flex:1;padding:.5rem;border:2px solid #16a34a;border-radius:8px;background:#f0fdf4;font-weight:700;font-size:.85rem;cursor:pointer;color:#15803d">No</button>
+        <button id="scc-payout-yes" type="button" onclick="_sccPayoutToggle('yes')"
+          style="flex:1;padding:.5rem;border:2px solid #e5e7eb;border-radius:8px;background:#fff;font-weight:700;font-size:.85rem;cursor:pointer;color:#374151">Yes</button>
+      </div>
+      <div id="scc-payout-rows" style="display:none">
+        <div id="scc-payout-list"></div>
+        <button type="button" onclick="_sccAddPayoutRow()" style="margin-top:.35rem;font-size:.8rem;font-weight:600;color:#d97706;background:none;border:none;cursor:pointer;padding:0">+ Add Another</button>
+      </div>
+    </div>
+
+    <!-- Buttons -->
+    <div style="display:flex;gap:.625rem">
+      <button id="scc-cancel" type="button" style="flex:1;padding:.7rem;border:2px solid #e5e7eb;border-radius:10px;background:#fff;font-weight:600;font-size:.9rem;cursor:pointer;color:#6b7280">Cancel</button>
+      <button id="scc-confirm" type="button" style="flex:2;padding:.7rem;border:none;border-radius:10px;background:#16a34a;font-weight:700;font-size:.9rem;cursor:pointer;color:#fff;transition:opacity .15s">✓ Confirm &amp; Move to Sold</button>
+    </div>
+  `;
+
+  overlay.appendChild(card);
+  document.body.appendChild(overlay);
+
+  // Track in-memory file and payout state
+  let _csFile = stageFiles[`${id}__closing-statement`] || null;
+  let _payoutVisible = false;
+
+  // Pre-fill if closing statement already staged
+  if(_csFile){
+    const zone = card.querySelector('#scc-cs-zone');
+    const lbl  = card.querySelector('#scc-cs-label');
+    zone.style.borderColor='#16a34a'; zone.style.background='#f0fdf4';
+    lbl.innerHTML=`✅ ${_csFile.name}`;
+  }
+
+  // File helpers (attached to window so inline handlers reach them)
+  window._sccHandleFile = ev => {
+    const file = ev.target.files[0]; if(!file) return;
+    const reader = new FileReader();
+    reader.onload = e => {
+      _csFile = {name:file.name, size:file.size, dataUrl:e.target.result};
+      stageFiles[`${id}__closing-statement`] = _csFile;
+      const zone = card.querySelector('#scc-cs-zone');
+      const lbl  = card.querySelector('#scc-cs-label');
+      zone.style.borderColor='#16a34a'; zone.style.background='#f0fdf4';
+      lbl.innerHTML=`✅ ${file.name}`;
+    };
+    reader.readAsDataURL(file);
+  };
+  window._sccHandleDrop = ev => {
+    ev.preventDefault();
+    const zone = document.getElementById('scc-cs-zone');
+    if(zone){ zone.style.borderColor='#d1d5db'; zone.style.background='#f9fafb'; }
+    const file = ev.dataTransfer.files[0]; if(!file) return;
+    window._sccHandleFile({target:{files:[file]}});
+  };
+  window._sccToggleOverride = () => {
+    const checked = card.querySelector('#scc-comm-confirmed').checked;
+    card.querySelector('#scc-override-row').style.display = checked ? 'none' : 'flex';
+  };
+  window._sccPayoutToggle = val => {
+    _payoutVisible = val==='yes';
+    card.querySelector('#scc-payout-rows').style.display = _payoutVisible ? 'block' : 'none';
+    const noBtn  = card.querySelector('#scc-payout-no');
+    const yesBtn = card.querySelector('#scc-payout-yes');
+    noBtn.style.background   = val==='no'  ? '#f0fdf4' : '#fff';
+    noBtn.style.borderColor  = val==='no'  ? '#16a34a' : '#e5e7eb';
+    noBtn.style.color        = val==='no'  ? '#15803d' : '#374151';
+    yesBtn.style.background  = val==='yes' ? '#fef3c7' : '#fff';
+    yesBtn.style.borderColor = val==='yes' ? '#f59e0b' : '#e5e7eb';
+    yesBtn.style.color       = val==='yes' ? '#92400e' : '#374151';
+    if(val==='yes' && card.querySelector('#scc-payout-list').children.length===0) window._sccAddPayoutRow();
+  };
+  window._sccAddPayoutRow = () => {
+    const row = document.createElement('div');
+    row.style.cssText='display:grid;grid-template-columns:1fr auto auto 1.6rem;gap:.4rem;margin-bottom:.4rem;align-items:center';
+    row.innerHTML=`
+      <input type="text" placeholder="Name / Company" style="border:1px solid #d1d5db;border-radius:7px;padding:.38rem .55rem;font-size:.82rem;outline:none;min-width:0"/>
+      <select style="border:1px solid #d1d5db;border-radius:7px;padding:.38rem .45rem;font-size:.82rem;outline:none">
+        <option value="co-advisor">Co-Advisor</option>
+        <option value="cobroke">Cobroke</option>
+        <option value="referral">Referral</option>
+      </select>
+      <div style="display:flex;align-items:center;border:1px solid #d1d5db;border-radius:7px;overflow:hidden">
+        <span style="padding:.38rem .4rem;background:#f9fafb;color:#6b7280;font-size:.82rem;border-right:1px solid #d1d5db">$</span>
+        <input type="number" min="0" step="100" placeholder="Amount" style="width:85px;padding:.38rem .4rem;font-size:.82rem;border:none;outline:none"/>
+      </div>
+      <button type="button" onclick="this.closest('div').remove()" style="width:1.6rem;height:1.6rem;border:none;background:#fee2e2;border-radius:6px;cursor:pointer;color:#dc2626;font-size:1rem;display:flex;align-items:center;justify-content:center">×</button>
+    `;
+    card.querySelector('#scc-payout-list').appendChild(row);
+  };
+
+  // Cancel
+  const closeModal = () => {
+    if(document.body.contains(overlay)) document.body.removeChild(overlay);
+    window._pendingDropOrder = null;
+  };
+  card.querySelector('#scc-cancel').addEventListener('click', closeModal);
+  overlay.addEventListener('click', e=>{ if(e.target===overlay) closeModal(); });
+
+  // Confirm
+  card.querySelector('#scc-confirm').addEventListener('click', async () => {
+    // 1. Closing statement required
+    if(!_csFile){
+      showToast('Upload the closing statement before confirming','warning',4000);
+      card.querySelector('#scc-cs-zone').style.borderColor='#dc2626';
+      return;
+    }
+    // 2. Commission confirmed or overridden
+    const commConfirmed = card.querySelector('#scc-comm-confirmed').checked;
+    const overrideVal   = parseFloat(card.querySelector('#scc-comm-override').value)||0;
+    if(!commConfirmed && overrideVal<=0){
+      showToast('Confirm the commission matches the closing statement, or enter the actual gross amount','warning',4000);
+      return;
+    }
+    const confirmedGross = commConfirmed ? gross : overrideVal;
+
+    // 3. Collect payout rows (if Yes was selected)
+    const payouts = [];
+    if(_payoutVisible){
+      card.querySelectorAll('#scc-payout-list > div').forEach(row=>{
+        const inputs = row.querySelectorAll('input[type=text],input[type=number]');
+        const sel    = row.querySelector('select');
+        const name   = inputs[0]?.value?.trim()||'';
+        const amount = parseFloat(inputs[1]?.value)||0;
+        const type   = sel?.value||'cobroke';
+        if(name && amount>0) payouts.push({name, type, amount});
+      });
+      if(payouts.length===0){
+        showToast('Add at least one payout row, or select No','warning',3000);
+        return;
+      }
+    }
+
+    // Disable confirm button while saving
+    const btn = card.querySelector('#scc-confirm');
+    btn.disabled=true; btn.textContent='Saving…'; btn.style.opacity='.6';
+
+    // Save confirmed data to deal
+    const saveData = {
+      closingStatementFileName:  _csFile.name,
+      closingStatementConfirmedAt: Date.now(),
+      confirmedGrossCommission:  confirmedGross,
+      commissionConfirmedBy:     currentUser?.uid||'advisor',
+      soldPayouts:               payouts,
+    };
+    await Store.updateDeal(id, saveData).catch(e=>console.error('[sold-confirm]',e));
+    Object.assign(deal, saveData);
+
+    // Fire Michael pay task
+    await _handleSoldPayTask(deal, confirmedGross, payouts);
+
+    closeModal();
+    onConfirmed();
+  });
+};
+
+// Builds and sends the detailed commission payment task to Michael
+async function _handleSoldPayTask(deal, confirmedGross, payouts){
+  const fmt  = n => '$'+Math.round(n||0).toLocaleString();
+  const addr = deal.propertyAddress||deal.projectName||deal.address||'property';
+  const proj = deal.projectName||deal.propertyAddress||addr;
+  const dueDate = n => { const d=new Date(); d.setDate(d.getDate()+n); return d.toISOString().slice(0,10); };
+
+  const mk     = Object.entries(allProfiles).find(([,p])=>(p.email||'').toLowerCase()==='michael@thedirtdog.com');
+  const mUid   = mk?.[0]||null;
+  const mName  = mk?.[1]?.name||'Michael';
+  const mEmail = 'michael@thedirtdog.com';
+
+  const {lines: advisorLines} = buildPayoutBreakdown(deal);
+  const totalDeductions = payouts.reduce((s,p)=>s+p.amount, 0);
+  const netToELC        = confirmedGross - totalDeductions;
+
+  let payoutSection = 'CONFIRMED GROSS COMMISSION TO ELC: '+fmt(confirmedGross);
+  if(payouts.length>0){
+    payoutSection += '\n\nDEDUCTIONS (pay these first):\n';
+    payouts.forEach(p=>{ payoutSection += `  • ${p.name} (${p.type}): ${fmt(p.amount)}\n`; });
+    payoutSection += '\nNET TO ELC AFTER DEDUCTIONS: '+fmt(netToELC);
+  }
+  payoutSection += '\n\nADVISOR PAYOUTS (from ELC net):\n'+advisorLines.map(l=>'  • '+l).join('\n');
+
+  const csNote = deal.closingStatementFileName ? '\nClosing statement: '+deal.closingStatementFileName : '';
+
+  // Task 1: Pay commission
+  await Store.createTask({
+    title: '💰 Pay commission — '+proj,
+    description: '✅ Advisor has confirmed this deal closed and approved the commission.\n\nProject: '+proj+'\nProperty: '+addr+'\nAdvisor: '+(deal.advisorName||deal.advisorEmail||'')+'\nClose date: '+(deal.closeDate||'—')+csNote+'\n\n'+payoutSection+'\n\nOnce all payments are made, complete this task and use the "Approve commission payment" task below to finalize on the dashboard.',
+    assignedTo: mUid, assignedToName: mName, assignedToEmail: mEmail,
+    dealId: deal.id, dealAddress: deal.propertyAddress,
+    dueDate: dueDate(1), status: 'pending',
+    createdBy: currentUser?.uid||'system', createdByName: 'Advisor Confirmed', createdAt: Date.now(),
+  }).catch(e=>console.error('[sold-pay-task]',e));
+
+  // Task 2: Approve button task (marks commissionPaid on deal)
+  await Store.createTask({
+    title: '✅ Approve commission payment — '+proj,
+    description: 'Once you have paid all advisors for '+proj+', click the button below to mark the commission as approved on the dashboard, leaderboard, and each advisor\'s My Pay page.\n\nGross to ELC: '+fmt(confirmedGross)+(payouts.length>0?'\nNet after deductions: '+fmt(netToELC):'')+'\n\nADVISOR PAYOUTS:\n'+advisorLines.map(l=>'  • '+l).join('\n'),
+    approvePaymentDealId: deal.id,
+    assignedTo: mUid, assignedToName: mName, assignedToEmail: mEmail,
+    dealId: deal.id, dealAddress: deal.propertyAddress,
+    dueDate: dueDate(3), status: 'pending',
+    createdBy: currentUser?.uid||'system', createdByName: 'Advisor Confirmed', createdAt: Date.now(),
+  }).catch(e=>console.error('[sold-approve-task]',e));
+
+  showToast('✅ Commission pay task sent to '+mName, 'success', 4000);
+}
+
 async function handleWireConfirmAutomation(deal){
   const gross = getEffectiveRevenue(deal);
   const fmt   = n => '$'+Math.round(n).toLocaleString();
@@ -15595,8 +15872,29 @@ window.handleDrop = (ev,newStage) => {
     openModalForStage(`Fill in the required details to move to ${newStage}`);
     return;
   }
+  // Sold — commission confirmation modal (closing statement + payout disclosure required)
+  if(newStage==='Sold'){
+    handleSoldConfirmation(id, deal, () => {
+      // Complete the stage move after advisor confirms
+      const oldStage = deal.stage;
+      const _sh = [...(deal.stageHistory||[])];
+      if(!_sh.length && deal.stageEnteredAt) _sh.push({stage:oldStage, enteredAt:deal.stageEnteredAt});
+      if(_sh.length){ const _l=_sh[_sh.length-1]; if(!_l.exitedAt){ _l.exitedAt=Date.now(); _l.durationMs=_l.exitedAt-_l.enteredAt; } }
+      _sh.push({stage:'Sold', enteredAt:Date.now()});
+      const upd = {stage:'Sold', stageEnteredAt:Date.now(), updatedAt:Date.now(), stageHistory:_sh};
+      Store.updateDeal(id, upd).then(()=>{
+        Object.assign(deal, upd);
+        window._logStageChange(id, oldStage, 'Sold');
+        fireAutomations(deal, oldStage);
+        if(window._pendingDropOrder){ _applyColumnOrder(window._pendingDropOrder); window._pendingDropOrder=null; }
+        viewBoard();
+        showToast('🏆 Moved to Sold!', 'success');
+      }).catch(e=>{ console.error('[sold-drop]',e); showToast('Error saving deal: '+e.message,'error'); });
+    });
+    return;
+  }
   // Any stage that has a built-in renderStageFields form — open the deal modal so autofill is available
-  if(/due.?diligence|sold|loi/i.test(newStage)){
+  if(/due.?diligence|loi/i.test(newStage)){
     openModalForStage(`Fill in the required details to move to ${newStage}`);
     return;
   }
