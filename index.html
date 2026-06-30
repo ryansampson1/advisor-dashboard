@@ -7456,6 +7456,71 @@ function projectAdvisorPayouts(deals, uid){
   return results;
 }
 
+// Returns the net revenue to the company for a deal (gross minus all advisor payouts)
+function getDealNetToCompany(deal){
+  const gross = getEffectiveRevenue(deal);
+  if(!gross||gross<=0) return 0;
+  const primaryUid = deal.advisorUid;
+  const coAdvisors = deal.coAdvisors||[];
+  const todayStr   = new Date().toISOString().slice(0,10);
+  const thisYear   = new Date().getFullYear();
+  let totalPayout  = 0;
+  // Helper: advisor YTD gross from closed deals this year
+  const advisorYTD = uid => allDeals
+    .filter(d=>isWonStage(d.stage)&&d.advisorUid===uid&&d.closeDate&&new Date(d.closeDate+'T00:00:00').getFullYear()===thisYear)
+    .reduce((s,d)=>s+getAdvisorShare(d,uid),0);
+  // Primary advisor
+  if(primaryUid){
+    const share = getAdvisorShare(deal,primaryUid);
+    totalPayout += payoutForGross(share, advisorYTD(primaryUid), getProfile(primaryUid));
+  }
+  // Co-advisors (new format)
+  coAdvisors.forEach(ca=>{
+    if(!ca.uid) return;
+    const share = getAdvisorShare(deal,ca.uid);
+    totalPayout += payoutForGross(share, advisorYTD(ca.uid), getProfile(ca.uid));
+  });
+  // Legacy single co-advisor
+  if(coAdvisors.length===0 && deal.coAdvisorUid && (deal.coAdvisorSplit||0)>0){
+    const share = getAdvisorShare(deal,deal.coAdvisorUid);
+    totalPayout += payoutForGross(share, advisorYTD(deal.coAdvisorUid), getProfile(deal.coAdvisorUid));
+  }
+  // Mentor overrides
+  const allAdvisorUids=[primaryUid,...coAdvisors.map(c=>c.uid)].filter(Boolean);
+  allAdvisorUids.forEach(advisorUid=>{
+    Object.entries(allProfiles||{}).forEach(([mUid,mProfile])=>{
+      if(mUid===advisorUid) return;
+      const ms=(mProfile.mentorships||[]).find(m=>m.menteeUid===advisorUid&&(!m.expiresDate||m.expiresDate>=todayStr));
+      if(!ms) return;
+      const menteePayout=payoutForGross(getAdvisorShare(deal,advisorUid),advisorYTD(advisorUid),getProfile(advisorUid));
+      totalPayout += menteePayout*(ms.rate/100);
+    });
+  });
+  return Math.max(0, gross-totalPayout);
+}
+
+// Like buildYearlyOutlook but uses net-to-company revenue instead of gross
+function buildYearlyOutlookNet(deals){
+  const now=new Date();
+  const todayStr=now.toISOString().slice(0,10);
+  const years=[0,1,2].map(i=>({label:`${now.getFullYear()+i}`,yr:now.getFullYear()+i,remaining:0,closed:0,projected:0,closedVol:0,remainingVol:0,vol:0}));
+  for(const deal of deals){
+    if(isLostStage(deal.stage)) continue;
+    if(!isWonStage(deal.stage)&&!isContractActiveStage(deal.stage)) continue;
+    const dateStr=deal.closeDate||(isWonStage(deal.stage)?todayStr:null);
+    if(!dateStr) continue;
+    const yr=new Date(dateStr+'T00:00:00').getFullYear();
+    const y=years.find(y=>y.yr===yr);
+    if(!y) continue;
+    const dealVol=(deal.purchasePrice||deal.contractPrice||0);
+    const net=getDealNetToCompany(deal);
+    if(isWonStage(deal.stage)){ y.closed+=net; y.closedVol+=dealVol; }
+    else { y.remaining+=net; y.remainingVol+=dealVol; }
+  }
+  years.forEach(y=>{ y.projected=y.closed+y.remaining; y.vol=y.closedVol+y.remainingVol; });
+  return years;
+}
+
 function quarterlyPayouts(deals, uid){
   const now=new Date();
   const quarters=[0,1,2,3].map(i=>{
@@ -15878,7 +15943,7 @@ function viewDashboard(){
 
   // ── Forecast data ─────────────────────────────────────────────────
   const months   = buildMonthlyProjection(_projDeals);
-  const years    = buildYearlyOutlook(_projDeals);
+  const years    = buildYearlyOutlookNet(_projDeals);
   const advisors = filterAdvisorsByOffice(getDistinctAdvisors());
 
   // ── QuickBooks section ────────────────────────────────────────────
