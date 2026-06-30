@@ -7134,6 +7134,12 @@ const FB = {
         });
       } catch(e){ console.warn('[createTask] activity log failed', e); }
     }
+    // Log to global userActivity feed (skip system/automation-generated tasks to reduce noise)
+    if(!data.auto && !data.system){
+      try { window.logUserActivity && window.logUserActivity('task_created',
+        `Created task: ${data.title||ref.id}${data.assignedToName?' → '+data.assignedToName:''}`,
+        { taskId: ref.id, dealId: data.dealId||'', dealName: data.dealName||'' }); } catch(_){}
+    }
     return ref.id;
   },
   async updateTask(id, data){
@@ -7147,6 +7153,9 @@ const FB = {
   async createDeal(data){
     const {collection, addDoc} = _fbFns;
     const ref = await addDoc(collection(_fbDb,'deals'), sanitizeForFirestore(data));
+    try { window.logUserActivity && window.logUserActivity('deal_created',
+      `Created deal: ${data.projectName||data.address||ref.id}`,
+      { dealId: ref.id, dealName: data.projectName||data.address||'' }); } catch(_){}
     return ref.id;
   },
   async updateDeal(id, data){
@@ -8608,6 +8617,7 @@ function renderShell(){
     {id:'inbox',         label:'📥 Inbox',          advisor:true, admin:true, manager:true},
     {id:'buyers',        label:'🏡 Buyers',         advisor:true, admin:true, manager:true},
     {id:'videoProposals',label:'🎬 Video Proposals',advisor:true, admin:true, manager:true, staff:true},
+    {id:'activityLog',   label:'🕵️ Activity Log',   admin:true},
     {id:'earthnotes',    label:'🌎 EarthNotes',     always:true},
     {id:'valuation',     label:'🔍 Site Research',  advisor:true, admin:true, manager:true, staff:true},
   ].filter(n=>{
@@ -8791,7 +8801,7 @@ function renderCurrentView(){
     commissions:viewMyCommissions,
     splits:viewSplits,automations:viewAutomations,users:viewUsers,leaderboard:viewLeaderboard,
     manageStages:viewManageStages,officeManagers:viewOfficeManagers,approvedUsers:viewApprovedUsers,officeOverview:viewOfficeOverview,
-    eos:()=>viewEOS(window._eosSub||'rocks'),comps:viewComps,drive:viewDrive,documents:viewDocuments,hr:viewHR,crm:viewCRM,leads:viewLeads,inbox:viewSmartInbox,buyers:viewBuyers,videoProposals:viewVideoProposals,earthnotes:viewEarthNotes,valuation:viewValuation};
+    eos:()=>viewEOS(window._eosSub||'rocks'),comps:viewComps,drive:viewDrive,documents:viewDocuments,hr:viewHR,crm:viewCRM,leads:viewLeads,inbox:viewSmartInbox,buyers:viewBuyers,videoProposals:viewVideoProposals,earthnotes:viewEarthNotes,valuation:viewValuation,activityLog:viewActivityLog};
   try {
     (map[currentView]||viewBoard)();
   } catch(e) {
@@ -14911,6 +14921,12 @@ window._logStageChange = async (dealId, fromStage, toStage) => {
       createdByName: currentUser?.displayName || currentUser?.name || '',
       body: fromStage ? `Moved from ${fromStage} → ${toStage}` : `Stage set to ${toStage}`,
     });
+    // Also log to global userActivity feed
+    const deal = allDeals && allDeals.find(d=>d.id===dealId);
+    const dealName = deal ? (deal.projectName||deal.address||dealId) : dealId;
+    try { window.logUserActivity && window.logUserActivity('stage_change',
+      fromStage ? `Moved ${dealName} from ${fromStage} → ${toStage}` : `Set ${dealName} to ${toStage}`,
+      { dealId, dealName, fromStage: fromStage||'', toStage }); } catch(_){}
   } catch(e) { console.warn('[logStageChange]', e); }
 };
 
@@ -14961,6 +14977,125 @@ window._logAttachmentActivity = async (dealId, fileObj, docType, downloadUrl) =>
       body: summary || `${label} uploaded: ${fileObj.name || ''}`,
     });
   } catch(e) { console.warn('[logAttachmentActivity]', e); }
+};
+
+// ── Global user activity logger (writes to top-level userActivity collection) ────────────
+// type: 'login' | 'stage_change' | 'deal_created' | 'task_created' | 'note_added' | etc.
+window.logUserActivity = async function(type, description, meta={}) {
+  if (!_fbDb || !_fbFns || !currentUser) return;
+  try {
+    const { collection, addDoc } = _fbFns;
+    await addDoc(collection(_fbDb, 'userActivity'), {
+      type,
+      description,
+      uid: currentUser.uid,
+      userName: currentUser.name || currentUser.email || '',
+      userEmail: currentUser.email || '',
+      createdAt: Date.now(),
+      ...meta,
+    });
+  } catch(e) { console.warn('[logUserActivity]', e); }
+};
+
+/* =======================================================
+   VIEW: ACTIVITY LOG (admin-only)
+   Shows a paginated, filterable feed of all user actions
+   logged to the Firestore `userActivity` collection.
+   ======================================================= */
+let _actLogCache = [];
+let _actLogLoaded = false;
+let _actLogUserFilter = '';
+let _actLogTypeFilter = '';
+
+async function viewActivityLog() {
+  if (!currentUser?.isAdmin) { setContent('<div style="padding:2rem;color:#ef4444">Admin access required.</div>'); return; }
+  setContent(`<div style="padding:1.5rem 2rem;max-width:960px">
+    <div style="display:flex;align-items:center;gap:1rem;margin-bottom:1.25rem;flex-wrap:wrap">
+      <h2 style="font-size:1.1rem;font-weight:700;margin:0">🕵️ Activity Log</h2>
+      <select id="act-log-user-filter" onchange="window._actLogFilterUser(this.value)"
+        style="border:1px solid #d1d5db;border-radius:8px;padding:4px 10px;font-size:.8rem;outline:none">
+        <option value="">All users</option>
+      </select>
+      <select id="act-log-type-filter" onchange="window._actLogFilterType(this.value)"
+        style="border:1px solid #d1d5db;border-radius:8px;padding:4px 10px;font-size:.8rem;outline:none">
+        <option value="">All actions</option>
+        <option value="login">Login</option>
+        <option value="stage_change">Stage Change</option>
+        <option value="deal_created">Deal Created</option>
+        <option value="task_created">Task Created</option>
+        <option value="note_added">Note Added</option>
+      </select>
+      <button onclick="window._actLogRefresh()" style="margin-left:auto;background:#1e293b;color:#fff;border:none;border-radius:8px;padding:6px 14px;font-size:.8rem;cursor:pointer;font-weight:600">↻ Refresh</button>
+    </div>
+    <div id="act-log-body" style="font-size:.82rem">Loading…</div>
+  </div>`);
+  await window._actLogRefresh();
+}
+window.viewActivityLog = viewActivityLog;
+
+window._actLogRefresh = async function() {
+  const el = document.getElementById('act-log-body');
+  if (!el) return;
+  el.innerHTML = '<div style="color:#64748b;padding:.5rem 0">Loading…</div>';
+  try {
+    const { collection, query, orderBy, limit, getDocs } = _fbFns;
+    const q = query(collection(_fbDb, 'userActivity'), orderBy('createdAt', 'desc'), limit(300));
+    const snap = await getDocs(q);
+    _actLogCache = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    _actLogLoaded = true;
+    // Populate user filter
+    const userSel = document.getElementById('act-log-user-filter');
+    if (userSel) {
+      const seen = new Map();
+      _actLogCache.forEach(a => { if (a.uid && !seen.has(a.uid)) seen.set(a.uid, a.userName || a.userEmail || a.uid); });
+      const cur = userSel.value;
+      userSel.innerHTML = '<option value="">All users</option>' +
+        [...seen.entries()].map(([uid, name]) => `<option value="${uid}" ${uid===cur?'selected':''}>${name}</option>`).join('');
+    }
+    window._actLogRender();
+  } catch(e) {
+    const el2 = document.getElementById('act-log-body');
+    if (el2) el2.innerHTML = `<div style="color:#ef4444;padding:.5rem 0">Error loading activity: ${e.message||e}</div>`;
+    console.warn('[viewActivityLog]', e);
+  }
+};
+
+window._actLogFilterUser = function(val) { _actLogUserFilter = val; window._actLogRender(); };
+window._actLogFilterType = function(val) { _actLogTypeFilter = val; window._actLogRender(); };
+
+window._actLogRender = function() {
+  const el = document.getElementById('act-log-body');
+  if (!el) return;
+  const typeIcons = { login:'🔐', stage_change:'🔄', deal_created:'🏗', task_created:'✅', note_added:'📝' };
+  let rows = _actLogCache;
+  if (_actLogUserFilter) rows = rows.filter(a => a.uid === _actLogUserFilter);
+  if (_actLogTypeFilter) rows = rows.filter(a => a.type === _actLogTypeFilter);
+  if (!rows.length) { el.innerHTML = '<div style="color:#64748b;padding:1rem 0">No activity found.</div>'; return; }
+  const fmtTs = ts => {
+    if (!ts) return '—';
+    const d = new Date(ts);
+    return d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) + ' ' +
+           d.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'});
+  };
+  el.innerHTML = `<table style="width:100%;border-collapse:collapse">
+    <thead>
+      <tr style="border-bottom:2px solid #e5e7eb;text-align:left">
+        <th style="padding:6px 10px;font-weight:700;color:#374151;white-space:nowrap">Time</th>
+        <th style="padding:6px 10px;font-weight:700;color:#374151">User</th>
+        <th style="padding:6px 10px;font-weight:700;color:#374151">Action</th>
+        <th style="padding:6px 10px;font-weight:700;color:#374151">Detail</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${rows.map((a,i) => `<tr style="border-bottom:1px solid #f1f5f9;background:${i%2===0?'#fff':'#f9fafb'}">
+        <td style="padding:7px 10px;color:#64748b;white-space:nowrap;font-size:.78rem">${fmtTs(a.createdAt)}</td>
+        <td style="padding:7px 10px;font-weight:600;color:#1e293b;white-space:nowrap">${a.userName||a.userEmail||'—'}<br><span style="font-weight:400;color:#94a3b8;font-size:.72rem">${a.userEmail||''}</span></td>
+        <td style="padding:7px 10px;white-space:nowrap">${typeIcons[a.type]||'•'} <span style="color:#475569;font-weight:600">${(a.type||'').replace(/_/g,' ')}</span></td>
+        <td style="padding:7px 10px;color:#374151;max-width:400px">${a.description||'—'}${a.dealName?` <span style="color:#94a3b8">· ${a.dealName}</span>`:''}</td>
+      </tr>`).join('')}
+    </tbody>
+  </table>
+  <div style="margin-top:.75rem;color:#94a3b8;font-size:.75rem">Showing ${rows.length} of ${_actLogCache.length} events (most recent 300)</div>`;
 };
 
 // ── Load + render property activity feed (Firestore sub-collection + legacy deal.notes) ──
@@ -30944,6 +31079,8 @@ async function init(){
       _startCalendarReminders();
       // Auto-migrate pending profile → real UID on first login
       await FB.migratePendingProfile(fbUser.uid, fbUser.email||'').catch(e=>console.warn('[pending-migrate]',e));
+      // Log login to global activity feed
+      try { window.logUserActivity && window.logUserActivity('login', 'Logged in', { role: currentUser.isAdmin?'admin':currentUser.isOfficeManager?'manager':currentUser.isStaff?'staff':'advisor' }); } catch(_){}
       launchApp();
     });
   } catch(e){
