@@ -15014,7 +15014,7 @@ window._propLoadActivities = async (dealId, feedElId) => {
                      : a.type === 'meeting' && a.meetingDate ? ` · ${a.meetingDate}`
                      : a.type === 'email'   && a.gmailDate   ? ` · ${a.gmailDate}` : '';
         const tsStr  = a.createdAt ? new Date(a.createdAt).toLocaleString() : '';
-        activities.push({ ts: a.createdAt || 0, tsStr, icon, text: a.body || '', title, meta, createdByName: a.createdByName || '', type: a.type, gmailSubject: a.gmailSubject||'', gmailId: a.gmailId||'', aiSummary: !!a.aiSummary });
+        activities.push({ id: a.id, dealId, ts: a.createdAt || 0, tsStr, icon, text: a.body || '', title, meta, createdByName: a.createdByName || '', type: a.type, gmailSubject: a.gmailSubject||'', gmailId: a.gmailId||'', aiSummary: !!a.aiSummary });
       });
     } catch (e) { /* sub-collection may not exist yet — that's fine */ }
   }
@@ -15027,15 +15027,24 @@ window._propLoadActivities = async (dealId, feedElId) => {
     return;
   }
 
+  const _fid = feedEl.id;
   feedEl.innerHTML = activities.map(a => `
     <div class="activity-item" style="display:flex;gap:.5rem;padding:.4rem 0;border-bottom:1px solid #f3f4f6">
       <div class="activity-icon" style="font-size:1rem;width:1.25rem;flex-shrink:0;margin-top:.1rem">${a.icon}</div>
       <div style="flex:1;min-width:0">
-        ${a.title ? `<div style="font-size:.68rem;font-weight:600;color:#6b7280;text-transform:uppercase;letter-spacing:.04em;margin-bottom:.1rem">${a.title}${a.meta || ''}</div>` : ''}
-        ${a.type==='email' && a.gmailSubject ? `<div style="font-size:.75rem;font-weight:600;color:#374151;margin-bottom:.15rem">${a.gmailSubject.replace(/</g,'&lt;')}</div>` : ''}
-        <div style="color:#1f2937;line-height:1.45;font-size:.8rem;white-space:pre-wrap;word-break:break-word">${(a.text || '').replace(/</g, '&lt;') || '<em style="color:#9ca3af">No notes</em>'}</div>
-        ${a.type==='email' && (a.aiSummary || a.gmailId) ? `<div style="font-size:.68rem;color:#9ca3af;margin-top:.2rem">${a.aiSummary ? '✨ AI summary' : ''}${a.aiSummary && a.gmailId ? ' · ' : ''}${a.gmailId ? `<a href="https://mail.google.com/mail/u/0/#all/${a.gmailId}" target="_blank" rel="noopener" style="color:#2563eb;text-decoration:none">Open full email in Gmail ↗</a>` : ''}</div>` : ''}
-        <div style="font-size:.7rem;color:#9ca3af;margin-top:.15rem">${a.tsStr}${a.createdByName ? ' · ' + a.createdByName : ''}</div>
+        <div style="display:flex;align-items:flex-start;gap:.3rem">
+          <div style="flex:1;min-width:0">
+            ${a.title ? `<div style="font-size:.68rem;font-weight:600;color:#6b7280;text-transform:uppercase;letter-spacing:.04em;margin-bottom:.1rem">${a.title}${a.meta || ''}</div>` : ''}
+            ${a.type==='email' && a.gmailSubject ? `<div style="font-size:.75rem;font-weight:600;color:#374151;margin-bottom:.15rem">${a.gmailSubject.replace(/</g,'&lt;')}</div>` : ''}
+            <div style="color:#1f2937;line-height:1.45;font-size:.8rem;white-space:pre-wrap;word-break:break-word">${(a.text || '').replace(/</g, '&lt;') || '<em style="color:#9ca3af">No notes</em>'}</div>
+            ${a.type==='email' && (a.aiSummary || a.gmailId) ? `<div style="font-size:.68rem;color:#9ca3af;margin-top:.2rem">${a.aiSummary ? '✨ AI summary' : ''}${a.aiSummary && a.gmailId ? ' · ' : ''}${a.gmailId ? `<a href="https://mail.google.com/mail/u/0/#all/${a.gmailId}" target="_blank" rel="noopener" style="color:#2563eb;text-decoration:none">Open full email in Gmail ↗</a>` : ''}</div>` : ''}
+            <div style="font-size:.7rem;color:#9ca3af;margin-top:.15rem">${a.tsStr}${a.createdByName ? ' · ' + a.createdByName : ''}</div>
+          </div>
+          ${['note','call','meeting'].includes(a.type) && a.id ? `<div style="display:flex;flex-direction:column;gap:.2rem;flex-shrink:0;margin-top:.05rem">
+            <button onclick="window._pdwEditActivity('${a.dealId}','${a.id}','${a.type}','${_fid}')" style="font-size:.65rem;color:#6b7280;background:none;border:1px solid #e5e7eb;border-radius:.35rem;padding:.15rem .4rem;cursor:pointer;white-space:nowrap;line-height:1.2">✏️ Edit</button>
+            <button onclick="window._pdwDeleteActivity('${a.dealId}','${a.id}','${_fid}')" style="font-size:.65rem;color:#b91c1c;background:none;border:1px solid #fecaca;border-radius:.35rem;padding:.15rem .4rem;cursor:pointer;white-space:nowrap;line-height:1.2">🗑 Delete</button>
+          </div>` : ''}
+        </div>
       </div>
     </div>`).join('');
 };
@@ -15117,6 +15126,114 @@ window._pdwSaveLog = async (dealId, type) => {
   setTimeout(() => {
     document.getElementById('pdw-activity-feed')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }, 80);
+};
+
+// ── Edit / Delete activity entries ───────────────────────────────────────────
+window._pdwEditState = null; // { dealId, activityId, type, feedElId }
+
+window._pdwEditActivity = async (dealId, activityId, type, feedElId) => {
+  const form = document.getElementById('pdw-log-form');
+  if (!form) return;
+  let data = {};
+  if (_fbDb && _fbFns) {
+    try {
+      const { doc, getDoc } = _fbFns;
+      const snap = await getDoc(doc(_fbDb, 'deals', dealId, 'activities', activityId));
+      if (snap.exists()) data = snap.data();
+    } catch(e) { console.warn('[pdwEditActivity]', e); }
+  }
+  window._pdwEditState = { dealId, activityId, type, feedElId };
+  form.classList.remove('hidden');
+  const today = new Date().toISOString().split('T')[0];
+  const esc = s => (s||'').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+  const closeX = `<button onclick="document.getElementById('pdw-log-form').classList.add('hidden')" style="margin-left:auto;background:none;border:none;color:#9ca3af;cursor:pointer;font-size:1.1rem;line-height:1">&times;</button>`;
+  const cancelBtn = `<button onclick="document.getElementById('pdw-log-form').classList.add('hidden')" style="padding:.45rem .75rem;border:1px solid #e5e7eb;border-radius:.5rem;font-size:.8rem;cursor:pointer;background:#fff">Cancel</button>`;
+  if (type === 'note') {
+    form.innerHTML = `
+      <div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.5rem">
+        <span style="font-size:.75rem;font-weight:700;color:#4f46e5">📝 Edit Note</span>${closeX}
+      </div>
+      <textarea id="pdw-log-body" rows="3" style="width:100%;border:1px solid #e5e7eb;border-radius:.5rem;padding:.5rem .75rem;font-size:.85rem;outline:none;resize:none;box-sizing:border-box">${esc(data.body)}</textarea>
+      <div style="display:flex;gap:.5rem;margin-top:.5rem">
+        ${window._micBtn('pdw-log-body')}
+        <button onclick="window._pdwSaveEdit()" style="flex:1;background:#4f46e5;color:#fff;border:none;border-radius:.5rem;padding:.45rem;font-size:.8rem;font-weight:600;cursor:pointer">Save Changes</button>
+        ${cancelBtn}
+      </div>`;
+    form.querySelector('#pdw-log-body')?.focus();
+  } else if (type === 'call') {
+    form.innerHTML = `
+      <div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.5rem">
+        <span style="font-size:.75rem;font-weight:700;color:#16a34a">📞 Edit Call</span>${closeX}
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:.5rem;margin-bottom:.5rem">
+        <div><label style="font-size:.7rem;color:#6b7280;display:block;margin-bottom:.2rem">Date</label>
+        <input id="pdw-log-call-date" type="date" value="${data.callDate||today}" style="width:100%;border:1px solid #e5e7eb;border-radius:.5rem;padding:.4rem .6rem;font-size:.82rem;outline:none;box-sizing:border-box"/></div>
+        <div><label style="font-size:.7rem;color:#6b7280;display:block;margin-bottom:.2rem">Duration (min)</label>
+        <input id="pdw-log-call-dur" type="number" min="1" value="${data.callDuration||''}" placeholder="e.g. 15" style="width:100%;border:1px solid #e5e7eb;border-radius:.5rem;padding:.4rem .6rem;font-size:.82rem;outline:none;box-sizing:border-box"/></div>
+      </div>
+      <textarea id="pdw-log-body" rows="2" style="width:100%;border:1px solid #e5e7eb;border-radius:.5rem;padding:.5rem .75rem;font-size:.85rem;outline:none;resize:none;box-sizing:border-box">${esc(data.body)}</textarea>
+      <div style="display:flex;gap:.5rem;margin-top:.5rem">
+        ${window._micBtn('pdw-log-body')}
+        <button onclick="window._pdwSaveEdit()" style="flex:1;background:#16a34a;color:#fff;border:none;border-radius:.5rem;padding:.45rem;font-size:.8rem;font-weight:600;cursor:pointer">Save Changes</button>
+        ${cancelBtn}
+      </div>`;
+  } else if (type === 'meeting') {
+    form.innerHTML = `
+      <div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.5rem">
+        <span style="font-size:.75rem;font-weight:700;color:#2563eb">📅 Edit Meeting</span>${closeX}
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:.5rem;margin-bottom:.5rem">
+        <div><label style="font-size:.7rem;color:#6b7280;display:block;margin-bottom:.2rem">Meeting Title</label>
+        <input id="pdw-log-mtg-title" type="text" value="${esc(data.meetingTitle)}" placeholder="e.g. Site visit" style="width:100%;border:1px solid #e5e7eb;border-radius:.5rem;padding:.4rem .6rem;font-size:.82rem;outline:none;box-sizing:border-box"/></div>
+        <div><label style="font-size:.7rem;color:#6b7280;display:block;margin-bottom:.2rem">Date</label>
+        <input id="pdw-log-mtg-date" type="date" value="${data.meetingDate||today}" style="width:100%;border:1px solid #e5e7eb;border-radius:.5rem;padding:.4rem .6rem;font-size:.82rem;outline:none;box-sizing:border-box"/></div>
+      </div>
+      <textarea id="pdw-log-body" rows="2" style="width:100%;border:1px solid #e5e7eb;border-radius:.5rem;padding:.5rem .75rem;font-size:.85rem;outline:none;resize:none;box-sizing:border-box">${esc(data.body)}</textarea>
+      <div style="display:flex;gap:.5rem;margin-top:.5rem">
+        ${window._micBtn('pdw-log-body')}
+        <button onclick="window._pdwSaveEdit()" style="flex:1;background:#2563eb;color:#fff;border:none;border-radius:.5rem;padding:.45rem;font-size:.8rem;font-weight:600;cursor:pointer">Save Changes</button>
+        ${cancelBtn}
+      </div>`;
+  }
+};
+
+window._pdwSaveEdit = async () => {
+  const state = window._pdwEditState;
+  if (!state || !_fbDb || !_fbFns) return;
+  const { dealId, activityId, type, feedElId } = state;
+  const body = document.getElementById('pdw-log-body')?.value.trim() || '';
+  const patch = { body, updatedAt: Date.now() };
+  if (type === 'call') {
+    patch.callDate = document.getElementById('pdw-log-call-date')?.value || '';
+    const dur = parseInt(document.getElementById('pdw-log-call-dur')?.value);
+    if (dur) patch.callDuration = dur;
+  } else if (type === 'meeting') {
+    patch.meetingTitle = document.getElementById('pdw-log-mtg-title')?.value.trim() || '';
+    patch.meetingDate  = document.getElementById('pdw-log-mtg-date')?.value || '';
+  }
+  try {
+    const { doc, updateDoc } = _fbFns;
+    await updateDoc(doc(_fbDb, 'deals', dealId, 'activities', activityId), patch);
+    document.getElementById('pdw-log-form')?.classList.add('hidden');
+    window._pdwEditState = null;
+    await window._propLoadActivities(dealId, feedElId);
+    showToast('Entry updated', 'success');
+  } catch(e) {
+    showToast('Failed to save: ' + (e.message || e), 'error');
+  }
+};
+
+window._pdwDeleteActivity = async (dealId, activityId, feedElId) => {
+  if (!confirm('Delete this entry? This cannot be undone.')) return;
+  if (!_fbDb || !_fbFns) return;
+  try {
+    const { doc, deleteDoc } = _fbFns;
+    await deleteDoc(doc(_fbDb, 'deals', dealId, 'activities', activityId));
+    await window._propLoadActivities(dealId, feedElId);
+    showToast('Entry deleted', 'success');
+  } catch(e) {
+    showToast('Failed to delete: ' + (e.message || e), 'error');
+  }
 };
 
 // ── CRM Properties card: open inline log form ────────────────────────────────
