@@ -25114,6 +25114,183 @@ function viewOfficeOverview(){
       </div>
     </div>`;
 
+  // ── Weekly Activity Log ────────────────────────────────
+  const fmtActTs = ts => {
+    if (!ts) return '';
+    const d = new Date(ts);
+    return d.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'})+' · '+d.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'});
+  };
+
+  const buildAdvActivity = uid => {
+    const items = [];
+    const aDeals = allDeals.filter(d => isDealAdvisor(d, uid));
+
+    // Stage moves — from stageHistory entries that landed in the prior-week window
+    for (const d of aDeals) {
+      const hist = d.stageHistory || [];
+      for (const h of hist) {
+        if ((h.enteredAt||0) >= pwS && (h.enteredAt||0) <= pwE) {
+          const addr = d.propertyAddress || d.projectName || 'Deal';
+          const prev = hist[hist.indexOf(h)-1];
+          items.push({ ts: h.enteredAt, type:'stage', icon:'🏷️',
+            text: prev
+              ? `Moved <strong>${addr}</strong>: ${prev.stage} → <em>${h.stage}</em>`
+              : `Moved <strong>${addr}</strong> → <em>${h.stage}</em>` });
+        }
+      }
+      // Deals with no history but stageEnteredAt in window
+      if (!hist.length && (d.stageEnteredAt||0) >= pwS && (d.stageEnteredAt||0) <= pwE) {
+        items.push({ ts: d.stageEnteredAt, type:'stage', icon:'🏷️',
+          text:`Moved <strong>${d.propertyAddress||d.projectName||'Deal'}</strong> → <em>${d.stage}</em>` });
+      }
+    }
+
+    // Tasks created by this advisor this week
+    const myTasks = allTasks.filter(t => t.createdBy===uid && (t.createdAt||0)>=pwS && (t.createdAt||0)<=pwE);
+    for (const t of myTasks) {
+      items.push({ ts:t.createdAt, type:'task', icon:'✅',
+        text:`Created task: <strong>${(t.title||'Untitled').replace(/</g,'&lt;')}</strong>${t.dealAddress?` on ${t.dealAddress.replace(/</g,'&lt;')}`:''}` });
+    }
+
+    // New CRM contacts created by this advisor this week
+    const myContacts = (allContacts||[]).filter(c => c.createdBy===uid && (c.createdAt||0)>=pwS && (c.createdAt||0)<=pwE);
+    for (const c of myContacts) {
+      const name = ([c.firstName,c.lastName].filter(Boolean).join(' ')||c.email||'Contact').replace(/</g,'&lt;');
+      items.push({ ts:c.createdAt, type:'contact', icon:'👤', text:`Added CRM contact: <strong>${name}</strong>` });
+    }
+
+    // Leads created or claimed by this advisor this week
+    const leads = (typeof allLeads!=='undefined' ? allLeads : []);
+    const seenLeadIds = new Set();
+    for (const l of leads) {
+      if (l.advisorUid !== uid) continue;
+      const nm = (l.name||l.email||'Unknown').replace(/</g,'&lt;');
+      if ((l.createdAt||0)>=pwS && (l.createdAt||0)<=pwE) {
+        seenLeadIds.add(l.id);
+        items.push({ ts:l.createdAt, type:'lead', icon:'🎯', text:`Lead created: <strong>${nm}</strong>` });
+      }
+      const claimTs = l.softClaimAt || l.claimedAt || 0;
+      if (claimTs>=pwS && claimTs<=pwE && !seenLeadIds.has(l.id)) {
+        seenLeadIds.add(l.id);
+        items.push({ ts:claimTs, type:'lead', icon:'🎯', text:`Lead claimed: <strong>${nm}</strong>` });
+      }
+    }
+
+    return items.sort((a,b)=>(b.ts||0)-(a.ts||0));
+  };
+
+  const actItemHtml = item => `
+    <div class="flex items-start gap-2.5 py-2 border-b border-gray-50 last:border-0">
+      <span class="text-sm mt-0.5 shrink-0 w-5 text-center">${item.icon}</span>
+      <div class="flex-1 min-w-0">
+        <div class="text-sm text-gray-700 leading-snug">${item.text}</div>
+        <div class="text-xs text-gray-400 mt-0.5">${fmtActTs(item.ts)}</div>
+      </div>
+    </div>`;
+
+  const actRows = allAdvs.map(adv => {
+    const items = buildAdvActivity(adv.uid);
+    return { adv, items,
+      stageCt:   items.filter(i=>i.type==='stage').length,
+      taskCt:    items.filter(i=>i.type==='task').length,
+      contactCt: items.filter(i=>i.type==='contact').length,
+      leadCt:    items.filter(i=>i.type==='lead').length,
+    };
+  }).sort((a,b)=>b.items.length-a.items.length);
+
+  // Expose toggle + async call-loader as window fns (module scope requires this)
+  window._officeToggleAdv = uid => {
+    const det  = document.getElementById('officeadv-detail-'+uid);
+    const chev = document.getElementById('officeadv-chevron-'+uid);
+    if (!det) return;
+    const nowHidden = det.classList.toggle('hidden');
+    if (chev) chev.textContent = nowHidden ? '▶' : '▼';
+  };
+
+  window._officeLoadCalls = async uid => {
+    const callsEl = document.getElementById('officeadv-calls-'+uid);
+    if (!callsEl) return;
+    const btn = callsEl.querySelector('button');
+    if (btn) { btn.disabled=true; btn.textContent='Loading…'; }
+    try {
+      const {collection, query:fbq, where:fbw, getDocs} = _fbFns;
+      const aDeals = allDeals.filter(d => isDealAdvisor(d, uid));
+      const callItems = [];
+      for (const d of aDeals) {
+        let snap;
+        try {
+          snap = await getDocs(fbq(
+            collection(_fbDb,'deals',d.id,'activities'),
+            fbw('createdAt','>=',pwS),
+            fbw('createdAt','<=',pwE)
+          ));
+        } catch(e){ console.warn('[officeLoadCalls] query failed for deal',d.id,e); continue; }
+        const addr = (d.propertyAddress||d.projectName||'Deal').replace(/</g,'&lt;');
+        for (const docSnap of snap.docs) {
+          const a = docSnap.data();
+          const t = a.type||'';
+          if (!['call','note','meeting','email','attachment'].includes(t)) continue;
+          const typeLabel = {call:'📞 Call',note:'📝 Note',meeting:'📅 Meeting',email:'📧 Email',attachment:'📎 File'}[t]||t;
+          const bodySnip = a.body ? ': '+a.body.replace(/</g,'&lt;').slice(0,90)+(a.body.length>90?'…':'') : '';
+          callItems.push({ ts:a.createdAt||0,
+            text:`<span class="text-gray-500 font-medium">${typeLabel}</span> on <strong>${addr}</strong>${bodySnip}` });
+        }
+      }
+      callItems.sort((a,b)=>(b.ts||0)-(a.ts||0));
+      if (!callItems.length) {
+        callsEl.innerHTML='<p class="text-xs text-gray-400 italic pt-1">No calls, notes, meetings or emails logged on deal cards this week.</p>';
+        return;
+      }
+      callsEl.innerHTML = callItems.map(item=>`
+        <div class="flex items-start gap-2.5 py-2 border-b border-gray-50 last:border-0">
+          <div class="flex-1 min-w-0">
+            <div class="text-sm text-gray-700 leading-snug">${item.text}</div>
+            <div class="text-xs text-gray-400 mt-0.5">${fmtActTs(item.ts)}</div>
+          </div>
+        </div>`).join('');
+    } catch(e) {
+      console.warn('[_officeLoadCalls]', e);
+      if (callsEl) callsEl.innerHTML='<p class="text-xs text-red-400 italic pt-1">Failed to load deal activities.</p>';
+    }
+  };
+
+  const actHtml = `
+    <div class="bg-white rounded-2xl border overflow-hidden mb-6">
+      <div class="px-5 py-3.5 border-b bg-gray-50 flex items-center gap-3 flex-wrap">
+        <span class="font-bold text-gray-800 text-sm">📋 Weekly Activity Log — ${office} Office</span>
+        <span class="text-xs text-gray-400">Prior week: ${pwStart.toLocaleDateString('en-US',{month:'short',day:'numeric'})} – ${pwEnd.toLocaleDateString('en-US',{month:'short',day:'numeric'})}</span>
+        <span class="text-xs text-gray-400 ml-auto italic">Stage moves, tasks, contacts &amp; leads from app data · click an advisor to expand · load calls/notes/meetings on demand</span>
+      </div>
+      ${actRows.length===0
+        ? '<div class="px-5 py-8 text-center text-gray-400 text-sm">No advisors in this office.</div>'
+        : actRows.map(r => `
+        <div class="border-b last:border-b-0">
+          <button class="w-full px-5 py-3 flex items-center gap-3 hover:bg-gray-50 transition-colors text-left" onclick="window._officeToggleAdv('${r.adv.uid}')">
+            <span class="font-semibold text-gray-800 text-sm w-40 shrink-0">${r.adv.name}</span>
+            <div class="flex items-center gap-2 flex-wrap flex-1 min-w-0">
+              ${r.stageCt>0   ? `<span class="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full" style="background:#e0e7ff;color:#4338ca">🏷️ ${r.stageCt} stage move${r.stageCt===1?'':'s'}</span>` : ''}
+              ${r.taskCt>0    ? `<span class="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full" style="background:#dcfce7;color:#15803d">✅ ${r.taskCt} task${r.taskCt===1?'':'s'} created</span>` : ''}
+              ${r.contactCt>0 ? `<span class="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full" style="background:#fce7f3;color:#9d174d">👤 ${r.contactCt} contact${r.contactCt===1?'':'s'} added</span>` : ''}
+              ${r.leadCt>0    ? `<span class="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full" style="background:#fef3c7;color:#92400e">🎯 ${r.leadCt} lead${r.leadCt===1?'':'s'}</span>` : ''}
+              ${r.items.length===0 ? `<span class="text-xs text-gray-400 italic">No recorded activity</span>` : ''}
+            </div>
+            <span id="officeadv-chevron-${r.adv.uid}" class="text-gray-400 text-xs shrink-0 ml-auto">▶</span>
+          </button>
+          <div id="officeadv-detail-${r.adv.uid}" class="hidden px-5 pb-4 border-t border-gray-100 bg-gray-50/30">
+            <div class="pt-3">
+              ${r.items.length===0
+                ? '<p class="text-xs text-gray-400 italic py-1">No stage moves, tasks, contacts or leads found this week.</p>'
+                : r.items.map(actItemHtml).join('')}
+            </div>
+            <div id="officeadv-calls-${r.adv.uid}" class="pt-3 border-t border-gray-100 mt-2">
+              <button onclick="window._officeLoadCalls('${r.adv.uid}')" class="text-xs text-blue-600 hover:text-blue-800 font-medium flex items-center gap-1.5">
+                📞 Load calls, notes &amp; meetings from deal activity →
+              </button>
+            </div>
+          </div>
+        </div>`).join('')}
+    </div>`;
+
   setContent(`
     ${isPreview ? `
     <div class="flex items-center justify-between gap-3 mb-4 px-4 py-3 rounded-xl border" style="background:#fff7ed;border-color:#fed7aa">
@@ -25136,6 +25313,7 @@ function viewOfficeOverview(){
 
     ${lbHtml}
     ${scHtml}
+    ${actHtml}
   `);
 }
 
