@@ -8494,6 +8494,74 @@ const ADVISOR_BIO_VIDEOS = {
   }
 }
 
+// ── Mentor notifications ───────────────────────────────────────────────────
+// Fires a task to a mentor whenever their mentee's deal moves to a new stage.
+function _fireMentorStageTask(deal, oldStage, newStage){
+  if(!allProfiles) return;
+  const today = new Date().toISOString().slice(0,10);
+  const due = new Date(); due.setDate(due.getDate()+1);
+  const dueStr = due.toISOString().slice(0,10);
+  const addr = deal.propertyAddress || deal.projectName || 'property';
+  // Collect all advisor UIDs on this deal (primary + co-advisors)
+  const advisorUids = [deal.advisorUid].filter(Boolean);
+  (deal.coAdvisors||[]).forEach(ca=>{ if(ca.uid && !advisorUids.includes(ca.uid)) advisorUids.push(ca.uid); });
+  const mentorsNotified = new Set();
+  for(const advisorUid of advisorUids){
+    const advisorProfile = allProfiles[advisorUid];
+    const advisorName = advisorProfile?.name || (advisorUid===deal.advisorUid ? deal.advisorName : (deal.coAdvisors||[]).find(ca=>ca.uid===advisorUid)?.name) || advisorUid;
+    for(const [mUid, mProfile] of Object.entries(allProfiles)){
+      if(mentorsNotified.has(mUid)) continue;
+      const ms = (mProfile.mentorships||[]).find(m=>m.menteeUid===advisorUid&&(!m.expiresDate||m.expiresDate>=today));
+      if(!ms) continue;
+      mentorsNotified.add(mUid);
+      Store.createTask({
+        title: '📋 Mentee deal → '+newStage+' — '+addr,
+        description: 'Your mentee '+advisorName+' has moved a deal to the '+newStage+' stage.'
+          +(oldStage?'\n\nPrevious stage: '+oldStage:'')
+          +'\nNew stage: '+newStage
+          +'\nProperty: '+addr
+          +'\nAdvisor: '+advisorName
+          +'\n\nReview the deal on the dashboard.',
+        assignedTo: mUid, assignedToName: mProfile.name||mUid, assignedToEmail: mProfile.email||'',
+        dealId: deal.id, dealAddress: deal.propertyAddress||'', dealName: deal.projectName||deal.propertyAddress||'',
+        dueDate: dueStr, status: 'pending',
+        createdBy: currentUser?.uid||'system', createdByName: 'Mentor Notification', createdAt: Date.now(),
+        auto: true,
+      }).catch(e=>console.error('[mentor-stage-task]',e));
+    }
+  }
+}
+
+// Fires a task to a mentor when their mentee creates a new proposal, so the
+// mentor can review it before it goes to the client.
+function _fireMentorProposalReviewTask(proposal){
+  if(!allProfiles) return;
+  const advisorUid = proposal.advisorUid || window._vpOwnerUid || currentUser?.uid;
+  if(!advisorUid) return;
+  const today = new Date().toISOString().slice(0,10);
+  const due = new Date(); due.setDate(due.getDate()+1);
+  const dueStr = due.toISOString().slice(0,10);
+  const proj = proposal.projectName || 'proposal';
+  const advisorName = proposal.advisorName || allProfiles[advisorUid]?.name || advisorUid;
+  for(const [mUid, mProfile] of Object.entries(allProfiles)){
+    const ms = (mProfile.mentorships||[]).find(m=>m.menteeUid===advisorUid&&(!m.expiresDate||m.expiresDate>=today));
+    if(!ms) continue;
+    Store.createTask({
+      title: '👀 Review proposal before sending — '+proj,
+      description: 'Your mentee '+advisorName+' has created a new proposal for "'+proj+'" and it should be reviewed before being sent to the client.'
+        +'\n\nClient: '+(proposal.client||'—')
+        +'\nProject: '+proj
+        +'\nAdvisor: '+advisorName
+        +'\n\nReview the proposal under Video Proposals, then provide feedback or approve.',
+      assignedTo: mUid, assignedToName: mProfile.name||mUid, assignedToEmail: mProfile.email||'',
+      dueDate: dueStr, status: 'pending',
+      createdBy: currentUser?.uid||'system', createdByName: 'Mentor Review', createdAt: Date.now(),
+      auto: true,
+    }).catch(e=>console.error('[mentor-proposal-task]',e));
+  }
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 function buildMailtoUrl(cfg,deal){
   return `mailto:${encodeURIComponent(interpolate(cfg.to||'',deal))}?cc=${encodeURIComponent(interpolate(cfg.cc||'',deal))}&subject=${encodeURIComponent(interpolate(cfg.subject||'',deal))}&body=${encodeURIComponent(interpolate(cfg.body||'',deal))}`;
 }
@@ -9492,13 +9560,17 @@ async function _vpSave(opts){
   const rec=_vpCollectRecord();
   if(!rec.projectName){ showToast('Add a project name first','warning'); return null; }
   const {doc,setDoc}=_fbFns;
+  const _vpIsNew = !window._vpEditing;  // capture before ref assignment
   // New proposals get a readable, project-name doc id so the share link is clean
   // (e.g. /proposals/#Willow_Creek_Ranch). Editing keeps the existing id so links
   // already sent to a client never break.
   const ref=window._vpEditing? doc(_fbDb,'proposals',window._vpEditing) : doc(_fbDb,'proposals',_vpUniqueSlugId(rec.projectName));
   rec.id=ref.id;
   try{ await setDoc(ref, sanitizeForFirestore(rec), {merge:true}); window._vpEditing=ref.id;
-    if(!opts.silent) showToast('Proposal saved','success'); return rec;
+    if(!opts.silent) showToast('Proposal saved','success');
+    // Notify mentor when mentee creates a brand-new proposal (not on edits/auto-saves)
+    if(_vpIsNew) _fireMentorProposalReviewTask(rec);
+    return rec;
   }catch(e){ console.error('[proposals] save',e); showToast('Save failed: '+(e.message||e),'error'); return null; }
 }
 function _vpSaveClick(){ _vpSave().then(r=>{ if(r) _vpBack(); }); }
@@ -29035,6 +29107,7 @@ window.handleDealSubmit = async ev => {
     }
     if(oldStage!==stage) fireAutomations(existing,oldStage);
     if(oldStage!==stage) window._logStageChange(id, oldStage, stage);
+    if(oldStage!==stage) _fireMentorStageTask(existing, oldStage, stage);
     // ── Log attachment uploads to activity feed ──────────────────────────
     if(loiUploadUrl && _snapLoi) window._logAttachmentActivity(id, _snapLoi, 'loi', loiUploadUrl);
     if(psaUploadUrl && _snapPsa) window._logAttachmentActivity(id, _snapPsa, 'psa', psaUploadUrl);
@@ -29097,6 +29170,7 @@ window.handleDealSubmit = async ev => {
     if(!allDeals.find(d=>d.id===newId)) allDeals.push(newDeal);
     if(_parcelDupMatch) _notifyParcelOwner(_parcelDupMatch, newDeal);   // warn + notify original advisor
     fireAutomations(newDeal,null);
+    _fireMentorStageTask(newDeal, null, stage);
     // ── Log attachment uploads for new deal ──────────────────────────────
     if(loiUploadUrl && _snapLoi) window._logAttachmentActivity(newId, _snapLoi, 'loi', loiUploadUrl);
     if(psaUploadUrl && _snapPsa) window._logAttachmentActivity(newId, _snapPsa, 'psa', psaUploadUrl);
