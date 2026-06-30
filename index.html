@@ -26354,11 +26354,150 @@ function viewEOS(sub='rocks'){
       </div>`;
     };
 
+    // ── Quarterly Report Card ─────────────────────────────────────────────
+    // Shows each advisor's average weekly scorecard score for the quarter.
+    // Q2 2026 special case: tracking started May 15, so only use weeks from
+    // the Monday on/before May 15 (2026-05-11) through end of June.
+    const buildQuarterlyReportCard = () => {
+      // Special per-quarter start overrides (key = "YYYY-QN")
+      const QUARTER_OVERRIDES = {
+        '2026-Q2': new Date(2026,4,11).getTime() // Mon May 11 — week containing May 15
+      };
+      const nowMs2 = Date.now();
+
+      // Collect quarters to render: current + prior (if ≥ Q2-2026)
+      const _curYear = now.getFullYear();
+      const quartersToRender = [];
+      quartersToRender.push({year:_curYear, qNum});
+      const prQNum = qNum===1?4:qNum-1, prYear = qNum===1?_curYear-1:_curYear;
+      if(prYear>2026||(prYear===2026&&prQNum>=2)) quartersToRender.push({year:prYear,qNum:prQNum});
+
+      // Get elapsed week keys for a quarter
+      const getQWeeks = (year, qn) => {
+        const oKey = `${year}-Q${qn}`;
+        const qStartMs2 = new Date(year,(qn-1)*3,1).getTime();
+        const qEndMs2   = new Date(year,qn*3,0,23,59,59,999).getTime();
+        const effStart  = QUARTER_OVERRIDES[oKey] ?? qStartMs2;
+        // First Monday on or before effStart
+        const fm = new Date(effStart);
+        const fdow = fm.getDay();
+        fm.setDate(fm.getDate()-(fdow===0?6:fdow-1));
+        fm.setHours(0,0,0,0);
+        const weeks=[];
+        const cur=new Date(fm);
+        while(cur.getTime()<Math.min(qEndMs2,nowMs2)){
+          const sunMs=cur.getTime()+6*86400000+23*3600000+3599999;
+          if(sunMs<nowMs2) weeks.push({wKey:cur.toISOString().split('T')[0], sunMs});
+          cur.setDate(cur.getDate()+7);
+        }
+        return weeks;
+      };
+
+      const _scoreHist2 = eosGet('scoreHistory',{});
+      const _sv2        = _scoreHist2.__ver||1;
+      const SCORECARD_VER2 = 5;
+      const advisorList2 = effectiveAdmin
+        ? getDistinctAdvisors()
+        : [{uid, name:currentUser.name||currentUser.email}];
+
+      const fmtQD = d=>d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+
+      const cardsHtml = quartersToRender.map(({year:yr,qNum:qn})=>{
+        const oKey = `${yr}-Q${qn}`;
+        const qWeeks2 = getQWeeks(yr,qn);
+        if(!qWeeks2.length) return '';
+        const isCurQ  = (yr===_curYear&&qn===qNum);
+        const qStartMs3 = new Date(yr,(qn-1)*3,1).getTime();
+        const qEndMs3   = new Date(yr,qn*3,0,23,59,59,999).getTime();
+        const hasOverride = oKey in QUARTER_OVERRIDES;
+        const rangeLabel  = hasOverride
+          ? `May 15 – Jun 30, ${yr} (tracking start)`
+          : fmtQD(new Date(qStartMs3))+' – '+fmtQD(new Date(Math.min(qEndMs3,Date.now())));
+
+        const advisorQRows = advisorList2.map(({uid:aUid,name:aName})=>{
+          const hist = (_scoreHist2[aUid]&&_sv2>=SCORECARD_VER2)?_scoreHist2[aUid]:{};
+          const scores = qWeeks2.map(({wKey})=>hist[wKey]?.score).filter(s=>s!==undefined);
+          const avg = scores.length>0 ? Math.round(scores.reduce((a,b)=>a+b,0)/scores.length) : null;
+          return {aUid,aName,avg,filled:scores.length,total:qWeeks2.length};
+        }).sort((a,b)=>(b.avg??-1)-(a.avg??-1));
+
+        if(!advisorQRows.some(r=>r.avg!==null)) return '';
+
+        const qRows = advisorQRows.map(({aName,avg,filled,total})=>{
+          if(avg===null) return `<tr class="border-b border-gray-100">
+            <td class="px-5 py-4 sticky left-0 bg-white z-10 border-r border-gray-100"><span class="text-sm font-semibold text-gray-800">${aName}</span></td>
+            <td class="px-4 py-4 text-center" colspan="3"><span class="text-xs text-gray-400 italic">No scorecard data yet</span></td>
+          </tr>`;
+          const g = weekGrade(avg);
+          const barPct = Math.min(100,avg);
+          return `<tr class="border-b border-gray-100 hover:bg-gray-50 transition-colors">
+            <td class="px-5 py-4 sticky left-0 bg-white z-10 border-r border-gray-100">
+              <span class="text-sm font-semibold text-gray-800">${aName}</span>
+            </td>
+            <td class="px-4 py-4 text-center">
+              <div style="display:inline-flex;flex-direction:column;align-items:center;gap:3px">
+                <div style="width:52px;height:52px;border-radius:50%;background:${g.bg};border:2.5px solid ${g.color};display:flex;flex-direction:column;align-items:center;justify-content:center;line-height:1">
+                  <span style="font-size:${g.letter.length>1?'1rem':'1.2rem'};font-weight:800;color:${g.color}">${g.letter}</span>
+                </div>
+                <span style="font-size:.72rem;color:${g.color};font-weight:700">${avg} avg pts</span>
+              </div>
+            </td>
+            <td class="px-5 py-4">
+              <div class="flex flex-col gap-1.5">
+                <div style="height:8px;background:#e5e7eb;border-radius:9999px;overflow:hidden;width:140px">
+                  <div style="width:${barPct}%;height:100%;background:${g.color};border-radius:9999px"></div>
+                </div>
+                <span class="text-xs text-gray-400">${avg} / 100 pts</span>
+              </div>
+            </td>
+            <td class="px-4 py-4 text-center">
+              <span class="text-sm font-semibold text-gray-700">${filled} <span class="text-xs text-gray-400 font-normal">/ ${total} wks</span></span>
+            </td>
+          </tr>`;
+        }).join('');
+
+        const badge = isCurQ
+          ? '<span class="text-xs font-semibold px-2.5 py-1 rounded-full" style="background:#eff6ff;color:#2563eb">In Progress</span>'
+          : '<span class="text-xs font-semibold px-2.5 py-1 rounded-full" style="background:#f0fdf4;color:#059669">Complete</span>';
+
+        return `<div class="bg-white rounded-2xl border overflow-hidden mt-6">
+          <div class="px-6 py-4 border-b flex items-center justify-between flex-wrap gap-2">
+            <div>
+              <h3 class="font-bold text-gray-800 text-base">📊 Q${qn} ${yr} Quarterly Report Card</h3>
+              <p class="text-xs text-gray-400 mt-0.5">${rangeLabel} · ${qWeeks2.length} week${qWeeks2.length!==1?'s':''} averaged</p>
+            </div>
+            <div class="flex items-center gap-2">
+              ${badge}
+              <span class="text-xs text-gray-400">A+ ≥ 100 · A ≥ 90 · B ≥ 80 · C ≥ 70 · D ≥ 60</span>
+            </div>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full">
+              <thead>
+                <tr class="bg-gray-50 border-b border-gray-200">
+                  <th class="px-5 py-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide sticky left-0 bg-gray-50 z-10 border-r border-gray-100">Advisor</th>
+                  <th class="px-4 py-3 text-center text-xs font-bold text-gray-500 uppercase tracking-wide">Q${qn} Grade</th>
+                  <th class="px-5 py-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide">Avg Score</th>
+                  <th class="px-4 py-3 text-center text-xs font-bold text-gray-500 uppercase tracking-wide">Weeks Scored</th>
+                </tr>
+              </thead>
+              <tbody>${qRows}</tbody>
+            </table>
+          </div>
+          <div class="px-6 py-3 border-t bg-gray-50 text-xs text-gray-400">
+            Average of weekly scorecard points · Weeks with no saved score excluded · Sorted by avg score
+          </div>
+        </div>`;
+      }).join('');
+
+      return cardsHtml;
+    };
 
     body = scToggle
       + (showAdv   ? advisorScHtml       : '')
       + (showStaff ? staffScorecard(true) : '')
-      + buildScorecardHistory();
+      + buildScorecardHistory()
+      + (showAdv   ? buildQuarterlyReportCard() : '');
   }
 
   // ── L-10 AGENDA ────────────────────────────────────────────────────────
