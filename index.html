@@ -8682,7 +8682,7 @@ function renderShell(){
     {id:'hr',            label:'👥 HR',             always:true},
     {id:'crm',           label:'🤝 CRM',            crm:true},
     {id:'leads',         label:'🎯 Leads',          advisor:true, admin:true, manager:true},
-    {id:'inbox',         label:'📥 Inbox',          advisor:true, admin:true, manager:true},
+    {id:'inbox',         label:'✉️ E-mail',         advisor:true, admin:true, manager:true},
     {id:'buyers',        label:'🏡 Buyers',         advisor:true, admin:true, manager:true},
     {id:'videoProposals',label:'🎬 Video Proposals',advisor:true, admin:true, manager:true, staff:true},
     {id:'activityLog',   label:'🕵️ Activity Log',   admin:true},
@@ -14959,6 +14959,7 @@ window._dealLogActivity = async (dealId, type, data = {}) => {
     ...( data.meetingDate  ? {meetingDate: data.meetingDate}   : {} ),
     ...( data.gcalEventId  ? {gcalEventId: data.gcalEventId}   : {} ),
     ...( data.gmailId      ? {gmailId: data.gmailId, gmailSubject: data.gmailSubject||'', gmailFrom: data.gmailFrom||'', gmailDate: data.gmailDate||''} : {} ),
+    ...( data.gmailThreadId ? {gmailThreadId: data.gmailThreadId} : {} ),
     ...( data.aiSummary    ? {aiSummary: true} : {} ),
   };
   // Write to deal sub-collection
@@ -21599,8 +21600,8 @@ window._execManualMergeContacts = async () => {
 };
 
 // ── CRM Outreach Imports (updated nightly by daily-crm-outreach-sync task) ──
-const _CRM_OUTREACH_SYNC_DATE = '2026-06-30';
-const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-06-29_0","emailDate":"2026-06-29","emailSubject":"Palm River Duplex Site","attachmentNames":["_0827130929_001.pdf","05-098 SITEPLAN C-2 (1).pdf"],"recipientEmail":"jonathonscott@nealcommunities.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Neal Communities","propertyHint":"Palm River Duplex Site","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-06-29_1","emailDate":"2026-06-29","emailSubject":"Land on Commercial Way","attachmentNames":["OM \u2013 Kokolakis Weeki Wachee.pdf"],"recipientEmail":"madmiked22@gmail.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"","propertyHint":"Kokolakis Weeki Wachee","matchedDealId":null,"imported":false,"skipped":false}];
+const _CRM_OUTREACH_SYNC_DATE = '2026-07-01';
+const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-06-30_0","emailDate":"2026-06-30","emailSubject":"Offer on 5406 Linebaugh","attachmentNames":["PSA Linebaugh.pdf"],"recipientEmail":"masisells@gmail.com","recipientName":"Dave Masi","recipientFirstName":"Dave","recipientLastName":"Masi","companyName":"Sunshinegle LLC","propertyHint":"5406 Linebaugh","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-06-30_1","emailDate":"2026-06-30","emailSubject":"Offer on 5116 Grace Street","attachmentNames":["PSA MVP Grace.pdf"],"recipientEmail":"rlolkus@thekraussorg.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Krauss Org","propertyHint":"Grace Nassau","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-06-30_2","emailDate":"2026-06-30","emailSubject":"Offer on 7900 Park Blvd","attachmentNames":["PSA 7900 Park Blvd.pdf"],"recipientEmail":"ngriffin06@yahoo.com","recipientName":"Nathan","recipientFirstName":"Nathan","recipientLastName":"","companyName":"","propertyHint":"7900 Park Blvd","matchedDealId":null,"imported":false,"skipped":false}];
 
 // ── Gmail Sync ───────────────────────────────────────────────────────
 let _GMAIL_SYNC_DATE;  // set at runtime by crmGmailSync; blank = never synced this session
@@ -34041,15 +34042,28 @@ window.openDealMap=async(includeClosed)=>{
 
 /* ===== SMART_INBOX_BLOCK_START ===== */
 /* =======================================================
-   VIEW: SMART INBOX  (AI-assisted email → property / task / attach)
-   Added elc-v281. Per-advisor Gmail (read-only), human-confirmed actions.
-   Reuses: Store.createDeal / Store.createTask, window._dealLogActivity
-   (activity schema already carries gmailId/gmailSubject/gmailFrom/gmailDate),
-   _aiPost (claude-sonnet-4-6), visibleDeals(), allProfiles, showToast.
+   VIEW: MAIL  (Apple-Mail-style 3-pane inbox)
+   Redesigned elc-v388. Per-advisor Gmail (read/modify/send).
+   Mailbox sidebar (system mailboxes + nested user folders), message
+   list, reading pane. Reply / Reply-all / Forward / Archive / Junk /
+   Trash / Flag. Manual property linking with thread-based auto-link.
+   Automatic contact-history logging (blasts excluded).
+   Reuses: Store.createDeal/createTask, _dealLogActivity, _crmLogActivity,
+   _crmEnsureContact/_crmFindContact, _emailLogBody, _siSaveEmailAttachments,
+   visibleDeals(), allDeals, allContacts, allProfiles, showToast, _aiPost.
    ======================================================= */
-// gmail.modify covers read + label changes (move to folder); gmail.send covers replies.
 const SI_GMAIL_SCOPES = ['https://www.googleapis.com/auth/gmail.modify','https://www.googleapis.com/auth/gmail.send'];
-window._siState = { emails:[], labels:[], selected:null, suggestions:[], log:[], analyzing:false };
+// System mailboxes (Apple Mail order). ARCHIVE is a query, not a Gmail label.
+const SI_SYSTEM_BOXES = [
+  { id:'INBOX',   name:'Inbox',   icon:'📥' },
+  { id:'STARRED', name:'Flagged', icon:'🚩' },
+  { id:'SENT',    name:'Sent',    icon:'📤' },
+  { id:'DRAFT',   name:'Drafts',  icon:'📝' },
+  { id:'SPAM',    name:'Junk',    icon:'🚫' },
+  { id:'TRASH',   name:'Trash',   icon:'🗑️' },
+  { id:'ARCHIVE', name:'Archive', icon:'🗄️' }
+];
+window._siState = { emails:[], labels:[], counts:{}, mailbox:'INBOX', mailboxName:'Inbox', selected:null, search:'', expanded:{}, log:[] };
 
 function _siEsc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function _siGmailToken(){
@@ -34059,6 +34073,14 @@ function _siGmailToken(){
   return t;
 }
 function _siDateStr(n){ const d=new Date(); d.setDate(d.getDate()+(n||0)); return d.toISOString().slice(0,10); }
+function _siFmtDate(dateStr){
+  const d = new Date(dateStr); if(isNaN(d)) return '';
+  const now=new Date();
+  const sameDay = d.toDateString()===now.toDateString();
+  if(sameDay) return d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'});
+  if(d.getFullYear()===now.getFullYear()) return d.toLocaleDateString(undefined,{month:'short',day:'numeric'});
+  return d.toLocaleDateString(undefined,{month:'numeric',day:'numeric',year:'2-digit'});
+}
 
 window._siConnectGmail = async function(){
   if(!_fbFns || !_fbAuth){ showToast('Not signed in','error'); return; }
@@ -34071,19 +34093,16 @@ window._siConnectGmail = async function(){
     if(cred?.accessToken){
       localStorage.setItem('gmail_token', cred.accessToken);
       localStorage.setItem('gmail_token_exp', String(Date.now() + 3600*1000));
-      showToast('Gmail connected ✓','success');
+      showToast('Mail connected ✓','success');
       window._siState.emails = [];
       viewSmartInbox();
-    } else {
-      showToast('Gmail token not returned — try again','error');
-    }
+    } else { showToast('Gmail token not returned — try again','error'); }
   } catch(e){ showToast('Gmail permission not granted','error'); }
 };
-
 window._siDisconnect = function(){
   localStorage.removeItem('gmail_token');
   localStorage.removeItem('gmail_token_exp');
-  window._siState = { emails:[], selected:null, suggestions:[], log:[], analyzing:false };
+  window._siState = { emails:[], labels:[], counts:{}, mailbox:'INBOX', mailboxName:'Inbox', selected:null, search:'', expanded:{}, log:[] };
   viewSmartInbox();
 };
 
@@ -34093,91 +34112,155 @@ function viewSmartInbox(){
   if(!token){
     setContent(
       '<div style="max-width:540px;margin:3rem auto;text-align:center;padding:2.2rem;background:#fff;border:1px solid #e5e7eb;border-radius:14px">'+
-      '<div style="font-size:2.4rem">📥</div>'+
-      '<h2 style="font-size:1.3rem;font-weight:800;margin:.5rem 0 .35rem">Smart Inbox</h2>'+
-      '<p style="color:#6b7280;font-size:.92rem;line-height:1.55;margin-bottom:1.3rem">Connect your Gmail and Terra will read your inbox and suggest <b>properties</b>, <b>tasks</b>, and <b>email attachments</b> — which you confirm before anything is saved. Terra reads only your own mailbox, in your browser.</p>'+
+      '<div style="font-size:2.4rem">✉️</div>'+
+      '<h2 style="font-size:1.3rem;font-weight:800;margin:.5rem 0 .35rem">E-mail</h2>'+
+      '<p style="color:#6b7280;font-size:.92rem;line-height:1.55;margin-bottom:1.3rem">Connect your Gmail to read, reply, and file your mail right inside Terra — with folders, subfolders, and one-click linking of any email to a property. Every conversation is automatically logged to the matching CRM contact.</p>'+
       '<button onclick="_siConnectGmail()" style="background:var(--brand-red,#DA291C);color:#fff;border:0;border-radius:9px;padding:.72rem 1.4rem;font-weight:700;cursor:pointer;font-size:.95rem">Connect Gmail</button>'+
-      '<p style="color:#9ca3af;font-size:.72rem;margin-top:1.1rem">Read, reply, and file your mail · message bodies are never stored on our servers</p>'+
+      '<p style="color:#9ca3af;font-size:.72rem;margin-top:1.1rem">Reads only your own mailbox, in your browser · message bodies are never stored on our servers</p>'+
       '</div>'
     );
     return;
   }
   setContent(
-    '<div style="display:grid;grid-template-columns:172px 280px 1fr 360px;height:calc(100vh - 90px);border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;background:#fff">'+
-      '<div id="si-folders" style="overflow-y:auto;border-right:1px solid #e5e7eb;background:#FAFAFB;display:flex;flex-direction:column">'+
-        '<div style="position:sticky;top:0;background:#FAFAFB;border-bottom:1px solid #e5e7eb;padding:.8rem .8rem;z-index:2;font-weight:800;font-size:.9rem">Folders</div>'+
-        '<div id="si-folder-list" style="padding:.4rem;flex:1"></div>'+
+    '<div class="si-mail" style="display:grid;grid-template-columns:230px 340px 1fr;height:calc(100vh - 90px);border:1px solid #d9d9de;border-radius:12px;overflow:hidden;background:#fff;font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,Helvetica,Arial,sans-serif">'+
+      // ── Mailbox sidebar ──
+      '<div id="si-sidebar" style="overflow-y:auto;border-right:1px solid #e3e3e8;background:#f5f5f7;display:flex;flex-direction:column">'+
+        '<div style="position:sticky;top:0;background:#f5f5f7;border-bottom:1px solid #e3e3e8;padding:.7rem .85rem;z-index:2;display:flex;align-items:center;justify-content:space-between">'+
+          '<span style="font-weight:800;font-size:.82rem;color:#6b7280;text-transform:uppercase;letter-spacing:.5px">Mailboxes</span>'+
+          '<button onclick="_siDisconnect()" title="Disconnect Gmail" style="border:0;background:none;color:#9ca3af;cursor:pointer;font-size:.72rem">Sign out</button>'+
+        '</div>'+
+        '<div id="si-mailbox-list" style="padding:.35rem;flex:1"></div>'+
         '<button onclick="_siNewFolder()" style="margin:.5rem;border:1px dashed #cbd5e1;background:#fff;border-radius:8px;padding:.5rem;font-size:.78rem;font-weight:600;color:#374151;cursor:pointer">＋ New folder</button>'+
       '</div>'+
-      '<div id="si-list" style="overflow-y:auto;border-right:1px solid #e5e7eb">'+
-        '<div style="position:sticky;top:0;background:#fff;border-bottom:1px solid #e5e7eb;padding:.8rem .9rem;z-index:2;display:flex;justify-content:space-between;align-items:center">'+
-          '<div><div style="font-weight:800;font-size:.95rem">Inbox</div><div id="si-sub" style="color:#6b7280;font-size:.74rem">Loading…</div></div>'+
-          '<button onclick="_siLoadInbox()" title="Refresh" style="border:1px solid #e5e7eb;background:#fff;border-radius:7px;padding:.3rem .5rem;cursor:pointer;font-size:.8rem">↻</button>'+
-        '</div>'+
-        '<div id="si-mails"></div>'+
-      '</div>'+
-      '<div id="si-reader" style="overflow-y:auto;border-right:1px solid #e5e7eb">'+
-        '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#9ca3af;text-align:center;padding:2rem">Select an email to read it and see AI-suggested actions.<br>Tip: drag any email onto a folder on the left to file it.</div>'+
-      '</div>'+
-      '<div id="si-ai" style="background:#FAFAFB;display:flex;flex-direction:column;overflow:hidden">'+
-        '<div style="background:#FAFAFB;border-bottom:1px solid #e5e7eb;padding:.85rem;flex:0 0 auto">'+
-          '<div style="font-weight:800;font-size:.95rem">🤖 AI Actions</div>'+
-          '<div style="color:#6b7280;font-size:.74rem;margin-top:.2rem">Claude reads the open email and proposes actions. Nothing saves until you confirm.</div>'+
-        '</div>'+
-        '<div id="si-ai-body" style="padding:.85rem;flex:1;overflow-y:auto"><div style="color:#9ca3af;font-size:.85rem;text-align:center;padding:1.5rem">Open an email to analyze it.</div></div>'+
-        '<div style="border-top:1px solid #e5e7eb;background:#fff;padding:.6rem;flex:0 0 auto">'+
-          '<div style="font-size:.7rem;color:#6b7280;margin-bottom:.35rem">Tell the AI what to do with this email</div>'+
-          '<div style="display:flex;gap:.4rem">'+
-            '<input id="si-chat-input" placeholder="e.g. draft a task for Krissy to order a survey" onkeydown="if(event.key===\'Enter\')_siChat()" style="flex:1;border:1px solid #e5e7eb;border-radius:8px;padding:.45rem .6rem;font-size:.8rem">'+
-            '<button onclick="_siChat()" style="background:var(--brand-teal,#00B2A9);color:#fff;border:0;border-radius:8px;padding:.45rem .7rem;font-size:.8rem;font-weight:700;cursor:pointer">Send</button>'+
+      // ── Message list ──
+      '<div id="si-list" style="overflow-y:auto;border-right:1px solid #e3e3e8;background:#fff;display:flex;flex-direction:column">'+
+        '<div style="position:sticky;top:0;background:#fbfbfd;border-bottom:1px solid #e3e3e8;padding:.6rem .8rem;z-index:2">'+
+          '<div style="display:flex;justify-content:space-between;align-items:center">'+
+            '<div><div id="si-box-title" style="font-weight:800;font-size:1rem">Inbox</div><div id="si-sub" style="color:#9ca3af;font-size:.72rem">Loading…</div></div>'+
+            '<button onclick="_siReload()" title="Refresh" style="border:1px solid #e5e7eb;background:#fff;border-radius:7px;padding:.3rem .5rem;cursor:pointer;font-size:.85rem">↻</button>'+
           '</div>'+
+          '<input id="si-search" oninput="_siOnSearch(this.value)" placeholder="Search this mailbox" style="margin-top:.5rem;width:100%;border:1px solid #e0e0e6;border-radius:8px;padding:.4rem .6rem;font-size:.82rem;background:#fff;box-sizing:border-box">'+
         '</div>'+
+        '<div id="si-mails" style="flex:1"></div>'+
+      '</div>'+
+      // ── Reading pane ──
+      '<div id="si-reader" style="overflow-y:auto;background:#fff">'+
+        '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#b8b8bf;text-align:center;padding:2rem;flex-direction:column;gap:.6rem"><div style="font-size:2.4rem">✉️</div><div>Select a message to read it.<br><span style="font-size:.8rem">Drag any message onto a folder to file it.</span></div></div>'+
       '</div>'+
     '</div>'
   );
   _siLoadLabels();
-  if(!window._siState.emails.length) _siLoadInbox();
-  else { _siRenderList(); }
+  _siRenderMailboxes();
+  _siLoadMailbox('INBOX','Inbox');
   _siStartPolling();
 }
 
-function _siRenderFolders(){
-  const wrap=document.getElementById('si-folder-list'); if(!wrap) return;
-  const labels=window._siState.labels||[];
-  if(!labels.length){ wrap.innerHTML='<div style="color:#9ca3af;font-size:.74rem;padding:.5rem">No folders yet. Create one below.</div>'; return; }
-  wrap.innerHTML=labels.map(function(l){
-    return '<div ondragover="event.preventDefault();this.style.background=\'#E6F7F5\'" ondragleave="this.style.background=\'\'" ondrop="this.style.background=\'\';_siDrop(event,\''+l.id+'\')" '+
-      'style="display:flex;align-items:center;gap:.4rem;padding:.45rem .55rem;border-radius:7px;font-size:.8rem;color:#374151;cursor:default;margin-bottom:.15rem" '+
-      'title="Drag an email here to file it">📁 <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+_siEsc(l.name)+'</span></div>';
+/* ─────────── Mailbox sidebar ─────────── */
+function _siMailboxRow(box, active){
+  const cnt = window._siState.counts[box.id]||0;
+  const badge = (cnt>0 && box.id!=='SENT' && box.id!=='DRAFT' && box.id!=='TRASH' && box.id!=='ARCHIVE')
+    ? '<span style="margin-left:auto;background:'+(active?'#fff':'#c7c7cd')+';color:'+(active?'#0a84ff':'#fff')+';font-size:.68rem;font-weight:700;border-radius:999px;padding:.05rem .4rem;min-width:18px;text-align:center">'+cnt+'</span>' : '';
+  return '<div onclick="_siLoadMailbox(\''+box.id+'\',\''+_siEsc(box.name)+'\')" '+
+    'ondragover="event.preventDefault()" '+
+    'style="display:flex;align-items:center;gap:.5rem;padding:.42rem .55rem;border-radius:7px;font-size:.86rem;cursor:pointer;margin-bottom:.1rem;'+(active?'background:#0a84ff;color:#fff;font-weight:600':'color:#1f2937')+'">'+
+    '<span style="font-size:.95rem">'+box.icon+'</span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+_siEsc(box.name)+'</span>'+badge+'</div>';
+}
+
+// Build a nested tree from user labels whose names use "Parent/Child".
+function _siFolderTree(){
+  const root={ children:{} };
+  (window._siState.labels||[]).forEach(function(l){
+    const parts=l.name.split('/'); let node=root; let path='';
+    parts.forEach(function(part,idx){
+      path = path ? path+'/'+part : part;
+      if(!node.children[part]) node.children[part]={ children:{}, name:part, path:path, label:null };
+      node=node.children[part];
+      if(idx===parts.length-1) node.label=l;
+    });
+  });
+  return root;
+}
+function _siRenderFolderNode(node, depth){
+  const st=window._siState;
+  const keys=Object.keys(node.children).sort(function(a,b){ return a.localeCompare(b); });
+  return keys.map(function(k){
+    const child=node.children[k];
+    const hasKids=Object.keys(child.children).length>0;
+    const open=!!st.expanded[child.path];
+    const active=child.label && st.mailbox===child.label.id;
+    const cnt=child.label ? (st.counts[child.label.id]||0) : 0;
+    const badge = cnt>0 ? '<span style="margin-left:auto;background:'+(active?'#fff':'#c7c7cd')+';color:'+(active?'#0a84ff':'#fff')+';font-size:.66rem;font-weight:700;border-radius:999px;padding:.05rem .38rem">'+cnt+'</span>' : '';
+    const tri = hasKids
+      ? '<span onclick="event.stopPropagation();_siToggleFolder(\''+_siEsc(child.path)+'\')" style="display:inline-block;width:12px;cursor:pointer;transform:rotate('+(open?'90':'0')+'deg);transition:transform .1s;color:'+(active?'#fff':'#9ca3af')+'">▶</span>'
+      : '<span style="display:inline-block;width:12px"></span>';
+    const clickAttr = child.label
+      ? 'onclick="_siLoadMailbox(\''+child.label.id+'\')" '+
+        'ondragover="event.preventDefault();this.style.background=\'#d5ecff\'" ondragleave="this.style.background=\'\'" ondrop="this.style.background=\'\';_siDrop(event,\''+child.label.id+'\')" '
+      : 'onclick="_siToggleFolder(\''+_siEsc(child.path)+'\')" ';
+    let html='<div '+clickAttr+'style="display:flex;align-items:center;gap:.35rem;padding:.38rem .5rem;padding-left:'+(0.5+depth*0.9)+'rem;border-radius:7px;font-size:.84rem;cursor:pointer;margin-bottom:.08rem;'+(active?'background:#0a84ff;color:#fff;font-weight:600':'color:#374151')+'" title="Drag a message here to file it">'+
+      tri+'<span style="font-size:.9rem">📁</span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+_siEsc(child.name)+'</span>'+badge+'</div>';
+    if(hasKids && open) html+=_siRenderFolderNode(child, depth+1);
+    return html;
   }).join('');
+}
+window._siToggleFolder = function(path){ const st=window._siState; st.expanded[path]=!st.expanded[path]; _siRenderMailboxes(); };
+function _siRenderMailboxes(){
+  const wrap=document.getElementById('si-mailbox-list'); if(!wrap) return;
+  const st=window._siState;
+  let html = SI_SYSTEM_BOXES.map(function(b){ return _siMailboxRow(b, st.mailbox===b.id); }).join('');
+  const tree=_siFolderTree();
+  if(Object.keys(tree.children).length){
+    html += '<div style="font-weight:800;font-size:.72rem;color:#9ca3af;text-transform:uppercase;letter-spacing:.5px;padding:.7rem .55rem .3rem">Folders</div>';
+    html += _siRenderFolderNode(tree, 0);
+  }
+  wrap.innerHTML=html;
 }
 
 window._siNewFolder = async function(){
   const token=_siGmailToken(); if(!token){ _siDisconnect(); return; }
-  const name=(window.prompt('New folder name:')||'').trim(); if(!name) return;
+  const name=(window.prompt('New folder name (use “Parent/Child” for a subfolder):')||'').trim(); if(!name) return;
   try{
     const r=await fetch('https://gmail.googleapis.com/gmail/v1/users/me/labels',{
       method:'POST', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
       body:JSON.stringify({ name:name, labelListVisibility:'labelShow', messageListVisibility:'show' })
     });
     if(r.status===401){ _siDisconnect(); showToast('Gmail session expired — reconnect','warning'); return; }
-    if(!r.ok){ const t=await r.text(); throw new Error(r.status===409?'A folder with that name already exists':('Gmail '+r.status)); }
+    if(!r.ok){ throw new Error(r.status===409?'A folder with that name already exists':('Gmail '+r.status)); }
     showToast('Folder “'+name+'” created ✓','success');
     await _siLoadLabels();
-  }catch(err){ console.error('[smart-inbox] new folder failed', err); showToast('Could not create folder: '+err.message,'error'); }
+  }catch(err){ console.error('[mail] new folder failed', err); showToast('Could not create folder: '+err.message,'error'); }
 };
 
 window._siDragStart = function(ev, id){ try{ ev.dataTransfer.setData('text/plain', id); ev.dataTransfer.effectAllowed='move'; }catch(e){} window._siDragId=id; };
 window._siDrop = function(ev, labelId){ ev.preventDefault(); let id=''; try{ id=ev.dataTransfer.getData('text/plain'); }catch(e){} id=id||window._siDragId; if(id) _siMoveById(id, labelId); };
 
-window._siLoadInbox = async function(){
-  const token = _siGmailToken();
-  if(!token){ viewSmartInbox(); return; }
-  const sub = document.getElementById('si-sub');
-  const mails = document.getElementById('si-mails');
-  if(sub) sub.textContent = 'Loading…';
-  try {
-    const listResp = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages?labelIds=INBOX&maxResults=20', { headers:{ Authorization:'Bearer '+token } });
+/* ─────────── Loading mailboxes ─────────── */
+window._siReload = function(){ const st=window._siState; _siLoadMailbox(st.mailbox, st.mailboxName); };
+window._siOnSearch = function(v){ window._siState.search=(v||'').toLowerCase(); _siRenderList(); };
+
+window._siLoadMailbox = async function(mailboxId, mailboxName){
+  const token = _siGmailToken(); if(!token){ viewSmartInbox(); return; }
+  const st=window._siState;
+  if(!mailboxName){
+    const sys=SI_SYSTEM_BOXES.find(b=>b.id===mailboxId);
+    const lbl=(st.labels||[]).find(l=>l.id===mailboxId);
+    mailboxName = sys ? sys.name : (lbl ? lbl.name.split('/').pop() : mailboxId);
+  }
+  st.mailbox=mailboxId; st.mailboxName=mailboxName||mailboxId; st.selected=null; st.search='';
+  const searchBox=document.getElementById('si-search'); if(searchBox) searchBox.value='';
+  const title=document.getElementById('si-box-title'); if(title) title.textContent=st.mailboxName;
+  const sub=document.getElementById('si-sub'); if(sub) sub.textContent='Loading…';
+  const reader=document.getElementById('si-reader');
+  if(reader) reader.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#b8b8bf;text-align:center;padding:2rem;flex-direction:column;gap:.6rem"><div style="font-size:2.4rem">✉️</div><div>Select a message to read it.</div></div>';
+  _siRenderMailboxes();
+  try{
+    let url;
+    if(mailboxId==='ARCHIVE'){
+      url='https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=30&q='+encodeURIComponent('-in:inbox -in:sent -in:trash -in:spam -in:draft -in:chats');
+    } else {
+      url='https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=30&labelIds='+encodeURIComponent(mailboxId);
+    }
+    const listResp = await fetch(url, { headers:{ Authorization:'Bearer '+token } });
     if(listResp.status===401){ _siDisconnect(); showToast('Gmail session expired — reconnect','warning'); return; }
     if(!listResp.ok) throw new Error('Gmail list '+listResp.status);
     const list = await listResp.json();
@@ -34186,28 +34269,30 @@ window._siLoadInbox = async function(){
       fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/'+id+'?format=full', { headers:{ Authorization:'Bearer '+token } })
         .then(r=>r.ok?r.json():null).catch(()=>null)
     ));
-    window._siState.emails = msgs.filter(Boolean).map(_siParse);
+    st.emails = msgs.filter(Boolean).map(_siParse);
     _siRenderList();
-  } catch(e){
-    console.error('[smart-inbox] load failed', e);
-    if(mails) mails.innerHTML = '<div style="padding:1rem;color:#b91c1c;font-size:.82rem">Could not load inbox: '+_siEsc(e.message)+'</div>';
-    if(sub) sub.textContent = 'Error';
+    // Background: auto-log to CRM contacts + auto-link known threads to properties.
+    _siAutoProcess(st.emails);
+  }catch(e){
+    console.error('[mail] load failed', e);
+    const mails=document.getElementById('si-mails');
+    if(mails) mails.innerHTML='<div style="padding:1rem;color:#b91c1c;font-size:.82rem">Could not load: '+_siEsc(e.message)+'</div>';
+    if(sub) sub.textContent='Error';
   }
 };
 
-// ── Real-time inbox: poll Gmail for new messages and slot them in without
-// disturbing the email the advisor is currently reading. ──────────────────────
+// Poll only the Inbox for new mail; leave the open message untouched.
 window._siPollInbox = async function(){
-  // self-clean: if the user navigated away from the inbox, stop polling
+  const st=window._siState;
   if(!document.getElementById('si-mails')){ _siStopPolling(); return; }
-  const token=_siGmailToken();
-  if(!token){ _siStopPolling(); return; }
+  if(st.mailbox!=='INBOX') return;
+  const token=_siGmailToken(); if(!token){ _siStopPolling(); return; }
   try{
     const r=await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages?labelIds=INBOX&maxResults=15',{ headers:{ Authorization:'Bearer '+token } });
     if(r.status===401){ _siStopPolling(); return; }
     if(!r.ok) return;
     const list=await r.json();
-    const have={}; (window._siState.emails||[]).forEach(e=>{ have[e.id]=1; });
+    const have={}; (st.emails||[]).forEach(e=>{ have[e.id]=1; });
     const newIds=(list.messages||[]).map(m=>m.id).filter(id=>!have[id]);
     if(!newIds.length) return;
     const msgs=await Promise.all(newIds.map(id=>
@@ -34215,18 +34300,16 @@ window._siPollInbox = async function(){
         .then(x=>x.ok?x.json():null).catch(()=>null)));
     const fresh=msgs.filter(Boolean).map(_siParse);
     if(!fresh.length) return;
-    // newest first; new mail goes to the top, the open/selected email is untouched
-    window._siState.emails = fresh.concat(window._siState.emails||[]);
+    st.emails = fresh.concat(st.emails||[]);
     _siRenderList();
-    const n=fresh.length;
-    try{ showToast(n+' new email'+(n!==1?'s':'')+' arrived','info',2500); }catch(_){}
+    _siAutoProcess(fresh);
+    try{ showToast(fresh.length+' new email'+(fresh.length!==1?'s':'')+' arrived','info',2500); }catch(_){}
   }catch(_){}
 };
 function _siStopPolling(){ if(window._siPollTimer){ clearInterval(window._siPollTimer); window._siPollTimer=null; } }
 function _siStartPolling(){
   _siStopPolling();
   window._siPollTimer=setInterval(window._siPollInbox, 30000);
-  // refresh the moment the tab/window regains focus (registered once)
   if(!window._siVisHooked){
     window._siVisHooked=true;
     document.addEventListener('visibilitychange', function(){
@@ -34236,11 +34319,11 @@ function _siStartPolling(){
   }
 }
 
+/* ─────────── MIME parsing ─────────── */
 function _siB64(data){
   try { return decodeURIComponent(escape(atob((data||'').replace(/-/g,'+').replace(/_/g,'/')))); }
   catch(e){ try { return atob((data||'').replace(/-/g,'+').replace(/_/g,'/')); } catch(_){ return ''; } }
 }
-// First text/html part anywhere in the MIME tree (raw, unmodified)
 function _siExtractHtml(payload){
   if(!payload) return '';
   const walk=(p)=>{
@@ -34253,10 +34336,8 @@ function _siExtractHtml(payload){
   if(!html && payload.mimeType==='text/html' && payload.body?.data) html = _siB64(payload.body.data);
   return (html||'').replace(/\r/g,'');
 }
-// Plain-text body for AI analysis / reply + forward quoting.
 function _siExtractBody(payload){
   if(!payload) return '';
-  // Prefer text/plain; walk parts recursively
   const walk = (p)=>{
     if(!p) return '';
     if(p.mimeType==='text/plain' && p.body?.data) return _siB64(p.body.data);
@@ -34265,30 +34346,23 @@ function _siExtractBody(payload){
   };
   let body = walk(payload);
   if(!body && payload.body?.data && payload.mimeType!=='text/html') body = _siB64(payload.body.data);
-  if(!body){ // derive readable text from the HTML part
-    const html=_siExtractHtml(payload);
-    if(html) body = _siHtmlToText(html);
-  }
+  if(!body){ const html=_siExtractHtml(payload); if(html) body=_siHtmlToText(html); }
   return (body||'').replace(/\r/g,'').trim();
 }
-// Strip an HTML email down to readable plain text (drops style/script/head,
-// turns block tags into line breaks, decodes common entities).
 function _siHtmlToText(html){
-  let s = (html||'');
-  s = s.replace(/<!--[\s\S]*?-->/g,'');
-  s = s.replace(/<(style|script|head|title)[\s\S]*?<\/\1>/gi,' ');
-  s = s.replace(/<\/(p|div|tr|table|h[1-6]|li|ul|ol|blockquote)>/gi,'\n');
-  s = s.replace(/<br\s*\/?>/gi,'\n');
-  s = s.replace(/<[^>]+>/g,'');
-  s = s.replace(/&nbsp;/gi,' ').replace(/&amp;/gi,'&').replace(/&lt;/gi,'<')
-       .replace(/&gt;/gi,'>').replace(/&quot;/gi,'"').replace(/&#39;/gi,"'")
-       .replace(/&#8202;/gi,' ').replace(/&#8217;/gi,"'").replace(/&#8220;/gi,'"').replace(/&#8221;/gi,'"');
-  s = s.replace(/[ \t]+/g,' ').replace(/\n{3,}/g,'\n\n');
+  let s=(html||'');
+  s=s.replace(/<!--[\s\S]*?-->/g,'');
+  s=s.replace(/<(style|script|head|title)[\s\S]*?<\/\1>/gi,' ');
+  s=s.replace(/<\/(p|div|tr|table|h[1-6]|li|ul|ol|blockquote)>/gi,'\n');
+  s=s.replace(/<br\s*\/?>/gi,'\n');
+  s=s.replace(/<[^>]+>/g,'');
+  s=s.replace(/&nbsp;/gi,' ').replace(/&amp;/gi,'&').replace(/&lt;/gi,'<')
+     .replace(/&gt;/gi,'>').replace(/&quot;/gi,'"').replace(/&#39;/gi,"'")
+     .replace(/&#8202;/gi,' ').replace(/&#8217;/gi,"'").replace(/&#8220;/gi,'"').replace(/&#8221;/gi,'"');
+  s=s.replace(/[ \t]+/g,' ').replace(/\n{3,}/g,'\n\n');
   return s.trim();
 }
 function _siExtractAttachments(payload){
-  // Walk the MIME tree for real file attachments (named parts with an attachmentId).
-  // Inline images (referenced by cid: in the HTML) are handled separately.
   const out=[];
   const walk=(p)=>{
     if(!p) return;
@@ -34302,7 +34376,6 @@ function _siExtractAttachments(payload){
   walk(payload);
   return out;
 }
-// Inline images embedded via Content-ID (cid:) — used to rewrite the HTML body.
 function _siExtractInlineImages(payload){
   const out=[];
   const walk=(p)=>{
@@ -34318,113 +34391,157 @@ function _siExtractInlineImages(payload){
   return out;
 }
 function _siParse(msg){
-  const headers = (msg.payload && msg.payload.headers) || [];
-  const h = (n)=>{ const x=headers.find(x=>x.name.toLowerCase()===n); return x?x.value:''; };
-  const fromRaw = h('from');
-  const m = fromRaw.match(/^(.*?)<(.+?)>/);
-  const fromName = m ? m[1].replace(/"/g,'').trim() : fromRaw;
-  const fromEmail = m ? m[2].trim() : fromRaw;
+  const headers=(msg.payload && msg.payload.headers)||[];
+  const h=(n)=>{ const x=headers.find(x=>x.name.toLowerCase()===n); return x?x.value:''; };
+  const fromRaw=h('from');
+  const m=fromRaw.match(/^(.*?)<(.+?)>/);
+  const fromName=m?m[1].replace(/"/g,'').trim():fromRaw;
+  const fromEmail=m?m[2].trim():fromRaw;
+  const labelIds=msg.labelIds||[];
+  // recipient display for Sent view
+  const toRaw=h('to');
+  const tm=toRaw.match(/^(.*?)<(.+?)>/);
+  const toName=tm?tm[1].replace(/"/g,'').trim():toRaw;
   return {
     id: msg.id,
     threadId: msg.threadId,
-    from: fromName || fromEmail,
+    from: fromName||fromEmail,
     fromEmail: fromEmail,
-    subject: h('subject') || '(no subject)',
+    toName: toName||toRaw,
+    subject: h('subject')||'(no subject)',
     date: (h('date')||'').replace(/\s*\(.*\)$/,''),
-    toRaw: h('to'),
+    toRaw: toRaw,
     ccRaw: h('cc'),
     messageId: h('message-id'),
-    snippet: msg.snippet || '',
+    listUnsub: h('list-unsubscribe'),
+    precedence: h('precedence'),
+    snippet: msg.snippet||'',
     body: _siExtractBody(msg.payload),
     bodyHtml: _siExtractHtml(msg.payload),
     inlineImages: _siExtractInlineImages(msg.payload),
     attachments: _siExtractAttachments(msg.payload),
-    unread: (msg.labelIds||[]).includes('UNREAD')
+    labelIds: labelIds,
+    flagged: labelIds.includes('STARRED'),
+    unread: labelIds.includes('UNREAD')
   };
 }
-// extract bare email addresses from a header value, lowercased + de-duped
 function _siEmails(str){
   const out=[]; const re=/[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/g; let m;
   while((m=re.exec(str||''))){ const a=m[0].toLowerCase(); if(out.indexOf(a)<0) out.push(a); }
   return out;
 }
+function _siParticipantEmails(email){
+  const all=[];
+  if(email.fromEmail) all.push(String(email.fromEmail).toLowerCase());
+  _siEmails(email.toRaw).forEach(a=>all.push(a));
+  _siEmails(email.ccRaw).forEach(a=>all.push(a));
+  const out=[]; all.forEach(a=>{ if(a && out.indexOf(a)<0) out.push(a); });
+  return out;
+}
 
+/* ─────────── Message list ─────────── */
+function _siFilteredEmails(){
+  const st=window._siState;
+  const q=st.search;
+  if(!q) return st.emails;
+  return st.emails.filter(e=>(
+    (e.from||'').toLowerCase().indexOf(q)>=0 ||
+    (e.toName||'').toLowerCase().indexOf(q)>=0 ||
+    (e.subject||'').toLowerCase().indexOf(q)>=0 ||
+    (e.snippet||'').toLowerCase().indexOf(q)>=0
+  ));
+}
 function _siRenderList(){
-  const st = window._siState;
-  const sub = document.getElementById('si-sub');
-  const wrap = document.getElementById('si-mails');
+  const st=window._siState;
+  const sub=document.getElementById('si-sub');
+  const wrap=document.getElementById('si-mails');
   if(!wrap) return;
-  const unread = st.emails.filter(e=>e.unread).length;
-  if(sub) sub.textContent = st.emails.length+' messages · '+unread+' unread';
-  if(!st.emails.length){ wrap.innerHTML = '<div style="padding:1rem;color:#9ca3af;font-size:.85rem">Inbox is empty.</div>'; return; }
-  wrap.innerHTML = st.emails.map(e=>{
-    const sel = st.selected===e.id;
-    return '<div draggable="true" ondragstart="_siDragStart(event,\''+e.id+'\')" onclick="_siOpenMail(\''+e.id+'\')" style="padding:.7rem .85rem;border-bottom:1px solid #f1f1f1;cursor:pointer;'+(sel?'background:#E6F7F5;border-left:3px solid var(--brand-teal,#00B2A9);padding-left:calc(.85rem - 3px)':'')+'">'+
-      '<div style="display:flex;justify-content:space-between;gap:.5rem">'+
-        '<div style="font-size:.84rem;'+(e.unread?'font-weight:700':'')+';overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+(e.unread?'<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--brand-teal,#00B2A9);margin-right:5px"></span>':'')+_siEsc(e.from)+'</div>'+
+  const isSent = st.mailbox==='SENT' || st.mailbox==='DRAFT';
+  const emails=_siFilteredEmails();
+  const unread=st.emails.filter(e=>e.unread).length;
+  if(sub) sub.textContent=st.emails.length+' message'+(st.emails.length!==1?'s':'')+(unread?(' · '+unread+' unread'):'');
+  if(!emails.length){ wrap.innerHTML='<div style="padding:1.2rem;color:#9ca3af;font-size:.85rem;text-align:center">'+(st.search?'No matches.':'No messages.')+'</div>'; return; }
+  wrap.innerHTML=emails.map(e=>{
+    const sel=st.selected===e.id;
+    const who = isSent ? ('To: '+(e.toName||'')) : (e.from||'');
+    const dot = (e.unread && !sel) ? '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#0a84ff;flex:0 0 auto"></span>' : '<span style="width:8px;flex:0 0 auto"></span>';
+    const flag = e.flagged ? '<span title="Flagged" style="color:'+(sel?'#fff':'#ff9500')+'">🚩</span>' : '';
+    const cText = sel?'#fff':'#111827', cMuted=sel?'rgba(255,255,255,.82)':'#6b7280', cSnip=sel?'rgba(255,255,255,.72)':'#9ca3af';
+    return '<div draggable="true" ondragstart="_siDragStart(event,\''+e.id+'\')" onclick="_siOpenMail(\''+e.id+'\')" '+
+      'style="display:flex;gap:.5rem;padding:.6rem .8rem;border-bottom:1px solid #f0f0f3;cursor:pointer;'+(sel?'background:#0a84ff':'')+'">'+
+      '<div style="padding-top:.35rem">'+dot+'</div>'+
+      '<div style="flex:1;min-width:0">'+
+        '<div style="display:flex;justify-content:space-between;gap:.5rem;align-items:baseline">'+
+          '<span style="font-size:.85rem;'+(e.unread?'font-weight:700':'font-weight:600')+';color:'+cText+';overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+_siEsc(who)+'</span>'+
+          '<span style="font-size:.72rem;color:'+cMuted+';flex:0 0 auto">'+_siEsc(_siFmtDate(e.date))+'</span>'+
+        '</div>'+
+        '<div style="display:flex;gap:.35rem;align-items:center;font-size:.82rem;color:'+cText+';margin-top:.1rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+flag+'<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+_siEsc(e.subject)+'</span></div>'+
+        '<div style="font-size:.78rem;color:'+cSnip+';margin-top:.1rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+_siEsc(e.snippet)+'</div>'+
       '</div>'+
-      '<div style="font-size:.82rem;margin-top:.15rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+_siEsc(e.subject)+'</div>'+
-      '<div style="color:#9ca3af;font-size:.76rem;margin-top:.12rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+_siEsc(e.snippet)+'</div>'+
     '</div>';
   }).join('');
 }
 
+/* ─────────── Reading pane ─────────── */
 window._siOpenMail = function(id){
-  const st = window._siState;
-  st.selected = id;
-  const e = st.emails.find(x=>x.id===id);
+  const st=window._siState;
+  st.selected=id;
+  const e=st.emails.find(x=>x.id===id);
   if(!e) return;
-  e.unread = false;
+  if(e.unread){ e.unread=false; _siMarkRead(e.id); }
   _siRenderList();
-  const reader = document.getElementById('si-reader');
-  if(reader){
-    var _btn='border:1px solid #e5e7eb;background:#fff;border-radius:7px;padding:.4rem .7rem;font-size:.78rem;font-weight:600;cursor:pointer';
-    var _dealOpts=_siDealOptionList(null, '🔗 Link to property…');
-    reader.innerHTML =
-      '<div style="padding:1.1rem 1.3rem .8rem;border-bottom:1px solid #e5e7eb">'+
-        '<h1 style="font-size:1.05rem;font-weight:800;margin:0 0 .5rem">'+_siEsc(e.subject)+'</h1>'+
-        '<div style="color:#6b7280;font-size:.76rem;line-height:1.5"><b>'+_siEsc(e.from)+'</b> &lt;'+_siEsc(e.fromEmail)+'&gt;<br>'+_siEsc(e.date)+'</div>'+
-        '<a href="https://mail.google.com/mail/u/0/#inbox/'+e.id+'" target="_blank" rel="noopener" style="font-size:.74rem;color:var(--brand-teal,#00B2A9)">Open in Gmail ↗</a>'+
+  const reader=document.getElementById('si-reader');
+  if(!reader) return;
+  const _btn='border:1px solid #e0e0e6;background:#fff;border-radius:7px;padding:.4rem .7rem;font-size:.78rem;font-weight:600;cursor:pointer;color:#1f2937';
+  const inTrash=st.mailbox==='TRASH', inSpam=st.mailbox==='SPAM';
+  reader.innerHTML =
+    '<div style="padding:.55rem .9rem;border-bottom:1px solid #ececef;background:#fbfbfd;display:flex;flex-wrap:wrap;gap:.4rem;align-items:center;position:sticky;top:0;z-index:2">'+
+      '<button onclick="_siCompose(\'reply\')" style="'+_btn+'">↩︎ Reply</button>'+
+      '<button onclick="_siCompose(\'all\')" style="'+_btn+'">↩︎↩︎ Reply All</button>'+
+      '<button onclick="_siCompose(\'forward\')" style="'+_btn+'">➡︎ Forward</button>'+
+      '<span style="width:1px;height:20px;background:#e0e0e6;margin:0 .15rem"></span>'+
+      '<button onclick="_siToggleFlag()" style="'+_btn+'">'+(e.flagged?'🚩 Unflag':'⚑ Flag')+'</button>'+
+      (!inTrash&&!inSpam?'<button onclick="_siArchive()" title="Archive" style="'+_btn+'">🗄️ Archive</button>':'')+
+      (!inSpam?'<button onclick="_siJunk()" title="Move to Junk" style="'+_btn+';color:#b45309">🚫 Junk</button>':'')+
+      '<button onclick="_siTrash()" title="Delete" style="'+_btn+';color:#b91c1c">🗑️ '+(inTrash?'Delete':'Trash')+'</button>'+
+      '<span style="flex:1"></span>'+
+      '<a href="https://mail.google.com/mail/u/0/#all/'+e.id+'" target="_blank" rel="noopener" style="font-size:.74rem;color:#0a84ff">Open in Gmail ↗</a>'+
+    '</div>'+
+    '<div style="padding:1rem 1.3rem .6rem">'+
+      '<h1 style="font-size:1.12rem;font-weight:800;margin:0 0 .5rem;line-height:1.3">'+_siEsc(e.subject)+'</h1>'+
+      '<div style="color:#6b7280;font-size:.78rem;line-height:1.55"><b style="color:#111827">'+_siEsc(e.from)+'</b> &lt;'+_siEsc(e.fromEmail)+'&gt;<br>'+
+        (e.toRaw?('<span style="color:#9ca3af">To: </span>'+_siEsc(e.toRaw)+'<br>'):'')+
+        '<span style="color:#9ca3af">'+_siEsc(e.date)+'</span></div>'+
+    '</div>'+
+    // link + CRM bars
+    '<div id="si-link-bar" style="padding:.5rem 1.3rem;border-top:1px solid #f0f0f3;border-bottom:1px solid #f0f0f3;background:#f7fbff"></div>'+
+    '<div id="si-crm-bar"></div>'+
+    // inline compose
+    '<div id="si-reply" style="display:none;padding:.8rem 1.3rem;border-bottom:1px solid #f0f0f3;background:#fff">'+
+      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.45rem"><div id="si-reply-mode" style="font-size:.8rem;color:#111827;font-weight:700">Reply</div>'+
+      '<button id="si-reply-ai" onclick="_siAiDraftReply()" style="border:0;background:#eef6ff;color:#0a6cff;border-radius:6px;padding:.25rem .55rem;font-size:.72rem;font-weight:700;cursor:pointer">✨ Draft with AI</button></div>'+
+      '<div style="display:flex;flex-direction:column;gap:.3rem;margin-bottom:.4rem">'+
+        '<div style="display:flex;align-items:center;gap:.4rem"><label style="font-size:.7rem;color:#6b7280;width:28px">To</label><input id="si-reply-to" style="flex:1;border:1px solid #e0e0e6;border-radius:6px;padding:.35rem .5rem;font-size:.8rem"></div>'+
+        '<div style="display:flex;align-items:center;gap:.4rem"><label style="font-size:.7rem;color:#6b7280;width:28px">Cc</label><input id="si-reply-cc" placeholder="(optional)" style="flex:1;border:1px solid #e0e0e6;border-radius:6px;padding:.35rem .5rem;font-size:.8rem"></div>'+
       '</div>'+
-      '<div style="display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;padding:.6rem 1.3rem;border-bottom:1px solid #f1f1f1;background:#FAFAFB">'+
-        '<button onclick="_siCompose(\'reply\')" style="'+_btn+'">↩ Reply</button>'+
-        '<button onclick="_siCompose(\'all\')" style="'+_btn+'">↩↩ Reply all</button>'+
-        '<button onclick="_siCompose(\'forward\')" style="'+_btn+'">➡ Forward</button>'+
-        '<select id="si-link-deal" style="'+_btn+'">'+_dealOpts+'</select>'+
-        '<button id="si-link-btn" onclick="_siManualLink()" style="'+_btn+'">Link</button>'+
-        '<span id="si-link-ai" style="font-size:.72rem;color:#0f766e;display:none">✨ AI-selected — confirm or change</span>'+
-        '<span style="flex:1"></span>'+
-        '<button onclick="_siJunk()" title="Report as junk / move to Spam" style="'+_btn+';color:#b45309">🚫 Junk</button>'+
-        '<button onclick="_siTrash()" title="Delete — move to Trash" style="'+_btn+';color:#b91c1c">🗑 Trash</button>'+
-      '</div>'+
-      '<div id="si-reply" style="display:none;padding:.8rem 1.3rem;border-bottom:1px solid #f1f1f1;background:#fff">'+
-        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.45rem"><div id="si-reply-mode" style="font-size:.78rem;color:#111827;font-weight:700">Reply</div>'+
-        '<button id="si-reply-ai" onclick="_siAiDraftReply()" style="border:0;background:#E6F7F5;color:#0f766e;border-radius:6px;padding:.25rem .55rem;font-size:.72rem;font-weight:700;cursor:pointer">✨ Draft with AI</button></div>'+
-        '<div style="display:flex;flex-direction:column;gap:.3rem;margin-bottom:.4rem">'+
-          '<div style="display:flex;align-items:center;gap:.4rem"><label style="font-size:.7rem;color:#6b7280;width:28px">To</label><input id="si-reply-to" style="flex:1;border:1px solid #e5e7eb;border-radius:6px;padding:.35rem .5rem;font-size:.8rem"></div>'+
-          '<div style="display:flex;align-items:center;gap:.4rem"><label style="font-size:.7rem;color:#6b7280;width:28px">Cc</label><input id="si-reply-cc" placeholder="(optional)" style="flex:1;border:1px solid #e5e7eb;border-radius:6px;padding:.35rem .5rem;font-size:.8rem"></div>'+
-        '</div>'+
-        '<textarea id="si-reply-body" placeholder="Write your message…" style="width:100%;border:1px solid #e5e7eb;border-radius:7px;padding:.5rem;font-size:.84rem;min-height:120px;resize:vertical;font-family:inherit"></textarea>'+
-        '<div style="display:flex;gap:.5rem;margin-top:.5rem"><button onclick="_siSendReply()" style="background:var(--brand-red,#DA291C);color:#fff;border:0;border-radius:7px;padding:.45rem .9rem;font-size:.8rem;font-weight:700;cursor:pointer">Send</button>'+
-        '<button onclick="_siToggleReply()" style="'+_btn+'">Cancel</button></div>'+
-      '</div>'+
-      '<div id="si-body" style="padding:0"></div>';
-    _siRenderBody(e);
-  }
-  _siAnalyze(e);
+      '<textarea id="si-reply-body" placeholder="Write your message…" style="width:100%;border:1px solid #e0e0e6;border-radius:7px;padding:.5rem;font-size:.84rem;min-height:140px;resize:vertical;font-family:inherit;box-sizing:border-box"></textarea>'+
+      '<div style="display:flex;gap:.5rem;margin-top:.5rem"><button onclick="_siSendReply()" style="background:var(--brand-red,#DA291C);color:#fff;border:0;border-radius:7px;padding:.45rem .9rem;font-size:.8rem;font-weight:700;cursor:pointer">Send</button>'+
+      '<button onclick="_siToggleReply()" style="'+_btn+'">Cancel</button></div>'+
+    '</div>'+
+    '<div id="si-body" style="padding:0"></div>';
+  _siRenderLinkBar(e);
+  _siRenderCrmBar(e);
+  _siRenderBody(e);
 };
 
-// Render the email body: full HTML in a sandboxed, auto-resized iframe
-// (images load, spacing/threads preserved), with a plain-text fallback.
 window._siRenderBody = async function(e){
   const host=document.getElementById('si-body');
   if(!host) return;
   if(!e.bodyHtml){
-    host.innerHTML='<div style="padding:1.1rem 1.3rem;line-height:1.6;white-space:pre-wrap;font-size:.86rem;color:#1f2937">'+_siEsc(e.body||e.snippet||'')+'</div>';
+    host.innerHTML='<div style="padding:1.1rem 1.3rem;line-height:1.6;white-space:pre-wrap;font-size:.88rem;color:#1f2937">'+_siEsc(e.body||e.snippet||'')+'</div>';
     return;
   }
   let html=e.bodyHtml;
-  // Inline any cid: images by fetching their attachment bytes → data URIs.
   try{
     if(e.inlineImages && e.inlineImages.length){
       const token=_siGmailToken();
@@ -34436,15 +34553,12 @@ window._siRenderBody = async function(e){
             if(!r.ok) continue;
             const d=await r.json();
             const b64=(d.data||'').replace(/-/g,'+').replace(/_/g,'/');
-            const uri='data:'+img.mimeType+';base64,'+b64;
-            html=html.split('cid:'+img.cid).join(uri);
+            html=html.split('cid:'+img.cid).join('data:'+img.mimeType+';base64,'+b64);
           }catch(_){}
         }
       }
     }
   }catch(_){}
-  // Strip scripts as a precaution (the iframe sandbox also blocks execution),
-  // and force links to open in a new tab.
   const doc='<!doctype html><html><head><meta charset="utf-8"><base target="_blank">'+
     '<style>html,body{margin:0;padding:0}body{font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;font-size:14px;line-height:1.5;color:#1f2937;word-wrap:break-word;overflow-wrap:break-word;padding:1.1rem 1.3rem}img{max-width:100%;height:auto}table{max-width:100%}</style>'+
     '</head><body>'+html.replace(/<script[\s\S]*?<\/script>/gi,'')+'</body></html>';
@@ -34461,15 +34575,10 @@ window._siRenderBody = async function(e){
       }catch(_){ if(!ifr.style.height) ifr.style.height='480px'; }
     }
     measure();
-    // The initial measure runs before remote images have downloaded, so image-heavy
-    // emails would collapse to near-zero height and clip. Re-measure as each image
-    // finishes loading, plus a few timed passes for late layout.
     try{
       const d=ifr.contentDocument||ifr.contentWindow.document;
       const imgs=d.images||[];
-      for(let k=0;k<imgs.length;k++){
-        if(!imgs[k].complete){ imgs[k].addEventListener('load',measure); imgs[k].addEventListener('error',measure); }
-      }
+      for(let k=0;k<imgs.length;k++){ if(!imgs[k].complete){ imgs[k].addEventListener('load',measure); imgs[k].addEventListener('error',measure); } }
     }catch(_){}
     setTimeout(measure,400); setTimeout(measure,1200); setTimeout(measure,2600);
   };
@@ -34483,50 +34592,56 @@ window._siLoadLabels = async function(){
     const r=await fetch('https://gmail.googleapis.com/gmail/v1/users/me/labels',{headers:{Authorization:'Bearer '+token}});
     if(!r.ok) return;
     const d=await r.json();
-    // user-created folders only (skip Gmail system labels like INBOX/SENT/CATEGORY_*)
     window._siState.labels=(d.labels||[]).filter(l=>l.type==='user').sort((a,b)=>a.name.localeCompare(b.name));
-    _siRenderFolders();
-  }catch(e){ console.warn('[smart-inbox] labels load failed', e); }
+    _siRenderMailboxes();
+    _siLoadCounts();
+  }catch(e){ console.warn('[mail] labels load failed', e); }
+};
+// Unread counts for the sidebar (system mailboxes + user folders), fetched in parallel.
+window._siLoadCounts = async function(){
+  const token=_siGmailToken(); if(!token) return;
+  const st=window._siState;
+  const ids=['INBOX','STARRED','SPAM'].concat((st.labels||[]).map(l=>l.id));
+  try{
+    await Promise.all(ids.map(async function(id){
+      try{
+        const r=await fetch('https://gmail.googleapis.com/gmail/v1/users/me/labels/'+id,{headers:{Authorization:'Bearer '+token}});
+        if(!r.ok) return;
+        const d=await r.json();
+        st.counts[id]=d.messagesUnread||0;
+      }catch(_){}
+    }));
+    _siRenderMailboxes();
+  }catch(_){}
 };
 
-window._siToggleReply = function(){
-  const box=document.getElementById('si-reply'); if(box) box.style.display='none';
-};
-
+/* ─────────── Compose / reply / forward ─────────── */
+window._siToggleReply = function(){ const box=document.getElementById('si-reply'); if(box) box.style.display='none'; };
 window._siCompose = function(mode){
   const st=window._siState; const e=st.emails.find(x=>x.id===st.selected); if(!e) return;
   st.composeMode=mode;
   const box=document.getElementById('si-reply'); if(box) box.style.display='block';
-  const toI=document.getElementById('si-reply-to');
-  const ccI=document.getElementById('si-reply-cc');
-  const ta=document.getElementById('si-reply-body');
-  const lbl=document.getElementById('si-reply-mode');
-  const aiBtn=document.getElementById('si-reply-ai');
+  const toI=document.getElementById('si-reply-to'), ccI=document.getElementById('si-reply-cc');
+  const ta=document.getElementById('si-reply-body'), lbl=document.getElementById('si-reply-mode'), aiBtn=document.getElementById('si-reply-ai');
   const me=((currentUser&&currentUser.email)||'').toLowerCase();
   if(mode==='all'){
-    if(lbl) lbl.textContent='Reply all';
+    if(lbl) lbl.textContent='Reply All';
     if(toI) toI.value=e.fromEmail;
     const others=_siEmails((e.toRaw||'')+', '+(e.ccRaw||'')).filter(a=>a!==me && a!==e.fromEmail.toLowerCase());
     if(ccI) ccI.value=others.join(', ');
-    if(ta) ta.value='';
-    if(aiBtn) aiBtn.style.display='';
+    if(ta) ta.value=''; if(aiBtn) aiBtn.style.display='';
   } else if(mode==='forward'){
     if(lbl) lbl.textContent='Forward';
-    if(toI) toI.value='';
-    if(ccI) ccI.value='';
+    if(toI) toI.value=''; if(ccI) ccI.value='';
     if(ta) ta.value='\n\n---------- Forwarded message ----------\nFrom: '+e.from+' <'+e.fromEmail+'>\nDate: '+e.date+'\nSubject: '+e.subject+'\nTo: '+(e.toRaw||'')+'\n\n'+(e.body||e.snippet||'');
     if(aiBtn) aiBtn.style.display='none';
   } else {
     if(lbl) lbl.textContent='Reply';
-    if(toI) toI.value=e.fromEmail;
-    if(ccI) ccI.value='';
-    if(ta) ta.value='';
-    if(aiBtn) aiBtn.style.display='';
+    if(toI) toI.value=e.fromEmail; if(ccI) ccI.value='';
+    if(ta) ta.value=''; if(aiBtn) aiBtn.style.display='';
   }
-  const focusEl = (mode==='forward') ? toI : ta;
-  if(focusEl) focusEl.focus();
+  const focusEl=(mode==='forward')?toI:ta; if(focusEl) focusEl.focus();
 };
-
 window._siAiDraftReply = async function(){
   const st=window._siState; const e=st.emails.find(x=>x.id===st.selected); if(!e) return;
   const ta=document.getElementById('si-reply-body'); if(!ta) return;
@@ -34542,7 +34657,6 @@ window._siAiDraftReply = async function(){
   }catch(err){ ta.value=prev; showToast('AI draft failed: '+err.message,'error'); }
   finally{ ta.disabled=false; ta.focus(); }
 };
-
 function _siRfc822(opts){
   const headers=[];
   headers.push('To: '+(opts.to||''));
@@ -34552,10 +34666,8 @@ function _siRfc822(opts){
   headers.push('MIME-Version: 1.0');
   if(opts.inReplyTo){ headers.push('In-Reply-To: '+opts.inReplyTo); headers.push('References: '+opts.inReplyTo); }
   const raw=headers.join('\r\n')+'\r\n\r\n'+(opts.body||'');
-  // base64url
   return btoa(unescape(encodeURIComponent(raw))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
 }
-
 window._siSendReply = async function(){
   const token=_siGmailToken(); if(!token){ _siDisconnect(); return; }
   const st=window._siState; const e=st.emails.find(x=>x.id===st.selected); if(!e) return;
@@ -34566,25 +34678,57 @@ window._siSendReply = async function(){
   if(!toVal){ showToast('Add a recipient in the To field','error'); return; }
   if(!bodyText){ showToast('Write a message first','error'); return; }
   const isFwd=(mode==='forward');
-  const subject = isFwd ? (/^fwd:/i.test(e.subject)?e.subject:'Fwd: '+e.subject)
-                        : (/^re:/i.test(e.subject)?e.subject:'Re: '+e.subject);
-  const raw=_siRfc822({ to:toVal, cc:ccVal, subject:subject, body:bodyText, inReplyTo: isFwd?null:(e.messageId||null) });
+  const subject=isFwd?(/^fwd:/i.test(e.subject)?e.subject:'Fwd: '+e.subject):(/^re:/i.test(e.subject)?e.subject:'Re: '+e.subject);
+  const raw=_siRfc822({ to:toVal, cc:ccVal, subject:subject, body:bodyText, inReplyTo:isFwd?null:(e.messageId||null) });
   const payload={ raw:raw };
   if(!isFwd && e.threadId) payload.threadId=e.threadId;
   try{
     const r=await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send',{
-      method:'POST', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
-      body:JSON.stringify(payload)
+      method:'POST', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'}, body:JSON.stringify(payload)
     });
     if(r.status===401){ _siDisconnect(); showToast('Gmail session expired — reconnect','warning'); return; }
     if(!r.ok) throw new Error('Gmail send '+r.status);
     showToast((isFwd?'Forwarded ✓':'Sent ✓'),'success');
     _siToggleReply(); if(ta) ta.value='';
-  }catch(err){ console.error('[smart-inbox] send failed', err); showToast('Could not send: '+err.message,'error'); }
+    // A sent reply keeps the thread on its linked property.
+    const dealId=_siThreadDeal(e.threadId);
+    if(dealId){ try{ await _siLogThreadEmail(dealId, e); }catch(_){} }
+  }catch(err){ console.error('[mail] send failed', err); showToast('Could not send: '+err.message,'error'); }
 };
 
+/* ─────────── Message actions (move / trash / junk / archive / flag / read) ─────────── */
+function _siRemoveFromList(id){
+  const st=window._siState;
+  const wasOpen=st.selected===id;
+  st.emails=st.emails.filter(x=>x.id!==id);
+  if(wasOpen) st.selected=null;
+  _siRenderList();
+  if(wasOpen){
+    const reader=document.getElementById('si-reader');
+    if(reader) reader.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#b8b8bf;text-align:center;padding:2rem;flex-direction:column;gap:.6rem"><div style="font-size:2.4rem">✉️</div><div>Select a message to read it.</div></div>';
+  }
+}
+window._siMarkRead = async function(id){
+  const token=_siGmailToken(); if(!token) return;
+  try{ await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/'+id+'/modify',{
+    method:'POST', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'}, body:JSON.stringify({ removeLabelIds:['UNREAD'] })
+  }); }catch(_){}
+};
+window._siToggleFlag = async function(){
+  const st=window._siState; const e=st.emails.find(x=>x.id===st.selected); if(!e) return;
+  const token=_siGmailToken(); if(!token){ _siDisconnect(); return; }
+  const add=!e.flagged;
+  try{
+    const r=await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/'+e.id+'/modify',{
+      method:'POST', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
+      body:JSON.stringify(add?{ addLabelIds:['STARRED'] }:{ removeLabelIds:['STARRED'] })
+    });
+    if(!r.ok) throw new Error('Gmail '+r.status);
+    e.flagged=add;
+    _siRenderList(); _siOpenMail(e.id);
+  }catch(err){ showToast('Could not flag: '+err.message,'error'); }
+};
 window._siMove = function(labelId){ const st=window._siState; if(st.selected) _siMoveById(st.selected, labelId); };
-
 window._siMoveById = async function(emailId, labelId){
   if(!emailId || !labelId) return;
   const token=_siGmailToken(); if(!token){ _siDisconnect(); return; }
@@ -34598,49 +34742,32 @@ window._siMoveById = async function(emailId, labelId){
     if(r.status===401){ _siDisconnect(); showToast('Gmail session expired — reconnect','warning'); return; }
     if(!r.ok) throw new Error('Gmail modify '+r.status);
     showToast('Moved to '+(lbl?lbl.name:'folder')+' ✓','success');
-    // drop from local inbox list
-    const wasOpen = st.selected===e.id;
-    st.emails=st.emails.filter(x=>x.id!==e.id);
-    if(wasOpen) st.selected=null;
-    _siRenderList();
-    if(wasOpen){
-      const reader=document.getElementById('si-reader');
-      if(reader) reader.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#9ca3af;text-align:center;padding:2rem">Select an email to read it and see AI-suggested actions.</div>';
-      const ai=document.getElementById('si-ai-body'); if(ai) ai.innerHTML='<div style="color:#9ca3af;font-size:.85rem;text-align:center;padding:1.5rem">Open an email to analyze it.</div>'+_siLogHtml();
-    }
-  }catch(err){ console.error('[smart-inbox] move failed', err); showToast('Could not move: '+err.message,'error'); }
+    _siRemoveFromList(e.id);
+  }catch(err){ console.error('[mail] move failed', err); showToast('Could not move: '+err.message,'error'); }
 };
-
-// remove a message from the local inbox list + reset reader/AI panes if it was open
-function _siRemoveFromInbox(id){
-  const st=window._siState;
-  const wasOpen = st.selected===id;
-  st.emails=st.emails.filter(x=>x.id!==id);
-  if(wasOpen) st.selected=null;
-  _siRenderList();
-  if(wasOpen){
-    const reader=document.getElementById('si-reader');
-    if(reader) reader.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#9ca3af;text-align:center;padding:2rem">Select an email to read it and see AI-suggested actions.</div>';
-    const ai=document.getElementById('si-ai-body'); if(ai) ai.innerHTML='<div style="color:#9ca3af;font-size:.85rem;text-align:center;padding:1.5rem">Open an email to analyze it.</div>'+_siLogHtml();
-  }
-}
-
+window._siArchive = async function(){
+  const st=window._siState; const e=st.emails.find(x=>x.id===st.selected); if(!e) return;
+  const token=_siGmailToken(); if(!token){ _siDisconnect(); return; }
+  try{
+    const r=await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/'+e.id+'/modify',{
+      method:'POST', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'}, body:JSON.stringify({ removeLabelIds:['INBOX'] })
+    });
+    if(!r.ok) throw new Error('Gmail '+r.status);
+    showToast('Archived ✓','success'); _siRemoveFromList(e.id);
+  }catch(err){ showToast('Could not archive: '+err.message,'error'); }
+};
 window._siTrash = function(){ const st=window._siState; if(st.selected) _siTrashById(st.selected); };
 window._siTrashById = async function(emailId){
   if(!emailId) return;
   const token=_siGmailToken(); if(!token){ _siDisconnect(); return; }
   const st=window._siState; const e=st.emails.find(x=>x.id===emailId); if(!e) return;
   try{
-    const r=await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/'+e.id+'/trash',{
-      method:'POST', headers:{Authorization:'Bearer '+token}
-    });
+    const r=await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/'+e.id+'/trash',{ method:'POST', headers:{Authorization:'Bearer '+token} });
     if(r.status===401){ _siDisconnect(); showToast('Gmail session expired — reconnect','warning'); return; }
     if(!r.ok) throw new Error('Gmail trash '+r.status);
-    showToast('Moved to Trash ✓','success');
-    _siRemoveFromInbox(e.id);
-  }catch(err){ console.error('[smart-inbox] trash failed', err); showToast('Could not delete: '+err.message,'error'); }
+    showToast('Moved to Trash ✓','success'); _siRemoveFromList(e.id);
+  }catch(err){ console.error('[mail] trash failed', err); showToast('Could not delete: '+err.message,'error'); }
 };
-
 window._siJunk = function(){ const st=window._siState; if(st.selected) _siJunkById(st.selected); };
 window._siJunkById = async function(emailId){
   if(!emailId) return;
@@ -34648,98 +34775,149 @@ window._siJunkById = async function(emailId){
   const st=window._siState; const e=st.emails.find(x=>x.id===emailId); if(!e) return;
   try{
     const r=await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/'+e.id+'/modify',{
-      method:'POST', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
-      body:JSON.stringify({ addLabelIds:['SPAM'], removeLabelIds:['INBOX'] })
+      method:'POST', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'}, body:JSON.stringify({ addLabelIds:['SPAM'], removeLabelIds:['INBOX'] })
     });
     if(r.status===401){ _siDisconnect(); showToast('Gmail session expired — reconnect','warning'); return; }
     if(!r.ok) throw new Error('Gmail modify '+r.status);
-    showToast('Reported as junk ✓','success');
-    _siRemoveFromInbox(e.id);
-  }catch(err){ console.error('[smart-inbox] junk failed', err); showToast('Could not mark as junk: '+err.message,'error'); }
+    showToast('Reported as junk ✓','success'); _siRemoveFromList(e.id);
+  }catch(err){ console.error('[mail] junk failed', err); showToast('Could not mark as junk: '+err.message,'error'); }
 };
 
+/* ─────────── Property linking (manual + thread auto-link) ─────────── */
+function _siDealLabel(d){ return (d.projectName||d.propertyAddress||'Untitled deal'); }
+function _siDealAddr(id){ const d=(allDeals||[]).find(x=>x.id===id); return d?(d.projectName||d.propertyAddress||''):''; }
+function _siDealsSorted(){ return visibleDeals().slice().sort((a,b)=>_siDealLabel(a).localeCompare(_siDealLabel(b), undefined, {numeric:true, sensitivity:'base'})); }
+function _siDealOptionList(sel, placeholder){
+  return (placeholder!=null?'<option value="">'+placeholder+'</option>':'')+
+    _siDealsSorted().map(function(d){ return '<option value="'+d.id+'"'+(sel===d.id?' selected':'')+'>'+_siEsc(_siDealLabel(d))+'</option>'; }).join('');
+}
+function _siRefreshDealFeed(dealId){ try{ if(typeof window._propLoadActivities==='function' && document.getElementById('prop-act-feed-'+dealId)) window._propLoadActivities(dealId,'prop-act-feed-'+dealId); }catch(_){} }
+// thread → deal map, persisted so future emails in the chain follow the same property
+function _siThreadMap(){ try{ return JSON.parse(localStorage.getItem('si_thread_link')||'{}'); }catch(_){ return {}; } }
+function _siThreadDeal(threadId){ if(!threadId) return null; try{ return _siThreadMap()[threadId]||null; }catch(_){ return null; } }
+function _siSetThreadDeal(threadId, dealId){
+  if(!threadId) return;
+  try{ const m=_siThreadMap(); if(dealId) m[threadId]=dealId; else delete m[threadId]; localStorage.setItem('si_thread_link', JSON.stringify(m)); }catch(_){}
+}
+function _siThreadTracked(){ try{ return new Set(JSON.parse(localStorage.getItem('si_thread_tracked')||'[]')); }catch(_){ return new Set(); } }
+function _siMarkThreadTracked(gmailId){ try{ const s=_siThreadTracked(); s.add(gmailId); localStorage.setItem('si_thread_tracked', JSON.stringify([...s])); }catch(_){} }
+
+// Log an email onto a property (lightweight, no AI) — used for thread auto-link.
+async function _siLogThreadEmail(dealId, email){
+  try{
+    await window._dealLogActivity(dealId, 'email', {
+      body: email.subject+(email.snippet?('\n'+email.snippet):''),
+      gmailId: email.id, gmailThreadId: email.threadId||'', gmailSubject: email.subject,
+      gmailFrom: email.fromEmail, gmailDate: email.date, autoLogged: true
+    });
+    _siMarkThreadTracked(email.id);
+    try{ _siRefreshDealFeed(dealId); }catch(_){}
+  }catch(err){ console.warn('[mail] thread log failed', err); }
+}
+
 // Fetch an email's file attachments from Gmail and save them onto the property card
-// (deal.dealAttachments), mirroring the drawer's manual-upload storage path. Idempotent:
-// skips any attachment already saved from the same Gmail message.
+// (deal.dealAttachments). Idempotent: skips any attachment already saved from the same message.
 window._siSaveEmailAttachments = async function(dealId, email, tokenOverride){
   try{
-    const atts = (email && email.attachments) || [];
+    const atts=(email && email.attachments)||[];
     if(!atts.length) return 0;
-    if(!_fbStorage || !_fbFns){ console.warn('[smart-inbox] storage not ready — skipping attachments'); return 0; }
-    const token = tokenOverride || _siGmailToken(); if(!token) return 0;
+    if(!_fbStorage || !_fbFns){ console.warn('[mail] storage not ready — skipping attachments'); return 0; }
+    const token=tokenOverride || _siGmailToken(); if(!token) return 0;
     const { ref: fbRef, uploadBytes, getDownloadURL } = _fbFns;
-    const deal = (allDeals||[]).find(d=>d.id===dealId);
-    let existing = (deal && deal.dealAttachments) ? deal.dealAttachments.slice() : [];
-    let added = 0;
+    const deal=(allDeals||[]).find(d=>d.id===dealId);
+    let existing=(deal && deal.dealAttachments)?deal.dealAttachments.slice():[];
+    let added=0;
     for(const att of atts){
       if(!att.attachmentId || !att.filename) continue;
-      if(existing.some(a=>a.gmailId===email.id && a.gmailAttachmentId===att.attachmentId)) continue; // already saved
+      if(existing.some(a=>a.gmailId===email.id && a.gmailAttachmentId===att.attachmentId)) continue;
       try{
-        const r = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/'+email.id+'/attachments/'+att.attachmentId,{ headers:{Authorization:'Bearer '+token} });
+        const r=await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/'+email.id+'/attachments/'+att.attachmentId,{ headers:{Authorization:'Bearer '+token} });
         if(r.status===401){ _siDisconnect(); showToast('Gmail session expired — reconnect','warning'); return added; }
         if(!r.ok) throw new Error('Gmail attachment '+r.status);
-        const j = await r.json();
-        const b64 = (j.data||'').replace(/-/g,'+').replace(/_/g,'/');
-        const bin = atob(b64);
-        const bytes = new Uint8Array(bin.length);
+        const j=await r.json();
+        const b64=(j.data||'').replace(/-/g,'+').replace(/_/g,'/');
+        const bin=atob(b64); const bytes=new Uint8Array(bin.length);
         for(let k=0;k<bin.length;k++) bytes[k]=bin.charCodeAt(k);
-        const blob = new Blob([bytes], { type: att.mimeType || 'application/octet-stream' });
-        const safeName = att.filename.replace(/[^a-zA-Z0-9._-]/g,'_');
-        const storePath = 'dealDocs/'+dealId+'/email_'+Date.now()+'_'+safeName;
-        const snap = await uploadBytes(fbRef(_fbStorage, storePath), blob);
-        const url = await getDownloadURL(snap.ref);
-        existing.push({
-          name: att.filename, url, uploadedAt: Date.now(),
-          uploadedBy: (currentUser && (currentUser.displayName||currentUser.name||currentUser.email))||'',
-          source:'email', gmailId: email.id, gmailAttachmentId: att.attachmentId
-        });
+        const blob=new Blob([bytes],{ type:att.mimeType||'application/octet-stream' });
+        const safeName=att.filename.replace(/[^a-zA-Z0-9._-]/g,'_');
+        const storePath='dealDocs/'+dealId+'/email_'+Date.now()+'_'+safeName;
+        const snap=await uploadBytes(fbRef(_fbStorage, storePath), blob);
+        const url=await getDownloadURL(snap.ref);
+        existing.push({ name:att.filename, url, uploadedAt:Date.now(),
+          uploadedBy:(currentUser && (currentUser.displayName||currentUser.name||currentUser.email))||'',
+          source:'email', gmailId:email.id, gmailAttachmentId:att.attachmentId });
         added++;
-      }catch(ae){ console.warn('[smart-inbox] attachment save failed:', att.filename, ae); }
+      }catch(ae){ console.warn('[mail] attachment save failed:', att.filename, ae); }
     }
     if(added){
       await Store.updateDeal(dealId, { dealAttachments: existing, updatedAt: Date.now() });
       if(deal) deal.dealAttachments = existing;
     }
     return added;
-  }catch(e){ console.warn('[smart-inbox] save attachments failed', e); return 0; }
+  }catch(e){ console.warn('[mail] save attachments failed', e); return 0; }
 };
 
+// Reader "Link to property" bar — shows the current link and lets you set/override it.
+function _siRenderLinkBar(e){
+  const bar=document.getElementById('si-link-bar'); if(!bar) return;
+  const linkedId=_siThreadDeal(e.threadId);
+  const _sel='border:1px solid #cfe4ff;border-radius:7px;padding:.32rem .5rem;font-size:.78rem;background:#fff;max-width:230px';
+  const _btn='border:1px solid #cfe4ff;background:#fff;border-radius:7px;padding:.34rem .7rem;font-size:.78rem;font-weight:600;cursor:pointer;color:#0a6cff';
+  if(linkedId && _siDealAddr(linkedId)){
+    bar.innerHTML='<div style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;font-size:.8rem">'+
+      '🔗 <span style="color:#0a6cff;font-weight:600">Linked to property:</span> <b>'+_siEsc(_siDealAddr(linkedId).split(',')[0])+'</b>'+
+      '<span style="color:#9ca3af;font-size:.74rem">— future emails in this thread link here automatically</span>'+
+      '<span style="flex:1"></span>'+
+      '<select id="si-link-deal" onchange="_siRelink(this.value)" style="'+_sel+'"><option value="">Change property…</option>'+_siDealOptionList(linkedId,null)+'</select>'+
+      '<button onclick="_siUnlink()" style="'+_btn+';color:#b91c1c;border-color:#f3c9c9">Unlink</button>'+
+      '</div>';
+  } else {
+    bar.innerHTML='<div style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;font-size:.8rem">'+
+      '🔗 <span style="color:#374151">Link this email to a property</span>'+
+      '<span style="flex:1"></span>'+
+      '<select id="si-link-deal" style="'+_sel+'">'+_siDealOptionList(null,'Choose property…')+'</select>'+
+      '<button onclick="_siManualLink()" style="'+_btn+'">Link</button>'+
+      '</div>';
+  }
+}
 window._siManualLink = async function(){
-  const sel=document.getElementById('si-link-deal'); if(!sel||!sel.value) return;
+  const sel=document.getElementById('si-link-deal'); if(!sel||!sel.value){ showToast('Pick a property first','error'); return; }
   const dealId=sel.value;
   const st=window._siState; const e=st.emails.find(x=>x.id===st.selected); if(!e) return;
   try{
-    const _sum = await window._emailLogBody({id:e.id, subject:e.subject, from:e.from, body:e.body, snippet:e.snippet});
+    const _sum=await window._emailLogBody({id:e.id, subject:e.subject, from:e.from, body:e.body, snippet:e.snippet});
     await window._dealLogActivity(dealId, 'email', {
-      body:_sum, aiSummary:true, gmailId:e.id, gmailSubject:e.subject, gmailFrom:e.fromEmail, gmailDate:e.date, autoLogged:false
+      body:_sum, aiSummary:true, gmailId:e.id, gmailThreadId:e.threadId||'', gmailSubject:e.subject, gmailFrom:e.fromEmail, gmailDate:e.date, autoLogged:false
     });
+    _siSetThreadDeal(e.threadId, dealId);
+    _siMarkThreadTracked(e.id);
     const addr=_siDealAddr(dealId).split(',')[0]||'property';
-    _siRememberMatch(e.id, dealId);
     let _na=0; try{ _na=await window._siSaveEmailAttachments(dealId, e); }catch(_){}
-    st.log.unshift({ kind:'attach', msg:'Linked email to '+addr+(_na?(' · '+_na+' attachment'+(_na!==1?'s':'')):'') });
-    const lw=document.getElementById('si-log'); if(lw) lw.outerHTML=_siLogHtml();
-    showToast('Linked email to '+addr+(_na?(' · '+_na+' file'+(_na!==1?'s':'')+' saved'):''),'success');
+    showToast('Linked to '+addr+(_na?(' · '+_na+' file'+(_na!==1?'s':'')+' saved'):''),'success');
     try{ _siRefreshDealFeed(dealId); }catch(_){}
-    sel.value='';
-  }catch(err){ console.error('[smart-inbox] manual link failed', err); showToast('Could not link: '+err.message,'error'); }
+    _siRenderLinkBar(e);
+  }catch(err){ console.error('[mail] manual link failed', err); showToast('Could not link: '+err.message,'error'); }
+};
+window._siRelink = async function(dealId){
+  const st=window._siState; const e=st.emails.find(x=>x.id===st.selected); if(!e||!dealId) return;
+  _siSetThreadDeal(e.threadId, dealId);
+  try{
+    const _sum=await window._emailLogBody({id:e.id, subject:e.subject, from:e.from, body:e.body, snippet:e.snippet});
+    await window._dealLogActivity(dealId,'email',{ body:_sum, aiSummary:true, gmailId:e.id, gmailThreadId:e.threadId||'', gmailSubject:e.subject, gmailFrom:e.fromEmail, gmailDate:e.date, autoLogged:false });
+    let _na=0; try{ _na=await window._siSaveEmailAttachments(dealId, e); }catch(_){}
+    showToast('Re-linked to '+(_siDealAddr(dealId).split(',')[0]||'property'),'success');
+    try{ _siRefreshDealFeed(dealId); }catch(_){}
+  }catch(_){}
+  _siRenderLinkBar(e);
+};
+window._siUnlink = function(){
+  const st=window._siState; const e=st.emails.find(x=>x.id===st.selected); if(!e) return;
+  _siSetThreadDeal(e.threadId, null);
+  showToast('Unlinked. New emails in this thread won’t auto-link.','info');
+  _siRenderLinkBar(e);
 };
 
-// ── Smart Inbox: deterministic match signals (people + attachments + groups) ──
-// The AI is only as good as what we hand it. Before asking Claude to match an email
-// to a property, cross-reference the email's participants against the CRM and the
-// attachment filenames against deal names — turning "guess from an address string"
-// into "here are the properties these exact people and files are already tied to."
-function _siParticipantEmails(email){
-  const all=[];
-  if(email.fromEmail) all.push(String(email.fromEmail).toLowerCase());
-  _siEmails(email.toRaw).forEach(a=>all.push(a));
-  _siEmails(email.ccRaw).forEach(a=>all.push(a));
-  const out=[]; all.forEach(a=>{ if(a && out.indexOf(a)<0) out.push(a); });
-  return out;
-}
-function _siGroupName(gid){ try{ return ((typeof allCRMGroups!=='undefined'?allCRMGroups:[]).find(x=>x.id===gid)||{}).name||''; }catch(_){ return ''; } }
-function _siContactName(c){ return c.name || [c.firstName,c.lastName].filter(Boolean).join(' ').trim() || c.email || 'Contact'; }
-// Email participants → CRM contacts (match on primary or secondary address)
+/* ─────────── CRM: matching, add-to-CRM prompt, auto history logging ─────────── */
 function _siContactMatches(email){
   const parts=_siParticipantEmails(email);
   const contacts=(typeof allContacts!=='undefined'?allContacts:[]);
@@ -34750,527 +34928,86 @@ function _siContactMatches(email){
   });
   return hits;
 }
-function _siNorm(s){ return String(s||'').toLowerCase().replace(/[_\-]+/g,' ').replace(/[^a-z0-9 ]+/g,' ').replace(/\s+/g,' ').trim(); }
-function _siNumTokens(s){ return (String(s||'').match(/\d{3,}/g)||[]); } // street numbers, parcel digits
-// Attachment filenames → existing properties (street/parcel digits + distinctive name words)
-function _siAttachmentMatches(email){
-  const atts=(email.attachments||[]); if(!atts.length) return [];
-  const deals=visibleDeals(); const out=[];
-  atts.forEach(a=>{
-    const fnNorm=_siNorm(a.filename), fnNums=_siNumTokens(a.filename);
-    let best=null;
-    deals.forEach(d=>{
-      const label=(d.projectName||d.propertyAddress||'');
-      const proj=_siNorm(d.projectName||''), addr=_siNorm(d.propertyAddress||d.address||'');
-      const addrNums=_siNumTokens(d.propertyAddress||d.address||'');
-      const parcelNums=_siNumTokens(d.folioNumber||d.parcelId||'');
-      let score=0;
-      addrNums.forEach(n=>{ if(fnNums.indexOf(n)>=0) score+=3; });
-      parcelNums.forEach(n=>{ if(fnNums.indexOf(n)>=0) score+=4; });
-      (proj+' '+addr).split(' ').filter(w=>w.length>=4).forEach(w=>{ if(fnNorm.indexOf(w)>=0) score+=2; });
-      if(score>0 && (!best||score>best.score)) best={ dealId:d.id, label:label, score:score };
+// Marketing blasts / no-reply / bulk mail — never logged to a contact and never prompted.
+function _siIsBlast(email){
+  if(email.listUnsub) return true;
+  if(/^(list|bulk|junk)$/i.test((email.precedence||'').trim())) return true;
+  const addr=(email.fromEmail||'').toLowerCase();
+  if(/(no-?reply|do-?not-?reply|donotreply|notifications?@|mailer-daemon|postmaster|bounce|newsletter|mailchimp|constantcontact|sendgrid|@.*\.mcsv\.|@e\.|@email\.)/.test(addr)) return true;
+  const cats=email.labelIds||[];
+  if(cats.indexOf('CATEGORY_PROMOTIONS')>=0 || cats.indexOf('CATEGORY_UPDATES')>=0 || cats.indexOf('CATEGORY_FORUMS')>=0 || cats.indexOf('CATEGORY_SOCIAL')>=0) return true;
+  return false;
+}
+function _siContactTrackedSet(){ try{ return new Set(JSON.parse(localStorage.getItem('si_contact_tracked')||'[]')); }catch(_){ return new Set(); } }
+function _siMarkContactTracked(gmailId){ try{ const s=_siContactTrackedSet(); s.add(gmailId); localStorage.setItem('si_contact_tracked', JSON.stringify([...s].slice(-4000))); }catch(_){} }
+
+// Idempotently log one email onto a contact's history (dedup on gmailId).
+async function _siLogContactEmail(contactId, email){
+  if(!_fbDb || !_fbFns) return;
+  const { collection, addDoc, query, where, getDocs } = _fbFns;
+  try{
+    const dup=await getDocs(query(collection(_fbDb,'contacts',contactId,'activities'), where('gmailId','==',email.id)));
+    if(!dup.empty) return;
+    await addDoc(collection(_fbDb,'contacts',contactId,'activities'),{
+      type:'email', createdAt:Date.now(), createdBy:currentUser?.uid||'', createdByName:currentUser?.name||'',
+      autoLogged:true, body:email.subject+(email.snippet?('\n'+email.snippet):''),
+      emailSubject:email.subject, emailFrom:email.fromEmail,
+      gmailId:email.id, gmailThreadId:email.threadId||'', gmailDate:email.date
     });
-    if(best) out.push({ filename:a.filename, dealId:best.dealId, label:best.label, score:best.score });
-  });
-  return out;
-}
-// Assemble everything Claude needs for an accurate match + a deterministic best guess.
-function _siBuildMatchContext(email){
-  const cm=_siContactMatches(email), am=_siAttachmentMatches(email);
-  const contactLines=[], attachLines=[];
-  cm.forEach(h=>{
-    const c=h.contact, nm=_siContactName(c);
-    const linked=(c.linkedDeals||[]).filter(id=>_siDealAddr(id));
-    const grpNames=(c.groups||[]).map(_siGroupName).filter(Boolean);
-    let line=nm+' <'+h.addr+'>'+(c.company?(' · '+c.company):'');
-    line += linked.length
-      ? ' · LINKED PROPERTIES: '+linked.map(id=>'"'+_siDealLabel((allDeals||[]).find(d=>d.id===id)||{})+'" [id '+id+']').join(', ')
-      : ' · not linked to any property';
-    if(grpNames.length) line+=' · received marketing blasts for: '+grpNames.join(', ');
-    contactLines.push(line);
-  });
-  am.forEach(m=>attachLines.push('"'+m.filename+'" → likely "'+m.label+'" [id '+m.dealId+']'));
-  // Strongest deterministic guess: a property a linked contact points to (attachments break ties)
-  const counts={};
-  cm.forEach(h=>(h.contact.linkedDeals||[]).forEach(id=>{ if(_siDealAddr(id)) counts[id]=(counts[id]||0)+1; }));
-  am.forEach(m=>{ if(m.score>=3) counts[m.dealId]=(counts[m.dealId]||0)+1.5; });
-  const ranked=Object.keys(counts).sort((a,b)=>counts[b]-counts[a]);
-  return { contactLines, attachLines, strongDealId:(ranked[0]||null),
-           attachmentNames:(email.attachments||[]).map(a=>a.filename) };
+  }catch(err){ console.warn('[mail] contact log failed', err); }
 }
 
-window._siAnalyze = async function(email){
-  window._siState.meeting = null;
-  const body = document.getElementById('si-ai-body');
-  if(body) body.innerHTML = '<div style="color:#6b7280;font-size:.85rem;display:flex;align-items:center;gap:.5rem;padding:.5rem"><span class="animate-spin" style="width:14px;height:14px;border:2px solid #d1d5db;border-top-color:var(--brand-teal,#00B2A9);border-radius:50%;display:inline-block"></span> Claude is reading this email…</div>';
-  const deals = visibleDeals().map(d=>({ id:d.id, address:d.propertyAddress||'', county:d.county||'', parcel:d.folioNumber||d.parcelId||'', stage:d.stage||'' }));
-  const sys = 'You are Terra\'s inbox assistant for a commercial land brokerage. Given one email and the advisor\'s existing properties, propose actions a coordinator would take. Only propose what the email clearly supports.\n'+
-    'MATCHING — read carefully: the CRM MATCHES and ATTACHMENT HINTS sections are your STRONGEST, most reliable signals. If a person on this email (sender, to, or cc) is a CRM contact linked to a property, that property is almost certainly the right match — trust it over guessing from address text in the body. Prefer attaching to an existing property over creating a new one whenever the people, attachments, address, or parcel point to one. When a deterministic "MOST LIKELY PROPERTY" is given, use it as matchedDealId unless the body clearly contradicts it.\n'+
-    'PROPOSALS: if the email is a NEW listing or seller opportunity that the advisor does not yet have a property for, propose a "proposal" action (not just "create") so it can kick off the proposal workflow.\n'+
-    'Newsletters / marketing / no-action emails should return an empty suggestions array. Return ONLY valid JSON, no prose, no code fences.';
-  const _now=new Date();
-  const _todayStr=_now.getFullYear()+'-'+String(_now.getMonth()+1).padStart(2,'0')+'-'+String(_now.getDate()).padStart(2,'0');
-  const _weekday=_now.toLocaleDateString(undefined,{weekday:'long'});
-  let _prior=[];
-  try{ _prior = await _siFindPriorLinks(email.id); }catch(_){}
-  window._siState.priorLinks=_prior;
-  const _priorTxt = _prior.length
-    ? '\n\nALREADY LINKED: This exact email is already attached to property "'+_prior[0].name+'" (id '+_prior[0].id+'). Set matchedDealId to that id and do NOT match a different property; only suggest new actions that make sense given it is already on that property.'
-    : '';
-  const _mc = _siBuildMatchContext(email);
-  window._siState.matchCtx = _mc;
-  const _ctxTxt =
-    (_mc.contactLines.length
-      ? '\n\nCRM MATCHES (email participants found in your CRM — STRONGEST SIGNAL):\n- '+_mc.contactLines.join('\n- ')
-      : '\n\nCRM MATCHES: none of this email\'s participants are in the CRM.')+
-    (_mc.attachmentNames.length ? '\n\nATTACHMENTS ON THIS EMAIL: '+_mc.attachmentNames.join(', ') : '')+
-    (_mc.attachLines.length ? '\nATTACHMENT→PROPERTY HINTS:\n- '+_mc.attachLines.join('\n- ') : '')+
-    (_mc.strongDealId
-      ? '\n\nMOST LIKELY PROPERTY (deterministic, from the people/attachments above): id '+_mc.strongDealId+' — "'+_siDealLabel((allDeals||[]).find(d=>d.id===_mc.strongDealId)||{})+'". Use this as matchedDealId unless the email body clearly contradicts it.'
-      : '');
-  const user =
-    'EMAIL:\nFrom: '+email.from+' <'+email.fromEmail+'>\nTo: '+(email.toRaw||'')+(email.ccRaw?('\nCc: '+email.ccRaw):'')+'\nSubject: '+email.subject+'\nBody:\n'+(email.body||email.snippet).slice(0,6000)+
-    _ctxTxt+
-    '\n\nEXISTING PROPERTIES (JSON):\n'+JSON.stringify(deals.slice(0,200))+
-    '\n\nTODAY: '+_todayStr+' ('+_weekday+'). Resolve relative dates like "Thursday" or "tomorrow" against this.'+_priorTxt+
-    '\n\nReturn JSON of this exact shape:\n'+
-    '{"matchedDealId": "<id or null>", "meeting": {"requested": false, "date": null, "start": null, "end": null, "label": null}, "suggestions": [ {"kind":"create|attach|task|proposal", "confidence":0.0, "title":"short label", "why":"one sentence", "fields": { } } ] }\n'+
-    'Set meeting.requested true ONLY if the email proposes or asks to meet, call, or schedule at a specific day and/or time. meeting.date = "YYYY-MM-DD" of the proposed day (null if none). meeting.start/end = 24h "HH:MM" local time (null if no specific time). meeting.label = short human description (e.g. "Call Thursday at 2pm").\n'+
-    'Field conventions:\n'+
-    '- create: {"address","county","parcel","acreage","stage","seller"}\n'+
-    '- proposal: {"address","county","parcel","acreage","seller","price"}  (use for a NEW listing/seller opportunity)\n'+
-    '- attach: {"dealId"}\n'+
-    '- task: {"title","assignedToEmail","dueInDays","desc","dealId"}\n'+
-    'Use the advisor\'s own email for assignedToEmail unless the email clearly implies ops/admin. dueInDays is an integer.';
-  try {
-    const resp = await _aiPost({ model:'claude-sonnet-4-6', max_tokens:1500, system:sys, messages:[{ role:'user', content:user }] });
-    if(!resp.ok) throw new Error('Claude '+resp.status);
-    const data = await resp.json();
-    let text = (data.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('\n').trim();
-    text = text.replace(/^```(?:json)?/i,'').replace(/```$/,'').trim();
-    const first = text.indexOf('{'); const last = text.lastIndexOf('}');
-    if(first>=0 && last>first) text = text.slice(first, last+1);
-    let parsed;
-    try { parsed = JSON.parse(text); } catch(pe){ throw new Error('Could not parse AI response'); }
-    window._siState.suggestions = (parsed.suggestions||[]).map((s,i)=>{ s._i=i; return s; });
-    const _remembered = _siRecallMatch(email.id);
-    const _rememberedValid = (_remembered && _siDealAddr(_remembered)) ? _remembered : null;
-    // precedence: the user's own remembered pick > prior link on record > deterministic
-    // CRM/attachment match > AI's fresh guess. (strongDealId must be a real, visible deal.)
-    const _strong = (_mc.strongDealId && _siDealAddr(_mc.strongDealId)) ? _mc.strongDealId : null;
-    window._siState.matchedDealId = _rememberedValid || ((_prior && _prior.length) ? _prior[0].id : (_strong || parsed.matchedDealId || null));
-    window._siState.meeting = (parsed.meeting && parsed.meeting.requested) ? parsed.meeting : null;
-    _siRenderSuggestions(email);
-  } catch(e){
-    console.error('[smart-inbox] analyze failed', e);
-    if(body) body.innerHTML = '<div style="background:#fff;border:1px dashed #e5e7eb;border-radius:10px;padding:1rem;text-align:center;color:#6b7280;font-size:.83rem">AI couldn\'t structure a suggestion for this email.<br><span style="font-size:.72rem;color:#9ca3af">'+_siEsc(e.message)+'</span></div>'+_siLogHtml();
+// Background pass over a batch of emails: log to matched contacts, auto-link known threads.
+window._siAutoProcess = async function(emails){
+  if(!emails || !emails.length) return;
+  const contactTracked=_siContactTrackedSet();
+  const threadTracked=_siThreadTracked();
+  for(const e of emails){
+    // 1) thread → property auto-link
+    try{
+      const dealId=_siThreadDeal(e.threadId);
+      if(dealId && !threadTracked.has(e.id) && _siDealAddr(dealId)){ await _siLogThreadEmail(dealId, e); }
+    }catch(_){}
+    // 2) contact history (skip blasts + already-processed)
+    try{
+      if(contactTracked.has(e.id)) continue;
+      if(_siIsBlast(e)){ _siMarkContactTracked(e.id); continue; }
+      const hits=_siContactMatches(e);
+      for(const h of hits){ await _siLogContactEmail(h.contact.id, e); }
+      _siMarkContactTracked(e.id);
+    }catch(_){}
   }
+  // refresh the CRM bar for the open email (its "add to CRM" state may have changed)
+  const st=window._siState; const open=st.emails.find(x=>x.id===st.selected);
+  if(open) _siRenderCrmBar(open);
 };
 
-function _siDealAddr(id){ const d=(allDeals||[]).find(x=>x.id===id); return d?(d.projectName||d.propertyAddress||''):''; }
-function _siRefreshDealFeed(dealId){ try{ if(typeof window._propLoadActivities==='function' && document.getElementById('prop-act-feed-'+dealId)) window._propLoadActivities(dealId,'prop-act-feed-'+dealId); }catch(_){} }
-
-// Remember the user's per-email property choice (survives navigating away + reloads),
-// so re-opening the same email keeps THEIR pick instead of re-guessing.
-function _siLinkMem(){ try{ return JSON.parse(localStorage.getItem('si_link_mem')||'{}'); }catch(_){ return {}; } }
-function _siRememberMatch(gmailId, dealId){
-  if(!gmailId) return;
-  window._siMemCache = window._siMemCache || {};
-  if(dealId) window._siMemCache[gmailId]=dealId; else delete window._siMemCache[gmailId];
-  try{ const m=_siLinkMem(); if(dealId) m[gmailId]=dealId; else delete m[gmailId]; localStorage.setItem('si_link_mem', JSON.stringify(m)); }catch(_){}
+// Reader bar: offer to add an unknown, non-blast sender to the CRM.
+function _siRenderCrmBar(e){
+  const bar=document.getElementById('si-crm-bar'); if(!bar) return;
+  const inSentBox = window._siState.mailbox==='SENT' || window._siState.mailbox==='DRAFT';
+  if(inSentBox || _siIsBlast(e)){ bar.innerHTML=''; return; }
+  const known=(typeof allContacts!=='undefined'?allContacts:[]).some(c=>c && ((c.email||'').toLowerCase()===(e.fromEmail||'').toLowerCase() || (c.email2||'').toLowerCase()===(e.fromEmail||'').toLowerCase()));
+  if(known){ bar.innerHTML=''; return; }
+  bar.innerHTML='<div style="padding:.5rem 1.3rem;border-bottom:1px solid #f0f0f3;background:#fffbf2;display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;font-size:.8rem">'+
+    '👤 <span><b>'+_siEsc(e.from)+'</b> &lt;'+_siEsc(e.fromEmail)+'&gt; isn’t in your CRM.</span>'+
+    '<span style="flex:1"></span>'+
+    '<button onclick="_siAddSenderToCrm()" style="border:1px solid #f0c66b;background:#fff;color:#92400e;border-radius:7px;padding:.34rem .7rem;font-size:.78rem;font-weight:700;cursor:pointer">Add to CRM</button>'+
+    '<button onclick="_siDismissCrmBar()" style="border:0;background:none;color:#9ca3af;font-size:.78rem;cursor:pointer">Not now</button>'+
+    '</div>';
 }
-function _siRecallMatch(gmailId){
-  if(!gmailId) return null;
-  if(window._siMemCache && window._siMemCache[gmailId]) return window._siMemCache[gmailId];
-  try{ return _siLinkMem()[gmailId]||null; }catch(_){ return null; }
-}
-
-// User can correct the AI's property match — flows to the reader Link dropdown and any open attach card
-window._siSetMatch = function(dealId){
-  const st=window._siState;
-  st.matchedDealId = dealId||null;
-  _siRememberMatch(st.selected, dealId||null);
-  const link=document.getElementById('si-link-deal'); if(link) link.value = dealId||'';
-  const hint=document.getElementById('si-link-ai'); if(hint) hint.style.display='none';
-  (st.suggestions||[]).forEach(function(s){ if(s.kind==='attach'){ const el=document.getElementById('si-f-'+s._i+'-dealId'); if(el) el.value=dealId||''; } });
-};
-
-// Best-effort: has this Gmail message already been linked to a property? (reads the gmailId
-// stamped on deal activities). Requires a collection-group read on 'activities'; degrades silently.
-async function _siFindPriorLinks(gmailId){
+window._siDismissCrmBar = function(){ const bar=document.getElementById('si-crm-bar'); if(bar) bar.innerHTML=''; };
+window._siAddSenderToCrm = async function(){
+  const st=window._siState; const e=st.emails.find(x=>x.id===st.selected); if(!e) return;
   try{
-    if(!_fbDb || !_fbFns || !_fbFns.collectionGroup || !gmailId) return [];
-    const { collectionGroup, query, where, getDocs } = _fbFns;
-    const snap = await getDocs(query(collectionGroup(_fbDb,'activities'), where('gmailId','==', gmailId)));
-    const ids=[];
-    snap.forEach(function(d){
-      const grand = d.ref && d.ref.parent && d.ref.parent.parent && d.ref.parent.parent.parent;
-      if(grand && grand.id==='deals'){ const did=d.ref.parent.parent.id; if(ids.indexOf(did)<0) ids.push(did); }
-    });
-    return ids.map(function(id){ return { id:id, name:_siDealAddr(id) }; }).filter(function(x){ return x.name; });
-  }catch(e){ console.warn('[smart-inbox] prior-link lookup failed', e); return []; }
-}
-function _siDealLabel(d){ return (d.projectName||d.propertyAddress||'Untitled deal'); }
-function _siDealsSorted(){ return visibleDeals().slice().sort((a,b)=>_siDealLabel(a).localeCompare(_siDealLabel(b), undefined, {numeric:true, sensitivity:'base'})); }
-function _siDealOptionList(sel, placeholder){
-  return (placeholder!=null?'<option value="">'+placeholder+'</option>':'')+
-    _siDealsSorted().map(function(d){ return '<option value="'+d.id+'"'+(sel===d.id?' selected':'')+'>'+_siEsc(_siDealLabel(d))+'</option>'; }).join('');
-}
-function _siProfileOptions(sel){
-  const list = Object.values(allProfiles||{}).filter(p=>p&&p.email).sort((a,b)=>(a.name||'').localeCompare(b.name||''));
-  const me = currentUser ? currentUser.email : '';
-  let opts = '<option value="'+_siEsc(me)+'"'+((!sel||sel===me)?' selected':'')+'>'+_siEsc((currentUser&&currentUser.name)||me)+' (you)</option>';
-  opts += list.filter(p=>p.email!==me).map(p=>'<option value="'+_siEsc(p.email)+'"'+(sel===p.email?' selected':'')+'>'+_siEsc(p.name||p.email)+'</option>').join('');
-  return opts;
-}
-function _siDealSelect(id, sel){
-  return '<select id="'+id+'">'+_siDealOptionList(sel, null)+'</select>';
-}
-
-function _siRenderSuggestions(email){
-  const st = window._siState;
-  const body = document.getElementById('si-ai-body');
-  if(!body) return;
-  let html = '';
-  const _pl = st.priorLinks||[];
-  if(st.matchedDealId || _pl.length){
-    const priorNote = _pl.length ? '<div style="color:#0f766e;font-size:.72rem;margin-top:.35rem">✓ This email was previously linked to '+_siEsc(_pl.map(x=>x.name).join(', '))+'</div>' : '';
-    html += '<div style="background:#E6F7F5;border:1px solid #99e2dc;border-radius:8px;padding:.5rem .65rem;font-size:.78rem;margin-bottom:.7rem">'+
-      '<div style="display:flex;align-items:center;gap:.4rem;flex-wrap:wrap">🔗 <span style="font-weight:600;color:#0f766e">Matched property:</span>'+
-      '<select id="si-match-select" onchange="_siSetMatch(this.value)" style="border:1px solid #99e2dc;border-radius:6px;padding:.2rem .4rem;font-size:.76rem;background:#fff;max-width:210px">'+_siDealOptionList(st.matchedDealId,'— none —')+'</select></div>'+
-      priorNote+'</div>';
-  }
-  if(st.meeting){ html += '<div id="si-avail" style="background:#fff;border:1px solid #e5e7eb;border-left:3px solid var(--brand-teal,#00B2A9);border-radius:8px;padding:.6rem .7rem;font-size:.8rem;margin-bottom:.7rem"><div style="color:#6b7280;font-size:.78rem">📅 Checking your availability…</div></div>'; }
-  if(!st.suggestions.length){ html += '<div style="background:#fff;border:1px dashed #e5e7eb;border-radius:10px;padding:1.1rem;text-align:center;color:#6b7280;font-size:.83rem">No actions suggested for this email. Use the chat box below to tell the AI what to do.</div>'; }
-  st.suggestions.forEach((s)=>{ html += _siSuggHtml(s); });
-  body.innerHTML = html + _siLogHtml();
-  if(st.meeting) _siCheckAvailability();
-  // AI auto-selects the matched property in the reader's Link dropdown (user can confirm or correct)
-  if(st.matchedDealId){
-    const sel=document.getElementById('si-link-deal');
-    if(sel && (allDeals||[]).some(d=>d.id===st.matchedDealId)){
-      sel.value=st.matchedDealId;
-      const hint=document.getElementById('si-link-ai'); if(hint) hint.style.display='inline';
-    }
-  }
-}
-
-function _siCalToken(){
-  const t=localStorage.getItem('gcal_token');
-  const exp=parseInt(localStorage.getItem('gcal_token_exp')||'0');
-  return (t && Date.now()<exp) ? t : null;
-}
-function _siFmtTime(d){ return d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'}); }
-
-window._siConnectCalendar = async function(){
-  if(!_fbFns || !_fbAuth){ showToast('Not signed in','error'); return; }
-  const { GoogleAuthProvider, signInWithPopup } = _fbFns;
-  const provider = new GoogleAuthProvider();
-  provider.addScope('https://www.googleapis.com/auth/calendar.events');
-  try{
-    const result = await signInWithPopup(_fbAuth, provider);
-    const cred = GoogleAuthProvider.credentialFromResult(result);
-    if(cred && cred.accessToken){
-      localStorage.setItem('gcal_token', cred.accessToken);
-      localStorage.setItem('gcal_token_exp', String(Date.now()+3600*1000));
-      showToast('Calendar connected ✓','success');
-      _siCheckAvailability();
-    } else { showToast('Calendar permission not granted','error'); }
-  }catch(e){ showToast('Calendar permission not granted','error'); }
+    const id=await _crmEnsureContact(e.from, e.fromEmail, '', '', null);
+    if(id){
+      showToast('Added '+_siEsc(e.from)+' to CRM ✓','success');
+      try{ await _siLogContactEmail(id, e); }catch(_){}
+      const bar=document.getElementById('si-crm-bar'); if(bar) bar.innerHTML='';
+    } else { showToast('Could not add contact','error'); }
+  }catch(err){ console.error('[mail] add-to-crm failed', err); showToast('Could not add: '+err.message,'error'); }
 };
-
-function _siFreeWindows(startMs, endMs, busy){
-  const sorted=busy.slice().filter(b=>b.e>startMs && b.s<endMs).sort((a,b)=>a.s-b.s);
-  const free=[]; let cursor=startMs;
-  for(const b of sorted){ const bs=Math.max(b.s,startMs); if(bs>cursor) free.push({s:cursor,e:bs}); cursor=Math.max(cursor,Math.min(b.e,endMs)); }
-  if(cursor<endMs) free.push({s:cursor,e:endMs});
-  return free.filter(w=>w.e-w.s>=15*60000);
-}
-
-window._siCheckAvailability = async function(){
-  const st=window._siState; const m=st.meeting; const el=document.getElementById('si-avail');
-  if(!m || !el) return;
-  if(!m.date){ el.innerHTML='<div style="font-size:.8rem;color:#374151">📅 <b>'+_siEsc(m.label||'Meeting request')+'</b><div style="color:#6b7280;font-size:.75rem;margin-top:.2rem">Couldn\'t pin down a specific date to check your calendar.</div></div>'; return; }
-  const token=_siCalToken();
-  if(!token){
-    el.innerHTML='<div style="font-size:.8rem;color:#374151">📅 <b>'+_siEsc(m.label||'Meeting request')+'</b><div style="color:#6b7280;font-size:.75rem;margin:.25rem 0 .45rem">Connect your Google Calendar to check your availability for this.</div><button onclick="_siConnectCalendar()" style="background:var(--brand-teal,#00B2A9);color:#fff;border:0;border-radius:6px;padding:.35rem .6rem;font-size:.74rem;font-weight:700;cursor:pointer">Connect Calendar</button></div>';
-    return;
-  }
-  const p=m.date.split('-').map(Number);
-  const dayStart=new Date(p[0],p[1]-1,p[2],8,0,0);
-  const dayEnd=new Date(p[0],p[1]-1,p[2],18,0,0);
-  try{
-    const resp=await window._calApiReq('POST','/freeBusy',{ timeMin:dayStart.toISOString(), timeMax:dayEnd.toISOString(), items:[{id:'primary'}] });
-    const busy=(((resp||{}).calendars||{}).primary||{}).busy||[];
-    const busyMs=busy.map(b=>({s:new Date(b.start).getTime(),e:new Date(b.end).getTime()}));
-    const dayLabel=new Date(p[0],p[1]-1,p[2]).toLocaleDateString(undefined,{weekday:'long',month:'short',day:'numeric'});
-    let verdict='';
-    if(m.start){
-      const sp=m.start.split(':').map(Number);
-      const reqS=new Date(p[0],p[1]-1,p[2],sp[0],sp[1]||0).getTime();
-      const ep=m.end?m.end.split(':').map(Number):null;
-      const reqE=ep?new Date(p[0],p[1]-1,p[2],ep[0],ep[1]||0).getTime():(reqS+3600000);
-      const conflict=busyMs.find(b=>b.s<reqE && b.e>reqS);
-      verdict=conflict
-        ? '<div style="color:#b91c1c;font-size:.8rem;font-weight:600;margin:.3rem 0">⛔ Conflict at that time ('+_siFmtTime(new Date(conflict.s))+'–'+_siFmtTime(new Date(conflict.e))+').</div>'
-        : '<div style="color:#047857;font-size:.8rem;font-weight:600;margin:.3rem 0">✅ You\'re free at '+_siFmtTime(new Date(reqS))+'.</div>';
-    }
-    const free=_siFreeWindows(dayStart.getTime(), dayEnd.getTime(), busyMs);
-    const freeStr=free.length? free.map(w=>_siFmtTime(new Date(w.s))+'–'+_siFmtTime(new Date(w.e))).join(', ') : 'no open windows in business hours';
-    el.innerHTML='<div style="font-size:.8rem;color:#374151"><b>📅 '+_siEsc(m.label||('Meeting on '+dayLabel))+'</b>'+verdict+
-      '<div style="color:#6b7280;font-size:.75rem;margin-top:.2rem"><b>'+dayLabel+'</b> — open: '+_siEsc(freeStr)+'</div>'+
-      '<button onclick="_siDraftAvailability()" style="margin-top:.45rem;background:#E6F7F5;color:#0f766e;border:0;border-radius:6px;padding:.3rem .55rem;font-size:.72rem;font-weight:700;cursor:pointer">✨ Reply with my availability</button></div>';
-    window._siAvailText='On '+dayLabel+' I\'m available '+freeStr+'.';
-  }catch(err){
-    if(/expired|401/i.test(err.message||'')){ el.innerHTML='<div style="font-size:.8rem;color:#374151">📅 Calendar session expired. <button onclick="_siConnectCalendar()" style="background:var(--brand-teal,#00B2A9);color:#fff;border:0;border-radius:6px;padding:.3rem .55rem;font-size:.72rem;font-weight:700;cursor:pointer">Reconnect</button></div>'; }
-    else { el.innerHTML='<div style="font-size:.78rem;color:#6b7280">📅 Couldn\'t check availability: '+_siEsc(err.message||String(err))+'</div>'; }
-  }
-};
-
-window._siDraftAvailability = function(){
-  _siCompose('reply');
-  const ta=document.getElementById('si-reply-body');
-  if(ta){ const txt=(window._siAvailText||'')+' Let me know what works best and I\'ll send an invite.'; ta.value=(ta.value?ta.value+'\n\n':'')+txt; ta.focus(); }
-};
-
-window._siChat = async function(){
-  const input=document.getElementById('si-chat-input');
-  const instruction=input?input.value.trim():'';
-  if(!instruction) return;
-  const st=window._siState; const email=st.emails.find(x=>x.id===st.selected);
-  if(!email){ showToast('Open an email first','error'); return; }
-  if(input){ input.value=''; input.disabled=true; }
-  const body=document.getElementById('si-ai-body');
-  if(body){ const note=document.createElement('div'); note.style.cssText='color:#6b7280;font-size:.8rem;display:flex;align-items:center;gap:.5rem;padding:.4rem 0'; note.innerHTML='<span class="animate-spin" style="width:13px;height:13px;border:2px solid #d1d5db;border-top-color:var(--brand-teal,#00B2A9);border-radius:50%;display:inline-block"></span> Thinking about: '+_siEsc(instruction); body.appendChild(note); body.scrollTop=body.scrollHeight; }
-  const deals = visibleDeals().map(d=>({ id:d.id, address:d.propertyAddress||'', county:d.county||'', parcel:d.folioNumber||d.parcelId||'', stage:d.stage||'' }));
-  const _mc = window._siState.matchCtx || _siBuildMatchContext(email);
-  const _ctxTxt =
-    (_mc.contactLines && _mc.contactLines.length ? '\n\nCRM MATCHES (email participants in your CRM — strongest signal):\n- '+_mc.contactLines.join('\n- ') : '')+
-    (_mc.attachLines && _mc.attachLines.length ? '\n\nATTACHMENT→PROPERTY HINTS:\n- '+_mc.attachLines.join('\n- ') : '')+
-    (_mc.strongDealId ? '\n\nMOST LIKELY PROPERTY: id '+_mc.strongDealId : '');
-  const sys='You are Terra\'s inbox assistant for a commercial land brokerage. The advisor will give an instruction about what to do with the open email. Turn it into one or more confirmable actions. Trust the CRM MATCHES section over guessing a property from the body. Return ONLY valid JSON, no prose, no code fences.';
-  const usr='EMAIL:\nFrom: '+email.from+' <'+email.fromEmail+'>\nSubject: '+email.subject+'\nBody:\n'+(email.body||email.snippet).slice(0,6000)+
-    _ctxTxt+
-    '\n\nEXISTING PROPERTIES (JSON):\n'+JSON.stringify(deals.slice(0,200))+
-    '\n\nADVISOR INSTRUCTION: '+instruction+
-    '\n\nReturn JSON: {"suggestions":[{"kind":"create|attach|task|proposal","confidence":0.0,"title":"short label","why":"one sentence","fields":{}}]}\n'+
-    'Field conventions: create {"address","county","parcel","acreage","stage","seller"}; proposal {"address","county","parcel","acreage","seller","price"}; attach {"dealId","stage"}; task {"title","assignedToEmail","dueInDays","desc","dealId"}. If the instruction asks for something none of these kinds can do, return a single task suggestion describing the follow-up.';
-  try{
-    const resp=await _aiPost({ model:'claude-sonnet-4-6', max_tokens:1200, system:sys, messages:[{ role:'user', content:usr }] });
-    if(!resp.ok) throw new Error('Claude '+resp.status);
-    const data=await resp.json();
-    let text=(data.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('\n').trim();
-    text=text.replace(/^```(?:json)?/i,'').replace(/```$/,'').trim();
-    const a=text.indexOf('{'), b2=text.lastIndexOf('}'); if(a>=0&&b2>a) text=text.slice(a,b2+1);
-    const parsed=JSON.parse(text);
-    const base=st.suggestions.reduce((m,s)=>Math.max(m,s._i),-1)+1;
-    const added=(parsed.suggestions||[]).map((s,k)=>{ s._i=base+k; return s; });
-    if(!added.length){ showToast('AI had no action for that','info'); }
-    st.suggestions=st.suggestions.concat(added);
-    _siRenderSuggestions(email);
-  }catch(err){
-    console.error('[smart-inbox] chat failed', err);
-    showToast('AI chat failed: '+err.message,'error');
-    _siRenderSuggestions(email);
-  }finally{ if(input){ input.disabled=false; input.focus(); } }
-};
-
-function _siSuggHtml(s){
-  const i = s._i;
-  const f = s.fields || {};
-  const email = (window._siState.emails||[]).find(x=>x.id===window._siState.selected) || {};
-  const badge = { create:['➕ Create property','#FDECEA','#DA291C'], proposal:['📄 Create proposal','#FEF3C7','#92400e'], attach:['🔗 Attach to property','#E6F7F5','#0f766e'], task:['✅ Create task','#ECFDF5','#047857'] }[s.kind] || ['Action','#eee','#333'];
-  const conf = Math.round((s.confidence||0)*100);
-  let fields='';
-  const inp=(id,label,val)=>'<div style="display:flex;flex-direction:column;gap:.2rem;margin-bottom:.5rem"><label style="font-size:.7rem;color:#6b7280;font-weight:600">'+label+'</label><input id="'+id+'" value="'+_siEsc(val)+'" style="border:1px solid #e5e7eb;border-radius:6px;padding:.35rem .5rem;font-size:.82rem"></div>';
-  const ta=(id,label,val)=>'<div style="display:flex;flex-direction:column;gap:.2rem;margin-bottom:.5rem"><label style="font-size:.7rem;color:#6b7280;font-weight:600">'+label+'</label><textarea id="'+id+'" style="border:1px solid #e5e7eb;border-radius:6px;padding:.35rem .5rem;font-size:.82rem;min-height:42px;resize:vertical">'+_siEsc(val)+'</textarea></div>';
-  if(s.kind==='create'){
-    fields += inp('si-f-'+i+'-address','Property address (required)', f.address||'');
-    fields += inp('si-f-'+i+'-county','County', f.county||'');
-    fields += inp('si-f-'+i+'-parcel','Parcel / folio', f.parcel||'');
-    fields += inp('si-f-'+i+'-acreage','Acreage', f.acreage||'');
-    fields += '<div style="display:flex;flex-direction:column;gap:.2rem;margin-bottom:.5rem"><label style="font-size:.7rem;color:#6b7280;font-weight:600">Status / stage</label><select id="si-f-'+i+'-stage">'+(STAGES&&STAGES.length?STAGES:['Prospect','Buyer Opportunities','Listing']).map(o=>'<option'+((f.stage||'Prospect')===o?' selected':'')+'>'+_siEsc(o)+'</option>').join('')+'</select></div>';
-    fields += inp('si-f-'+i+'-seller','Seller / contact', f.seller||email.from||'');
-  } else if(s.kind==='proposal'){
-    fields += inp('si-f-'+i+'-address','Property address (required)', f.address||'');
-    fields += inp('si-f-'+i+'-county','County', f.county||'');
-    fields += inp('si-f-'+i+'-parcel','Parcel / folio', f.parcel||'');
-    fields += inp('si-f-'+i+'-acreage','Acreage', f.acreage||'');
-    fields += inp('si-f-'+i+'-price','Suggested price', f.price||'');
-    fields += inp('si-f-'+i+'-seller','Seller / client', f.seller||email.from||'');
-  } else if(s.kind==='attach'){
-    fields += '<div style="display:flex;flex-direction:column;gap:.2rem;margin-bottom:.5rem"><label style="font-size:.7rem;color:#6b7280;font-weight:600">Property</label>'+_siDealSelect('si-f-'+i+'-dealId', f.dealId||window._siState.matchedDealId)+'</div>';
-    var _siStageOpts = '<option value="">— keep current status —</option>'+(STAGES||[]).map(o=>'<option'+(f.stage===o?' selected':'')+'>'+_siEsc(o)+'</option>').join('');
-    fields += '<div style="display:flex;flex-direction:column;gap:.2rem;margin-bottom:.5rem"><label style="font-size:.7rem;color:#6b7280;font-weight:600">Set status / move card (optional)</label><select id="si-f-'+i+'-stage">'+_siStageOpts+'</select></div>';
-  } else if(s.kind==='task'){
-    fields += inp('si-f-'+i+'-title','Task title', f.title||s.title);
-    fields += '<div style="display:flex;flex-direction:column;gap:.2rem;margin-bottom:.5rem"><label style="font-size:.7rem;color:#6b7280;font-weight:600">Assign to</label><select id="si-f-'+i+'-assignee">'+_siProfileOptions(f.assignedToEmail)+'</select></div>';
-    fields += inp('si-f-'+i+'-due','Due date', _siDateStr(parseInt(f.dueInDays!=null?f.dueInDays:2)));
-    fields += '<div style="display:flex;flex-direction:column;gap:.2rem;margin-bottom:.5rem"><label style="font-size:.7rem;color:#6b7280;font-weight:600">Link to property (optional)</label><select id="si-f-'+i+'-dealId">'+_siDealOptionList(f.dealId||window._siState.matchedDealId, '— none —')+'</select></div>';
-    fields += ta('si-f-'+i+'-desc','Notes', f.desc||'');
-  }
-  return '<div id="si-sugg-'+i+'" style="background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:.8rem;margin-bottom:.7rem">'+
-    '<span style="display:inline-block;font-size:.66rem;font-weight:800;text-transform:uppercase;letter-spacing:.4px;padding:.18rem .5rem;border-radius:999px;background:'+badge[1]+';color:'+badge[2]+'">'+badge[0]+'</span>'+
-    '<h4 style="margin:.5rem 0 .25rem;font-size:.88rem">'+_siEsc(s.title)+'</h4>'+
-    '<div style="color:#6b7280;font-size:.76rem;line-height:1.45;margin-bottom:.5rem">'+_siEsc(s.why||'')+'</div>'+
-    '<div style="font-size:.7rem;color:#6b7280;display:flex;align-items:center;gap:.4rem;margin-bottom:.5rem">confidence '+conf+'% <span style="height:5px;border-radius:3px;background:#eee;flex:1;overflow:hidden"><span style="display:block;height:100%;width:'+conf+'%;background:var(--brand-teal,#00B2A9)"></span></span></div>'+
-    '<div style="border-top:1px dashed #e5e7eb;padding-top:.55rem">'+fields+'</div>'+
-    '<div style="display:flex;gap:.5rem;margin-top:.3rem;flex-wrap:wrap">'+
-    (s.kind==='proposal'
-      ? '<button onclick="_siConfirm('+i+',\'card\')" style="background:#fff;border:1px solid var(--brand-teal,#00B2A9);color:#0f766e;border-radius:6px;padding:.4rem .7rem;font-size:.78rem;font-weight:700;cursor:pointer">Create proposal card</button>'+
-        '<button onclick="_siConfirm('+i+',\'docs\')" style="background:var(--brand-teal,#00B2A9);color:#fff;border:0;border-radius:6px;padding:.4rem .7rem;font-size:.78rem;font-weight:700;cursor:pointer">Create + generate docs</button>'
-      : '<button onclick="_siConfirm('+i+')" style="background:var(--brand-teal,#00B2A9);color:#fff;border:0;border-radius:6px;padding:.4rem .7rem;font-size:.78rem;font-weight:700;cursor:pointer">Confirm</button>')+
-    '<button onclick="_siDismiss('+i+')" style="background:#fff;border:1px solid #e5e7eb;color:#374151;border-radius:6px;padding:.4rem .7rem;font-size:.78rem;font-weight:600;cursor:pointer">Dismiss</button></div>'+
-  '</div>';
-}
-
-function _siVal(id){ const el=document.getElementById(id); return el?el.value.trim():''; }
-
-window._siConfirm = async function(i, mode){
-  const st = window._siState;
-  const s = st.suggestions.find(x=>x._i===i);
-  const email = st.emails.find(x=>x.id===st.selected);
-  if(!s || !email) return;
-  const card = document.getElementById('si-sugg-'+i);
-  try {
-    let msg='';
-    if(s.kind==='proposal'){
-      const address=_siVal('si-f-'+i+'-address');
-      if(!address){ showToast('Property address is required','error'); return; }
-      const _deal = {
-        propertyAddress: address,
-        county: _siVal('si-f-'+i+'-county'),
-        folioNumber: _siVal('si-f-'+i+'-parcel'),
-        acreage: _siVal('si-f-'+i+'-acreage'),
-        suggestedPrice: _siVal('si-f-'+i+'-price'),
-        seller: _siVal('si-f-'+i+'-seller'),
-        clientName: _siVal('si-f-'+i+'-seller'),
-        stage: 'Proposal To Do',
-        advisorUid: currentUser.uid,
-        advisorEmail: currentUser.email,
-        advisorName: currentUser.name||'',
-        probability: 10,
-        createdAt: Date.now(),
-        createdBy: currentUser.uid,
-        source: 'smart-inbox'
-      };
-      const _newId = await Store.createDeal(_deal);
-      if(_newId){
-        try{ await window._dealLogActivity(_newId,'note',{ body:'Proposal created from Smart Inbox email: '+email.subject }); }catch(_){}
-        try{ const _sum=await window._emailLogBody({id:email.id, subject:email.subject, from:email.from, body:email.body, snippet:email.snippet}); await window._dealLogActivity(_newId,'email',{ body:_sum, aiSummary:true, gmailId:email.id, gmailSubject:email.subject, gmailFrom:email.fromEmail, gmailDate:email.date, autoLogged:false }); }catch(_){}
-        let _na=0; try{ _na=await window._siSaveEmailAttachments(_newId, email); }catch(_){}
-        msg = 'Created proposal “'+address+'”'+(_na?(' · '+_na+' file'+(_na!==1?'s':'')+' saved'):'');
-        if(mode==='docs'){
-          try{
-            if(typeof handleProposalTodoAutomation==='function'){ await handleProposalTodoAutomation({ ..._deal, id:_newId }); msg += ' · generating proposal package'; }
-            else if(typeof fireAutomations==='function'){ fireAutomations({ ..._deal, id:_newId }, 'Prospect'); msg += ' · generating proposal package'; }
-          }catch(pe){ console.warn('[smart-inbox] proposal automation failed', pe); }
-        }
-        try{ _siRefreshDealFeed(_newId); }catch(_){}
-      }
-    } else if(s.kind==='create'){
-      const address=_siVal('si-f-'+i+'-address');
-      if(!address){ showToast('Property address is required','error'); return; }
-      const _newId = await Store.createDeal({
-        propertyAddress: address,
-        county: _siVal('si-f-'+i+'-county'),
-        folioNumber: _siVal('si-f-'+i+'-parcel'),
-        acreage: _siVal('si-f-'+i+'-acreage'),
-        stage: _siVal('si-f-'+i+'-stage')||'Prospect',
-        seller: _siVal('si-f-'+i+'-seller'),
-        advisorUid: currentUser.uid,
-        advisorEmail: currentUser.email,
-        advisorName: currentUser.name||'',
-        probability: 10,
-        createdAt: Date.now(),
-        createdBy: currentUser.uid,
-        source: 'smart-inbox'
-      });
-      // record creation + the source email on the new property's history
-      if(_newId){
-        try{ await window._dealLogActivity(_newId,'note',{ body:'Property created from Smart Inbox email: '+email.subject }); }catch(_){}
-        try{ const _sum=await window._emailLogBody({id:email.id, subject:email.subject, from:email.from, body:email.body, snippet:email.snippet}); await window._dealLogActivity(_newId,'email',{ body:_sum, aiSummary:true, gmailId:email.id, gmailSubject:email.subject, gmailFrom:email.fromEmail, gmailDate:email.date, autoLogged:false }); }catch(_){}
-        let _na=0; try{ _na=await window._siSaveEmailAttachments(_newId, email); }catch(_){}
-        try{ _siRefreshDealFeed(_newId); }catch(_){}
-      }
-      msg = 'Created property “'+address+'”';
-    } else if(s.kind==='attach'){
-      const dealId=_siVal('si-f-'+i+'-dealId');
-      if(!dealId){ showToast('Pick a property to attach to','error'); return; }
-      const _sum = await window._emailLogBody({id:email.id, subject:email.subject, from:email.from, body:email.body, snippet:email.snippet});
-      await window._dealLogActivity(dealId, 'email', {
-        body: _sum,
-        aiSummary: true,
-        gmailId: email.id,
-        gmailSubject: email.subject,
-        gmailFrom: email.fromEmail,
-        gmailDate: email.date,
-        autoLogged: false
-      });
-      _siRememberMatch(email.id, dealId);
-      let _na=0; try{ _na=await window._siSaveEmailAttachments(dealId, email); }catch(_){}
-      try{ _siRefreshDealFeed(dealId); }catch(_){}
-      msg = 'Attached email to '+(_siDealAddr(dealId).split(',')[0]||'property')+(_na?(' · '+_na+' file'+(_na!==1?'s':'')+' saved'):'');
-      const newStage=_siVal('si-f-'+i+'-stage');
-      const _deal=(allDeals||[]).find(d=>d.id===dealId);
-      if(newStage && _deal && _deal.stage!==newStage){
-        const _oldStage=_deal.stage;
-        await Store.updateDeal(dealId, { stage:newStage, updatedAt:Date.now() });
-        try{ if(typeof window._logStageChange==='function') await window._logStageChange(dealId,_oldStage,newStage); }catch(_){}
-        try{ if(typeof fireAutomations==='function'){ const _d2=(allDeals||[]).find(d=>d.id===dealId)||{..._deal,stage:newStage}; fireAutomations({..._d2,stage:newStage}, _oldStage); } }catch(_){}
-        msg += ' · moved to '+newStage;
-      }
-    } else if(s.kind==='task'){
-      const title=_siVal('si-f-'+i+'-title');
-      if(!title){ showToast('Task title is required','error'); return; }
-      const assigneeEmail=_siVal('si-f-'+i+'-assignee');
-      const prof = Object.values(allProfiles||{}).find(p=>p&&p.email===assigneeEmail);
-      const uid = (prof && (prof.uid||Object.keys(allProfiles).find(k=>allProfiles[k]===prof))) || currentUser.uid;
-      const dealId=_siVal('si-f-'+i+'-dealId');
-      await Store.createTask({
-        title: title,
-        description: _siVal('si-f-'+i+'-desc'),
-        assignedTo: uid,
-        assignedToName: (prof&&prof.name)||currentUser.name||'',
-        assignedToEmail: assigneeEmail||currentUser.email,
-        dealId: dealId||'',
-        dealAddress: dealId?_siDealAddr(dealId):'',
-        dueDate: _siVal('si-f-'+i+'-due'),
-        status: 'pending',
-        taskType: 'inbox',
-        gmailUrl: 'https://mail.google.com/mail/u/0/#inbox/'+email.id,
-        createdAt: Date.now(),
-        createdBy: currentUser.uid,
-        createdByName: currentUser.name||''
-      });
-      msg = 'Created task “'+title+'”';
-      try{ if(dealId) _siRefreshDealFeed(dealId); }catch(_){}
-    }
-    st.log.unshift({ kind:s.kind, msg:msg });
-    st.suggestions = st.suggestions.filter(x=>x._i!==i);
-    if(card) card.remove();
-    showToast(msg,'success');
-    const lw=document.getElementById('si-log'); if(lw) lw.outerHTML=_siLogHtml();
-  } catch(e){
-    console.error('[smart-inbox] confirm failed', e);
-    showToast('Could not save: '+e.message,'error');
-  }
-};
-
-window._siDismiss = function(i){
-  const st=window._siState;
-  st.suggestions = st.suggestions.filter(x=>x._i!==i);
-  const card = document.getElementById('si-sugg-'+i);
-  if(card) card.remove();
-};
-
-function _siLogHtml(){
-  const log = window._siState.log;
-  if(!log || !log.length) return '<div id="si-log"></div>';
-  const ic={ create:'➕', proposal:'📄', attach:'🔗', task:'✅' };
-  return '<div id="si-log"><div style="font-size:.7rem;color:#6b7280;text-transform:uppercase;letter-spacing:.4px;margin:1rem 0 .5rem">Applied this session</div>'+
-    log.map(l=>'<div style="font-size:.76rem;color:#374151;padding:.4rem .6rem;background:#fff;border:1px solid #e5e7eb;border-radius:7px;margin-bottom:.35rem">'+(ic[l.kind]||'•')+' '+_siEsc(l.msg)+'</div>').join('')+'</div>';
-}
 
 /* ===== SMART_INBOX_BLOCK_END ===== */
 
