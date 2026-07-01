@@ -34525,7 +34525,10 @@ window._siOpenMail = function(id){
         '<div style="display:flex;align-items:center;gap:.4rem"><label style="font-size:.7rem;color:#6b7280;width:28px">Cc</label><input id="si-reply-cc" placeholder="(optional)" style="flex:1;border:1px solid #e0e0e6;border-radius:6px;padding:.35rem .5rem;font-size:.8rem"></div>'+
       '</div>'+
       '<textarea id="si-reply-body" placeholder="Write your message…" style="width:100%;border:1px solid #e0e0e6;border-radius:7px;padding:.5rem;font-size:.84rem;min-height:140px;resize:vertical;font-family:inherit;box-sizing:border-box"></textarea>'+
-      '<div style="display:flex;gap:.5rem;margin-top:.5rem"><button onclick="_siSendReply()" style="background:var(--brand-red,#DA291C);color:#fff;border:0;border-radius:7px;padding:.45rem .9rem;font-size:.8rem;font-weight:700;cursor:pointer">Send</button>'+
+      '<input id="si-attach-input" type="file" multiple style="display:none" onchange="_siOnAttachFiles(this)">'+
+      '<div id="si-attach-chips" style="display:flex;flex-wrap:wrap;gap:.35rem;margin-top:.45rem"></div>'+
+      '<div style="display:flex;gap:.5rem;margin-top:.5rem;align-items:center"><button onclick="_siSendReply()" style="background:var(--brand-red,#DA291C);color:#fff;border:0;border-radius:7px;padding:.45rem .9rem;font-size:.8rem;font-weight:700;cursor:pointer">Send</button>'+
+      '<button onclick="_siPickAttach()" style="'+_btn+'">📎 Attach</button>'+
       '<button onclick="_siToggleReply()" style="'+_btn+'">Cancel</button></div>'+
     '</div>'+
     '<div id="si-body" style="padding:0"></div>';
@@ -34616,10 +34619,11 @@ window._siLoadCounts = async function(){
 };
 
 /* ─────────── Compose / reply / forward ─────────── */
-window._siToggleReply = function(){ const box=document.getElementById('si-reply'); if(box) box.style.display='none'; };
+window._siToggleReply = function(){ const box=document.getElementById('si-reply'); if(box) box.style.display='none'; window._siState.composeAtts=[]; };
 window._siCompose = function(mode){
   const st=window._siState; const e=st.emails.find(x=>x.id===st.selected); if(!e) return;
   st.composeMode=mode;
+  st.composeAtts=[]; _siRenderAttachChips();
   const box=document.getElementById('si-reply'); if(box) box.style.display='block';
   const toI=document.getElementById('si-reply-to'), ccI=document.getElementById('si-reply-cc');
   const ta=document.getElementById('si-reply-body'), lbl=document.getElementById('si-reply-mode'), aiBtn=document.getElementById('si-reply-ai');
@@ -34657,15 +34661,78 @@ window._siAiDraftReply = async function(){
   }catch(err){ ta.value=prev; showToast('AI draft failed: '+err.message,'error'); }
   finally{ ta.disabled=false; ta.focus(); }
 };
+// ── Compose attachments ───────────────────────────────────────────────
+function _siFmtBytes(n){ n=n||0; if(n<1024) return n+' B'; if(n<1048576) return (n/1024).toFixed(0)+' KB'; return (n/1048576).toFixed(1)+' MB'; }
+function _siFileToB64(file){
+  return new Promise(function(res,rej){
+    const fr=new FileReader();
+    fr.onload=function(){ const s=String(fr.result||''); const i=s.indexOf('base64,'); res(i>=0?s.slice(i+7):''); };
+    fr.onerror=function(){ rej(fr.error||new Error('read failed')); };
+    fr.readAsDataURL(file);
+  });
+}
+window._siPickAttach = function(){ const inp=document.getElementById('si-attach-input'); if(inp) inp.click(); };
+window._siOnAttachFiles = async function(input){
+  const st=window._siState; st.composeAtts=st.composeAtts||[];
+  const files=Array.from((input&&input.files)||[]);
+  for(const f of files){
+    try{
+      const b64=await _siFileToB64(f);
+      st.composeAtts.push({ name:f.name, type:f.type||'application/octet-stream', size:f.size||0, b64:b64 });
+    }catch(err){ showToast('Could not read '+f.name,'error'); }
+  }
+  if(input) input.value='';
+  _siRenderAttachChips();
+};
+window._siRemoveAttach = function(idx){
+  const st=window._siState; if(!st.composeAtts) return;
+  st.composeAtts.splice(idx,1); _siRenderAttachChips();
+};
+function _siRenderAttachChips(){
+  const wrap=document.getElementById('si-attach-chips'); if(!wrap) return;
+  const atts=window._siState.composeAtts||[];
+  wrap.innerHTML=atts.map(function(a,i){
+    return '<span style="display:inline-flex;align-items:center;gap:.35rem;background:#f1f3f5;border:1px solid #e0e0e6;border-radius:999px;padding:.2rem .5rem;font-size:.74rem;color:#374151">'+
+      '📎 <span style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+_siEsc(a.name)+'</span>'+
+      '<span style="color:#9ca3af">'+_siFmtBytes(a.size)+'</span>'+
+      '<button onclick="_siRemoveAttach('+i+')" title="Remove" style="border:0;background:none;color:#b91c1c;cursor:pointer;font-size:.9rem;line-height:1;padding:0 0 0 .1rem">×</button></span>';
+  }).join('');
+}
+// Wrap a base64 string at 76 chars per line (RFC 2045).
+function _siB64Wrap(b64){ return (b64||'').replace(/.{76}/g,'$&\r\n'); }
 function _siRfc822(opts){
+  const atts=opts.attachments||[];
   const headers=[];
   headers.push('To: '+(opts.to||''));
   if(opts.cc) headers.push('Cc: '+opts.cc);
   headers.push('Subject: '+(opts.subject||''));
-  headers.push('Content-Type: text/plain; charset="UTF-8"');
   headers.push('MIME-Version: 1.0');
   if(opts.inReplyTo){ headers.push('In-Reply-To: '+opts.inReplyTo); headers.push('References: '+opts.inReplyTo); }
-  const raw=headers.join('\r\n')+'\r\n\r\n'+(opts.body||'');
+  let raw;
+  if(atts.length){
+    const boundary='terra_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2);
+    headers.push('Content-Type: multipart/mixed; boundary="'+boundary+'"');
+    let msg=headers.join('\r\n')+'\r\n\r\n';
+    // body part
+    msg+='--'+boundary+'\r\n';
+    msg+='Content-Type: text/plain; charset="UTF-8"\r\n';
+    msg+='Content-Transfer-Encoding: 7bit\r\n\r\n';
+    msg+=(opts.body||'')+'\r\n\r\n';
+    // attachment parts
+    atts.forEach(function(a){
+      const fn=(a.name||'attachment').replace(/"/g,'');
+      msg+='--'+boundary+'\r\n';
+      msg+='Content-Type: '+(a.type||'application/octet-stream')+'; name="'+fn+'"\r\n';
+      msg+='Content-Transfer-Encoding: base64\r\n';
+      msg+='Content-Disposition: attachment; filename="'+fn+'"\r\n\r\n';
+      msg+=_siB64Wrap(a.b64)+'\r\n';
+    });
+    msg+='--'+boundary+'--';
+    raw=msg;
+  } else {
+    headers.push('Content-Type: text/plain; charset="UTF-8"');
+    raw=headers.join('\r\n')+'\r\n\r\n'+(opts.body||'');
+  }
   return btoa(unescape(encodeURIComponent(raw))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
 }
 window._siSendReply = async function(){
@@ -34675,25 +34742,31 @@ window._siSendReply = async function(){
   const toVal=(((document.getElementById('si-reply-to')||{}).value)||'').trim();
   const ccVal=(((document.getElementById('si-reply-cc')||{}).value)||'').trim();
   const ta=document.getElementById('si-reply-body'); const bodyText=ta?ta.value.trim():'';
+  const atts=st.composeAtts||[];
   if(!toVal){ showToast('Add a recipient in the To field','error'); return; }
-  if(!bodyText){ showToast('Write a message first','error'); return; }
+  if(!bodyText && !atts.length){ showToast('Write a message first','error'); return; }
+  const totalBytes=atts.reduce(function(s,a){ return s+(a.size||0); },0);
+  if(totalBytes > 25*1024*1024){ showToast('Attachments exceed 25 MB — Gmail may reject this. Remove a file.','error'); return; }
   const isFwd=(mode==='forward');
   const subject=isFwd?(/^fwd:/i.test(e.subject)?e.subject:'Fwd: '+e.subject):(/^re:/i.test(e.subject)?e.subject:'Re: '+e.subject);
-  const raw=_siRfc822({ to:toVal, cc:ccVal, subject:subject, body:bodyText, inReplyTo:isFwd?null:(e.messageId||null) });
+  const raw=_siRfc822({ to:toVal, cc:ccVal, subject:subject, body:bodyText, inReplyTo:isFwd?null:(e.messageId||null), attachments:atts });
   const payload={ raw:raw };
   if(!isFwd && e.threadId) payload.threadId=e.threadId;
+  const sendBtn=document.querySelector('#si-reply button'); if(sendBtn){ sendBtn.disabled=true; sendBtn.textContent='Sending…'; }
   try{
     const r=await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send',{
       method:'POST', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'}, body:JSON.stringify(payload)
     });
     if(r.status===401){ _siDisconnect(); showToast('Gmail session expired — reconnect','warning'); return; }
     if(!r.ok) throw new Error('Gmail send '+r.status);
-    showToast((isFwd?'Forwarded ✓':'Sent ✓'),'success');
+    showToast((isFwd?'Forwarded ✓':'Sent ✓')+(atts.length?(' · '+atts.length+' attachment'+(atts.length!==1?'s':'')):''),'success');
+    st.composeAtts=[];
     _siToggleReply(); if(ta) ta.value='';
     // A sent reply keeps the thread on its linked property.
     const dealId=_siThreadDeal(e.threadId);
     if(dealId){ try{ await _siLogThreadEmail(dealId, e); }catch(_){} }
   }catch(err){ console.error('[mail] send failed', err); showToast('Could not send: '+err.message,'error'); }
+  finally{ const b=document.querySelector('#si-reply button'); if(b){ b.disabled=false; b.textContent='Send'; } }
 };
 
 /* ─────────── Message actions (move / trash / junk / archive / flag / read) ─────────── */
