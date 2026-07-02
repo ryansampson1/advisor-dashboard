@@ -5662,6 +5662,26 @@ async function _applyCriticalDatesToDeal(dealId){
     await Store.updateDeal(dealId, update);
     panel.remove();
     showToast('✅ Applied '+filled+' field'+(filled===1?'':'s')+' to deal', 'success');
+
+    // Keep the in-memory deal in sync so downstream helpers (task) see the
+    // freshly applied values immediately, before the drawer re-renders. Also
+    // stash the confirmed terms so the attachment activity note (logged from the
+    // upload path) can display the real values instead of N/A.
+    const _deal = (typeof allDeals !== 'undefined') ? allDeals.find(d=>d.id===dealId) : null;
+    if(_deal) Object.assign(_deal, update);
+    window._pdwLastConfirmedTerms = window._pdwLastConfirmedTerms || {};
+    window._pdwLastConfirmedTerms[dealId] = vals;
+
+    // ── Fire the critical-dates review + client-email tasks ────────────
+    // Only when the deal is in Due Diligence — mirrors the edit-form rule
+    // (elc-v245): a new listing / LOI must never generate a critical-dates task.
+    try {
+      const stg = (_deal?.stage || '').toLowerCase();
+      if(stg.includes('due diligence')){
+        _sendCriticalDatesTaskForDeal(dealId, vals);
+      }
+    } catch(taskErr){ console.warn('[_applyCriticalDatesToDeal] task', taskErr); }
+
     // Refresh drawer so updated values show immediately
     setTimeout(()=> window.openPropertyDetail && window.openPropertyDetail(dealId), 200);
   } catch(err){
@@ -5670,6 +5690,28 @@ async function _applyCriticalDatesToDeal(dealId){
   }
 }
 window._applyCriticalDatesToDeal = _applyCriticalDatesToDeal;
+
+// ── Format extracted/confirmed key terms into the compact activity-note summary
+// (Buyer / Price / Deposit / Close Date / DD Period). Accepts either the raw
+// auto-fill JSON or the review-panel vals object (same key names).
+function _fmtCriticalDatesSummary(x){
+  if(!x || typeof x !== 'object') return '';
+  const money = v => { const n=parseFloat(String(v).replace(/[^0-9.]/g,'')); return !isNaN(n)&&n ? '$'+n.toLocaleString() : (v||''); };
+  const val = v => (v===null||v===undefined||String(v).trim()==='') ? 'N/A' : String(v).trim();
+  const buyer   = x.buyer || x.loiBuyer;
+  const price   = x.purchasePrice || x.contractPrice || x.loiPrice || x.listingPrice;
+  const deposit = x.earnestMoney;
+  const close   = x.closeDate;
+  const dd      = x.ddExpirationDate;
+  return [
+    'Buyer: '   + val(buyer),
+    'Price: '   + (price   ? money(price)   : 'N/A'),
+    'Deposit: ' + (deposit ? money(deposit) : 'N/A'),
+    'Close Date: ' + val(close),
+    'DD Period: '  + val(dd),
+  ].join('\n');
+}
+window._fmtCriticalDatesSummary = _fmtCriticalDatesSummary;
 
 // ── On-demand Listing Extension generator ────────────────────────────────────
 // Shows a pre-fill review panel then generates + downloads the amendment DOCX
@@ -5807,37 +5849,67 @@ window._pdwHandleAutoFill = function(dealId, files){
     showToast('Please upload a PDF or Word document (.pdf, .doc, .docx)', 'warning'); return;
   }
   const zone = document.getElementById('pdw-autofill-zone');
+  // Capture the strong (vision-capable) extraction so the attachment activity
+  // note can reuse it — the note's own text-only pass returns N/A on scanned/
+  // DocuSign PDFs. Resolves with the extracted terms (or null on failure).
+  let _resolveExtract;
+  const extractPromise = new Promise(res => { _resolveExtract = res; });
   autoFillDealFromDoc(file, null, {
     spinnerContainer: zone,
-    onExtracted: (extracted) => _showCriticalDatesReviewForDeal(extracted, dealId)
-  });
+    onExtracted: (extracted) => { try { _resolveExtract(extracted); } catch(_){} _showCriticalDatesReviewForDeal(extracted, dealId); }
+  }).catch(()=>{ try { _resolveExtract(null); } catch(_){} });
   // Also save the uploaded document as an attachment on the deal
-  if(dealId) window._pdwUploadAttachment(dealId, file);
+  if(dealId) window._pdwUploadAttachment(dealId, file, { extractPromise });
 };
 
+// ── DOM/edit-form wrapper: resolves advisor + address from the deal edit form ──
 async function _sendCriticalDatesTask(vals){
+  const advUid   = document.getElementById('f-advisor-uid')?.value || currentUser?.uid || '';
+  const address  = document.getElementById('f-address')?.value || vals.projectName || 'this deal';
+  const dealId   = editingDealId || null;
+  let advName  = currentUser?.name  || '';
+  let advEmail = currentUser?.email || '';
+  if(advUid && typeof allProfiles !== 'undefined' && allProfiles[advUid]){
+    const p = allProfiles[advUid];
+    if(p.name)  advName  = p.name;
+    if(p.email) advEmail = p.email;
+  }
+  if((!advName || !advEmail) && typeof allDeals !== 'undefined'){
+    const match = allDeals.find(d=>d.advisorUid===advUid);
+    if(match){
+      if(!advName  && match.advisorName)  advName  = match.advisorName;
+      if(!advEmail && match.advisorEmail) advEmail = match.advisorEmail;
+    }
+  }
+  return _dispatchCriticalDatesTasks({vals, dealId, address, advUid, advName, advEmail});
+}
+window._sendCriticalDatesTask = _sendCriticalDatesTask;
+
+// ── Drawer wrapper: resolves advisor + address from the deal object (no form) ──
+// Used when a document is dropped onto an existing deal card. Without this, the
+// drawer auto-fill path applied fields but never generated the critical-dates
+// review / client-email tasks.
+async function _sendCriticalDatesTaskForDeal(dealId, vals){
+  const deal = (typeof allDeals !== 'undefined') ? allDeals.find(d=>d.id===dealId) : null;
+  if(!deal) return;
+  const address  = deal.propertyAddress || deal.projectName || vals.address || 'this deal';
+  const advUid   = deal.advisorUid || currentUser?.uid || '';
+  let advName  = deal.advisorName  || currentUser?.name  || '';
+  let advEmail = deal.advisorEmail || currentUser?.email || '';
+  if(advUid && typeof allProfiles !== 'undefined' && allProfiles[advUid]){
+    const p = allProfiles[advUid];
+    if(p.name)  advName  = p.name;
+    if(p.email) advEmail = p.email;
+  }
+  return _dispatchCriticalDatesTasks({vals, dealId, address, advUid, advName, advEmail});
+}
+window._sendCriticalDatesTaskForDeal = _sendCriticalDatesTaskForDeal;
+
+// ── Shared dispatcher: builds the critical-dates list + Excel and sends the ──
+// review task and the client-email task. Context (advisor/address/dealId) is
+// resolved by the caller so this works from both the edit form and the drawer.
+async function _dispatchCriticalDatesTasks({vals, dealId, address, advUid, advName, advEmail}){
   try {
-    // Resolve advisor from form
-    const advUid   = document.getElementById('f-advisor-uid')?.value || currentUser?.uid || '';
-    const address  = document.getElementById('f-address')?.value || vals.projectName || 'this deal';
-    const dealId   = editingDealId || null;
-
-    // Look up name/email from allProfiles or allDeals
-    let advName  = currentUser?.name  || '';
-    let advEmail = currentUser?.email || '';
-    if(advUid && typeof allProfiles !== 'undefined' && allProfiles[advUid]){
-      const p = allProfiles[advUid];
-      if(p.name)  advName  = p.name;
-      if(p.email) advEmail = p.email;
-    }
-    if((!advName || !advEmail) && typeof allDeals !== 'undefined'){
-      const match = allDeals.find(d=>d.advisorUid===advUid);
-      if(match){
-        if(!advName  && match.advisorName)  advName  = match.advisorName;
-        if(!advEmail && match.advisorEmail) advEmail = match.advisorEmail;
-      }
-    }
-
     // Label definitions (order matters — this is the display order)
     const labelMap = [
       ['address',                 'Property Address'],
@@ -5966,9 +6038,9 @@ async function _sendCriticalDatesTask(vals){
       ...(attachmentUrl ? {attachmentUrl, attachmentName} : {}),
     }).catch(e=>console.error('[critical-dates-task-2]',e));
 
-  } catch(e){ console.error('[_sendCriticalDatesTask]',e); }
+  } catch(e){ console.error('[_dispatchCriticalDatesTasks]',e); }
 }
-window._sendCriticalDatesTask = _sendCriticalDatesTask;
+window._dispatchCriticalDatesTasks = _dispatchCriticalDatesTasks;
 
 // ── CRM typeahead for Buyer Opportunities contact picker ──────────────────
 function boContactSearch(value, dealKey){
@@ -15004,12 +15076,29 @@ window._logStageChange = async (dealId, fromStage, toStage) => {
 };
 
 // ── Log an attachment upload + AI term summary to the deal activity feed ──────
-window._logAttachmentActivity = async (dealId, fileObj, docType, downloadUrl) => {
+window._logAttachmentActivity = async (dealId, fileObj, docType, downloadUrl, extractPromise) => {
   if (!dealId || !fileObj?.dataUrl || !_fbDb || !_fbFns) return;
   const typeLabels = { loi: 'LOI', psa: 'PSA', closing: 'Closing Statement', listing: 'Listing Agreement', contract: 'Contract' };
   const label = typeLabels[docType] || docType;
   let summary = '';
+  // ── Prefer the strong (vision-capable) auto-fill extraction when available ──
+  // The drawer auto-fill passes its extraction promise; using it avoids the
+  // weak text-only pass below returning N/A on scanned / DocuSign PDFs.
+  if (extractPromise && typeof _fmtCriticalDatesSummary === 'function') {
+    try {
+      const strong = await Promise.race([
+        extractPromise,
+        new Promise(r => setTimeout(() => r(null), 60000)),
+      ]);
+      if (strong && typeof strong === 'object') {
+        const s = _fmtCriticalDatesSummary(strong);
+        // Only use it if at least one field came back non-N/A
+        if (s && /:\s*(?!N\/A)\S/.test(s)) summary = s;
+      }
+    } catch(_) {}
+  }
   try {
+    if (summary) throw { _skipWeak: true }; // strong extraction already produced a summary
     let docText = '';
     const ext = (fileObj.name || '').split('.').pop().toLowerCase();
     if (ext === 'pdf' && typeof pdfjsLib !== 'undefined') {
@@ -15035,7 +15124,7 @@ window._logAttachmentActivity = async (dealId, fileObj, docType, downloadUrl) =>
       const ai = await callAIAssistant(docText.slice(0, 8000), prompt, aiKey).catch(() => null);
       if (ai) summary = ai.trim();
     }
-  } catch(aiErr) { console.warn('[logAttachment] AI summary failed:', aiErr); }
+  } catch(aiErr) { if(!aiErr?._skipWeak) console.warn('[logAttachment] AI summary failed:', aiErr); }
   try {
     const { collection, addDoc } = _fbFns;
     await addDoc(collection(_fbDb, 'deals', dealId, 'activities'), {
@@ -15529,7 +15618,7 @@ window._pdwHandleFiles = async (dealId, fileList) => {
   openPropertyDetail(dealId);
 };
 
-window._pdwUploadAttachment = async (dealId, file) => {
+window._pdwUploadAttachment = async (dealId, file, opts = {}) => {
   if (!_fbStorage || !_fbFns) {
     showToast('Storage not connected — cannot upload', 'error');
     return;
@@ -15574,7 +15663,7 @@ window._pdwUploadAttachment = async (dealId, file) => {
                      : /listing.agr|listing.agreement/i.test(_fn) ? 'listing'
                      : 'document';
       const _reader = new FileReader();
-      _reader.onload = e => window._logAttachmentActivity(dealId, {name: file.name, dataUrl: e.target.result}, _docType, url);
+      _reader.onload = e => window._logAttachmentActivity(dealId, {name: file.name, dataUrl: e.target.result}, _docType, url, opts.extractPromise);
       _reader.readAsDataURL(file);
       // Auto-file to Drive (non-blocking)
       if (deal?.driveUrl || deal?.driveFolderId) window._autoFileToDrive(deal, file, file.name).catch(()=>{});
@@ -21600,8 +21689,8 @@ window._execManualMergeContacts = async () => {
 };
 
 // ── CRM Outreach Imports (updated nightly by daily-crm-outreach-sync task) ──
-const _CRM_OUTREACH_SYNC_DATE = '2026-07-01';
-const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-06-30_0","emailDate":"2026-06-30","emailSubject":"Offer on 5406 Linebaugh","attachmentNames":["PSA Linebaugh.pdf"],"recipientEmail":"masisells@gmail.com","recipientName":"Dave Masi","recipientFirstName":"Dave","recipientLastName":"Masi","companyName":"Sunshinegle LLC","propertyHint":"5406 Linebaugh","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-06-30_1","emailDate":"2026-06-30","emailSubject":"Offer on 5116 Grace Street","attachmentNames":["PSA MVP Grace.pdf"],"recipientEmail":"rlolkus@thekraussorg.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Krauss Org","propertyHint":"Grace Nassau","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-06-30_2","emailDate":"2026-06-30","emailSubject":"Offer on 7900 Park Blvd","attachmentNames":["PSA 7900 Park Blvd.pdf"],"recipientEmail":"ngriffin06@yahoo.com","recipientName":"Nathan","recipientFirstName":"Nathan","recipientLastName":"","companyName":"","propertyHint":"7900 Park Blvd","matchedDealId":null,"imported":false,"skipped":false}];
+const _CRM_OUTREACH_SYNC_DATE = '2026-07-02';
+const _CRM_OUTREACH_IMPORTS = [{"emailDate":"2026-07-01","emailSubject":"Kolter Mocassin Wallow Site","attachmentNames":["SWGR MSP REVISED_ (004).pdf"],"recipientEmail":"f.bianchi@verizon.net","recipientName":"Fabian Bianchi","recipientFirstName":"Fabian","recipientLastName":"Bianchi","companyName":"","propertyHint":"Moccasin Wallow","id":"oi_2026-07-01_0","matchedDealId":null,"imported":false,"skipped":false},{"emailDate":"2026-07-01","emailSubject":"Re: Your Q2 2026 Eshenbaugh Report is here","attachmentNames":["Esh Report 2nd Qtr 2026 Final.pdf"],"recipientEmail":"mddady@kbhome.com","recipientName":"Michael Dady","recipientFirstName":"Michael","recipientLastName":"Dady","companyName":"KB Home","propertyHint":"","id":"oi_2026-07-01_1","matchedDealId":null,"imported":false,"skipped":false},{"emailDate":"2026-07-01","emailSubject":"Re: Contact information","attachmentNames":["2026-04-08--FIRST AMENDMENT TO REAL ESTATE PURCHASE AGREEMENT (Lakeland FL).pdf","FE PSA 2025-09-12--Purchase Agreement (Lakeland Florida)[1].pdf","PUD26-010_7390 Bridgewater Center Dr.pdf","PUD Drawings_Blue Beacon Inc..pdf","PUD Sketch_Blue Beacon Inc..pdf","Remaining Trip Counts_Blue Beacon Inc..pdf","Development Site Legal_Blue Beacon Inc..pdf"],"recipientEmail":"msolik@dotysoliklaw.com","recipientName":"Mary Doty Solik","recipientFirstName":"Mary","recipientLastName":"Doty Solik","companyName":"Doty Solik Law","propertyHint":"Blue Beacon / Bridgewater Center Dr","id":"oi_2026-07-01_2","matchedDealId":null,"imported":false,"skipped":false},{"emailDate":"2026-07-01","emailSubject":"Fwd: McDowell Housing Partners - Brandon Site - LOI","attachmentNames":["Robert Tolle Drive - LOI - 06.29.26.pdf"],"recipientEmail":"fabbrit@richmancapital.com","recipientName":"Todd Fabbri","recipientFirstName":"Todd","recipientLastName":"Fabbri","companyName":"Richman Capital","propertyHint":"Robert Tolle Drive / Brandon Site","id":"oi_2026-07-01_3","matchedDealId":null,"imported":false,"skipped":false}];
 
 // ── Gmail Sync ───────────────────────────────────────────────────────
 let _GMAIL_SYNC_DATE;  // set at runtime by crmGmailSync; blank = never synced this session
