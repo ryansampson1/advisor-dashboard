@@ -17053,28 +17053,40 @@ function viewMyCommissions(){
   const uid      = viewingOther ? payViewAdvisorUid : currentUser.uid;
   const myDeals  = allDeals.filter(d => isDealAdvisor(d, uid));
   const profile  = getProfile(uid);
-  // legacy vars kept so nothing below breaks if referenced elsewhere
-  const quarters = quarterlyPayouts(myDeals, uid);
-  const payouts  = projectAdvisorPayouts(myDeals, uid);
 
   const thisYear = new Date().getFullYear();
   const today    = new Date().toISOString().slice(0,10);
 
+  // ── Canonical payout book ─────────────────────────────────────────────────
+  // A deal's split tier is set by its projected close date and the advisor's
+  // cumulative gross AS OF that close date, resetting Jan 1 each year. To keep
+  // this consistent with the admin Commission Pay Forecast, compute EVERY
+  // deal's payout ONCE from the full close-date-sorted book (won + active
+  // together) and then slice it for display. Do NOT re-run
+  // projectAdvisorPayouts on a sub-array — that resets the YTD tier accumulator
+  // and makes the same deal pay out differently across the two views.
+  const bookDeals   = myDeals.filter(d => isWonStage(d.stage) || isContractActiveStage(d.stage));
+  const bookPayouts = projectAdvisorPayouts(bookDeals, uid);
+  const _payoutById = new Map(bookPayouts.map(p=>[p.dealId, p]));
+  const _slice      = list => list.map(d => _payoutById.get(d.id)).filter(Boolean);
+
+  // legacy vars kept so nothing below breaks if referenced elsewhere
+  const quarters = quarterlyPayouts(bookDeals, uid);
+  const payouts  = bookPayouts;
+
   // ── Section 1: Closed / Sold ──────────────────────────────────────────────
   const closedDeals   = myDeals.filter(d=>isWonStage(d.stage));
-  const closedPayouts = projectAdvisorPayouts(closedDeals, uid);
+  const closedPayouts = _slice(closedDeals);
   const closedTotal   = closedPayouts.reduce((s,p)=>s+p.payout, 0);
   const closedGross   = closedDeals.reduce((s,d)=>s+getAdvisorShare(d,uid), 0);
   const ytdClosed     = closedDeals.filter(d=>d.closeDate&&new Date(d.closeDate+'T00:00:00').getFullYear()===thisYear);
-  const ytdPayouts    = projectAdvisorPayouts(ytdClosed, uid);
+  const ytdPayouts    = _slice(ytdClosed);
   const ytdPayout     = ytdPayouts.reduce((s,p)=>s+p.payout, 0);
   const ytdGross      = ytdClosed.reduce((s,d)=>s+getAdvisorShare(d,uid), 0);
 
   // ── Section 2: Pipeline / Projected — Under Contract, Rezoning/Permitting, Closing only ──
-  const isContractActiveStage = s => !isLostStage(s||'') && !isWonStage(s||'')
-    && /due.?diligence|rezoning|permitting|closing/i.test(s||'');
   const pipelineDeals   = myDeals.filter(d=>isContractActiveStage(d.stage));
-  const pipelinePayouts = projectAdvisorPayouts(pipelineDeals, uid);
+  const pipelinePayouts = _slice(pipelineDeals);
   const pipelineTotal   = pipelinePayouts.reduce((s,p)=>s+p.payout, 0);
   const pipelineWeighted= pipelineDeals.reduce((s,d)=>s+getAdvisorShare(d,uid), 0);
 
@@ -17087,7 +17099,7 @@ function viewMyCommissions(){
 
   // CY remaining — open deals with close date still in this year
   const cyRemainingDeals   = pipelineDeals.filter(d=>d.closeDate&&d.closeDate>=todayStr&&d.closeDate<=yearEndStr);
-  const cyRemainingPayouts = projectAdvisorPayouts(cyRemainingDeals, uid);
+  const cyRemainingPayouts = _slice(cyRemainingDeals);
   const cyRemainingPayout  = cyRemainingPayouts.reduce((s,p)=>s+p.payout, 0);
   const cyRemainingComm    = cyRemainingDeals.reduce((s,d)=>s+getAdvisorShare(d,uid), 0);
 
@@ -17097,7 +17109,7 @@ function viewMyCommissions(){
 
   // NY projected — open deals with close date in next year
   const nyDeals   = pipelineDeals.filter(d=>d.closeDate&&d.closeDate>=nyStartStr&&d.closeDate<=nyEndStr);
-  const nyPayouts = projectAdvisorPayouts(nyDeals, uid);
+  const nyPayouts = _slice(nyDeals);
   const nyPayout  = nyPayouts.reduce((s,p)=>s+p.payout, 0);
   const nyComm    = nyDeals.reduce((s,d)=>s+getAdvisorShare(d,uid), 0);
 
