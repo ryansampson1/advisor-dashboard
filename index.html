@@ -34253,7 +34253,7 @@ function viewSmartInbox(){
             '<div><div id="si-box-title" style="font-weight:800;font-size:1rem">Inbox</div><div id="si-sub" style="color:#9ca3af;font-size:.72rem">Loading…</div></div>'+
             '<button onclick="_siReload()" title="Refresh" style="border:1px solid #e5e7eb;background:#fff;border-radius:7px;padding:.3rem .5rem;cursor:pointer;font-size:.85rem">↻</button>'+
           '</div>'+
-          '<input id="si-search" oninput="_siOnSearch(this.value)" placeholder="Search this mailbox" style="margin-top:.5rem;width:100%;border:1px solid #e0e0e6;border-radius:8px;padding:.4rem .6rem;font-size:.82rem;background:#fff;box-sizing:border-box">'+
+          '<input id="si-search" oninput="_siOnSearch(this.value)" placeholder="Search all mail" style="margin-top:.5rem;width:100%;border:1px solid #e0e0e6;border-radius:8px;padding:.4rem .6rem;font-size:.82rem;background:#fff;box-sizing:border-box">'+
         '</div>'+
         '<div id="si-mails" style="flex:1"></div>'+
       '</div>'+
@@ -34350,7 +34350,13 @@ window._siDrop = function(ev, labelId){ ev.preventDefault(); let id=''; try{ id=
 
 /* ─────────── Loading mailboxes ─────────── */
 window._siReload = function(){ const st=window._siState; _siLoadMailbox(st.mailbox, st.mailboxName); };
-window._siOnSearch = function(v){ window._siState.search=(v||'').toLowerCase(); _siRenderList(); };
+window._siOnSearch = function(v){
+  const st=window._siState;
+  st.search=(v||'');
+  clearTimeout(window._siSearchTimer);
+  if(!st.search.trim()){ _siExitSearch(); return; }
+  window._siSearchTimer=setTimeout(function(){ _siRunSearch(); }, 350);
+};
 
 window._siLoadMailbox = async function(mailboxId, mailboxName){
   const token = _siGmailToken(); if(!token){ viewSmartInbox(); return; }
@@ -34361,6 +34367,7 @@ window._siLoadMailbox = async function(mailboxId, mailboxName){
     mailboxName = sys ? sys.name : (lbl ? lbl.name.split('/').pop() : mailboxId);
   }
   st.mailbox=mailboxId; st.mailboxName=mailboxName||mailboxId; st.selected=null; st.search=''; st.nextPageToken=null; st.loadingMore=false;
+  st.searchActive=false; st.searchLoading=false; st._mailboxEmails=null; st._mailboxNextPageToken=null; _siSearchSeq++;
   const searchBox=document.getElementById('si-search'); if(searchBox) searchBox.value='';
   const title=document.getElementById('si-box-title'); if(title) title.textContent=st.mailboxName;
   const sub=document.getElementById('si-sub'); if(sub) sub.textContent='Loading…';
@@ -34407,12 +34414,15 @@ window._siLoadMore = async function(){
   const st=window._siState;
   if(st.loadingMore || !st.nextPageToken) return;
   const token=_siGmailToken(); if(!token) return;
+  const searching = !!st.searchActive, seq = st.searchSeq;
   st.loadingMore=true; _siRenderList();
   try{
-    const listResp = await fetch(_siBuildListUrl(st, st.nextPageToken), { headers:{ Authorization:'Bearer '+token } });
+    const url = searching ? _siBuildSearchUrl(st, st.nextPageToken) : _siBuildListUrl(st, st.nextPageToken);
+    const listResp = await fetch(url, { headers:{ Authorization:'Bearer '+token } });
     if(listResp.status===401){ _siDisconnect(); showToast('Gmail session expired — reconnect','warning'); return; }
     if(!listResp.ok) throw new Error('Gmail list '+listResp.status);
     const list = await listResp.json();
+    if(searching && seq!==st.searchSeq) return; // search changed while paging
     st.nextPageToken = list.nextPageToken || null;
     const have={}; (st.emails||[]).forEach(e=>{ have[e.id]=1; });
     const ids = (list.messages||[]).map(m=>m.id).filter(id=>!have[id]);
@@ -34420,6 +34430,7 @@ window._siLoadMore = async function(){
       fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/'+id+'?format=full', { headers:{ Authorization:'Bearer '+token } })
         .then(r=>r.ok?r.json():null).catch(()=>null)
     ));
+    if(searching && seq!==st.searchSeq) return;
     const parsed = msgs.filter(Boolean).map(_siParse);
     st.emails = (st.emails||[]).concat(parsed);
     _siAutoProcess(parsed);
@@ -34431,11 +34442,60 @@ window._siLoadMore = async function(){
   }
 };
 
+/* ─────────── Server-side search (all mail, like Apple Mail) ─────────── */
+let _siSearchSeq = 0;
+function _siBuildSearchUrl(st, pageToken){
+  let url='https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=50&includeSpamTrash=true&q='+encodeURIComponent((st.search||'').trim());
+  if(pageToken) url+='&pageToken='+encodeURIComponent(pageToken);
+  return url;
+}
+window._siRunSearch = async function(){
+  const st=window._siState;
+  const q=(st.search||'').trim();
+  if(!q){ _siExitSearch(); return; }
+  const token=_siGmailToken(); if(!token) return;
+  // Preserve the mailbox buffer the first time we enter search.
+  if(!st.searchActive){ st._mailboxEmails=st.emails; st._mailboxNextPageToken=st.nextPageToken; st.searchActive=true; }
+  const seq=++_siSearchSeq; st.searchSeq=seq;
+  st.selected=null; st.loadingMore=false; st.searchLoading=true;
+  st.emails=[]; st.nextPageToken=null;
+  _siRenderList();
+  try{
+    const r=await fetch(_siBuildSearchUrl(st, null), { headers:{ Authorization:'Bearer '+token } });
+    if(r.status===401){ _siDisconnect(); showToast('Gmail session expired — reconnect','warning'); return; }
+    if(!r.ok) throw new Error('Gmail search '+r.status);
+    const list=await r.json();
+    if(seq!==_siSearchSeq) return; // a newer search superseded this one
+    const ids=(list.messages||[]).map(m=>m.id);
+    const msgs=await Promise.all(ids.map(id=>
+      fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/'+id+'?format=full',{ headers:{ Authorization:'Bearer '+token } })
+        .then(r=>r.ok?r.json():null).catch(()=>null)));
+    if(seq!==_siSearchSeq) return;
+    st.emails=msgs.filter(Boolean).map(_siParse);
+    st.nextPageToken=list.nextPageToken||null;
+    _siAutoProcess(st.emails);
+  }catch(e){
+    console.error('[mail] search failed', e);
+    if(seq===_siSearchSeq){ const mails=document.getElementById('si-mails'); if(mails) mails.innerHTML='<div style="padding:1rem;color:#b91c1c;font-size:.82rem">Search failed: '+_siEsc(e.message)+'</div>'; }
+  }finally{
+    if(seq===_siSearchSeq){ st.searchLoading=false; _siRenderList(); }
+  }
+};
+window._siExitSearch = function(){
+  const st=window._siState;
+  _siSearchSeq++; st.searchSeq=_siSearchSeq; // invalidate any in-flight search
+  if(!st.searchActive){ st.searchLoading=false; _siRenderList(); return; }
+  st.searchActive=false; st.searchLoading=false; st.loadingMore=false;
+  st.emails=st._mailboxEmails||[]; st.nextPageToken=st._mailboxNextPageToken||null;
+  st._mailboxEmails=null; st._mailboxNextPageToken=null; st.selected=null;
+  _siRenderList();
+};
+
 // Poll only the Inbox for new mail; leave the open message untouched.
 window._siPollInbox = async function(){
   const st=window._siState;
   if(!document.getElementById('si-mails')){ _siStopPolling(); return; }
-  if(st.mailbox!=='INBOX') return;
+  if(st.mailbox!=='INBOX' || st.searchActive) return;
   const token=_siGmailToken(); if(!token){ _siStopPolling(); return; }
   try{
     const r=await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages?labelIds=INBOX&maxResults=15',{ headers:{ Authorization:'Bearer '+token } });
@@ -34606,11 +34666,18 @@ function _siRenderList(){
   const sub=document.getElementById('si-sub');
   const wrap=document.getElementById('si-mails');
   if(!wrap) return;
-  const isSent = st.mailbox==='SENT' || st.mailbox==='DRAFT';
-  const emails=_siFilteredEmails();
-  const unread=st.emails.filter(e=>e.unread).length;
-  if(sub) sub.textContent=st.emails.length+' message'+(st.emails.length!==1?'s':'')+(unread?(' · '+unread+' unread'):'');
-  if(!emails.length){ wrap.innerHTML='<div style="padding:1.2rem;color:#9ca3af;font-size:.85rem;text-align:center">'+(st.search?'No matches.':'No messages.')+'</div>'+_siListFooterHtml(); _siAttachScroll(); return; }
+  const searching = !!st.searchActive;
+  const isSent = !searching && (st.mailbox==='SENT' || st.mailbox==='DRAFT');
+  const emails=st.emails;
+  if(sub){
+    if(searching){
+      sub.textContent = st.searchLoading ? 'Searching all mail…' : (emails.length+' result'+(emails.length!==1?'s':'')+(st.nextPageToken?'+':'')+' · all mail');
+    } else {
+      const unread=st.emails.filter(e=>e.unread).length;
+      sub.textContent=st.emails.length+' message'+(st.emails.length!==1?'s':'')+(unread?(' · '+unread+' unread'):'');
+    }
+  }
+  if(!emails.length){ wrap.innerHTML='<div style="padding:1.2rem;color:#9ca3af;font-size:.85rem;text-align:center">'+(searching?(st.searchLoading?'Searching all mail…':'No matches in all mail.'):'No messages.')+'</div>'+_siListFooterHtml(); _siAttachScroll(); return; }
   wrap.innerHTML=emails.map(e=>{
     const sel=st.selected===e.id;
     const who = isSent ? ('To: '+(e.toName||'')) : (e.from||'');
@@ -34636,8 +34703,8 @@ function _siRenderList(){
 function _siListFooterHtml(){
   const st=window._siState;
   if(st.loadingMore) return '<div style="padding:1rem;text-align:center;color:#9ca3af;font-size:.8rem">Loading more…</div>';
-  if(st.nextPageToken) return '<div style="padding:.9rem;text-align:center"><button onclick="_siLoadMore()" style="border:1px solid #e0e0e6;background:#fff;border-radius:8px;padding:.5rem .95rem;font-size:.8rem;font-weight:600;cursor:pointer;color:#1f2937">Load older messages</button></div>';
-  if((st.emails||[]).length) return '<div style="padding:.9rem;text-align:center;color:#c8c8cf;font-size:.72rem">— end of mailbox —</div>';
+  if(st.nextPageToken) return '<div style="padding:.9rem;text-align:center"><button onclick="_siLoadMore()" style="border:1px solid #e0e0e6;background:#fff;border-radius:8px;padding:.5rem .95rem;font-size:.8rem;font-weight:600;cursor:pointer;color:#1f2937">'+(st.searchActive?'Load more results':'Load older messages')+'</button></div>';
+  if((st.emails||[]).length) return '<div style="padding:.9rem;text-align:center;color:#c8c8cf;font-size:.72rem">'+(st.searchActive?'— end of results —':'— end of mailbox —')+'</div>';
   return '';
 }
 /* Auto-load the next page when the user scrolls near the bottom of the list. */
@@ -34647,7 +34714,7 @@ function _siAttachScroll(){
   list._siScrollHooked=true;
   list.addEventListener('scroll', function(){
     const st=window._siState;
-    if(st.search || st.loadingMore || !st.nextPageToken) return;
+    if(st.loadingMore || !st.nextPageToken) return;
     if(list.scrollTop + list.clientHeight >= list.scrollHeight - 140) _siLoadMore();
   });
 }
