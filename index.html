@@ -34360,7 +34360,7 @@ window._siLoadMailbox = async function(mailboxId, mailboxName){
     const lbl=(st.labels||[]).find(l=>l.id===mailboxId);
     mailboxName = sys ? sys.name : (lbl ? lbl.name.split('/').pop() : mailboxId);
   }
-  st.mailbox=mailboxId; st.mailboxName=mailboxName||mailboxId; st.selected=null; st.search='';
+  st.mailbox=mailboxId; st.mailboxName=mailboxName||mailboxId; st.selected=null; st.search=''; st.nextPageToken=null; st.loadingMore=false;
   const searchBox=document.getElementById('si-search'); if(searchBox) searchBox.value='';
   const title=document.getElementById('si-box-title'); if(title) title.textContent=st.mailboxName;
   const sub=document.getElementById('si-sub'); if(sub) sub.textContent='Loading…';
@@ -34368,16 +34368,11 @@ window._siLoadMailbox = async function(mailboxId, mailboxName){
   if(reader) reader.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#b8b8bf;text-align:center;padding:2rem;flex-direction:column;gap:.6rem"><div style="font-size:2.4rem">✉️</div><div>Select a message to read it.</div></div>';
   _siRenderMailboxes();
   try{
-    let url;
-    if(mailboxId==='ARCHIVE'){
-      url='https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=30&q='+encodeURIComponent('-in:inbox -in:sent -in:trash -in:spam -in:draft -in:chats');
-    } else {
-      url='https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=30&labelIds='+encodeURIComponent(mailboxId);
-    }
-    const listResp = await fetch(url, { headers:{ Authorization:'Bearer '+token } });
+    const listResp = await fetch(_siBuildListUrl(st, null), { headers:{ Authorization:'Bearer '+token } });
     if(listResp.status===401){ _siDisconnect(); showToast('Gmail session expired — reconnect','warning'); return; }
     if(!listResp.ok) throw new Error('Gmail list '+listResp.status);
     const list = await listResp.json();
+    st.nextPageToken = list.nextPageToken || null;
     const ids = (list.messages||[]).map(m=>m.id);
     const msgs = await Promise.all(ids.map(id =>
       fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/'+id+'?format=full', { headers:{ Authorization:'Bearer '+token } })
@@ -34392,6 +34387,47 @@ window._siLoadMailbox = async function(mailboxId, mailboxName){
     const mails=document.getElementById('si-mails');
     if(mails) mails.innerHTML='<div style="padding:1rem;color:#b91c1c;font-size:.82rem">Could not load: '+_siEsc(e.message)+'</div>';
     if(sub) sub.textContent='Error';
+  }
+};
+
+/* Build the Gmail list URL for the current mailbox, page by page (no hard cap — pages of 50). */
+function _siBuildListUrl(st, pageToken){
+  let url='https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=50';
+  if(st.mailbox==='ARCHIVE'){
+    url+='&q='+encodeURIComponent('-in:inbox -in:sent -in:trash -in:spam -in:draft -in:chats');
+  } else {
+    url+='&labelIds='+encodeURIComponent(st.mailbox);
+  }
+  if(pageToken) url+='&pageToken='+encodeURIComponent(pageToken);
+  return url;
+}
+
+/* Load the next page of the current mailbox and append it (used by the button + infinite scroll). */
+window._siLoadMore = async function(){
+  const st=window._siState;
+  if(st.loadingMore || !st.nextPageToken) return;
+  const token=_siGmailToken(); if(!token) return;
+  st.loadingMore=true; _siRenderList();
+  try{
+    const listResp = await fetch(_siBuildListUrl(st, st.nextPageToken), { headers:{ Authorization:'Bearer '+token } });
+    if(listResp.status===401){ _siDisconnect(); showToast('Gmail session expired — reconnect','warning'); return; }
+    if(!listResp.ok) throw new Error('Gmail list '+listResp.status);
+    const list = await listResp.json();
+    st.nextPageToken = list.nextPageToken || null;
+    const have={}; (st.emails||[]).forEach(e=>{ have[e.id]=1; });
+    const ids = (list.messages||[]).map(m=>m.id).filter(id=>!have[id]);
+    const msgs = await Promise.all(ids.map(id =>
+      fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/'+id+'?format=full', { headers:{ Authorization:'Bearer '+token } })
+        .then(r=>r.ok?r.json():null).catch(()=>null)
+    ));
+    const parsed = msgs.filter(Boolean).map(_siParse);
+    st.emails = (st.emails||[]).concat(parsed);
+    _siAutoProcess(parsed);
+  }catch(e){
+    console.error('[mail] load more failed', e);
+    showToast('Could not load more: '+e.message,'error');
+  }finally{
+    st.loadingMore=false; _siRenderList();
   }
 };
 
@@ -34574,7 +34610,7 @@ function _siRenderList(){
   const emails=_siFilteredEmails();
   const unread=st.emails.filter(e=>e.unread).length;
   if(sub) sub.textContent=st.emails.length+' message'+(st.emails.length!==1?'s':'')+(unread?(' · '+unread+' unread'):'');
-  if(!emails.length){ wrap.innerHTML='<div style="padding:1.2rem;color:#9ca3af;font-size:.85rem;text-align:center">'+(st.search?'No matches.':'No messages.')+'</div>'; return; }
+  if(!emails.length){ wrap.innerHTML='<div style="padding:1.2rem;color:#9ca3af;font-size:.85rem;text-align:center">'+(st.search?'No matches.':'No messages.')+'</div>'+_siListFooterHtml(); _siAttachScroll(); return; }
   wrap.innerHTML=emails.map(e=>{
     const sel=st.selected===e.id;
     const who = isSent ? ('To: '+(e.toName||'')) : (e.from||'');
@@ -34593,7 +34629,27 @@ function _siRenderList(){
         '<div style="font-size:.78rem;color:'+cSnip+';margin-top:.1rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+_siEsc(e.snippet)+'</div>'+
       '</div>'+
     '</div>';
-  }).join('');
+  }).join('')+_siListFooterHtml();
+  _siAttachScroll();
+}
+/* Footer under the message list: Load-more button, loading state, or end marker. */
+function _siListFooterHtml(){
+  const st=window._siState;
+  if(st.loadingMore) return '<div style="padding:1rem;text-align:center;color:#9ca3af;font-size:.8rem">Loading more…</div>';
+  if(st.nextPageToken) return '<div style="padding:.9rem;text-align:center"><button onclick="_siLoadMore()" style="border:1px solid #e0e0e6;background:#fff;border-radius:8px;padding:.5rem .95rem;font-size:.8rem;font-weight:600;cursor:pointer;color:#1f2937">Load older messages</button></div>';
+  if((st.emails||[]).length) return '<div style="padding:.9rem;text-align:center;color:#c8c8cf;font-size:.72rem">— end of mailbox —</div>';
+  return '';
+}
+/* Auto-load the next page when the user scrolls near the bottom of the list. */
+function _siAttachScroll(){
+  const list=document.getElementById('si-list');
+  if(!list || list._siScrollHooked) return;
+  list._siScrollHooked=true;
+  list.addEventListener('scroll', function(){
+    const st=window._siState;
+    if(st.search || st.loadingMore || !st.nextPageToken) return;
+    if(list.scrollTop + list.clientHeight >= list.scrollHeight - 140) _siLoadMore();
+  });
 }
 
 /* ─────────── Reading pane ─────────── */
