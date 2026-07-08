@@ -18943,6 +18943,8 @@ async function _crmEnsureContact(nameRaw, email, phone, company, dealId) {
     createdAt: Date.now(),
     updatedAt: Date.now(),
     createdBy: currentUser?.uid||'',
+    // Queue for Mailchimp sync so deal-sourced contacts reach the audience.
+    ...((email||'').trim() && APP_CONFIG.mailchimp?.listId ? { mailchimpPendingSync: true } : {}),
   };
   const ref = await addDoc(collection(_fbDb,'contacts'), contactData);
   allContacts.push({id:ref.id, ...contactData});
@@ -20511,8 +20513,15 @@ window.saveContact = async () => {
   const linkedDeals = window._cmLinkedDeals || [];
 
   const email = document.getElementById('cm-email')?.value.trim().toLowerCase()||'';
-  // Flag for Mailchimp sync whenever a contact with an email is saved
-  const mcPending = !!(email && APP_CONFIG.mailchimp?.listId);
+  // If editing, detect an email change/clear so the sync can drop the stale
+  // Mailchimp member (members are keyed by email, so a changed/blank address
+  // leaves the old one orphaned unless we explicitly remove it).
+  const _prevContact = _editingContactId ? (allContacts||[]).find(c=>c.id===_editingContactId) : null;
+  const oldEmail = (_prevContact?.email||'').toLowerCase().trim();
+  const emailRemoved = !!(oldEmail && oldEmail !== email && APP_CONFIG.mailchimp?.listId);
+  // Flag for Mailchimp sync when a contact with an email is saved, OR when an
+  // old address needs to be removed from the audience.
+  const mcPending = !!((email || emailRemoved) && APP_CONFIG.mailchimp?.listId);
 
   const data = {
     firstName, lastName,
@@ -20535,6 +20544,7 @@ window.saveContact = async () => {
     groups, linkedDeals,
     updatedAt: Date.now(),
     ...(mcPending ? { mailchimpPendingSync: true } : {}),
+    ...(emailRemoved ? { mailchimpRemoveEmail: oldEmail } : {}),
   };
 
   try {
@@ -20556,11 +20566,20 @@ window._CRM_DELETE_RETENTION_DAYS = 30;
 window.crmDeleteContact = async id => {
   if(!confirm('Move this contact to Recently Deleted?\n\nIt disappears from the list right away, and an admin can restore it for 30 days. After that it is permanently removed.')) return;
   const {doc, updateDoc} = _fbFns;
+  // If this contact has an email on a configured Mailchimp list, queue it for
+  // removal so the deletion propagates to the audience (the sync deletes any
+  // mailchimpRemoveEmail address).
+  const _delContact = (allContacts||[]).find(c=>c.id===id);
+  const _delEmail = (_delContact?.email||'').toLowerCase().trim();
+  const _mcRemove = (_delEmail && APP_CONFIG.mailchimp?.listId)
+    ? { mailchimpRemoveEmail: _delEmail, mailchimpPendingSync: true }
+    : {};
   try {
     await updateDoc(doc(_fbDb,'contacts',id), {
       _deleted:    true,
       _deletedAt:  Date.now(),
       _deletedBy:  (currentUser?.email || currentUser?.displayName || currentUser?.uid || 'unknown'),
+      ..._mcRemove,
     });
     showToast('Moved to Recently Deleted — restorable for 30 days','info');
   } catch(e){ showToast('Delete failed — '+(e.message||e),'error'); }
