@@ -25726,6 +25726,38 @@ function viewOfficeOverview(){
         </div>`).join('')}
     </div>`;
 
+  // ── Advisor Rocks (EOS 90-day goals) for this office ──────────
+  const officeRocks = eosGet('myRocks',{});
+  const rocksHtml = `
+    <div class="bg-white rounded-2xl border overflow-hidden mb-6">
+      <div class="px-5 py-3.5 border-b bg-gray-50 flex items-center gap-3 flex-wrap">
+        <span class="font-bold text-gray-800 text-sm">🪨 Advisor Rocks — ${office} Office</span>
+        <span class="text-xs text-gray-400">Q${qNum} ${now.getFullYear()} 90-day goals · check off or edit</span>
+      </div>
+      <div class="p-5 grid gap-5" style="grid-template-columns:repeat(auto-fill,minmax(280px,1fr))">
+        ${allAdvs.length===0
+          ? '<p class="text-sm text-gray-400">No advisors found for this office.</p>'
+          : allAdvs.map(adv=>{
+              const rocks = officeRocks[adv.uid]||[];
+              return `<div class="border rounded-xl p-4">
+                <div class="text-xs font-bold text-gray-500 uppercase tracking-wide mb-2.5">${adv.name}</div>
+                ${rocks.length===0
+                  ? '<p class="text-xs text-gray-400 italic">No rocks set.</p>'
+                  : rocks.map((r,i)=>`
+                    <div class="flex items-start gap-2 p-2 rounded-lg ${r.status==='complete'?'bg-green-50':'bg-gray-50'} mb-1.5">
+                      <input type="checkbox" ${r.status==='complete'?'checked':''}
+                        onchange="mgrToggleRock('${adv.uid}',${i},this.checked)" class="mt-0.5 accent-green-600 rounded"/>
+                      <div class="flex-1 min-w-0">
+                        <div class="text-sm ${r.status==='complete'?'line-through text-gray-400':'text-gray-800'}">${r.text}</div>
+                        ${r.dueDate?`<div class="text-xs text-gray-400 mt-0.5">Due: ${fmtDate(r.dueDate)}</div>`:''}
+                      </div>
+                      <button onclick="mgrEditRock('${adv.uid}',${i})" class="text-gray-300 hover:text-blue-500 text-xs" title="Edit rock">✏️</button>
+                    </div>`).join('')}
+              </div>`;
+            }).join('')}
+      </div>
+    </div>`;
+
   setContent(`
     ${isPreview ? `
     <div class="flex items-center justify-between gap-3 mb-4 px-4 py-3 rounded-xl border" style="background:#fff7ed;border-color:#fed7aa">
@@ -25748,6 +25780,7 @@ function viewOfficeOverview(){
 
     ${lbHtml}
     ${scHtml}
+    ${rocksHtml}
     ${actHtml}
   `);
 }
@@ -25855,7 +25888,8 @@ function viewEOS(sub='rocks'){
                   <div class="text-sm ${r.status==='complete'?'line-through text-gray-400':'text-gray-800'}">${r.text}</div>
                   ${r.dueDate?`<div class="text-xs text-gray-400 mt-0.5">Due: ${fmtDate(r.dueDate)}</div>`:''}
                 </div>
-                ${effectiveAdminGlobal?`<button onclick="deleteCompRock(${i})" class="text-gray-300 hover:text-red-400 text-xs">✕</button>`:''}
+                ${effectiveAdminGlobal?`<button onclick="editCompRock(${i})" class="text-gray-300 hover:text-blue-500 text-xs" title="Edit rock">✏️</button>
+                <button onclick="deleteCompRock(${i})" class="text-gray-300 hover:text-red-400 text-xs" title="Delete rock">✕</button>`:''}
               </div>`).join('')}
           </div>
         </div>
@@ -25875,7 +25909,8 @@ function viewEOS(sub='rocks'){
                   <div class="text-sm ${r.status==='complete'?'line-through text-gray-400':'text-gray-800'}">${r.text}</div>
                   ${r.dueDate?`<div class="text-xs text-gray-400 mt-0.5">Due: ${fmtDate(r.dueDate)}</div>`:''}
                 </div>
-                <button onclick="deleteMyRock(${i})" class="text-gray-300 hover:text-red-400 text-xs">✕</button>
+                <button onclick="editMyRock(${i})" class="text-gray-300 hover:text-blue-500 text-xs" title="Edit rock">✏️</button>
+                <button onclick="deleteMyRock(${i})" class="text-gray-300 hover:text-red-400 text-xs" title="Delete rock">✕</button>
               </div>`).join('')}
           </div>
         </div>
@@ -27959,6 +27994,51 @@ window.deleteMyRock = i => {
   const uid=currentUser.uid;
   const all=eosGet('myRocks',{}); const list=all[uid]||[];
   list.splice(i,1); all[uid]=list; eosSave('myRocks',all); viewEOS('rocks');
+};
+// Edit a rock in place (text + due date) instead of delete-and-re-add
+window.editMyRock = i => {
+  const uid=currentUser.uid;
+  const all=eosGet('myRocks',{}); const list=all[uid]||[];
+  if(!list[i]) return;
+  const text=prompt('Edit your rock:', list[i].text||''); if(text===null) return;
+  if(!text.trim()){ showToast&&showToast('Rock text can\'t be empty','error'); return; }
+  const dueDate=prompt('Due date (YYYY-MM-DD) or leave blank:', list[i].dueDate||'');
+  list[i].text=text.trim();
+  if(dueDate!==null) list[i].dueDate=dueDate.trim();
+  all[uid]=list; eosSave('myRocks',all); viewEOS('rocks');
+};
+window.editCompRock = i => {
+  const list=eosGet('compRocks',[]);
+  if(!list[i]) return;
+  const text=prompt('Edit company rock:', list[i].text||''); if(text===null) return;
+  if(!text.trim()){ showToast&&showToast('Rock text can\'t be empty','error'); return; }
+  const dueDate=prompt('Due date (YYYY-MM-DD) or leave blank:', list[i].dueDate||'');
+  list[i].text=text.trim();
+  if(dueDate!==null) list[i].dueDate=dueDate.trim();
+  eosSave('compRocks',list); viewEOS('rocks');
+};
+// ── Office-manager rock controls (My Office view): check-off + edit, no delete ──
+function _mgrCanEditRock(uid){
+  if(currentUser.isAdmin) return true; // admins (incl. office preview) can always
+  if(currentUser.isOfficeManager) return (allProfiles[uid]?.office||'') === currentUser.officeManagerOffice;
+  return false;
+}
+window.mgrToggleRock = (uid,i,done) => {
+  if(!_mgrCanEditRock(uid)){ showToast&&showToast('Not allowed for this advisor','error'); return; }
+  const all=eosGet('myRocks',{}); const list=all[uid]||[];
+  if(list[i]) list[i].status=done?'complete':'inprocess';
+  all[uid]=list; eosSave('myRocks',all); viewOfficeOverview();
+};
+window.mgrEditRock = (uid,i) => {
+  if(!_mgrCanEditRock(uid)){ showToast&&showToast('Not allowed for this advisor','error'); return; }
+  const all=eosGet('myRocks',{}); const list=all[uid]||[];
+  if(!list[i]) return;
+  const text=prompt('Edit rock:', list[i].text||''); if(text===null) return;
+  if(!text.trim()){ showToast&&showToast('Rock text can\'t be empty','error'); return; }
+  const dueDate=prompt('Due date (YYYY-MM-DD) or leave blank:', list[i].dueDate||'');
+  list[i].text=text.trim();
+  if(dueDate!==null) list[i].dueDate=dueDate.trim();
+  all[uid]=list; eosSave('myRocks',all); viewOfficeOverview();
 };
 // ── Issue/headline attachment (opened during L-10) ─────────────────────────
 let _issueAttachFile = null; // {name,size,file} for pending upload
