@@ -8234,6 +8234,11 @@ function autoStageMatches(ruleStage, dealStage, dealLostType){
 
 function fireAutomations(deal, oldStage){
   const _lt = deal.lostType||'';
+  // Phase 2: unify drag/stage-change with the Task Automation config for the
+  // listing-lifecycle stages (Listing, LOI, Under Contract). The overlapping
+  // legacy rule types are skipped in the loop below (see _TA_REPLACED_TYPES).
+  try { const _taKey = _taStageToKey(deal); if(_taKey && window.applyTaskAutomation) window.applyTaskAutomation(deal.id, _taKey); }
+  catch(e){ console.warn('[taskAutomation hook]', e); }
   console.log('[fireAutomations] deal.stage='+deal.stage+' lostType='+_lt+' oldStage='+oldStage+' matching rules:', allAutomations.filter(r=>r.active&&autoStageMatches(r.stage,deal.stage,_lt)).map(r=>r.id+':'+r.type));
   const rules=allAutomations.filter(r=>r.active&&autoStageMatches(r.stage,deal.stage,_lt));
   const now=Date.now();
@@ -8241,6 +8246,7 @@ function fireAutomations(deal, oldStage){
     const _key=deal.id+':'+rule.id;
     if(now-(_firedAutoLog.get(_key)||0)<30000) continue;
     _firedAutoLog.set(_key,now);
+    if(_TA_REPLACED_TYPES[rule.type]) continue; // superseded by Task Automation config (Phase 2)
     const cfg=rule.config||{};
     switch(rule.type){
       case 'toast':
@@ -24349,6 +24355,29 @@ const TASK_AUTOMATIONS = {
 // Order shown in the dropdown (matches how Ryan listed them).
 const TASK_AUTOMATION_ORDER = ['price_change','fell_out','under_contract','listing_canceled','listing_renewed','begin_marketing','loi','new_listing','proposal_todo','sold','uc_buyer_rep','uc_seller_rep','expired_listing'];
 
+/* Phase 2 — drag/stage-change unification.
+   Dragging a card into (or saving it to) a listing-lifecycle column fires the
+   SAME config task set as the dropdown. Only these stages are unified; Sold,
+   Proposal, Lost/Terminated stay on their existing behavior (Sold keeps its
+   commission/payout flow). Under Contract picks the set by representation. */
+function _taStageToKey(deal){
+  const s = String(deal && deal.stage || '');
+  if(/^listing$/i.test(s)) return 'new_listing';
+  if(/^loi$/i.test(s))     return 'loi';
+  if(/due.?diligence|under.?contract/i.test(s)){
+    if(deal.representation === 'buyer') return 'uc_buyer_rep';
+    if(deal.representation)             return 'uc_seller_rep';
+    return 'under_contract';
+  }
+  return null;
+}
+// Legacy fireAutomations rule types now superseded by the config for the
+// unified stages — skipped so drag doesn't create duplicate/old task lists.
+const _TA_REPLACED_TYPES = { listing:1, loi_research:1, dd_research:1 };
+// Guards against the same automation being applied twice concurrently (the
+// Phase 2 hook can fire from multiple fireAutomations call sites per action).
+const _taInFlight = new Set();
+
 function _taResolveAssignee(token, deal){
   const advUid=deal.advisorUid||null, advName=deal.advisorName||deal.advisorEmail||'Advisor', advEmail=deal.advisorEmail||'';
   const findByEmail=(em)=>{
@@ -24375,6 +24404,9 @@ window.applyTaskAutomation = async function(dealId, key){
   const cfg=TASK_AUTOMATIONS[key];
   if(!cfg) return;
   if(!cfg.tasks || !cfg.tasks.length){ showToast(`"${cfg.label}" has no tasks configured yet.`,'warning'); return; }
+  const _lock = dealId+':'+key;
+  if(_taInFlight.has(_lock)) return;
+  _taInFlight.add(_lock);
   const addr=deal.propertyAddress||deal.projectName||'';
   const existing=(allTasks||[]).filter(t=>t.dealId===dealId);
   const _isDone=t=>t.status==='complete'||t.status==='completed';
@@ -24406,6 +24438,7 @@ window.applyTaskAutomation = async function(dealId, key){
   showToast(`${cfg.label}: ${created} task${created===1?'':'s'} added${skipped?`, ${skipped} already present`:''}${cfg.terminal?' · cleared open tasks':''}`,'success');
   window._taRefreshDealTasks && window._taRefreshDealTasks(dealId);
   try{ if(typeof viewTasks==='function' && document.getElementById('tasks-view')) viewTasks(); }catch(e){}
+  _taInFlight.delete(_lock);
 };
 
 // Called from the "Task Automation…" dropdown in the deal edit modal header.
