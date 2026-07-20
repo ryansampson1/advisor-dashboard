@@ -7135,6 +7135,12 @@ const FB = {
             allOfficeManagers = payload.data;
             localStorage.setItem(K('officeManagers'), JSON.stringify(payload.data));
           }
+        } else if(docId === 'taskAutomations'){
+          // Sync admin-edited task-automation activities across all users
+          if(payload.data && typeof payload.data === 'object'){
+            TASK_AUTOMATIONS = _mergeTaskAutomations(payload.data);
+            try{ localStorage.setItem(K('taskAutomations'), JSON.stringify(TASK_AUTOMATIONS)); }catch(e){}
+          }
         } else if(docId === 'pendingProfiles'){
           // Sync pending advisor profiles across machines
           if(payload.data && typeof payload.data === 'object'){
@@ -24255,7 +24261,9 @@ const _TA_NAME_HINTS = {
   'bill@thedirtdog.com':   'Bill',
 };
 // Each task row: [title, assigneeToken, dueDays]. dueDays defaults to 3.
-const TASK_AUTOMATIONS = {
+// This is the built-in DEFAULT — the live config (TASK_AUTOMATIONS) is loaded
+// below and may be edited by admins on the Automations page (synced via Firestore).
+const TASK_AUTOMATIONS_DEFAULT = {
   price_change: { label:'Price Change', terminal:false, tasks:[
     ['Reduce price on package & put new package on server', _TA.PAT, 2],
     ['Reduce Price on All Websites', _TA.KRISSY, 1],
@@ -24394,6 +24402,32 @@ const TASK_AUTOMATIONS = {
 };
 // Order shown in the dropdown (matches how Ryan listed them).
 const TASK_AUTOMATION_ORDER = ['price_change','fell_out','under_contract','listing_canceled','listing_renewed','begin_marketing','loi','new_listing','proposal_todo','sold','uc_buyer_rep','uc_seller_rep','expired_listing'];
+
+// ── Editable config: default merged with any admin-saved overrides ──────────
+function _mergeTaskAutomations(stored){
+  const base = JSON.parse(JSON.stringify(TASK_AUTOMATIONS_DEFAULT));
+  if(stored && typeof stored === 'object'){
+    for(const k of Object.keys(base)){
+      const s = stored[k];
+      if(s){
+        if(Array.isArray(s.tasks))        base[k].tasks    = s.tasks;
+        if(typeof s.terminal === 'boolean') base[k].terminal = s.terminal;
+        if(s.label)                        base[k].label    = s.label;
+      }
+    }
+    // Preserve any brand-new events an admin may have added (future-proofing).
+    for(const k of Object.keys(stored)){ if(!base[k] && stored[k] && Array.isArray(stored[k].tasks)) base[k] = stored[k]; }
+  }
+  return base;
+}
+// Live config used everywhere (dropdown, drag hook, Tasks tab, editor).
+let TASK_AUTOMATIONS = _mergeTaskAutomations((()=>{ try{ return JSON.parse(localStorage.getItem(K('taskAutomations'))||'null'); }catch(e){ return null; } })());
+async function saveTaskAutomations(){
+  try{ localStorage.setItem(K('taskAutomations'), JSON.stringify(TASK_AUTOMATIONS)); }catch(e){}
+  try{ if(_fbDb && _fbFns){ const {doc, setDoc} = _fbFns; await setDoc(doc(_fbDb,'eos','taskAutomations'), {data: TASK_AUTOMATIONS}, {merge:false}); } }
+  catch(e){ console.warn('[taskAutomations] Firestore save failed', e); }
+}
+window.saveTaskAutomations = saveTaskAutomations;
 
 /* Phase 2 — drag/stage-change unification.
    Dragging a card into (or saving it to) a listing-lifecycle column fires the
@@ -24554,6 +24588,93 @@ window._applyTaskAutomationFromModal = async function(){
   document.getElementById('task-auto-modal')?.remove();
   await window.applyTaskAutomation(dealId, key);
   try{ if(typeof viewTasks==='function') viewTasks(); }catch(e){}
+};
+
+/* ── Admin editor: edit each stage's activities, assignee, and due days ── */
+// Assignee dropdown options: Unassigned / Deal Advisor / Office Manager / people.
+window._taAssigneeOptions = function(sel){
+  sel = sel==null ? '' : sel;
+  const people = Object.entries(allProfiles||{})
+    .filter(([,p])=>p.email)
+    .map(([,p])=>({email:(p.email||'').toLowerCase(), name:p.name||p.email}))
+    .filter((v,i,a)=>a.findIndex(x=>x.email===v.email)===i)
+    .sort((a,b)=>a.name.localeCompare(b.name));
+  const selLow=(sel||'').toLowerCase();
+  if(sel && sel!=='[Deal Advisor]' && sel!=='[Manager]' && !people.some(p=>p.email===selLow)){
+    people.push({email:selLow, name:(_TA_NAME_HINTS[selLow]||sel)});
+  }
+  const esc=s=>String(s).replace(/"/g,'&quot;').replace(/</g,'&lt;');
+  const opt=(v,label)=>`<option value="${esc(v)}" ${sel===v?'selected':''}>${esc(label)}</option>`;
+  return [ opt('','Unassigned → Deal Advisor'), opt('[Deal Advisor]','Deal Advisor'), opt('[Manager]','Office Manager'),
+    ...people.map(p=>opt(p.email, p.name)) ].join('');
+};
+window._taAddActivityRow = function(container, base, token, days){
+  if(!container) return;
+  const row=document.createElement('div');
+  row.className='ta-row flex items-center gap-2 mb-2';
+  row.innerHTML=`
+    <input class="ta-title flex-1 border rounded-lg px-2 py-1.5 text-sm outline-none focus:ring-2 focus:ring-blue-500" placeholder="Activity…" value="${String(base||'').replace(/"/g,'&quot;')}"/>
+    <select class="ta-assignee border rounded-lg px-2 py-1.5 text-sm outline-none bg-white" style="width:150px;flex-shrink:0">${window._taAssigneeOptions(token||'')}</select>
+    <input class="ta-days border rounded-lg px-2 py-1.5 text-sm outline-none text-center" style="width:64px;flex-shrink:0" type="number" min="0" value="${days==null?3:days}" title="Days to complete"/>
+    <button type="button" onclick="this.closest('.ta-row').remove()" title="Remove activity" class="text-gray-300 hover:text-red-500 text-sm" style="width:16px;flex-shrink:0">✕</button>`;
+  container.appendChild(row);
+};
+window.openStageActivitiesEditor = function(key){
+  const cfg=TASK_AUTOMATIONS[key]; if(!cfg) return;
+  document.getElementById('stage-act-modal')?.remove();
+  const modal=document.createElement('div');
+  modal.id='stage-act-modal';
+  modal.className='fixed inset-0 z-50 flex items-center justify-center modal-bg bg-black/40 p-4';
+  modal.innerHTML=`
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-2xl flex flex-col" style="max-height:90vh">
+      <div class="p-5 border-b flex items-start justify-between">
+        <div>
+          <h2 class="text-lg font-bold">⚡ ${String(cfg.label).replace(/</g,'&lt;')} — Activities</h2>
+          <p class="text-xs text-gray-400 mt-0.5">Set each activity, who does it, and days to complete.${cfg.terminal?' <span class="text-red-500">Terminal event — clears other open tasks when applied.</span>':''}</p>
+        </div>
+        <button onclick="document.getElementById('stage-act-modal').remove()" class="text-gray-400 hover:text-gray-700 text-2xl leading-none">&times;</button>
+      </div>
+      <div class="p-5 overflow-y-auto" style="flex:1">
+        <div class="flex items-center gap-2 mb-2 text-xs font-semibold text-gray-400 uppercase tracking-wide">
+          <span class="flex-1">Activity</span><span style="width:150px">Who does it</span><span style="width:64px;text-align:center">Days</span><span style="width:16px"></span>
+        </div>
+        <div id="ta-rows"></div>
+        <button type="button" onclick="window._taAddActivityRow(document.getElementById('ta-rows'))" class="text-sm text-blue-600 hover:underline mt-1">+ Add activity</button>
+      </div>
+      <div class="p-5 border-t flex gap-2 items-center justify-between">
+        <button onclick="window._taResetStage('${key}')" class="text-sm text-gray-500 hover:text-red-500">↺ Reset to default</button>
+        <div class="flex gap-2">
+          <button onclick="document.getElementById('stage-act-modal').remove()" class="px-4 border rounded-lg py-2 text-sm text-gray-600">Cancel</button>
+          <button onclick="window._taSaveStage('${key}')" class="brand-btn px-5 rounded-lg py-2 text-sm font-semibold">Save</button>
+        </div>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  const rows=modal.querySelector('#ta-rows');
+  (cfg.tasks||[]).forEach(t=>window._taAddActivityRow(rows, t[0], t[1], t[2]==null?3:t[2]));
+  if(!(cfg.tasks||[]).length) window._taAddActivityRow(rows);
+};
+window._taSaveStage = async function(key){
+  if(!TASK_AUTOMATIONS[key]) return;
+  const tasks=[...document.querySelectorAll('#ta-rows .ta-row')].map(r=>{
+    const title=r.querySelector('.ta-title').value.trim();
+    const token=r.querySelector('.ta-assignee').value;
+    let days=parseInt(r.querySelector('.ta-days').value,10); if(isNaN(days)||days<0) days=3;
+    return title ? [title, token, days] : null;
+  }).filter(Boolean);
+  TASK_AUTOMATIONS[key].tasks=tasks;
+  await saveTaskAutomations();
+  document.getElementById('stage-act-modal')?.remove();
+  showToast(`Saved ${tasks.length} activit${tasks.length===1?'y':'ies'} for ${TASK_AUTOMATIONS[key].label}`,'success');
+  try{ if(typeof viewAutomations==='function' && document.getElementById('view-automations-marker')) viewAutomations(); }catch(e){}
+};
+window._taResetStage = async function(key){
+  if(!TASK_AUTOMATIONS_DEFAULT[key]) return;
+  if(!confirm(`Reset "${TASK_AUTOMATIONS[key].label}" activities to the built-in default?`)) return;
+  TASK_AUTOMATIONS[key].tasks=JSON.parse(JSON.stringify(TASK_AUTOMATIONS_DEFAULT[key].tasks));
+  await saveTaskAutomations();
+  showToast(`Reset ${TASK_AUTOMATIONS[key].label} to default`,'info');
+  window.openStageActivitiesEditor(key);
 };
 
 // Renders the per-deal task checklist in the left column of the detail view.
@@ -25238,6 +25359,25 @@ function viewAutomations(){
       </div>
       ${currentUser.isSuperAdmin?'<button onclick="openAutoModal(null)" class="brand-btn px-4 py-2 rounded-lg text-sm font-semibold">+ Add Rule</button>':''}
     </div>
+    <span id="view-automations-marker" style="display:none"></span>
+    <!-- Task Automations editor — activities by stage -->
+    <div class="bg-white rounded-2xl border p-5 mb-4">
+      <div class="flex items-center gap-2 mb-1">
+        <span class="text-base">⚡</span>
+        <h3 class="text-sm font-bold text-gray-700">Task Automations — Activities by Stage</h3>
+      </div>
+      <p class="text-xs text-gray-400 mb-3">Edit the tasks each stage/event creates — the activity, who does it, and how many days they have. Changes apply everywhere these fire (the deal-card dropdown, drag-to-column, and the Tasks tab) and sync to everyone.</p>
+      <div class="grid gap-2 md:grid-cols-2">
+        ${TASK_AUTOMATION_ORDER.map(k=>{ const c=TASK_AUTOMATIONS[k]; const n=(c.tasks||[]).length; return `
+          <div class="flex items-center justify-between border rounded-xl px-3 py-2.5">
+            <div class="min-w-0 pr-2">
+              <div class="text-sm font-semibold text-gray-800 truncate">${String(c.label).replace(/</g,'&lt;')}${c.terminal?' <span class="text-xs bg-red-50 text-red-500 px-1.5 py-0.5 rounded ml-1 align-middle">terminal</span>':''}</div>
+              <div class="text-xs text-gray-400">${n} activit${n===1?'y':'ies'}</div>
+            </div>
+            <button onclick="window.openStageActivitiesEditor('${k}')" class="text-sm text-blue-600 hover:underline shrink-0">Edit activities</button>
+          </div>`; }).join('')}
+      </div>
+    </div>
     <!-- AI Key Settings -->
     <div class="bg-white rounded-2xl border p-5 mb-4">
       <div class="flex items-center gap-2 mb-3">
@@ -25351,6 +25491,7 @@ function viewAutomations(){
                 <span class="text-xs bg-gray-100 text-gray-700 px-2 py-0.5 rounded-full">${rule.stage}</span>
                 <span class="text-xs ${rule.active?'bg-green-100 text-green-700':'bg-gray-100 text-gray-400'} px-2 py-0.5 rounded-full">${rule.active?'Active':'Inactive'}</span>
                 <span class="text-xs text-gray-400">${['toast','note'].includes(rule.type)?'instant':'queued'}</span>
+                ${_TA_REPLACED_TYPES[rule.type]?'<span class="text-xs bg-amber-50 text-amber-600 px-2 py-0.5 rounded-full" title="This stage\'s tasks are now managed in the Task Automations editor above.">↑ managed above</span>':''}
               </div>
               <div class="text-sm text-gray-700 truncate">${autoSummary(rule)}</div>
             </div>
