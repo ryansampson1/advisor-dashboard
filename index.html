@@ -1003,6 +1003,28 @@ body { background: var(--bg); }
               onchange="document.getElementById('f-stage').value=this.value; window._setStageBadge(this.value); window.onStageChange();">
             </select>
           </div>
+          <!-- Task Automations dropdown — applies a predefined task set to this deal -->
+          <div class="flex items-center gap-1 mt-1.5">
+            <span style="font-size:.72rem" title="Apply a task automation">⚡</span>
+            <select id="f-task-automation" title="Adds this event's task set to the deal (does not move the card)"
+              class="text-xs font-semibold bg-white border border-gray-200 rounded-md outline-none cursor-pointer text-gray-600 py-0.5 pl-1.5 pr-1"
+              onchange="window._onTaskAutomationPick(this.value); this.selectedIndex=0;">
+              <option value="">＋ Task Automation…</option>
+              <option value="price_change">Price Change</option>
+              <option value="fell_out">Fell out of Contract</option>
+              <option value="under_contract">Under Contract</option>
+              <option value="listing_canceled">Listing Canceled</option>
+              <option value="listing_renewed">Listing Renewed</option>
+              <option value="begin_marketing">Begin Marketing</option>
+              <option value="loi">LOI</option>
+              <option value="new_listing">New Listing</option>
+              <option value="proposal_todo">Proposal to Do</option>
+              <option value="sold">Sold Listing</option>
+              <option value="uc_buyer_rep">Under Contract — Buyer Rep</option>
+              <option value="uc_seller_rep">Under Contract — Seller Rep</option>
+              <option value="expired_listing">Expired Listing</option>
+            </select>
+          </div>
         </div>
         <button onclick="closeDealModal()" class="text-gray-400 hover:text-gray-700 text-2xl leading-none">&times;</button>
       </div>
@@ -14777,6 +14799,15 @@ window.openPropertyDetail = (dealId) => {
       <div style="display:flex;align-items:center;flex-wrap:wrap;gap:.5rem">${stageBadge}</div>
     </div>
 
+    <!-- Tasks -->
+    <div class="prop-section">
+      <div class="prop-section-title" style="display:flex;align-items:center;justify-content:space-between">
+        <span>Tasks</span>
+        <button class="prop-note-btn" style="padding:.2rem .55rem" onclick="window.openTaskModal(null,'${dealId}')" title="Add a task to this deal">+ Task</button>
+      </div>
+      <div id="pdw-tasks-list" style="margin-top:.35rem"><span style="font-size:.75rem;color:#9ca3af">Loading…</span></div>
+    </div>
+
     <!-- Key Details -->
     <div class="prop-section">
       <div class="prop-section-title">Details</div>
@@ -14856,6 +14887,7 @@ window.openPropertyDetail = (dealId) => {
   overlay.classList.add('open');
   // Load activity feed async (sub-collection + legacy notes)
   setTimeout(() => window._propLoadActivities(dealId, 'pdw-activity-feed'), 50);
+  setTimeout(() => window._taRenderDealTasks(dealId), 50);
 };
 
 window.closePropertyDetail = () => {
@@ -24147,11 +24179,287 @@ window.saveTask = async () => {
   }
 };
 
+/* =======================================================
+   TASK AUTOMATIONS — dropdown-driven task sets per deal
+   (added 2026-07-20) Phase 1: additive dropdown + config +
+   left-side checklist. Drag-path unification is Phase 2.
+   ======================================================= */
+// Assignee tokens. '[Deal Advisor]' → deal advisor; '[Manager]' → office
+// manager; ''/undefined → deal advisor; anything else = a dashboard email.
+const _TA = {
+  KRISSY:  'krissy@thedirtdog.com',
+  NICK:    'nick@thedirtdog.com',
+  PAT:     'pat@thedirtdog.com',
+  MICHAEL: 'michael@thedirtdog.com',
+  BILL:    'bill@thedirtdog.com',
+  MKTG:    'marketing@thedirtdog.com', // remapped to nick@ via EMAIL_REMAP
+  // Kellie Dove departed 2026-07; her tasks are reassigned to Nick.
+  // To reassign this staff role in future, change this one email.
+  KELLIE:  'nick@thedirtdog.com',
+  ADV:     '[Deal Advisor]',
+  MGR:     '[Manager]',
+};
+// Friendly names shown when no matching dashboard profile exists yet.
+const _TA_NAME_HINTS = {
+  'kellie@thedirtdog.com': 'Kellie Dove',
+  'krissy@thedirtdog.com': 'Krissy',
+  'nick@thedirtdog.com':   'Nick',
+  'pat@thedirtdog.com':    'Pat',
+  'michael@thedirtdog.com':'Michael',
+  'bill@thedirtdog.com':   'Bill',
+};
+// Each task row: [title, assigneeToken, dueDays]. dueDays defaults to 3.
+const TASK_AUTOMATIONS = {
+  price_change: { label:'Price Change', terminal:false, tasks:[
+    ['Reduce price on package & put new package on server', _TA.PAT, 2],
+    ['Reduce Price on All Websites', _TA.KRISSY, 1],
+    ['Reduce Price on MLS', '', 1],
+    ['Ask Brokers if updated Direct Mail is needed', _TA.NICK, 5],
+    ['Call top 10 prospects / adjoining owners re: price reduction', '', 3],
+    ['Give Broker neighbors contact info', _TA.PAT, 5],
+    ['Social Media Post: "Price Reduced"', _TA.NICK, 1],
+    ['Email Nick, Pat & KC with the new price', '', 1],
+    ['Reduce Price on Buildout / update OM / put on Box', _TA.PAT, 2],
+    ['Reduce Price in Eshenbaugh Report', _TA.KRISSY, 2],
+    ['Prepare listing extension & reduction paperwork', _TA.PAT, 1],
+    ['Send paperwork to client to sign', '', 1],
+    ['Email blast to groups on price adjustment', _TA.NICK, 3],
+  ]},
+  fell_out: { label:'Fell out of Contract', terminal:true, tasks:[
+    ['🔄 Re-listing decision (contract terminated)', _TA.ADV, 3],
+    ['📊 Update tracking & remove from websites', _TA.KRISSY, 3],
+    ['📣 Begin remarketing', _TA.MKTG, 3],
+    ['📋 Create protection list', _TA.ADV, 3],
+    ['🪧 Remove sign & Telzio', _TA.MKTG, 3],
+  ]},
+  under_contract: { label:'Under Contract', terminal:false, tasks:[
+    ['File PSA in Google Drive', _TA.KRISSY, 3],
+    ['Deliver all Due Diligence materials to buyer', _TA.ADV, 3],
+    ['Review & track Critical Dates', _TA.ADV, 3],
+    ['Confirm deposit received & title ordered', _TA.ADV, 3],
+    ['Add critical dates to Google Calendar', _TA.ADV, 3],
+    ['📊 Preliminary DD Report', _TA.ADV, 3],
+    ['Email client critical dates', _TA.ADV, 3],
+  ]},
+  listing_canceled: { label:'Listing Canceled', terminal:true, tasks:[
+    ['Remove Sign', _TA.NICK, 3],
+    ['Remove from all websites', _TA.KRISSY, 2],
+    ['Remove from MLS', '', 2],
+    ['Send protection list to advisor', _TA.KELLIE, 5],
+    ['Remove from active listing folder & move to lost listings', _TA.KELLIE, 1],
+    ['Confirm all tasks complete, then mark Cancelled on Daylite project', '', 20],
+    ['Mark as Off Market on Buildout', _TA.NICK, 1],
+    ['Remove from Esh Report', _TA.KRISSY, 2],
+    ['Remove from monthly report group', _TA.KRISSY, 2],
+    ['Put on Monday Metrics', _TA.KRISSY, 2],
+    ['Remove listing agreement reminder', _TA.KELLIE, 2],
+  ]},
+  listing_renewed: { label:'Listing Renewed', terminal:false, tasks:[
+    ['Scheduled email blast / create marketing plan', _TA.NICK, 2],
+    ['New drone photos', _TA.NICK, 1],
+    ['Read description & update if necessary', '', 1],
+    ['Social media marketing plan', _TA.NICK, 5],
+    ['Check signs', '', 4],
+    ['Extend on MLS', '', 1],
+    ['Do email blast on site', _TA.NICK, 10],
+    ['Edit listing extension reminder', _TA.KELLIE, 2],
+  ]},
+  begin_marketing: { label:'Begin Marketing', terminal:false, tasks:[
+    ['Add to all websites', _TA.KRISSY, 3],
+    ['Social media post on new listing', '', 3],
+    ['Schedule meeting with brokers to discuss marketing ideas', '', 2],
+    ['Advisor: send Nick list of groups for email blasts', _TA.ADV, 2],
+    ['Advisor: put on MLS if needed', _TA.ADV, 2],
+    ['Advisor: put on personal social media — new listing', _TA.ADV, 2],
+    ['Email to DL groups', '', 30],
+    ['Make active on Buildout', '', 3],
+  ]},
+  loi: { label:'LOI', terminal:false, tasks:[
+    ['File LOI in Google Drive', _TA.KRISSY, 3],
+    ['Follow up with seller on LOI', _TA.ADV, 3],
+    ['Buyer research', _TA.ADV, 3],
+    ['Draft owner response to LOI', _TA.ADV, 3],
+  ]},
+  new_listing: { label:'New Listing', terminal:false, tasks:[
+    ['📸 Schedule aerial photography', _TA.MKTG, 3],
+    ['📧 Send property details to proposal team', _TA.ADV, 3],
+    ['📝 Review & sign listing agreement', _TA.ADV, 3],
+    ['📁 File & track listing agreement', _TA.KRISSY, 3],
+    ['📄 Draft OM & call top 10 buyers', _TA.ADV, 3],
+    ['📣 Add to marketing groups', _TA.BILL, 3],
+    ['🪧 Order sign & request Telzio', _TA.MKTG, 3],
+    ['🌐 List on websites', _TA.KRISSY, 3],
+    ['✉️ Email client — marketing prep underway', _TA.ADV, 3],
+  ]},
+  proposal_todo: { label:'Proposal to Do', terminal:false, tasks:[
+    ['📞 Follow up on outstanding proposal', _TA.ADV, 3],
+    ['⏰ Check-in reminder — proposal still outstanding', _TA.ADV, 3],
+    ['✉️ Draft follow-up email to client', _TA.ADV, 3],
+  ]},
+  sold: { label:'Sold Listing', terminal:true, tasks:[
+    ['Send closing statement', _TA.KRISSY, 3],
+    ['Remove from websites + archive Google Drive', _TA.KRISSY, 7],
+    ['Send thank-you email to client', _TA.ADV, 3],
+    ['Order closing gift for client', _TA.KRISSY, 5],
+    ['Mark as Sold on Eshenbaugh Report + remove from Available Land', _TA.MKTG, 7],
+    ['Confirm wire received', _TA.MGR, 3],
+    ['Advisor payout breakdown', _TA.MGR, 3],
+    ['Approve commission payment', _TA.MGR, 3],
+    ['🪧 Pick up sign + take down Telzio', _TA.MKTG, 3],
+  ]},
+  uc_buyer_rep: { label:'Under Contract — Buyer Rep', terminal:false, tasks:[
+    ['Remind advisor to verify deposit', _TA.KELLIE, 2],
+    ['Create list of critical dates', _TA.KELLIE, 2],
+    ['Ask broker for a copy of the contract', _TA.KELLIE, 2],
+    ['Remind advisor to confirm title was ordered / delivered', _TA.KELLIE, 2],
+    ['Add to pipeline as under contract', _TA.KELLIE, 2],
+    ['Mark "In Progress" in Daylite', _TA.NICK, 2],
+    ['Add critical dates to calendar', _TA.KELLIE, 2],
+    ['Add to Excel projected revenue sheet', _TA.MICHAEL, 3],
+    ['Put contract & critical dates on Box.com', _TA.KELLIE, 2],
+    ['Create a project in Daylite for this property', '', 1],
+    ['Add folder for property in Box → Active Listings', '', 1],
+  ]},
+  uc_seller_rep: { label:'Under Contract — Seller Rep', terminal:false, tasks:[
+    ['Mark as Under Contract on websites', _TA.KRISSY, 2],
+    ['Mark as Under Contract on MLS', '', 2],
+    ['Remind advisor to verify deposit has been made', _TA.KELLIE, 5],
+    ['Create list of important dates & give to advisor', _TA.KELLIE, 1],
+    ['Ask broker for a copy of the contract', _TA.KRISSY, 1],
+    ['Remind advisor to confirm title was ordered / given to buyer', _TA.KELLIE, 3],
+    ['Mark as under contract in Buildout', _TA.NICK, 1],
+    ['Mark as "In Progress" in Daylite project', _TA.NICK, 1],
+    ['Add to Excel projected revenue', _TA.MICHAEL, 1],
+    ['Check LoopNet & confirm not a Premium; switch if needed', _TA.KRISSY, 1],
+    ['Add to pipeline as under contract', _TA.KELLIE, 1],
+    ['Put copy of contract & critical dates on Box.com', _TA.KELLIE, 2],
+    ['Mark as under contract on Eshenbaugh Report', _TA.KRISSY, 2],
+  ]},
+  expired_listing: { label:'Expired Listing', terminal:false, tasks:[
+    ['Send listing extension to advisor', _TA.KRISSY, 1],
+    ['Follow up on listing extension', '', 15],
+    ['Prepare & send a protection list to advisor', _TA.KELLIE, 3],
+    ['Do the Canceled or Renewed activity set', '', 25],
+    ['Review & send protection list to client', '', 10],
+    ['Send listing extension to advisor to send on', _TA.KRISSY, 3],
+    ['Let advisor know the listing is expiring on exact date', _TA.KELLIE, 2],
+    ['Listing will be removed from Buildout in one week', _TA.KELLIE, 23],
+  ]},
+};
+// Order shown in the dropdown (matches how Ryan listed them).
+const TASK_AUTOMATION_ORDER = ['price_change','fell_out','under_contract','listing_canceled','listing_renewed','begin_marketing','loi','new_listing','proposal_todo','sold','uc_buyer_rep','uc_seller_rep','expired_listing'];
+
+function _taResolveAssignee(token, deal){
+  const advUid=deal.advisorUid||null, advName=deal.advisorName||deal.advisorEmail||'Advisor', advEmail=deal.advisorEmail||'';
+  const findByEmail=(em)=>{
+    const t=(EMAIL_REMAP[(em||'').toLowerCase()]||em||'').toLowerCase();
+    const hit=Object.entries(allProfiles||{}).find(([,p])=>(p.email||'').toLowerCase()===t);
+    return { uid:hit?hit[0]:null, name:hit?(hit[1].name||hit[1].email):(_TA_NAME_HINTS[t]||null), email:t };
+  };
+  if(!token || token==='[Deal Advisor]') return {assignedTo:advUid, assignedToName:advName, assignedToEmail:advEmail};
+  if(token==='[Manager]'){
+    const mgr=(allOfficeManagers&&allOfficeManagers[0]); const mgrEmail=mgr&&(mgr.email||mgr);
+    if(mgrEmail){ const r=findByEmail(mgrEmail); return {assignedTo:r.uid, assignedToName:r.name||'Manager', assignedToEmail:r.email}; }
+    return {assignedTo:advUid, assignedToName:advName, assignedToEmail:advEmail};
+  }
+  const r=findByEmail(token);
+  // Unknown email (e.g. Kellie before her login exists): keep the friendly
+  // name, route the actionable assignment to the advisor so it isn't lost.
+  if(!r.uid) return {assignedTo:advUid, assignedToName:r.name||token, assignedToEmail:r.email};
+  return {assignedTo:r.uid, assignedToName:r.name||token, assignedToEmail:r.email};
+}
+
+window.applyTaskAutomation = async function(dealId, key){
+  const deal=(allDeals||[]).find(d=>d.id===dealId);
+  if(!deal){ showToast('Deal not found','error'); return; }
+  const cfg=TASK_AUTOMATIONS[key];
+  if(!cfg) return;
+  if(!cfg.tasks || !cfg.tasks.length){ showToast(`"${cfg.label}" has no tasks configured yet.`,'warning'); return; }
+  const addr=deal.propertyAddress||deal.projectName||'';
+  const existing=(allTasks||[]).filter(t=>t.dealId===dealId);
+  const _isDone=t=>t.status==='complete'||t.status==='completed';
+  // Terminal event → clear other automations' open tasks first.
+  if(cfg.terminal){
+    const open=existing.filter(t=>!_isDone(t) && t.status!=='cancelled' && t.autoKey!==key);
+    for(const t of open){
+      try{ await Store.updateTask(t.id,{status:'cancelled', cancelledAt:Date.now(), cancelledReason:cfg.label, updatedAt:Date.now()});
+        const l=allTasks.find(x=>x.id===t.id); if(l){ l.status='cancelled'; l.cancelledAt=Date.now(); } }catch(e){ console.warn('[taskAutomation] clear failed',e); }
+    }
+  }
+  let created=0, skipped=0;
+  for(const row of cfg.tasks){
+    const base=row[0], token=row[1], dueDays=row[2]||3;
+    if(existing.find(t=>t.autoKey===key && t.taskBase===base && t.status!=='cancelled')){ skipped++; continue; }
+    const a=_taResolveAssignee(token, deal);
+    const dd=(()=>{ const d=new Date(); d.setDate(d.getDate()+dueDays); return d.toISOString().slice(0,10); })();
+    const obj={
+      title: base + (addr?` — ${addr}`:''),
+      taskBase: base, autoKey: key, autoLabel: cfg.label, auto:true,
+      assignedTo:a.assignedTo, assignedToName:a.assignedToName, assignedToEmail:a.assignedToEmail,
+      dealId:deal.id, dealAddress:addr, dealName:deal.projectName||addr,
+      dueDate:dd, status:'pending',
+      createdBy: currentUser?.uid||'system', createdByName: currentUser?.name||'Task Automation', createdAt:Date.now(),
+    };
+    try{ const id=await Store.createTask(obj); if(id){ allTasks.push({...obj,id}); } created++; }
+    catch(e){ console.error('[taskAutomation] create failed',e); }
+  }
+  showToast(`${cfg.label}: ${created} task${created===1?'':'s'} added${skipped?`, ${skipped} already present`:''}${cfg.terminal?' · cleared open tasks':''}`,'success');
+  window._taRefreshDealTasks && window._taRefreshDealTasks(dealId);
+  try{ if(typeof viewTasks==='function' && document.getElementById('tasks-view')) viewTasks(); }catch(e){}
+};
+
+// Called from the "Task Automation…" dropdown in the deal edit modal header.
+window._onTaskAutomationPick = function(key){
+  if(!key) return;
+  const dealId=document.getElementById('f-id')?.value;
+  if(!dealId){ showToast('Save the deal first, then apply a task automation.','warning'); return; }
+  const cfg=TASK_AUTOMATIONS[key];
+  if(cfg && cfg.terminal && !confirm(`"${cfg.label}" is a terminal event — it will clear this deal's other open tasks and add its own set. Continue?`)) return;
+  window.applyTaskAutomation(dealId, key);
+};
+
+// Renders the per-deal task checklist in the left column of the detail view.
+window._taRenderDealTasks = function(dealId){
+  const el=document.getElementById('pdw-tasks-list'); if(!el) return;
+  const _isDone=t=>t.status==='complete'||t.status==='completed';
+  const today=new Date().toISOString().slice(0,10);
+  const list=(allTasks||[]).filter(t=>t.dealId===dealId && t.status!=='cancelled')
+    .sort((a,b)=>{ const ad=_isDone(a)?1:0, bd=_isDone(b)?1:0; if(ad!==bd) return ad-bd; return String(a.dueDate||'').localeCompare(String(b.dueDate||'')); });
+  if(!list.length){ el.innerHTML='<div style="font-size:.78rem;color:#9ca3af;font-style:italic">No tasks yet. Use the ⚡ Task Automation menu in Edit, or + Task above.</div>'; return; }
+  const esc=s=>String(s||'').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+  const fmt=d=>{ try{ return new Date(d+'T00:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'}); }catch(e){ return d; } };
+  el.innerHTML=list.map(t=>{
+    const done=_isDone(t);
+    const overdue=!done && t.dueDate && t.dueDate<today;
+    const stamp=done && t.completedAt ? `✓ ${esc(t.completedByName||'done')} · ${new Date(t.completedAt).toLocaleDateString('en-US',{month:'short',day:'numeric'})}` : '';
+    return `<div style="display:flex;align-items:flex-start;gap:.5rem;padding:.4rem 0;border-bottom:1px solid #f3f4f6">
+      <input type="checkbox" ${done?'checked':''} onchange="window.toggleTask('${t.id}', this.checked?'complete':'pending')" style="margin-top:.15rem;cursor:pointer;flex-shrink:0"/>
+      <div style="flex:1;min-width:0">
+        <div onclick="window.openTaskModal('${t.id}','${dealId}')" title="Edit task" style="font-size:.82rem;line-height:1.3;cursor:pointer;color:${done?'#9ca3af':'#111827'};${done?'text-decoration:line-through':''}">${esc(t.title)}</div>
+        <div style="font-size:.7rem;color:#6b7280;margin-top:.15rem;display:flex;gap:.6rem;flex-wrap:wrap">
+          ${t.assignedToName?`<span>👤 ${esc(t.assignedToName)}</span>`:''}
+          ${t.dueDate?`<span style="color:${overdue?'#dc2626':'#6b7280'}">📅 ${fmt(t.dueDate)}${overdue?' · overdue':''}</span>`:''}
+          ${stamp?`<span style="color:#059669">${stamp}</span>`:''}
+        </div>
+      </div>
+      <button onclick="window.deleteTask('${t.id}')" title="Delete task" style="background:none;border:none;color:#d1d5db;cursor:pointer;font-size:.85rem;line-height:1;flex-shrink:0">✕</button>
+    </div>`;
+  }).join('');
+};
+window._taRefreshDealTasks = window._taRenderDealTasks;
+
 window.toggleTask = async (id, newStatus) => {
   try {
-    await Store.updateTask(id, {status:newStatus, updatedAt:Date.now()});
+    // Completion stamp: record who completed it and when (cleared if reopened).
+    const _done = (newStatus==='complete'||newStatus==='completed');
+    const _stamp = _done
+      ? { completedAt: Date.now(), completedBy: currentUser?.uid||'', completedByName: currentUser?.name||currentUser?.email||'' }
+      : { completedAt: null, completedBy: '', completedByName: '' };
+    await Store.updateTask(id, {status:newStatus, updatedAt:Date.now(), ..._stamp});
     const t = allTasks.find(x=>x.id===id);
-    if(t){ t.status=newStatus; t.updatedAt=Date.now(); }
+    if(t){ t.status=newStatus; t.updatedAt=Date.now(); Object.assign(t, _stamp); }
+    // Refresh the per-deal checklist if the detail view is open.
+    if(t && t.dealId && window._taRefreshDealTasks) window._taRefreshDealTasks(t.dealId);
     // ── Rolling Buyer Opportunities follow-up chain ──────────────────
     if(newStatus === 'completed' && t?.taskType === 'buyer_opp_followup' && t.dealId){
       const deal = (Store.allDeals||allDeals||[]).find(d=>d.id===t.dealId);
@@ -24186,10 +24494,12 @@ window.deleteTask = async id => {
   document.getElementById('task-modal')?.remove();
   if(!confirm('Delete this task?')) return;
   try {
+    const _dt = allTasks.find(t=>t.id===id);
     await Store.deleteTask(id);
     allTasks = allTasks.filter(t=>t.id!==id);
     showToast('Task deleted','info');
     viewTasks();
+    if(_dt && _dt.dealId && window._taRefreshDealTasks) window._taRefreshDealTasks(_dt.dealId);
   } catch(err){ showToast('Delete failed','error'); }
 };
 
