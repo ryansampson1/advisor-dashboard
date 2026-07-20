@@ -16213,6 +16213,9 @@ window._pdwUploadAttachment = async (dealId, file, opts = {}) => {
       await Store.updateDeal(dealId, { dealAttachments: updated, updatedAt: Date.now() });
       if (deal) deal.dealAttachments = updated;
       showToast(`✅ ${file.name} attached`, 'success', 3000);
+      // Ask the advisor what kind of document this is so it scores correctly
+      // (LOI → scored offer, Contract → contract credit, Other → just filed).
+      setTimeout(() => window._classifyAttachment(dealId, file.name, url), 250);
       // Log attachment to activity feed with AI summary (fire-and-forget)
       const _fn = file.name.toLowerCase();
       const _docType = /\bloi\b|letter.of.intent/i.test(_fn) ? 'loi'
@@ -16229,6 +16232,77 @@ window._pdwUploadAttachment = async (dealId, file, opts = {}) => {
   } catch (e) {
     console.warn('[pdwUpload]', e);
     showToast(`Upload failed: ${e.message}`, 'error');
+  }
+};
+
+// ── Attachment classifier ────────────────────────────────────────────────
+// After a file is attached, ask the advisor whether it's an LOI, a Contract,
+// or Other. LOI → adds a scored offer (10 pts). Contract → contract credit
+// (30 pts). Other → just filed. Points are dated to the attach time.
+window._classifyAttachment = (dealId, name, url) => {
+  const esc = s => (s==null?'':String(s)).replace(/</g,'&lt;').replace(/"/g,'&quot;');
+  const fn = (name||'').toLowerCase();
+  const guess = /\bloi\b|letter.of.intent|offer/i.test(fn) ? 'loi'
+              : /\bpsa\b|contract|purchase.*sale|purchase.and.sale/i.test(fn) ? 'contract' : '';
+  document.getElementById('attach-classify-overlay')?.remove();
+  const ov = document.createElement('div');
+  ov.id = 'attach-classify-overlay';
+  ov.style.cssText = 'position:fixed;inset:0;z-index:9200;background:rgba(15,23,42,.55);display:flex;align-items:center;justify-content:center;padding:16px';
+  const btn = (kind,emoji,title,sub,color) => `
+    <button type="button" onclick="window._classifyPick('${dealId}','${encodeURIComponent(name)}','${encodeURIComponent(url)}','${kind}')"
+      style="display:flex;align-items:center;gap:12px;width:100%;text-align:left;padding:13px 15px;border:2px solid ${guess===kind?color:'#e5e7eb'};background:${guess===kind?color+'11':'#fff'};border-radius:12px;cursor:pointer;transition:all .12s"
+      onmouseover="this.style.borderColor='${color}'" onmouseout="this.style.borderColor='${guess===kind?color:'#e5e7eb'}'">
+      <span style="font-size:22px">${emoji}</span>
+      <span><span style="display:block;font-size:14px;font-weight:700;color:#0f172a">${title}</span>
+      <span style="display:block;font-size:12px;color:#64748b">${sub}</span></span>
+    </button>`;
+  ov.innerHTML = `
+    <div style="background:#fff;border-radius:16px;max-width:460px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,.3);overflow:hidden">
+      <div style="padding:18px 20px 8px">
+        <div style="font-size:15px;font-weight:700;color:#0f172a">What kind of document is this?</div>
+        <div style="font-size:12px;color:#64748b;margin-top:3px;word-break:break-word">📎 ${esc(name)}</div>
+      </div>
+      <div style="padding:8px 16px 4px;display:flex;flex-direction:column;gap:8px">
+        ${btn('loi','📄','LOI / Offer','Adds a scored offer (+10 pts). Add buyer &amp; price to rank it.','#f59e0b')}
+        ${btn('contract','📝','Contract','Logs the signed contract (+30 pts).','#2563eb')}
+        ${btn('other','🗂️','Other','Just file it — no scoring.','#64748b')}
+      </div>
+      <div style="display:flex;justify-content:flex-end;padding:10px 18px 16px">
+        <button type="button" onclick="document.getElementById('attach-classify-overlay').remove()"
+          style="padding:7px 13px;border-radius:9px;border:1px solid #e5e7eb;background:#fff;font-size:12px;font-weight:600;color:#64748b;cursor:pointer">Skip</button>
+      </div>
+    </div>`;
+  document.body.appendChild(ov);
+  ov.addEventListener('click', e => { if(e.target===ov) ov.remove(); });
+};
+window._classifyPick = async (dealId, encName, encUrl, kind) => {
+  document.getElementById('attach-classify-overlay')?.remove();
+  const name = decodeURIComponent(encName), url = decodeURIComponent(encUrl);
+  const deal = allDeals.find(d => d.id === dealId);
+  if (!deal) return;
+  try {
+    if (kind === 'loi') {
+      const lois = Array.isArray(deal.lois) ? deal.lois.slice() : [];
+      if (lois.some(l => l.fileUrl && l.fileUrl === url)) { showToast('Already added as an offer', 'info', 2500); return; }
+      const nextRank = lois.length ? Math.max(...lois.map(l => +l.rank || 0)) + 1 : 1;
+      const id = 'loi_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+      lois.push({ id, buyer: '', price: '', rank: nextRank, fileName: name, fileUrl: url, addedAt: Date.now() });
+      const patch = { lois, updatedAt: Date.now() };
+      if (!deal.selectedLoiId && lois.length === 1) patch.selectedLoiId = id;
+      await Store.updateDeal(dealId, patch);
+      Object.assign(deal, patch);
+      showToast('📄 Added as a scored offer (+10 pts). Open the card to add buyer & price.', 'success', 4500);
+    } else if (kind === 'contract') {
+      const patch = { updatedAt: Date.now() };
+      if (!deal.contractAttachedAt) patch.contractAttachedAt = Date.now();
+      await Store.updateDeal(dealId, patch);
+      Object.assign(deal, patch);
+      showToast('📝 Logged as the contract (+30 pts this week).', 'success', 4500);
+    }
+    if (typeof openPropertyDetail === 'function') openPropertyDetail(dealId);
+  } catch (e) {
+    console.warn('[classifyAttachment]', e);
+    showToast('Could not classify: ' + e.message, 'error');
   }
 };
 
@@ -25993,6 +26067,21 @@ function viewOfficeOverview(){
     }
     return n;
   };
+  // Contract credit (once per deal): counts if a contract doc was attached in the
+  // window OR the card entered an under-contract stage in the window. Attaching a
+  // signed contract now scores without needing to drag the card.
+  const _ctStageTs = (d) => {
+    const h = d.stageHistory||[];
+    const e = h.find(x=>/under.?contract/i.test(x.stage||''));
+    if(e && e.enteredAt) return e.enteredAt;
+    if(/under.?contract/i.test(d.stage||'')) return d.stageEnteredAt||d.createdAt||0;
+    return 0;
+  };
+  const _ctInWindow = (d, start, end) => {
+    const c = +d.contractAttachedAt||0;
+    const st = _ctStageTs(d);
+    return ((c>=start && c<=end) || (st>=start && st<=end)) ? 1 : 0;
+  };
 
   const lbRows = allAdvs.map(adv => {
     const ad = allDeals.filter(d=>isDealAdvisor(d,adv.uid));
@@ -26079,7 +26168,7 @@ function viewOfficeOverview(){
     const loiPts   = aDeals.reduce((s,d)=>s+splitPts(d,adv.uid,10*_loiCountInWindow(d,pwS,pwE)),0);
     const propPts  = aDeals.filter(d=>d.stage==='Proposal To Do'&&inPW(d)).reduce((s,d)=>s+splitPts(d,adv.uid,5),0);
     const listPts  = aDeals.filter(d=>d.stage==='Listing'&&inPW(d)).reduce((s,d)=>s+splitPts(d,adv.uid,10),0);
-    const ctPts    = aDeals.filter(d=>/under.?contract/i.test(d.stage||'')&&inPW(d)).reduce((s,d)=>s+splitPts(d,adv.uid,30),0);
+    const ctPts    = aDeals.reduce((s,d)=>s+splitPts(d,adv.uid,30*_ctInWindow(d,pwS,pwE)),0);
     const score    = (qPct>=10?10:0)+Math.max(0,20-overdue*2)+prospPts+loiPts+propPts+listPts+ctPts+(wi.networkEvent==='yes'?10:0)+(wi.driveProperties==='yes'?10:0);
     return {adv, score, qPct, qVolA, qGoal, overdue, wi, prospPts, loiPts, propPts, listPts, ctPts};
   }).sort((a,b)=>b.score-a.score);
@@ -26803,21 +26892,40 @@ function viewEOS(sub='rocks'){
         return ca ? base * (ca.splitPct||0) / 100 : 0;
       };
       const prospectDeals  = advDeals.filter(d=>d.stage==='Prospect'          && (d.createdAt||0)>=pwS && (d.createdAt||0)<=pwE);
-      const loiDeals       = advDeals.filter(d=>d.stage==='LOI'               && inPW(d));
       const propDeals      = advDeals.filter(d=>(d.stage==='Proposal To Do'||d.stage==='Proposal Outstanding') && inPW(d));
       const listingDeals   = advDeals.filter(d=>d.stage==='Listing'           && inPW(d));
-      const contractDeals  = advDeals.filter(d=>/under.?contract/i.test(d.stage||'') && inPW(d));
+      // Per-offer LOI credit (matches main scorecard + agenda): each offer on
+      // deal.lois[] earns 10 pts, counted by offer upload date OR LOI-stage entry.
+      const _loiCntPW = d=>{
+        let list = Array.isArray(d.lois)&&d.lois.length ? d.lois
+          : ((d.loiBuyer||d.loiPrice||d.loiUrl||d.loiFileName)?[{addedAt:+d.loiAddedAt||0}]:[]);
+        if(!list.length) return 0;
+        const hist=d.stageHistory||[];
+        const e=hist.find(h=>/^loi$/i.test((h.stage||'').trim()));
+        let sTs = e&&e.enteredAt ? e.enteredAt : (/^loi$/i.test((d.stage||'').trim())?(d.stageEnteredAt||d.createdAt||0):0);
+        const stageIn = sTs>=pwS && sTs<=pwE;
+        let n=0; for(const l of list){ const a=+l.addedAt||0; if((a>=pwS&&a<=pwE)||stageIn) n++; }
+        return n;
+      };
+      // Contract credit (once per deal): contract doc attached OR under-contract stage entry this week.
+      const _ctCntPW = d=>{
+        const c=+d.contractAttachedAt||0;
+        const hist=d.stageHistory||[];
+        const e=hist.find(h=>/under.?contract/i.test(h.stage||''));
+        let st = e&&e.enteredAt ? e.enteredAt : (/under.?contract/i.test(d.stage||'')?(d.stageEnteredAt||d.createdAt||0):0);
+        return ((c>=pwS&&c<=pwE)||(st>=pwS&&st<=pwE))?1:0;
+      };
       const prospectPts    = prospectDeals.reduce((s,d)=>s+splitPts(d,5),0);
-      const loiPts         = loiDeals.reduce((s,d)=>s+splitPts(d,10),0);
+      const loiPts         = advDeals.reduce((s,d)=>s+splitPts(d,10*_loiCntPW(d)),0);
       const propPts        = propDeals.reduce((s,d)=>s+splitPts(d,10),0);
       const listingPts     = listingDeals.reduce((s,d)=>s+splitPts(d,20),0);
-      const contractPts    = contractDeals.reduce((s,d)=>s+splitPts(d,30),0);
+      const contractPts    = advDeals.reduce((s,d)=>s+splitPts(d,30*_ctCntPW(d)),0);
       // Counts still used for display
       const prospects   = prospectDeals.length;
-      const newLOIs     = loiDeals.length;
+      const newLOIs     = advDeals.reduce((s,d)=>s+_loiCntPW(d),0);
       const newProps    = propDeals.length;
       const newListings = listingDeals.length;
-      const newContracts= contractDeals.length;
+      const newContracts= advDeals.reduce((s,d)=>s+_ctCntPW(d),0);
 
       // Self-reported inputs (saved to advisorProfiles)
       const weekInputs     = allProfiles[advUid]?.weeklyInputs?.[weekKey] || {};
@@ -27806,10 +27914,18 @@ function viewEOS(sub='rocks'){
                 let n=0; for(const l of list){ const a=+l.addedAt||0; if((a>=pwSts&&a<=pwEts)||stageIn) n++; }
                 return n;
               };
+              // Contract credit (once per deal): contract doc attached OR under-contract stage entry this week.
+              const _ctCntPW = d=>{
+                const c=+d.contractAttachedAt||0;
+                const hist=d.stageHistory||[];
+                const e=hist.find(h=>/under.?contract/i.test(h.stage||''));
+                let st = e&&e.enteredAt ? e.enteredAt : (/under.?contract/i.test(d.stage||'')?(d.stageEnteredAt||d.createdAt||0):0);
+                return ((c>=pwSts&&c<=pwEts)||(st>=pwSts&&st<=pwEts))?1:0;
+              };
               const loiPts  = advDeals.reduce((s,d)=>s+spl(d,10*_loiCntPW(d)),0);
               const propPts = advDeals.filter(d=>(d.stage==='Proposal To Do'||d.stage==='Proposal Outstanding')&&inPW(d)).reduce((s,d)=>s+spl(d,10),0);
               const listPts = advDeals.filter(d=>d.stage==='Listing'&&inPW(d)).reduce((s,d)=>s+spl(d,20),0);
-              const conPts  = advDeals.filter(d=>/under.?contract/i.test(d.stage||'')&&inPW(d)).reduce((s,d)=>s+spl(d,30),0);
+              const conPts  = advDeals.reduce((s,d)=>s+spl(d,30*_ctCntPW(d)),0);
               const wi = allProfiles[a.uid]?.weeklyInputs?.[wk]||{};
               const netPts = wi.networkEvent==='yes'?10:0;
               const drvPts = wi.driveProperties==='yes'?10:0;
