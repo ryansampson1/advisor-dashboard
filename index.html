@@ -14869,6 +14869,22 @@ window.openPropertyDetail = (dealId) => {
       </div>
       <input id="pdw-autofill-input" type="file" accept=".pdf,.doc,.docx" style="display:none"
         onchange="_pdwHandleAutoFill('${dealId}',this.files);this.value=''"/>
+      <!-- LOI upload → Google Drive Offers folder -->
+      <div id="pdw-loi-zone"
+        style="position:relative;border:2px dashed #fcd34d;border-radius:.75rem;padding:.75rem 1rem;text-align:center;cursor:pointer;background:#fffbeb;transition:border-color .15s,background .15s;margin-bottom:.65rem"
+        onclick="document.getElementById('pdw-loi-input').click()"
+        ondragover="event.preventDefault();this.style.borderColor='#f59e0b';this.style.background='#fef3c7'"
+        ondragleave="this.style.borderColor='#fcd34d';this.style.background='#fffbeb'"
+        ondrop="event.preventDefault();this.style.borderColor='#fcd34d';this.style.background='#fffbeb';window._pdwUploadLOI('${dealId}',event.dataTransfer.files)"
+        onmouseover="this.style.borderColor='#f59e0b'" onmouseout="this.style.borderColor='#fcd34d'">
+        <div style="font-size:.8rem;color:#b45309;pointer-events:none">
+          <span style="font-size:1.1rem;display:block;margin-bottom:.15rem">📄</span>
+          Upload LOI / Offer
+          <span style="display:block;font-size:.72rem;color:#a16207;margin-top:.15rem">Files to the Google Drive Offers folder &amp; scores as an offer</span>
+        </div>
+      </div>
+      <input id="pdw-loi-input" type="file" accept=".pdf,.doc,.docx" multiple style="display:none"
+        onchange="window._pdwUploadLOI('${dealId}',this.files);this.value=''"/>
       <!-- Drop zone -->
       <div id="pdw-drop-zone"
         style="border:2px dashed #e5e7eb;border-radius:.75rem;padding:.85rem 1rem;text-align:center;cursor:pointer;transition:border-color .15s,background .15s"
@@ -16251,12 +16267,18 @@ window._pdwUploadAttachment = async (dealId, file, opts = {}) => {
       await Store.updateDeal(dealId, { dealAttachments: updated, updatedAt: Date.now() });
       if (deal) deal.dealAttachments = updated;
       showToast(`✅ ${file.name} attached`, 'success', 3000);
-      // Ask the advisor what kind of document this is so it scores correctly
-      // (LOI → scored offer, Contract → contract credit, Other → just filed).
-      setTimeout(() => window._classifyAttachment(dealId, file.name, url), 250);
+      if (opts.forceDocType === 'loi') {
+        // Dedicated LOI box: score it as an offer directly — no classify prompt.
+        await window._classifyPick(dealId, encodeURIComponent(file.name), encodeURIComponent(url), 'loi');
+      } else {
+        // Ask the advisor what kind of document this is so it scores correctly
+        // (LOI → scored offer, Contract → contract credit, Other → just filed).
+        setTimeout(() => window._classifyAttachment(dealId, file.name, url), 250);
+      }
       // Log attachment to activity feed with AI summary (fire-and-forget)
       const _fn = file.name.toLowerCase();
-      const _docType = /\bloi\b|letter.of.intent/i.test(_fn) ? 'loi'
+      const _docType = opts.forceDocType === 'loi' ? 'loi'
+                     : /\bloi\b|letter.of.intent/i.test(_fn) ? 'loi'
                      : /\bpsa\b|purchase.sale|purchase.and.sale/i.test(_fn) ? 'psa'
                      : /closing.statement|settlement.statement|hud/i.test(_fn) ? 'closing'
                      : /listing.agr|listing.agreement/i.test(_fn) ? 'listing'
@@ -16264,12 +16286,27 @@ window._pdwUploadAttachment = async (dealId, file, opts = {}) => {
       const _reader = new FileReader();
       _reader.onload = e => window._logAttachmentActivity(dealId, {name: file.name, dataUrl: e.target.result}, _docType, url, opts.extractPromise);
       _reader.readAsDataURL(file);
-      // Auto-file to Drive (non-blocking)
-      if (deal?.driveUrl || deal?.driveFolderId) window._autoFileToDrive(deal, file, file.name).catch(()=>{});
+      // Auto-file to Drive (non-blocking) — the LOI box forces the Offers subfolder
+      if (deal?.driveUrl || deal?.driveFolderId) window._autoFileToDrive(deal, file, file.name, opts.forceDocType==='loi'?{forceSubfolder:'offers'}:{}).catch(()=>{});
     }
   } catch (e) {
     console.warn('[pdwUpload]', e);
     showToast(`Upload failed: ${e.message}`, 'error');
+  }
+};
+
+// Dedicated LOI upload (the 📄 box in the deal detail). Files each document
+// to the Google Drive Offers subfolder and scores it as an offer — no classify
+// prompt, since the advisor already declared it's an LOI by using this box.
+window._pdwUploadLOI = async (dealId, files) => {
+  if (!files || !files.length) return;
+  const deal = allDeals.find(d => d.id === dealId);
+  if (deal && !deal.driveUrl && !deal.driveFolderId) {
+    showToast('No Google Drive folder on this deal yet — the LOI will still be attached & scored.', 'info', 5000);
+  }
+  for (const file of Array.from(files)) {
+    if (file.type.startsWith('image/')) { showToast(`Skipped ${file.name} — LOIs should be a PDF or Word doc.`, 'warning'); continue; }
+    await window._pdwUploadAttachment(dealId, file, { forceDocType: 'loi' });
   }
 };
 
@@ -34706,14 +34743,17 @@ window._driveStageWorkflow = async (deal, newStage, opts = {}) => {
 };
 
 // Generic attachment file entry point — routes files to the correct Drive subfolder.
-window._autoFileToDrive = async (deal, file, fileName) => {
+window._autoFileToDrive = async (deal, file, fileName, opts = {}) => {
   if (!deal?.driveUrl && !deal?.driveFolderId) return;
   try {
     const token = await _getDriveWriteToken();
     let targetId = deal.driveFolderId || _getDriveFolderIdFromUrl(deal.driveUrl);
     const stage = deal.stage || '';
+    // Explicit subfolder override (e.g. the dedicated LOI box → Offers folder)
+    if (opts.forceSubfolder && deal.driveSubfolderIds?.[opts.forceSubfolder]) {
+      targetId = deal.driveSubfolderIds[opts.forceSubfolder];
     // Route listing agreement files to Listing Agreement subfolder
-    if (deal.driveSubfolderIds?.listingAgreement &&
+    } else if (deal.driveSubfolderIds?.listingAgreement &&
         /listing.?agree|signed.?listing|\bla[\s_\-\.]/i.test(fileName)) {
       targetId = deal.driveSubfolderIds.listingAgreement;
     // Route LOI/PSA/offer files to Offers subfolder
