@@ -1908,8 +1908,14 @@ function buildPayoutBreakdown(deal){
   const primaryName = deal.advisorName || deal.advisorEmail || 'Primary Advisor';
   const lines = [];
 
-  // Primary advisor payout (using their tier schedule with correct YTD)
-  const primaryWonDeals = allDeals.filter(d => d.advisorUid===primaryUid && isWonStage(d.stage));
+  // Primary advisor payout (using their tier schedule with correct YTD).
+  // Use the SAME close-date book the My Pay / Splits view uses — won AND
+  // contract-active deals — and always include THIS deal. Otherwise the tier
+  // is wrong: this task is built before the deal flips to a won stage, so a
+  // won-only filter drops it, resets YTD to 0, and pays the entry tier (e.g.
+  // 60%) instead of the advisor's true cumulative tier (e.g. 70%).
+  const primaryWonDeals = allDeals.filter(d => d.advisorUid===primaryUid && (isWonStage(d.stage) || isContractActiveStage(d.stage)));
+  if(!primaryWonDeals.some(d => d.id===deal.id)) primaryWonDeals.push(deal);
   const primaryPayouts  = projectAdvisorPayouts(primaryWonDeals, primaryUid);
   const thisPayoutEntry = primaryPayouts.find(p => p.dealId===deal.id);
   const primaryPayout   = thisPayoutEntry?.payout || payoutForGross(gross, 0, getProfile(primaryUid));
@@ -1920,7 +1926,8 @@ function buildPayoutBreakdown(deal){
   const coAdvisors = deal.coAdvisors || [];
   coAdvisors.forEach(ca => {
     const caGross    = ca.split>0 ? gross*(ca.split/100) : gross*0.5;
-    const caWon      = allDeals.filter(d => d.advisorUid===ca.uid && isWonStage(d.stage));
+    const caWon      = allDeals.filter(d => d.advisorUid===ca.uid && (isWonStage(d.stage) || isContractActiveStage(d.stage)));
+    if(!caWon.some(d => d.id===deal.id)) caWon.push(deal);
     const caPayouts  = projectAdvisorPayouts(caWon, ca.uid);
     const caEntry    = caPayouts.find(p => p.dealId===deal.id);
     const caPayout   = caEntry?.payout || payoutForGross(caGross, 0, getProfile(ca.uid));
