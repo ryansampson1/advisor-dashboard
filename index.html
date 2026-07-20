@@ -19332,7 +19332,10 @@ function viewTasks(){
         <h2 class="text-xl font-bold text-gray-800">Tasks</h2>
         <p class="text-sm text-gray-500 mt-0.5">${pending.length} pending${isAdmin?` across ${advisors.length} advisors`:''}${delegated.length?` · ${delegated.length} assigned to others`:''}</p>
       </div>
-      <button onclick="openTaskModal(null)" class="brand-btn px-4 py-2 rounded-lg text-sm font-semibold">+ New Task</button>
+      <div class="flex gap-2">
+        <button onclick="window.openTaskAutomationModal()" class="px-4 py-2 rounded-lg text-sm font-semibold border border-gray-200 text-gray-700 hover:bg-gray-50">⚡ Apply Automation</button>
+        <button onclick="openTaskModal(null)" class="brand-btn px-4 py-2 rounded-lg text-sm font-semibold">+ New Task</button>
+      </div>
     </div>
 
     ${taskAnalyticsHtml}
@@ -24449,6 +24452,71 @@ window._onTaskAutomationPick = function(key){
   const cfg=TASK_AUTOMATIONS[key];
   if(cfg && cfg.terminal && !confirm(`"${cfg.label}" is a terminal event — it will clear this deal's other open tasks and add its own set. Continue?`)) return;
   window.applyTaskAutomation(dealId, key);
+};
+
+// Tasks-tab entry point: pick a property + an automation, then apply it.
+window.openTaskAutomationModal = function(presetDealId){
+  const esc=s=>String(s||'').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+  const deals=(allDeals||[]).slice()
+    .filter(d=>currentUser?.isAdmin || isStaffView?.() || isDealAdvisor?.(d,currentUser?.uid) || d.advisorUid===currentUser?.uid)
+    .sort((a,b)=>String(a.projectName||a.propertyAddress||'').localeCompare(String(b.projectName||b.propertyAddress||'')));
+  const dealOpts=deals.map(d=>`<option value="${d.id}" ${d.id===presetDealId?'selected':''}>${esc(d.projectName||d.propertyAddress||'Untitled')}</option>`).join('');
+  const autoOpts=TASK_AUTOMATION_ORDER.map(k=>`<option value="${k}">${esc(TASK_AUTOMATIONS[k].label)}${TASK_AUTOMATIONS[k].terminal?' — terminal':''}</option>`).join('');
+  const modal=document.createElement('div');
+  modal.id='task-auto-modal';
+  modal.className='fixed inset-0 z-40 flex items-center justify-center modal-bg bg-black/40 p-4';
+  modal.innerHTML=`
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md">
+      <div class="p-6">
+        <div class="flex items-center justify-between mb-1">
+          <h2 class="text-lg font-bold">⚡ Apply Task Automation</h2>
+          <button onclick="document.getElementById('task-auto-modal').remove()" class="text-gray-400 hover:text-gray-700 text-2xl leading-none">&times;</button>
+        </div>
+        <p class="text-xs text-gray-500 mb-4">Adds a predefined task set to the selected property. This does not move the card's stage.</p>
+        <div class="space-y-3">
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Property *</label>
+            <select id="tam-deal" class="w-full border rounded-lg px-2 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500">
+              <option value="">— Select a property —</option>
+              ${dealOpts}
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Task Automation *</label>
+            <select id="tam-auto" onchange="window._taModalNote()" class="w-full border rounded-lg px-2 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500">
+              <option value="">— Select an automation —</option>
+              ${autoOpts}
+            </select>
+            <p id="tam-note" class="text-xs text-gray-400 mt-1"></p>
+          </div>
+        </div>
+        <div class="flex gap-2 mt-5">
+          <button onclick="window._applyTaskAutomationFromModal()" class="flex-1 brand-btn rounded-lg py-2.5 text-sm font-semibold">Apply</button>
+          <button onclick="document.getElementById('task-auto-modal').remove()" class="px-4 border rounded-lg py-2.5 text-sm text-gray-600">Cancel</button>
+        </div>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+};
+// Live hint under the automation picker (task count / terminal warning).
+window._taModalNote = function(){
+  const sel=document.getElementById('tam-auto'), note=document.getElementById('tam-note');
+  if(!sel||!note) return;
+  const c=TASK_AUTOMATIONS[sel.value];
+  if(!c){ note.textContent=''; return; }
+  if(c.terminal){ note.textContent='⚠ Terminal event — clears the property’s other open tasks before adding this set.'; note.style.color='#DA291C'; }
+  else { const n=c.tasks.length; note.textContent=`${n} task${n===1?'':'s'} will be added.`; note.style.color='#9ca3af'; }
+};
+window._applyTaskAutomationFromModal = async function(){
+  const dealId=document.getElementById('tam-deal')?.value;
+  const key=document.getElementById('tam-auto')?.value;
+  if(!dealId){ showToast('Select a property first.','warning'); return; }
+  if(!key){ showToast('Select a task automation.','warning'); return; }
+  const cfg=TASK_AUTOMATIONS[key];
+  if(cfg && cfg.terminal && !confirm(`"${cfg.label}" is a terminal event — it will clear the property's other open tasks and add its own set. Continue?`)) return;
+  document.getElementById('task-auto-modal')?.remove();
+  await window.applyTaskAutomation(dealId, key);
+  try{ if(typeof viewTasks==='function') viewTasks(); }catch(e){}
 };
 
 // Renders the per-deal task checklist in the left column of the detail view.
