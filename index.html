@@ -7143,9 +7143,13 @@ const FB = {
             localStorage.setItem(K('officeManagers'), JSON.stringify(payload.data));
           }
         } else if(docId === 'taskAutomations'){
-          // Sync admin-edited task-automation activities across all users
-          if(payload.data && typeof payload.data === 'object'){
-            TASK_AUTOMATIONS = _mergeTaskAutomations(payload.data);
+          // Sync admin-edited task-automation activities across all users.
+          // Stored as a JSON string (Firestore rejects nested arrays); tolerate
+          // the legacy object form too in case an older doc exists.
+          let _ta = payload.data;
+          if(typeof _ta === 'string'){ try{ _ta = JSON.parse(_ta); }catch(e){ _ta = null; } }
+          if(_ta && typeof _ta === 'object'){
+            TASK_AUTOMATIONS = _mergeTaskAutomations(_ta);
             try{ localStorage.setItem(K('taskAutomations'), JSON.stringify(TASK_AUTOMATIONS)); }catch(e){}
           }
         } else if(docId === 'pendingProfiles'){
@@ -24502,8 +24506,16 @@ function _mergeTaskAutomations(stored){
 let TASK_AUTOMATIONS = _mergeTaskAutomations((()=>{ try{ return JSON.parse(localStorage.getItem(K('taskAutomations'))||'null'); }catch(e){ return null; } })());
 async function saveTaskAutomations(){
   try{ localStorage.setItem(K('taskAutomations'), JSON.stringify(TASK_AUTOMATIONS)); }catch(e){}
-  try{ if(_fbDb && _fbFns){ const {doc, setDoc} = _fbFns; await setDoc(doc(_fbDb,'eos','taskAutomations'), {data: TASK_AUTOMATIONS}, {merge:false}); } }
-  catch(e){ console.warn('[taskAutomations] Firestore save failed', e); }
+  // Store as a JSON STRING, not a raw object: the tasks are arrays-of-arrays
+  // ([title, who, days]) and Firestore rejects directly-nested arrays, which
+  // made the write fail silently — so other users never got the edits.
+  try{
+    if(_fbDb && _fbFns){ const {doc, setDoc} = _fbFns; await setDoc(doc(_fbDb,'eos','taskAutomations'), {data: JSON.stringify(TASK_AUTOMATIONS)}, {merge:false}); }
+  }
+  catch(e){
+    console.warn('[taskAutomations] Firestore save failed', e);
+    try{ showToast('⚠ Saved on this device, but syncing to other users failed: '+(e.message||e), 'warning', 8000); }catch(_){}
+  }
 }
 window.saveTaskAutomations = saveTaskAutomations;
 
