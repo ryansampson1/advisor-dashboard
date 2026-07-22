@@ -20470,6 +20470,7 @@ function viewCRM(){
         <p class="text-sm text-gray-500 mt-0.5">${allContacts.length} contacts · ${allCRMGroups.filter(_isGroupVisible).length} groups</p>
       </div>
       <div class="flex gap-2">
+        <button onclick="window._crmShowRecentlyAdded()" class="border border-gray-200 bg-white text-gray-700 hover:bg-gray-50 px-4 py-2 rounded-lg text-sm font-semibold whitespace-nowrap" title="See who was added to the CRM in the last 30 days, who added them, and their groups">🆕 Recently Added${(()=>{const n=(allContacts||[]).filter(c=>c.createdAt&&c.createdAt>=Date.now()-30*864e5).length;return n?` <span class="inline-flex items-center justify-center min-w-4 h-4 px-1 text-xs font-bold text-white bg-blue-500 rounded-full ml-1">${n}</span>`:'';})()}</button>
         <button onclick="openContactModal(null)" class="brand-btn px-4 py-2 rounded-lg text-sm font-semibold">+ Add Contact</button>
       </div>
     </div>
@@ -21372,6 +21373,76 @@ window.crmOpenRecycleBin = () => {
         <table class="w-full text-sm">
           <thead class="bg-gray-50 text-left text-xs text-gray-500 uppercase tracking-wide sticky top-0">
             <tr><th class="px-3 py-2 font-semibold">Name</th><th class="px-3 py-2 font-semibold">Email</th><th class="px-3 py-2 font-semibold">Deleted</th><th class="px-3 py-2 font-semibold">Expires</th><th class="px-3 py-2"></th></tr>
+          </thead>
+          <tbody>${bodyRows}</tbody>
+        </table>
+      </div>
+    </div>`;
+  modal.addEventListener('click', e=>{ if(e.target===modal) modal.remove(); });
+  document.body.appendChild(modal);
+};
+
+// ── Recently Added contacts (last 30 days) — visible to everyone ───
+// Resolve the human-readable name of whoever created a contact.
+window._crmAddedByLabel = (c) => {
+  const by = c.createdBy;
+  // Known team member (createdBy stored as a uid)
+  const p = (typeof allProfiles!=='undefined' && allProfiles && by) ? allProfiles[by] : null;
+  if(p && (p.name || p.email)) return p.name || p.email;
+  // Some paths store an email string directly in createdBy
+  if(typeof by==='string' && by.includes('@')) return by;
+  if(by==='website-signup') return 'Website sign-up';
+  // Explicit system/automation marker
+  if(by==='system') return c.source ? `Automation · ${c.source}` : 'Automation';
+  // No usable createdBy (Gmail Sync, signature paste, CSV import) — show the source
+  if(c.source) return c.source;
+  return by || '—';
+};
+
+window._crmShowRecentlyAdded = () => {
+  document.getElementById('crm-recent-modal')?.remove();
+  const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  const cutoff = Date.now() - 30*24*60*60*1000;
+  const rows = (allContacts||[])
+    .filter(c => c.createdAt && c.createdAt >= cutoff)
+    .sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
+
+  const bodyRows = rows.length ? rows.map(c => {
+    const name = esc([c.firstName,c.lastName].filter(Boolean).join(' ') || c.email || '(no name)');
+    const when = new Date(c.createdAt).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'2-digit'});
+    const daysAgo = Math.floor((Date.now()-c.createdAt)/(24*60*60*1000));
+    const ago = daysAgo===0 ? 'Today' : daysAgo===1 ? 'Yesterday' : `${daysAgo} days ago`;
+    const addedBy = esc(window._crmAddedByLabel(c));
+    // Group badges (respect visibility rules)
+    const groupBadges = (c.groups||[]).map(gid => {
+      const g = (allCRMGroups||[]).find(x => x.id === gid);
+      if(!g || (typeof _isGroupVisible==='function' && !_isGroupVisible(g))) return '';
+      return `<span class="inline-block px-2 py-0.5 rounded-full text-xs font-semibold mr-1 mb-1" style="background:${g.color||'#e5e7eb'};color:${g.textColor||'#374151'}">${esc(g.name)}</span>`;
+    }).filter(Boolean).join('') || '<span class="text-xs text-gray-300 italic">None</span>';
+    return `<tr class="border-b border-gray-100 hover:bg-gray-50 cursor-pointer" onclick="document.getElementById('crm-recent-modal')?.remove();setTimeout(()=>window.openContactPanel('${c.id}'),50)">
+      <td class="px-3 py-2 align-top"><div class="font-medium text-gray-800">${name}</div>${c.company?`<div class="text-xs text-gray-400">${esc(c.company)}</div>`:''}</td>
+      <td class="px-3 py-2 align-top text-xs text-gray-500 whitespace-nowrap">${when}<div class="text-gray-400">${ago}</div></td>
+      <td class="px-3 py-2 align-top text-sm text-gray-700 whitespace-nowrap">${addedBy}</td>
+      <td class="px-3 py-2 align-top"><div class="flex flex-wrap">${groupBadges}</div></td>
+    </tr>`;
+  }).join('') : `<tr><td colspan="4" class="text-center text-gray-400 py-10">No contacts have been added in the last 30 days.</td></tr>`;
+
+  const modal = document.createElement('div');
+  modal.id = 'crm-recent-modal';
+  modal.className = 'fixed inset-0 z-50 flex items-center justify-center modal-bg bg-black/40 p-4';
+  modal.innerHTML = `
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[85vh] flex flex-col">
+      <div class="flex items-center justify-between p-5 border-b">
+        <div>
+          <h2 class="text-lg font-bold">🆕 Recently Added Contacts</h2>
+          <p class="text-xs text-gray-500 mt-0.5">${rows.length} contact${rows.length===1?'':'s'} added in the last 30 days · newest first</p>
+        </div>
+        <button onclick="document.getElementById('crm-recent-modal').remove()" class="text-gray-400 hover:text-gray-700 text-2xl leading-none">&times;</button>
+      </div>
+      <div class="overflow-y-auto">
+        <table class="w-full text-sm">
+          <thead class="bg-gray-50 text-left text-xs text-gray-500 uppercase tracking-wide sticky top-0">
+            <tr><th class="px-3 py-2 font-semibold">Name</th><th class="px-3 py-2 font-semibold">Added</th><th class="px-3 py-2 font-semibold">Added By</th><th class="px-3 py-2 font-semibold">Groups</th></tr>
           </thead>
           <tbody>${bodyRows}</tbody>
         </table>
