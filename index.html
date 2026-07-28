@@ -2227,6 +2227,13 @@ window.handleSoldConfirmation = function(id, deal, onConfirmed){
   });
 };
 
+// Returns the property/project NAME for task headlines so teammates recognize
+// the deal at a glance. Falls back to the street address, then generic label.
+function _taskHeadlineName(deal){
+  if(!deal) return 'property';
+  return deal.projectName || deal.propertyAddress || deal.address || 'property';
+}
+
 // Builds and sends the detailed commission payment task to Michael
 async function _handleSoldPayTask(deal, confirmedGross, payouts){
   const fmt  = n => '$'+Math.round(n||0).toLocaleString();
@@ -2362,7 +2369,7 @@ function handleSignPickupAutomation(deal){
     document.body.removeChild(overlay);
     const nickHit = Object.entries(allProfiles).find(([,p])=>(p.email||'').toLowerCase()==='nick@thedirtdog.com');
     await Store.createTask({
-      title:'🪧 Pick up sign + take down Telzio — '+addr,
+      title:'🪧 Pick up sign + take down Telzio — '+_taskHeadlineName(deal),
       description:'This deal has closed (Sold). Please retrieve the sign from the property and remove the Telzio number.\n\nProperty: '+addr+'\nAdvisor: '+(deal.advisorName||deal.advisorEmail||'')+'\n\n□ Schedule sign pick-up from '+addr+'\n□ Take down the Telzio sign-call number for this listing\n□ Confirm sign is back in storage\n□ Notify advisor once complete',
       assignedTo: nickHit?.[0]||null,
       assignedToName: nickHit?.[1]?.name||'Nick',
@@ -2416,7 +2423,7 @@ function handleGiftConfirmAutomation(deal){
     document.body.removeChild(overlay);
     const km = Object.entries(allProfiles).find(([,p])=>(p.email||'').toLowerCase()==='krissy@thedirtdog.com');
     await Store.createTask({
-      title:'🎁 Order closing gift for client — '+addr,
+      title:'🎁 Order closing gift for client — '+_taskHeadlineName(deal),
       description:'Order a closing gift for the client on '+addr+'. Buyer: '+buyerName+'. Check with '+advisorName+' for preference or use the standard gift package.',
       assignedTo: km?.[0]||null,
       assignedToName: km?.[1]?.name||'Krissy',
@@ -2440,7 +2447,7 @@ async function handleDDAutomation(deal){
 
   // Always-create: Advisor delivers DD materials
   Store.createTask({
-    title:'Deliver all Due Diligence materials to buyer — '+addr,
+    title:'Deliver all Due Diligence materials to buyer — '+_taskHeadlineName(deal),
     description:'Ensure all Due Diligence materials have been provided to the buyer for '+addr+'.\n\nChecklist:\n- Survey / boundary survey\n- Environmental reports / Phase I ESA\n- Soil / wetlands reports\n- Title commitment\n- Existing easements, restrictions, or encumbrances\n- Utility info / availability letters\n- Any other materials the buyer requested per the contract\n\nConfirm receipt with buyer in writing.',
     assignedTo:deal.advisorUid,assignedToName:deal.advisorName||deal.advisorEmail,
     dealId:deal.id,dealAddress:deal.propertyAddress,dueDate:dueDate(3),status:'pending',
@@ -2449,14 +2456,14 @@ async function handleDDAutomation(deal){
 
   if(!apiKey){
     Store.createTask({
-      title:'Critical Dates — '+addr,
+      title:'Critical Dates — '+_taskHeadlineName(deal),
       description:'No Anthropic API key configured. Manually extract critical dates from the PSA:\n- Effective Date\n- Inspection/DD Period End\n- Initial Deposit Due (amount + escrow agent)\n- Additional Deposits\n- Financing Contingency End\n- Title Commitment Due\n- Survey Due\n- Closing Date',
       assignedTo:deal.advisorUid,assignedToName:deal.advisorName||deal.advisorEmail,
       dealId:deal.id,dealAddress:deal.propertyAddress,dueDate:dueDate(1),status:'pending',
       createdBy:currentUser?.uid||'system',createdByName:'Automation',createdAt:Date.now(),
     }).catch(()=>{});
     Store.createTask({
-      title:'Track ALL deposit deadlines — '+addr,
+      title:'Track ALL deposit deadlines — '+_taskHeadlineName(deal),
       description:'Review the PSA and calendar every deposit deadline. For each deposit:\n\n'
         +'□ Initial deposit: $____  due ____  escrow agent: ____\n'
         +'□ Additional deposit(s): list each amount and due date below\n'
@@ -2472,7 +2479,7 @@ async function handleDDAutomation(deal){
       createdBy:currentUser?.uid||'system',createdByName:'Automation',createdAt:Date.now(),
     }).catch(()=>{});
     Store.createTask({
-      title:'Confirm initial deposit received & title ordered — '+addr,
+      title:'Confirm initial deposit received & title ordered — '+_taskHeadlineName(deal),
       description:'Confirm the initial deposit has been received by the escrow agent and title has been ordered.\nSee contract for escrow agent name, phone, email, and address.',
       assignedTo:deal.advisorUid,assignedToName:deal.advisorName||deal.advisorEmail,
       dealId:deal.id,dealAddress:deal.propertyAddress,dueDate:dueDate(3),status:'pending',
@@ -2559,7 +2566,7 @@ async function handleDDAutomation(deal){
 
     // Task 1: Critical dates with Excel attachment
     await Store.createTask({
-      title:'Critical Dates — '+addr,
+      title:'Critical Dates — '+_taskHeadlineName(deal),
       description:'CRITICAL DATES — '+addr+'\nBuyer: '+buyerName+'  |  Price: '+price+'\n\n'+datesSec+'\n\n---\nESCROW AGENT:\n'+escrowSec+'\n\nDEPOSIT INFO:\n'+depositSec,
       assignedTo:deal.advisorUid,assignedToName:deal.advisorName||deal.advisorEmail,
       dealId:deal.id,dealAddress:deal.propertyAddress,dueDate:dueDate(1),status:'pending',
@@ -2571,7 +2578,7 @@ async function handleDDAutomation(deal){
     const critList=dateRows.map(r=>'  • '+r.item+': '+r.date+(r.notes?' — '+r.notes:'')).join('\n');
     const clientBody='Hi '+buyerName+',\n\nThank you for executing the Purchase and Sale Agreement for '+addr+'. Please find below the critical dates for your transaction. These are contractually binding deadlines, so please calendar them promptly.\n\nCRITICAL DATES:\n'+(critList||datesSec)+'\n\n'+(escrowSec?'ESCROW AGENT:\n'+escrowSec+'\n\n':'')+'Please deliver your initial deposit to the escrow agent by the due date above and begin your due diligence period immediately. Do not hesitate to call or email with any questions.\n\nBest regards,\n'+(deal.advisorName||'')+'\nEshenbaugh Land Company | 813-417-5928';
     await Store.createTask({
-      title:'Email client critical dates — '+addr,
+      title:'Email client critical dates — '+_taskHeadlineName(deal),
       description:clientBody,
       gmailUrl:'https://mail.google.com/mail/?view=cm&su='+encodeURIComponent('Critical Dates — '+addr)+'&body='+encodeURIComponent(clientBody),
       assignedTo:deal.advisorUid,assignedToName:deal.advisorName||deal.advisorEmail,
@@ -2581,7 +2588,7 @@ async function handleDDAutomation(deal){
 
     // Task 3: Confirm deposit + escrow
     await Store.createTask({
-      title:'Confirm deposit received & title ordered — '+addr,
+      title:'Confirm deposit received & title ordered — '+_taskHeadlineName(deal),
       description:'Confirm the following within 3 days:\n\n1. DEPOSIT RECEIVED\n'+( depositSec||'Check contract for deposit amount and due date.')+'\n\n2. ESCROW AGENT\n'+(escrowSec||'Check contract for escrow agent details.')+'\n\nAction items:\n- Call/email escrow agent to confirm deposit received\n- Confirm title order has been placed with title company\n- Get estimated title commitment delivery date',
       assignedTo:deal.advisorUid,assignedToName:deal.advisorName||deal.advisorEmail,
       dealId:deal.id,dealAddress:deal.propertyAddress,dueDate:dueDate(3),status:'pending',
@@ -2594,7 +2601,7 @@ async function handleDDAutomation(deal){
       const depDate=dep.date;
       if(!depDate||depDate==='N/A'||!/^\d{4}-\d{2}-\d{2}$/.test(depDate)) continue;
       await Store.createTask({
-        title:'⚠️ Deposit Due — '+dep.item+' — '+addr,
+        title:'⚠️ Deposit Due — '+dep.item+' — '+_taskHeadlineName(deal),
         description:dep.item+' is due on '+depDate+'.\n\n'+(dep.notes?'Amount / Notes: '+dep.notes+'\n\n':'')
           +'ESCROW AGENT:\n'+(escrowSec||'See contract for escrow agent details.')+'\n\n'
           +'Action: Confirm the buyer has wired / delivered the deposit to the escrow agent by end of day.',
@@ -2605,7 +2612,7 @@ async function handleDDAutomation(deal){
       // Follow-up: confirm deposit received the next business day
       const confirmDate=(()=>{const d=new Date(depDate+'T12:00:00');d.setDate(d.getDate()+1);return d.toISOString().slice(0,10);})();
       await Store.createTask({
-        title:'Confirm deposit received by escrow — '+dep.item+' — '+addr,
+        title:'Confirm deposit received by escrow — '+dep.item+' — '+_taskHeadlineName(deal),
         description:'Confirm the escrow agent received the '+dep.item.toLowerCase()+' that was due on '+depDate+'.\n\n'
           +(dep.notes?'Amount: '+dep.notes+'\n\n':'')
           +'ESCROW AGENT:\n'+(escrowSec||'See contract for escrow agent details.')+'\n\n'
@@ -2628,7 +2635,7 @@ async function handleDDAutomation(deal){
 
     if(calLinks){
       await Store.createTask({
-        title:'Add critical dates to Google Calendar — '+addr,
+        title:'Add critical dates to Google Calendar — '+_taskHeadlineName(deal),
         description:'Click each link to add a critical date to your Google Calendar:\n\n'+calLinks,
         assignedTo:deal.advisorUid,assignedToName:deal.advisorName||deal.advisorEmail,
         dealId:deal.id,dealAddress:deal.propertyAddress,dueDate:dueDate(1),status:'pending',
@@ -2640,14 +2647,14 @@ async function handleDDAutomation(deal){
   }catch(e){
     console.error('[DD automation]',e);
     Store.createTask({
-      title:'Critical Dates — '+addr,
+      title:'Critical Dates — '+_taskHeadlineName(deal),
       description:'AI contract reading failed. Please manually extract critical dates from the PSA.\n\nError: '+e.message,
       assignedTo:deal.advisorUid,assignedToName:deal.advisorName||deal.advisorEmail,
       dealId:deal.id,dealAddress:deal.propertyAddress,dueDate:dueDate(1),status:'pending',
       createdBy:currentUser?.uid||'system',createdByName:'Automation',createdAt:Date.now(),
     }).catch(()=>{});
     Store.createTask({
-      title:'Track ALL deposit deadlines — '+addr,
+      title:'Track ALL deposit deadlines — '+_taskHeadlineName(deal),
       description:'AI contract reading failed — manually review the PSA for every deposit deadline.\n\n'
         +'□ Initial deposit: $____  due ____  escrow agent: ____\n'
         +'□ Additional deposit(s): list each amount and due date below\n'
@@ -2663,7 +2670,7 @@ async function handleDDAutomation(deal){
       createdBy:currentUser?.uid||'system',createdByName:'Automation',createdAt:Date.now(),
     }).catch(()=>{});
     Store.createTask({
-      title:'Confirm initial deposit received & title ordered — '+addr,
+      title:'Confirm initial deposit received & title ordered — '+_taskHeadlineName(deal),
       description:'Confirm the initial deposit has been received by escrow agent and title has been ordered.\nSee contract for escrow agent contact information.',
       assignedTo:deal.advisorUid,assignedToName:deal.advisorName||deal.advisorEmail,
       dealId:deal.id,dealAddress:deal.propertyAddress,dueDate:dueDate(3),status:'pending',
@@ -2716,7 +2723,7 @@ Best regards,
 ${deal.advisorName||''}
 Eshenbaugh Land Company | 813-417-5928`;
   Store.createTask({
-    title:`Follow up with seller on LOI — ${addr}`,
+    title:`Follow up with seller on LOI — ${_taskHeadlineName(deal)}`,
     description:followBody,
     gmailUrl:`https://mail.google.com/mail/?view=cm&su=${encodeURIComponent('LOI Follow Up — '+addr)}&body=${encodeURIComponent(followBody)}`,
     assignedTo:deal.advisorUid, assignedToName:deal.advisorName||deal.advisorEmail,
@@ -2726,7 +2733,7 @@ Eshenbaugh Land Company | 813-417-5928`;
 
   if(!apiKey){
     Store.createTask({
-      title:`Buyer Research — ${buyerName} — ${addr}`,
+      title:`Buyer Research — ${buyerName} — ${_taskHeadlineName(deal)}`,
       description:`No Anthropic API key configured (APP_CONFIG.ai.anthropicKey). Please research manually:
 
 Buyer: ${buyerName}   |   Offer: ${loiPrice}   |   Property: ${addr}
@@ -2740,7 +2747,7 @@ Buyer: ${buyerName}   |   Offer: ${loiPrice}   |   Property: ${addr}
       createdBy:currentUser?.uid||'system', createdByName:'Automation', createdAt:Date.now(),
     }).catch(e=>console.error('[LOI-research]',e));
     Store.createTask({
-      title:`Draft owner response — ${addr} LOI`,
+      title:`Draft owner response — ${_taskHeadlineName(deal)} LOI`,
       description:`Draft a response to the owner regarding the LOI from ${buyerName} at ${loiPrice}. Include offer summary, buyer overview, and suggested counter.`,
       assignedTo:deal.advisorUid, assignedToName:deal.advisorName||deal.advisorEmail,
       dealId:deal.id, dealAddress:deal.propertyAddress, dueDate:dueDate(2), status:'pending',
@@ -2815,7 +2822,7 @@ Base all recommendations on standard Florida land transaction norms and strong s
     const counterSec = sec('SUGGESTED COUNTER');
 
     await Store.createTask({
-      title:`Buyer Research — ${buyerName} — ${addr}`,
+      title:`Buyer Research — ${buyerName} — ${_taskHeadlineName(deal)}`,
       description:`BUYER: ${buyerName}  |  OFFER: ${loiPrice}  |  PROPERTY: ${addr}
 
 ${buyerSec}`,
@@ -2849,7 +2856,7 @@ Best regards,
 ${deal.advisorName||''}
 Eshenbaugh Land Company | 813-417-5928`;
     await Store.createTask({
-      title:`Draft owner response — ${addr} LOI`,
+      title:`Draft owner response — ${_taskHeadlineName(deal)} LOI`,
       description:ownerBody,
       gmailUrl:`https://mail.google.com/mail/?view=cm&su=${encodeURIComponent('LOI Received — '+addr)}&body=${encodeURIComponent(ownerBody)}`,
       assignedTo:deal.advisorUid, assignedToName:deal.advisorName||deal.advisorEmail,
@@ -2861,7 +2868,7 @@ Eshenbaugh Land Company | 813-417-5928`;
   }catch(e){
     console.error('[LOI automation]',e);
     Store.createTask({
-      title:`Buyer Research — ${buyerName} — ${addr}`,
+      title:`Buyer Research — ${buyerName} — ${_taskHeadlineName(deal)}`,
       description:`AI research failed. Please manually research:
 
 Buyer: ${buyerName}  |  Offer: ${loiPrice}
@@ -2876,7 +2883,7 @@ Error: ${e.message}`,
       createdBy:currentUser?.uid||'system', createdByName:'Automation', createdAt:Date.now(),
     }).catch(()=>{});
     Store.createTask({
-      title:`Draft owner response — ${addr} LOI`,
+      title:`Draft owner response — ${_taskHeadlineName(deal)} LOI`,
       description:`Draft owner response for LOI from ${buyerName} at ${loiPrice}.`,
       assignedTo:deal.advisorUid, assignedToName:deal.advisorName||deal.advisorEmail,
       dealId:deal.id, dealAddress:deal.propertyAddress, dueDate:dueDate(2), status:'pending',
@@ -3655,7 +3662,7 @@ async function handleProposalTodoAutomation(deal){
   // ── 1. Aerials task → marketing ────────────────────────────────────────────
   const nickHit=Object.entries(allProfiles).find(([,p])=>(p.email||'').toLowerCase()==='nick@thedirtdog.com');
   Store.createTask({
-    title:`📸 Schedule Aerial Photography — ${addr}`,
+    title:`📸 Schedule Aerial Photography — ${_taskHeadlineName(deal)}`,
     description:`Schedule drone/aerial photography for the proposal package.\n\nProperty: ${addr}\nCounty: ${county}, FL\nAcres: ${acres}\nAdvisor: ${deal.advisorName||deal.advisorEmail}\n\n□ Contact aerial photography vendor\n□ Coordinate property access with owner/client\n□ Deliver high-res images + video to advisor within 3 days`,
     assignedTo:nickHit?nickHit[0]:'nick@thedirtdog.com',
     assignedToName:nickHit?nickHit[1].name||'Nick':'Nick',
@@ -3670,7 +3677,7 @@ async function handleProposalTodoAutomation(deal){
   const propBody=`Hi Proposal Team,\n\nPlease start the following property:\n\nProperty: ${addr}\nProject: ${deal.projectName||addr}\nClient/Seller: ${clientName}\nCounty: ${county}, FL\nAcres: ${acres}\nSuggested Price: ${priceFmt}\nListing Period: ${listingPeriod}\nCommission: ${commPct}%\nAdvisor: ${deal.advisorName||deal.advisorEmail}\n\nNotes:\n${deal.notes||'(none)'}\n\nThank you`;
   const gmailUrl=`https://mail.google.com/mail/?view=cm&to=proposal%40thedirtdog.com&su=${encodeURIComponent(propSubject)}&body=${encodeURIComponent(propBody)}`;
   Store.createTask({
-    title:`📧 Send Property Details to Proposal Team — ${addr}`,
+    title:`📧 Send Property Details to Proposal Team — ${_taskHeadlineName(deal)}`,
     description:`Click "Open Email Draft" to open Gmail with everything pre-filled. Just review and hit Send.\n\nTO: proposal@thedirtdog.com\nSUBJECT: ${propSubject}\n\n${'─'.repeat(44)}\n${propBody}\n${'─'.repeat(44)}`,
     gmailUrl,
     assignedTo:deal.advisorUid,assignedToName:deal.advisorName||deal.advisorEmail,assignedToEmail:deal.advisorEmail||'',
@@ -3686,7 +3693,7 @@ async function handleProposalTodoAutomation(deal){
   (async()=>{
     const laName='Listing Agreement - '+addr.replace(/[\/\\:*?"<>|]/g,'-')+'.docx';
     const taskBase={
-      title:`📝 Review & Sign Listing Agreement — ${addr}`,
+      title:`📝 Review & Sign Listing Agreement — ${_taskHeadlineName(deal)}`,
       description:'Listing agreement pre-filled with deal fields (when doc generation succeeds). Review for accuracy, then forward to client for signature (DocuSign or in person). Upload executed copy back to deal record.',
       assignedTo:deal.advisorUid,assignedToName:deal.advisorName||deal.advisorEmail,assignedToEmail:deal.advisorEmail||'',
       dealId:deal.id,dealAddress:deal.propertyAddress,
@@ -4054,7 +4061,7 @@ Wildlife/Listed Species | IPaC not run — verify manually | Medium]
       const downloadURL=await getDownloadURL(snap.ref);
       const ddName='DD Report - '+addr.replace(/[\/\\:*?"<>|]/g,'-')+'.docx';
       await Store.createTask({
-        title:`📊 Preliminary DD Report — ${addr}`,
+        title:`📊 Preliminary DD Report — ${_taskHeadlineName(deal)}`,
         description:`CONFIRMED PUBLIC RECORDS — ${new Date().toLocaleDateString()}:\n• Elevation: ${elevNote}\n• FEMA Flood Zone: ${fema?femaZones:'Not confirmed — verify at msc.fema.gov'}\n• FIRM Panel: ${firmNote}\n• Wetlands (1km): ${nwi?(nwi.length===0?'None mapped':nwi.length+' features'):'Not confirmed'}\n• Opportunity Zone: ${oz?'YES — OZ tract':'No'}\n• QCT 2026: ${qct?'YES — QCT':'Not confirmed'}\n• Zoning: ${zoningNote}\n\nFull 17-section ELC DD report attached. Sections with NOT CONFIRMED require manual verification before presenting to buyers.`,
         attachmentUrl:downloadURL,attachmentName:ddName,
         assignedTo:deal.advisorUid,assignedToName:deal.advisorName||deal.advisorEmail,assignedToEmail:deal.advisorEmail||'',
@@ -4079,7 +4086,7 @@ async function handleProposalOutstandingAutomation(deal){
 
   // 1. Follow-up task -> advisor, due 5 days
   Store.createTask({
-    title:`📞 Follow Up on Outstanding Proposal — ${addr}`,
+    title:`📞 Follow Up on Outstanding Proposal — ${_taskHeadlineName(deal)}`,
     description:`The proposal for ${addr} is outstanding. Follow up with the client on status.\n\nClient/Seller: ${deal.clientName||deal.seller||'[Client]'}\nSuggested Price: ${priceFmt}\nListing Period: ${deal.listingPeriod||'[TBD]'}\n\n□ Call or email the client\n□ Confirm they received and reviewed the proposal\n□ Address any questions or objections\n□ Confirm next steps and update deal stage`,
     assignedTo:deal.advisorUid,assignedToName:deal.advisorName||deal.advisorEmail,assignedToEmail:deal.advisorEmail||'',
     dealId:deal.id,dealAddress:deal.propertyAddress,
@@ -4089,7 +4096,7 @@ async function handleProposalOutstandingAutomation(deal){
 
   // 2. Check-in reminder -> advisor, due 10 days
   Store.createTask({
-    title:`⏰ Check-In Reminder — Proposal Still Outstanding (${addr})`,
+    title:`⏰ Check-In Reminder — Proposal Still Outstanding (${_taskHeadlineName(deal)})`,
     description:`10-day check-in: Proposal for ${addr} still outstanding.\n\nClient: ${deal.clientName||deal.seller||'[Client]'}\n\n□ Confirm proposal status with client\n□ Schedule a meeting or call if needed\n□ Update deal stage once a decision is made`,
     assignedTo:deal.advisorUid,assignedToName:deal.advisorName||deal.advisorEmail,assignedToEmail:deal.advisorEmail||'',
     dealId:deal.id,dealAddress:deal.propertyAddress,
@@ -4110,7 +4117,7 @@ async function handleProposalOutstandingAutomation(deal){
     if(!emailBody) emailBody=`Dear ${deal.clientName||deal.seller||'[Client Name]'},\n\nI wanted to follow up on the listing proposal we recently submitted for ${addr}. I hope you have had a chance to review it and I would be happy to answer any questions you may have.\n\nPlease do not hesitate to reach out — I am available to meet or speak at your convenience.\n\nWarm regards,\n${deal.advisorName||'[Advisor Name]'}\n${deal.advisorEmail||'[advisor@thedirtdog.com]'}\n813-287-8787`;
     const subject=`Follow Up: Listing Proposal — ${addr}`;
     await Store.createTask({
-      title:`✉️ AI Draft: Follow-Up Email to Client — ${addr}`,
+      title:`✉️ AI Draft: Follow-Up Email to Client — ${_taskHeadlineName(deal)}`,
       description:`AI-drafted follow-up email. Edit as needed and send from your email client.\n\nSUBJECT: ${subject}\n\n${'─'.repeat(44)}\n${emailBody}\n${'─'.repeat(44)}`,
       assignedTo:deal.advisorUid,assignedToName:deal.advisorName||deal.advisorEmail,assignedToEmail:deal.advisorEmail||'',
       dealId:deal.id,dealAddress:deal.propertyAddress,
@@ -4136,7 +4143,7 @@ async function handleContractTerminatedAutomation(deal){
 
   // 1. Re-listing decision task -> advisor, due 3 days
   Store.createTask({
-    title:`🔄 Re-Listing Decision — ${addr} (Contract Terminated)`,
+    title:`🔄 Re-Listing Decision — ${_taskHeadlineName(deal)} (Contract Terminated)`,
     description:`The contract for ${addr} has been terminated. Determine whether to begin re-marketing.\n\nProperty: ${addr}\nClient/Seller: ${deal.clientName||deal.seller||'[Client]'}\nFormer Buyer: ${deal.buyer||'[Buyer]'}\nOriginal Price: ${priceFmt}\nAdvisor: ${deal.advisorName||deal.advisorEmail}\n\n□ Contact client to discuss next steps\n□ Confirm whether property goes back to market\n□ Discuss revised pricing strategy if applicable\n□ Execute listing extension agreement if re-listing\n□ Notify marketing team to refresh materials if needed`,
     assignedTo:deal.advisorUid,assignedToName:deal.advisorName||deal.advisorEmail,assignedToEmail:deal.advisorEmail||'',
     dealId:deal.id,dealAddress:deal.propertyAddress,
@@ -4149,7 +4156,7 @@ async function handleContractTerminatedAutomation(deal){
     const krissyEmail='krissy@thedirtdog.com';
     const km=Object.entries(allProfiles).find(([,p])=>(p.email||'').toLowerCase()===krissyEmail);
     Store.createTask({
-      title:`📊 Update Tracking & Remove from Websites — ${addr} (Contract Terminated)`,
+      title:`📊 Update Tracking & Remove from Websites — ${_taskHeadlineName(deal)} (Contract Terminated)`,
       description:`The contract for ${addr} has been terminated.\n\n□ Update internal deal tracker to reflect Contract Terminated status\n□ Remove property from all active listing websites\n□ Update any active marketing campaigns or listings\n□ Archive the deal file in Google Drive\n□ Confirm all external listings have been updated or removed\n\nProperty: ${addr}\nAdvisor: ${deal.advisorName||deal.advisorEmail}`,
       assignedTo:km?km[0]:'',assignedToName:km?km[1].name||krissyEmail:krissyEmail,assignedToEmail:krissyEmail,
       dealId:deal.id,dealAddress:deal.propertyAddress,
@@ -4163,7 +4170,7 @@ async function handleContractTerminatedAutomation(deal){
     const mktEmail='nick@thedirtdog.com';
     const mm=Object.entries(allProfiles).find(([,p])=>(p.email||'').toLowerCase()===mktEmail);
     Store.createTask({
-      title:`📣 Begin Remarketing — ${addr} (Contract Terminated)`,
+      title:`📣 Begin Remarketing — ${_taskHeadlineName(deal)} (Contract Terminated)`,
       description:`The contract for ${addr} has been terminated and the property is back on the market.\n\nProperty: ${addr}\nClient/Seller: ${deal.clientName||deal.seller||'[Client]'}\nOriginal Price: ${priceFmt}\nAdvisor: ${deal.advisorName||deal.advisorEmail}\n\n□ Refresh all marketing materials for re-listing\n□ Prepare new email blast to qualified buyer list\n□ Update property photos/aerials if needed\n□ Re-post on all active marketing platforms\n□ Coordinate with advisor on revised pricing strategy\n□ Update signage if applicable`,
       assignedTo:mm?mm[0]:'',assignedToName:mm?mm[1].name||mktEmail:mktEmail,assignedToEmail:mktEmail,
       dealId:deal.id,dealAddress:deal.propertyAddress,
@@ -4230,7 +4237,7 @@ async function handleContractTerminatedAutomation(deal){
       const downloadURL=await getDownloadURL(snap.ref);
       const fileName='Listing Extension - '+addr.replace(/[\/\\:*?"<>|]/g,'-')+'.docx';
       await Store.createTask({
-        title:`📄 Listing Extension Agreement Draft — ${addr}`,
+        title:`📄 Listing Extension Agreement Draft — ${_taskHeadlineName(deal)}`,
         description:'AI-generated listing extension agreement attached as Word doc. Complete all [FILL IN] placeholders and obtain both signatures before re-listing.',
         attachmentUrl:downloadURL,attachmentName:fileName,
         assignedTo:deal.advisorUid,assignedToName:deal.advisorName||deal.advisorEmail,assignedToEmail:deal.advisorEmail||'',
@@ -4355,7 +4362,7 @@ async function _fireLostListingTasks(deal, answers, addr, dueDate){
   /* Protection list → task to advisor */
   if(answers.protection==='yes'){
     tasks.push(Store.createTask({
-      title:`📋 Create Protection List — ${addr}`,
+      title:`📋 Create Protection List — ${_taskHeadlineName(deal)}`,
       description:`The listing for ${addr} has been lost. A protection list is required.\n\nProperty: ${addr}\nAdvisor: ${deal.advisorName||deal.advisorEmail||''}\nClient/Seller: ${deal.clientName||deal.seller||''}\n\n□ Prepare protection list of prospective buyers introduced to the property during the listing period\n□ Confirm effective protection period dates per the listing agreement\n□ Deliver protection list to client in writing`,
       assignedTo:deal.advisorUid||null,
       assignedToName:deal.advisorName||deal.advisorEmail||'Advisor',
@@ -4370,7 +4377,7 @@ async function _fireLostListingTasks(deal, answers, addr, dueDate){
   if(answers.sign==='yes'){
     const nickHit=Object.entries(allProfiles).find(([,p])=>(p.email||'').toLowerCase()==='nick@thedirtdog.com');
     tasks.push(Store.createTask({
-      title:`🪧 Remove Sign & Telzio — ${addr}`,
+      title:`🪧 Remove Sign & Telzio — ${_taskHeadlineName(deal)}`,
       description:`The listing for ${addr} has been lost and the sign is still on the property.\n\nProperty: ${addr}\nAdvisor: ${deal.advisorName||deal.advisorEmail||''}\n\n□ Schedule sign retrieval from property\n□ Remove Telzio tracking number associated with this listing\n□ Confirm sign is back in storage and in good condition\n□ Notify advisor once complete`,
       assignedTo:nickHit?.[0]||null,
       assignedToName:nickHit?.[1]?.name||'Nick',
@@ -4414,7 +4421,7 @@ function handleProspectAutomation(deal){
   const addr = deal.propertyAddress||deal.projectName||'property';
   const dueDate = n=>{ const d=new Date(); d.setDate(d.getDate()+n); return d.toISOString().slice(0,10); };
   Store.createTask({
-    title:`📞 Reach out to prospect — ${addr}`,
+    title:`📞 Reach out to prospect — ${_taskHeadlineName(deal)}`,
     description:`New prospect added: ${addr}.\n\nAdvisor: ${deal.advisorName||deal.advisorEmail||''}\nClient/Seller: ${deal.clientName||deal.seller||''}\n\n☐ Make initial contact with the prospect\n☐ Qualify the lead (property details, motivation, timeline, pricing expectations)\n☐ Log all notes and contact details in CRM\n☐ Schedule follow-up if needed`,
     assignedTo:deal.advisorUid||null,
     assignedToName:deal.advisorName||deal.advisorEmail||'Advisor',
@@ -4456,7 +4463,7 @@ function _fireListingWebsiteTask(deal){
   const krissyEmail = 'krissy@thedirtdog.com';
   const krissyHit = Object.entries(allProfiles||{}).find(([,p])=>(p.email||'').toLowerCase()===krissyEmail);
   Store.createTask({
-    title:`🌐 Add to Websites — ${addr}`,
+    title:`🌐 Add to Websites — ${_taskHeadlineName(deal)}`,
     description:`Advisor has confirmed this listing is ready to go live on websites.\n\nProperty: ${addr}\nAdvisor: ${deal.advisorName||deal.advisorEmail||''}\nPrice: ${price}\nAcres: ${acres}\nCounty: ${county}\n\n☐ Add to Eshenbaugh website\n☐ Post on LoopNet / CoStar\n☐ Add to any other active listing portals\n☐ Confirm listing details with advisor before publishing`,
     assignedTo:krissyHit?.[0]||null, assignedToName:krissyHit?.[1]?.name||'Krissy',
     assignedToEmail:krissyEmail,
@@ -4486,7 +4493,7 @@ function _fireListingClientEmailTask(deal){
     + '&body='+encodeURIComponent(body);
 
   Store.createTask({
-    title: `✉️ Email client — Marketing prep underway — ${addr}`,
+    title: `✉️ Email client — Marketing prep underway — ${_taskHeadlineName(deal)}`,
     description: body,
     gmailUrl,
     assignedTo:    deal.advisorUid||null,
@@ -4582,7 +4589,7 @@ function handleListingAutomation(deal){
 
     /* 2. Advisor — draft OM and call top 10 buyers */
     tasks.push(Store.createTask({
-      title:`📄 Draft OM & Call Top 10 Buyers — ${addr}`,
+      title:`📄 Draft OM & Call Top 10 Buyers — ${_taskHeadlineName(deal)}`,
       description:`New listing is active: ${addr}.\n\nListed Price: ${price}\nAcres: ${acres}\nCounty: ${county}\nEffective: ${effDate}\nExpires: ${expDate}\n\n☐ Draft the Offering Memorandum (OM) for this property\n☐ Identify and call the top 10 prospective buyers\n☐ Log all buyer contacts and conversations in CRM\n☐ Track any LOI interest received`,
       assignedTo:deal.advisorUid||null, assignedToName:deal.advisorName||deal.advisorEmail||'Advisor',
       assignedToEmail:deal.advisorEmail||'',
@@ -4593,7 +4600,7 @@ function handleListingAutomation(deal){
 
     /* 3. Nick — put in correct marketing groups */
     tasks.push(Store.createTask({
-      title:`📣 Add to Marketing Groups — ${addr}`,
+      title:`📣 Add to Marketing Groups — ${_taskHeadlineName(deal)}`,
       description:`New listing needs to be placed in the correct marketing groups.\n\nProperty: ${addr}\nAdvisor: ${deal.advisorName||deal.advisorEmail||''}\nPrice: ${price}\nAcres: ${acres}\nCounty: ${county}\n\n☐ Review property type, zoning, and location\n☐ Add to the appropriate buyer/investor marketing groups\n☐ Confirm with advisor which groups should receive the listing blast`,
       assignedTo:mktHit?.[0]||null, assignedToName:mktHit?.[1]?.name||'Nick',
       assignedToEmail:'nick@thedirtdog.com',
@@ -4605,7 +4612,7 @@ function handleListingAutomation(deal){
     /* 4. Marketing — order sign + Telzio (if sign needed) */
     if(answers.sign==='yes'){
       tasks.push(Store.createTask({
-        title:`🪧 Order Sign & Request Telzio — ${addr}`,
+        title:`🪧 Order Sign & Request Telzio — ${_taskHeadlineName(deal)}`,
         description:`A new listing needs a sign and Telzio number set up.\n\nProperty: ${addr}\nAdvisor: ${deal.advisorName||deal.advisorEmail||''}\nCounty: ${county}\nAcres: ${acres}\nListed Price: ${price}\n\n☐ Order sign for ${addr}${county?' ('+county+' County)':''}\n☐ Coordinate sign installation with landowner / confirm property access\n☐ Request a Telzio tracking number for this listing\n☐ Provide Telzio number to advisor for marketing materials\n☐ Confirm sign is installed and log location`,
         assignedTo:mktHit?.[0]||null, assignedToName:mktHit?.[1]?.name||'Nick',
         assignedToEmail:'nick@thedirtdog.com',
@@ -4618,7 +4625,7 @@ function handleListingAutomation(deal){
     /* 5. Krissy — put on websites (if requested) */
     if(answers.web==='yes'){
       tasks.push(Store.createTask({
-        title:`🌐 List on Websites — ${addr}`,
+        title:`🌐 List on Websites — ${_taskHeadlineName(deal)}`,
         description:`New listing to be published on all active listing websites.\n\nProperty: ${addr}\nAdvisor: ${deal.advisorName||deal.advisorEmail||''}\nPrice: ${price}\nAcres: ${acres}\nCounty: ${county}\n\n☐ Add to Eshenbaugh website\n☐ Post on LoopNet / CoStar\n☐ Add to any other active listing portals\n☐ Confirm listing details with advisor before publishing`,
         assignedTo:krissyHit?.[0]||null, assignedToName:krissyHit?.[1]?.name||'Krissy',
         assignedToEmail:'krissy@thedirtdog.com',
@@ -4679,7 +4686,7 @@ function checkListingRenewalReminders(){
     const addr = deal.propertyAddress||deal.projectName||'property';
     const expStr = new Date(deal.listingExpiration+'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
     const taskBase = {
-      title:`🔄 Renew Listing — ${addr}`,
+      title:`🔄 Renew Listing — ${_taskHeadlineName(deal)}`,
       description:`The listing agreement for ${addr} expires on ${expStr} (${daysLeft} day${daysLeft===1?'':'s'} remaining).\n\nAdvisor: ${deal.advisorName||deal.advisorEmail||''}\nCurrent Expiration: ${expStr}\n\n☐ Contact the seller to discuss renewing the listing\n☐ Prepare and execute a listing extension amendment (see attached template)\n☐ Get the extension signed before the expiration date\n☐ Update the Expiration Date on the deal card once signed`,
       assignedTo:deal.advisorUid||null, assignedToName:deal.advisorName||deal.advisorEmail||'Advisor',
       assignedToEmail:deal.advisorEmail||'',
@@ -5897,6 +5904,7 @@ window._pdwHandleAutoFill = function(dealId, files){
 async function _sendCriticalDatesTask(vals){
   const advUid   = document.getElementById('f-advisor-uid')?.value || currentUser?.uid || '';
   const address  = document.getElementById('f-address')?.value || vals.projectName || 'this deal';
+  const name     = document.getElementById('f-project-name')?.value || vals.projectName || address;
   const dealId   = editingDealId || null;
   let advName  = currentUser?.name  || '';
   let advEmail = currentUser?.email || '';
@@ -5912,7 +5920,7 @@ async function _sendCriticalDatesTask(vals){
       if(!advEmail && match.advisorEmail) advEmail = match.advisorEmail;
     }
   }
-  return _dispatchCriticalDatesTasks({vals, dealId, address, advUid, advName, advEmail});
+  return _dispatchCriticalDatesTasks({vals, dealId, address, name, advUid, advName, advEmail});
 }
 window._sendCriticalDatesTask = _sendCriticalDatesTask;
 
@@ -5924,6 +5932,7 @@ async function _sendCriticalDatesTaskForDeal(dealId, vals){
   const deal = (typeof allDeals !== 'undefined') ? allDeals.find(d=>d.id===dealId) : null;
   if(!deal) return;
   const address  = deal.propertyAddress || deal.projectName || vals.address || 'this deal';
+  const name     = deal.projectName || address;
   const advUid   = deal.advisorUid || currentUser?.uid || '';
   let advName  = deal.advisorName  || currentUser?.name  || '';
   let advEmail = deal.advisorEmail || currentUser?.email || '';
@@ -5932,14 +5941,15 @@ async function _sendCriticalDatesTaskForDeal(dealId, vals){
     if(p.name)  advName  = p.name;
     if(p.email) advEmail = p.email;
   }
-  return _dispatchCriticalDatesTasks({vals, dealId, address, advUid, advName, advEmail});
+  return _dispatchCriticalDatesTasks({vals, dealId, address, name, advUid, advName, advEmail});
 }
 window._sendCriticalDatesTaskForDeal = _sendCriticalDatesTaskForDeal;
 
 // ── Shared dispatcher: builds the critical-dates list + Excel and sends the ──
 // review task and the client-email task. Context (advisor/address/dealId) is
 // resolved by the caller so this works from both the edit form and the drawer.
-async function _dispatchCriticalDatesTasks({vals, dealId, address, advUid, advName, advEmail}){
+async function _dispatchCriticalDatesTasks({vals, dealId, address, name, advUid, advName, advEmail}){
+  name = name || address;  // property/project name for task headlines; address stays in bodies
   try {
     // Label definitions (order matters — this is the display order)
     const labelMap = [
@@ -6041,7 +6051,7 @@ async function _dispatchCriticalDatesTasks({vals, dealId, address, advUid, advNa
     // Task 1: Review + Excel attachment
     await Store.createTask({
       ...taskBase,
-      title: 'Review Critical Dates — '+address,
+      title: 'Review Critical Dates — '+name,
       description: taskBody,
       ...(attachmentUrl ? {attachmentUrl, attachmentName} : {}),
     }).catch(e=>console.error('[critical-dates-task-1]',e));
@@ -6061,7 +6071,7 @@ async function _dispatchCriticalDatesTasks({vals, dealId, address, advUid, advNa
 
     await Store.createTask({
       ...taskBase,
-      title: 'Email critical dates to client — '+address,
+      title: 'Email critical dates to client — '+name,
       description: clientBody,
       gmailUrl: 'https://mail.google.com/mail/?view=cm&su='+
         encodeURIComponent('Critical Dates — '+address)+
@@ -8674,7 +8684,7 @@ function _fireMentorStageTask(deal, oldStage, newStage){
       if(!ms) continue;
       mentorsNotified.add(mUid);
       Store.createTask({
-        title: '📋 Mentee deal → '+newStage+' — '+addr,
+        title: '📋 Mentee deal → '+newStage+' — '+_taskHeadlineName(deal),
         description: 'Your mentee '+advisorName+' has moved a deal to the '+newStage+' stage.'
           +(oldStage?'\n\nPrevious stage: '+oldStage:'')
           +'\nNew stage: '+newStage
@@ -9907,7 +9917,7 @@ async function _vpSigFinalize(id){
     }
     // Counter-sign task (notifies the advisor; carries the signed PDF)
     await Store.createTask({
-      title:'✍️ Counter-sign listing agreement — '+(addr||s.projectName||''),
+      title:'✍️ Counter-sign listing agreement — '+((deal&&deal.projectName)||addr||s.projectName||''),
       description:(s.signerName||'The client')+' e-signed the listing agreement via their video proposal.\n\n□ Review the signed agreement\n□ Counter-sign\n□ Save the fully-executed copy to the deal\n□ Confirm listing is live\n\nSigned copy: '+(url||'(open Video Proposals to view)'),
       assignedTo: deal?deal.advisorUid:(prop.advisorUid||currentUser.uid),
       assignedToName: deal?(deal.advisorName||''):(prop.advisorName||''),
@@ -9919,7 +9929,7 @@ async function _vpSigFinalize(id){
     });
     if(deal){
       await Store.createTask({
-        title:'🆕 New listing kickoff — '+addr,
+        title:'🆕 New listing kickoff — '+_taskHeadlineName(deal),
         description:'Listing agreement signed — kick off the new listing for '+addr+'.\n\n□ Order signage\n□ Set up marketing (photos/video, MLS, web)\n□ Confirm listing price & commission\n□ Enter critical dates / listing expiration\n□ Notify the team',
         assignedTo: deal.advisorUid||null, assignedToName: deal.advisorName||'', assignedToEmail: deal.advisorEmail||'',
         dealId: deal.id, dealAddress: addr, dueDate: due, status:'pending', taskType:'new_listing',
@@ -24631,7 +24641,7 @@ window.applyTaskAutomation = async function(dealId, key){
     const a=_taResolveAssignee(token, deal);
     const dd=(()=>{ const d=new Date(); d.setDate(d.getDate()+dueDays); return d.toISOString().slice(0,10); })();
     const obj={
-      title: base + (addr?` — ${addr}`:''),
+      title: base + (addr?` — ${_taskHeadlineName(deal)}`:''),
       taskBase: base, autoKey: key, autoLabel: cfg.label, auto:true,
       assignedTo:a.assignedTo, assignedToName:a.assignedToName, assignedToEmail:a.assignedToEmail,
       dealId:deal.id, dealAddress:addr, dealName:deal.projectName||addr,
