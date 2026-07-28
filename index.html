@@ -32400,8 +32400,162 @@ async function claimLead(leadId){
   if(!lead.research && lead.status==='New' && confirm('Run the AI agent now? (research + outreach draft + cadence)')){
     runLeadAgent(leadId);
   }
+  // Auto-prompt: right after claiming, offer to add this lead to the CRM +
+  // tag it into groups — unless it's already linked to a CRM contact (the
+  // enrich step above may have just matched it).
+  const _claimed = _leadById(leadId);
+  if(_claimed && !_claimed.crmContactId){
+    setTimeout(()=>{ const f=_leadById(leadId); if(f && !f.crmContactId) openLeadToCRMModal(leadId); }, 250);
+  }
 }
 window.claimLead = claimLead;
+
+// ── Convert a lead → CRM contact (+ group tagging) ───────────────────────────
+// Opens a lightweight modal pre-filled from the lead. Creates a new CRM contact
+// (or updates/links an existing match), tags it into the chosen groups, and
+// links the contact back onto the lead (so the "🔗 ALREADY IN OUR CRM" box
+// shows). Does NOT touch the deal pipeline — that's the separate "Promote to
+// Deal" button.
+function openLeadToCRMModal(leadId){
+  const l=_leadById(leadId); if(!l){ showToast('Lead not found','error'); return; }
+  document.getElementById('lead-crm-modal')?.remove();
+  // Prefer the explicitly-linked contact; otherwise a fuzzy email/name match.
+  let existing = l.crmContactId ? (allContacts||[]).find(c=>c.id===l.crmContactId) : null;
+  if(!existing){ try{ existing = _crmFindContact(l.email, l.name); }catch(e){} }
+  const nm = _crmParseName(l.name||'');
+  const firstName = existing?.firstName || nm.firstName;
+  const lastName  = existing?.lastName  || nm.lastName;
+  const email   = existing?.email   || l.email   || '';
+  const phone   = existing?.phone   || l.phone   || '';
+  const company = existing?.company || l.company || '';
+  const preGroups = new Set(existing?.groups||[]);
+  const visGroups = (allCRMGroups||[]).filter(g=> typeof _isGroupVisible==='function' ? _isGroupVisible(g) : true);
+  const esc=_leadEsc;
+  const groupsHtml = visGroups.length ? visGroups.map(g=>`
+    <label class="flex items-center gap-1.5 cursor-pointer bg-white border rounded-lg px-2.5 py-1.5 hover:bg-gray-50">
+      <input type="checkbox" value="${g.id}" ${preGroups.has(g.id)?'checked':''} class="accent-emerald-600"/>
+      <span class="inline-block w-2.5 h-2.5 rounded-full" style="background:${g.color||'#e5e7eb'}"></span>
+      <span class="text-sm text-gray-700">${esc(g.emoji||'')} ${esc(g.name)}${g.visibility==='private'?' 🔒':''}</span>
+    </label>`).join('')
+    : '<span class="text-xs text-gray-400 italic">No groups yet — type a name below to create your first one.</span>';
+  const wrap=document.createElement('div');
+  wrap.id='lead-crm-modal';
+  wrap.className='fixed inset-0 z-[60] flex items-center justify-center bg-black/30 p-4';
+  wrap.innerHTML=`<div class="bg-white rounded-xl shadow-2xl w-full overflow-y-auto" style="max-width:520px;max-height:92vh">
+    <div class="bg-gray-900 text-white px-5 py-3 rounded-t-xl flex justify-between items-center">
+      <span class="font-bold">${existing?'🏷️ CRM contact & groups':'➕ Add lead to CRM'}</span>
+      <button onclick="document.getElementById('lead-crm-modal').remove()" class="text-gray-300 hover:text-white">✕</button>
+    </div>
+    <div class="px-5 py-4 space-y-3">
+      ${existing
+        ? `<div class="bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2 text-xs text-emerald-800">🔗 Already in the CRM — updating <b>${esc([existing.firstName,existing.lastName].filter(Boolean).join(' ')||existing.email||'this contact')}</b>. New groups are added; existing details are kept.</div>`
+        : `<div class="text-xs text-gray-500">Creates a CRM contact from this lead and tags it into the groups you pick. This won't create a deal.</div>`}
+      <div class="grid grid-cols-2 gap-2">
+        <div><label class="block text-xs font-medium text-gray-600 mb-1">First name</label><input id="lcrm-first" value="${esc(firstName)}" class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-200"/></div>
+        <div><label class="block text-xs font-medium text-gray-600 mb-1">Last name</label><input id="lcrm-last" value="${esc(lastName)}" class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-200"/></div>
+      </div>
+      <div><label class="block text-xs font-medium text-gray-600 mb-1">Email</label><input id="lcrm-email" value="${esc(email)}" class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-200"/></div>
+      <div class="grid grid-cols-2 gap-2">
+        <div><label class="block text-xs font-medium text-gray-600 mb-1">Phone</label><input id="lcrm-phone" value="${esc(phone)}" class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-200"/></div>
+        <div><label class="block text-xs font-medium text-gray-600 mb-1">Company</label><input id="lcrm-company" value="${esc(company)}" class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-200"/></div>
+      </div>
+      <div>
+        <label class="block text-xs font-medium text-gray-600 mb-1">Groups</label>
+        <div id="lcrm-groups-wrap" class="flex flex-wrap gap-2 p-3 border rounded-lg bg-gray-50 min-h-10">${groupsHtml}</div>
+        <div class="flex gap-2 mt-2">
+          <input id="lcrm-newgroup" placeholder="New group name…" class="flex-1 border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-200" onkeydown="if(event.key==='Enter'){event.preventDefault();window._leadCRMQuickGroup();}"/>
+          <button onclick="window._leadCRMQuickGroup()" class="text-xs border border-emerald-300 text-emerald-700 rounded-lg px-3 py-2 hover:bg-emerald-50 whitespace-nowrap">+ Create &amp; tag</button>
+        </div>
+      </div>
+    </div>
+    <div class="px-5 pb-5 flex gap-2">
+      <button onclick="window.saveLeadToCRM('${l.id}')" class="flex-1 bg-emerald-600 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-emerald-700">${existing?'Save & tag groups':'Add to CRM'}</button>
+      <button onclick="document.getElementById('lead-crm-modal').remove()" class="px-4 border rounded-lg py-2.5 text-sm text-gray-600">Cancel</button>
+    </div>
+  </div>`;
+  document.body.appendChild(wrap);
+  wrap.addEventListener('mousedown', e=>{ if(e.target===wrap) wrap.remove(); });
+  setTimeout(()=>document.getElementById('lcrm-first')?.focus(),50);
+}
+window.openLeadToCRMModal = openLeadToCRMModal;
+
+// Inline "create a group on the fly" from inside the add-to-CRM modal.
+window._leadCRMQuickGroup = async function(){
+  const inp=document.getElementById('lcrm-newgroup'); if(!inp) return;
+  const name=(inp.value||'').trim(); if(!name){ inp.focus(); return; }
+  const wrapEl=document.getElementById('lcrm-groups-wrap'); if(!wrapEl) return;
+  const addCheckbox=(g)=>{
+    const ph=wrapEl.querySelector('span.italic'); if(ph) ph.remove();
+    const existingBox=wrapEl.querySelector(`input[value="${g.id}"]`);
+    if(existingBox){ existingBox.checked=true; return; }
+    const lbl=document.createElement('label');
+    lbl.className='flex items-center gap-1.5 cursor-pointer bg-white border rounded-lg px-2.5 py-1.5 hover:bg-gray-50';
+    lbl.innerHTML=`<input type="checkbox" value="${g.id}" checked class="accent-emerald-600"/><span class="inline-block w-2.5 h-2.5 rounded-full" style="background:${g.color||'#e5e7eb'}"></span><span class="text-sm text-gray-700">${_leadEsc(g.emoji||'')} ${_leadEsc(g.name)}</span>`;
+    wrapEl.appendChild(lbl);
+  };
+  const dup=(allCRMGroups||[]).find(g=>(g.name||'').toLowerCase().trim()===name.toLowerCase());
+  if(dup){ addCheckbox(dup); inp.value=''; showToast('That group already existed — tagged it','info'); return; }
+  try{
+    const {collection, addDoc}=_fbFns;
+    const data={ name, emoji:'👥', color:'#dcfce7', textColor:'#166534', description:'', visibility:'public', allowedUsers:[], createdAt:Date.now(), createdBy:currentUser?.uid||'' };
+    const ref=await addDoc(collection(_fbDb,'crmGroups'), data);
+    if(!(allCRMGroups||[]).some(g=>g.id===ref.id)) allCRMGroups.push({id:ref.id,...data});
+    addCheckbox({id:ref.id,...data});
+    inp.value='';
+    showToast(`Group "${name}" created ✓`,'success');
+  }catch(e){ showToast('Could not create group — '+(e.message||e),'error'); }
+};
+
+// Save handler for the add-to-CRM modal.
+window.saveLeadToCRM = async function(leadId){
+  const l=_leadById(leadId); if(!l){ showToast('Lead not found','error'); return; }
+  const firstName=(document.getElementById('lcrm-first')?.value||'').trim();
+  const lastName =(document.getElementById('lcrm-last')?.value||'').trim();
+  if(!firstName && !lastName){ showToast('Name is required','error'); return; }
+  const email=(document.getElementById('lcrm-email')?.value||'').trim().toLowerCase();
+  const phoneRaw=(document.getElementById('lcrm-phone')?.value||'').trim();
+  const phone= window._fmtPhone ? window._fmtPhone(phoneRaw) : phoneRaw;
+  const company=(document.getElementById('lcrm-company')?.value||'').trim();
+  const groups=[...document.querySelectorAll('#lcrm-groups-wrap input[type=checkbox]:checked')].map(el=>el.value);
+  const {doc, addDoc, updateDoc, collection}=_fbFns;
+  // Resolve an existing contact: linked id first, then a fuzzy email/name match.
+  let existing = l.crmContactId ? (allContacts||[]).find(c=>c.id===l.crmContactId) : null;
+  if(!existing){ try{ existing=_crmFindContact(email, [firstName,lastName].filter(Boolean).join(' ')); }catch(e){} }
+  const mcPending = !!(email && APP_CONFIG.mailchimp?.listId);
+  try{
+    let contactId;
+    if(existing){
+      contactId=existing.id;
+      const mergedGroups=[...new Set([...(existing.groups||[]), ...groups])];
+      const patch={ groups:mergedGroups, updatedAt:Date.now() };
+      // Fill blank fields only — never overwrite data already in the CRM.
+      if(!existing.firstName && firstName) patch.firstName=firstName;
+      if(!existing.lastName  && lastName)  patch.lastName=lastName;
+      if(!existing.email && email){ patch.email=email; if(mcPending) patch.mailchimpPendingSync=true; }
+      if(!existing.phone   && phone)   patch.phone=phone;
+      if(!existing.company && company) patch.company=company;
+      await updateDoc(doc(_fbDb,'contacts',contactId), patch);
+    } else {
+      const data={
+        firstName, lastName, email, phone, company,
+        source:'Lead — converted', groups, linkedDeals:[],
+        createdAt:Date.now(), updatedAt:Date.now(), createdBy:currentUser?.uid||'',
+        ...(mcPending ? { mailchimpPendingSync:true } : {}),
+      };
+      const ref=await addDoc(collection(_fbDb,'contacts'), data);
+      contactId=ref.id;
+      if(!(allContacts||[]).some(c=>c.id===contactId)) allContacts.push({id:contactId,...data});
+    }
+    const contactName=[firstName,lastName].filter(Boolean).join(' ')||email||'Contact';
+    await _leadUpdate(leadId, { crmContactId:contactId, crmContactName:contactName, crmMatchChecked:true });
+    const grpNames=groups.map(id=>(allCRMGroups.find(g=>g.id===id)||{}).name).filter(Boolean);
+    await _leadLog(leadId, (existing?'Linked to CRM contact':'Added to CRM as a new contact')+(grpNames.length?' · groups: '+grpNames.join(', '):''));
+    document.getElementById('lead-crm-modal')?.remove();
+    showToast(existing?'✓ CRM contact updated & tagged':'✓ Added to CRM','success');
+    // The leads snapshot re-renders the open panel, so the "🔗 ALREADY IN OUR
+    // CRM" box appears automatically — no manual refresh needed.
+  }catch(e){ showToast('Could not save to CRM — '+(e.message||e),'error'); }
+};
 
 // ── Create lead ─────────────────────────────────────────────────────────────
 async function createLead(data, runAgent){
@@ -32614,6 +32768,9 @@ function renderLeadPanel(id){
         ${l.status==='New'||l.agentError?`<button onclick="runLeadAgent('${l.id}')" class="text-xs bg-amber-500 text-white font-semibold rounded-lg px-3 py-1.5 hover:bg-amber-600">🤖 ${l.agentError?'Retry agent':'Run AI agent'}</button>`:''}
         ${cad?`<button onclick="toggleLeadCadence('${l.id}')" class="text-xs border rounded-lg px-3 py-1.5 hover:bg-gray-50">${cad.active?'⏸ Pause cadence':'▶️ Resume cadence'}</button>`:''}
         ${!l.replyDetectedAt&&cad?`<button onclick="markLeadReplied('${l.id}')" class="text-xs border border-violet-300 text-violet-700 rounded-lg px-3 py-1.5 hover:bg-violet-50">💬 They replied</button>`:''}
+        ${l.crmContactId
+          ? `<button onclick="openLeadToCRMModal('${l.id}')" class="text-xs border border-emerald-300 text-emerald-700 rounded-lg px-3 py-1.5 hover:bg-emerald-50">🏷️ CRM groups</button>`
+          : `<button onclick="openLeadToCRMModal('${l.id}')" class="text-xs bg-emerald-600 text-white font-semibold rounded-lg px-3 py-1.5 hover:bg-emerald-700">➕ Add to CRM</button>`}
         <button onclick="promoteLeadToDeal('${l.id}')" class="text-xs bg-green-600 text-white font-semibold rounded-lg px-3 py-1.5 hover:bg-green-700">🚀 Promote to Deal</button>
         ${l.status!=='Dead'?`<button onclick="markLeadDead('${l.id}')" class="text-xs border border-red-200 text-red-600 rounded-lg px-3 py-1.5 hover:bg-red-50">💀 Dead</button>`:''}
       </div>
