@@ -379,6 +379,54 @@ body {
   .board-scroll { flex: none; overflow: visible; }
 }
 
+/* ── Pipeline card-grid view (elc-v415) ─────────────── */
+.pipeline-grid-inner {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: .75rem;
+  align-content: start;
+}
+@media (max-width: 767px) {
+  .pipeline-grid-inner { grid-template-columns: 1fr; }
+}
+/* View-mode segmented toggle */
+.pv-toggle {
+  display: inline-flex;
+  border: 1px solid #d1d5db;
+  border-radius: .55rem;
+  overflow: hidden;
+  background: #fff;
+}
+.pv-seg {
+  display: inline-flex;
+  align-items: center;
+  gap: .35rem;
+  font-size: .8rem;
+  font-weight: 600;
+  color: #6b7280;
+  padding: .4rem .8rem;
+  background: #fff;
+  border: none;
+  cursor: pointer;
+  transition: background .15s, color .15s;
+  line-height: 1;
+}
+.pv-seg + .pv-seg { border-left: 1px solid #e5e7eb; }
+.pv-seg:hover { background: #f3f4f6; }
+.pv-seg.active { background: var(--brand-black, #111); color: #fff; }
+.pv-seg.active:hover { background: var(--brand-black, #111); }
+.pv-seg svg { width: 14px; height: 14px; flex-shrink: 0; }
+.pv-sort-select {
+  font-size: .8rem;
+  padding: .4rem .6rem;
+  border: 1px solid #d1d5db;
+  border-radius: .5rem;
+  background: #fff;
+  color: #111;
+  cursor: pointer;
+  outline: none;
+}
+
 /* ── Upload zone ────────────────────────────────── */
 .upload-zone {
   border: 2px dashed var(--border);
@@ -14338,6 +14386,65 @@ function viewBoard(){
         style="font-size:.75rem;padding:.25rem .6rem;border-radius:.4rem;background:#fee2e2;color:#dc2626;border:none;cursor:pointer;font-weight:600">✕ Clear</button>` : ''}
     </div>` : '';
 
+  // ── View mode: kanban board vs sortable card grid (elc-v415) ────────────
+  const _pvMode  = (localStorage.getItem('pipelineViewMode') === 'grid') ? 'grid' : 'board';
+  const _pvSort  = localStorage.getItem('pipelineGridSort')  || 'added-new';
+  const _pvStage = localStorage.getItem('pipelineGridStage') || '';
+
+  const _pvSortOpts = [
+    ['added-new','Newest added'],
+    ['added-old','Oldest added'],
+    ['price-hi','Price: High → Low'],
+    ['price-lo','Price: Low → High'],
+    ['close-soon','Close date: Soonest'],
+    ['days-most','Days in stage: Most'],
+  ];
+  const _pvGridControls = _pvMode==='grid' ? `
+      <div style="display:flex;align-items:center;gap:.4rem;flex-wrap:wrap">
+        <span style="font-size:.72rem;font-weight:700;color:#9ca3af;text-transform:uppercase;letter-spacing:.03em">Sort</span>
+        <select class="pv-sort-select" title="Sort cards" onchange="setPipelineSort(this.value)">
+          ${_pvSortOpts.map(([v,l])=>`<option value="${v}" ${v===_pvSort?'selected':''}>${l}</option>`).join('')}
+        </select>
+        <span style="font-size:.72rem;font-weight:700;color:#9ca3af;text-transform:uppercase;letter-spacing:.03em;margin-left:.35rem">Stage</span>
+        <select class="pv-sort-select" title="Filter by stage" onchange="setPipelineStageFilter(this.value)">
+          <option value="">All stages</option>
+          ${STAGES.map(s=>`<option value="${s}" ${s===_pvStage?'selected':''}>${s}</option>`).join('')}
+        </select>
+      </div>` : '';
+  const _pvControls = `
+      <div class="pv-toggle" role="group" aria-label="View mode">
+        <button type="button" class="pv-seg ${_pvMode==='board'?'active':''}" onclick="setPipelineView('board')" title="Kanban board">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="6" height="18" rx="1"/><rect x="10.5" y="3" width="6" height="12" rx="1"/><rect x="18" y="3" width="3" height="18" rx="1"/></svg>Board
+        </button>
+        <button type="button" class="pv-seg ${_pvMode==='grid'?'active':''}" onclick="setPipelineView('grid')" title="Sortable card grid">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>Cards
+        </button>
+      </div>
+      ${_pvGridControls}`;
+
+  // ── Build the sortable grid markup (used when _pvMode === 'grid') ────────
+  let _gridDeals = deals.slice();
+  if(_pvStage) _gridDeals = _gridDeals.filter(d => (STAGE_ALIAS[d.stage]||d.stage) === _pvStage);
+  {
+    const _price   = d => getDealPrice(d);
+    const _added   = d => (d.createdAt || d.stageEnteredAt || 0);
+    const _closeTs = d => d.closeDate ? new Date(d.closeDate+'T00:00:00').getTime() : Infinity;
+    const _sorters = {
+      'added-new': (a,b)=>_added(b)-_added(a),
+      'added-old': (a,b)=>_added(a)-_added(b),
+      'price-hi':  (a,b)=>_price(b)-_price(a),
+      'price-lo':  (a,b)=>_price(a)-_price(b),
+      'close-soon':(a,b)=>_closeTs(a)-_closeTs(b),
+      'days-most': (a,b)=>daysInStage(b)-daysInStage(a),
+    };
+    _gridDeals.sort(_sorters[_pvSort] || _sorters['added-new']);
+  }
+  const gridHtml = `<div id="pipeline-grid" class="board-scroll" style="padding-bottom:1rem">
+      ${_gridDeals.length
+        ? `<div class="pipeline-grid-inner">${_gridDeals.map(d=>renderCard(d,{showStage:true})).join('')}</div>`
+        : `<div style="text-align:center;color:#9ca3af;padding:3rem 1rem;font-size:.9rem">No deals${_pvStage?` in “${_pvStage}”`:''} to show.</div>`}
+    </div>`;
+
   setContent(`
     <div class="board-fill">
     <div style="flex:0 0 auto">
@@ -14347,6 +14454,7 @@ function viewBoard(){
         ${currentUser.isAdmin ? `<p class="text-sm text-gray-500 mt-0.5">${deals.length} deal${deals.length!==1?'s':''} ${_filterAdvisorName ? '· '+_filterAdvisorName : 'across all advisors'}</p>` : ''}
       </div>
       <div style="display:flex;align-items:center;gap:.75rem;flex-wrap:wrap">
+        ${_pvControls}
         <div id="deal-search-wrap" style="position:relative">
           <input id="deal-search-input" type="text" autocomplete="off" placeholder="Search deals…"
             oninput="_dealSearch(this.value)" onfocus="_dealSearch(this.value)" onkeydown="_dealSearchKey(event)"
@@ -14392,7 +14500,7 @@ function viewBoard(){
     })()}
     ${kpiBar}
     </div>
-    <div id="pipeline-kanban" class="board-scroll">
+    ${_pvMode==='grid' ? gridHtml : `<div id="pipeline-kanban" class="board-scroll">
       <div class="board-row">
       ${STAGES.map(stage=>{
         const allSd=(byStage[stage]||[]).slice().sort(_boardOrderCmp);
@@ -14451,18 +14559,40 @@ function viewBoard(){
           </div>`;
       }).join('')}
       </div>
-    </div>
+    </div>`}
     </div>
   `);
-  // Render mobile pipeline list (shown on small screens)
-  if(window.renderMobilePipeline) renderMobilePipeline(deals, STAGES, STAGE_ALIAS);
+  // Render mobile pipeline list (shown on small screens) — board mode only.
+  // In grid mode the card grid is responsive (1-col on mobile), so clear the
+  // persistent mobile-list container to avoid a duplicate list underneath.
+  if(_pvMode==='board'){
+    if(window.renderMobilePipeline) renderMobilePipeline(deals, STAGES, STAGE_ALIAS);
+  } else {
+    const _mob = document.getElementById('pipeline-mobile'); if(_mob) _mob.innerHTML='';
+  }
 
   // Attach delegated click handler — one listener for all cards instead of inline onclick
   const kanban = document.getElementById('pipeline-kanban');
   if(kanban) kanban.addEventListener('click', _kanbanClickDelegate);
+  const grid = document.getElementById('pipeline-grid');
+  if(grid) grid.addEventListener('click', _kanbanClickDelegate);
 }
 
-function renderCard(deal){
+// ── Pipeline view-mode + grid sort/filter controls (elc-v415) ──────────────
+window.setPipelineView = function(mode){
+  try{ localStorage.setItem('pipelineViewMode', mode==='grid'?'grid':'board'); }catch(e){}
+  viewBoard();
+};
+window.setPipelineSort = function(val){
+  try{ localStorage.setItem('pipelineGridSort', val); }catch(e){}
+  viewBoard();
+};
+window.setPipelineStageFilter = function(val){
+  try{ localStorage.setItem('pipelineGridStage', val||''); }catch(e){}
+  viewBoard();
+};
+
+function renderCard(deal, opts){
   const days    = daysInStage(deal);
   const dayCls  = days>45?'text-red-600 bg-red-100':days>21?'text-amber-600 bg-amber-100':'text-gray-400 bg-gray-100';
   const canDrag = currentUser.isAdmin||isDealAdvisor(deal,currentUser.uid);
@@ -14645,6 +14775,15 @@ function renderCard(deal){
     : '';
 
   const photoUrl = deal.primaryPhotoUrl || (photoFiles[deal.id]?.dataUrl) || '';
+
+  // ── Stage chip — shown only in the card-grid view, where cards aren't
+  //    grouped into stage columns (elc-v415). ──────────────────────────────
+  const stageChip = (opts && opts.showStage)
+    ? (()=>{ const _cs = STAGE_ALIAS[deal.stage] || deal.stage || '—';
+             const _c  = SC[_cs] || {hdr:'bg-gray-200',txt:'text-gray-700'};
+             return `<span class="inline-block ${_c.hdr} ${_c.txt} font-bold uppercase rounded-full px-2 py-0.5 mb-1.5" style="font-size:10px;letter-spacing:.04em">${_cs}</span>`; })()
+    : '';
+
   return `
     <div class="deal-card bg-white rounded-xl px-3 ${photoUrl?'pt-0':'pt-2.5'} pb-2 shadow-sm border border-white/80 hover:shadow-md transition select-none min-w-0"
       ${canDrag?`draggable="true" ondragstart="handleDragStart(event,'${deal.id}')"`:''}
@@ -14666,6 +14805,8 @@ function renderCard(deal){
         <div class="flex-1 min-w-0 text-xs font-semibold text-gray-800 leading-snug" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">${title}</div>
         <button data-action="edit-deal" data-deal-id="${deal.id}" data-stage="${st.replace(/"/g,'&quot;')}" class="text-gray-300 hover:text-gray-600 shrink-0 leading-none ml-1" title="Edit"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
       </div>
+
+      ${stageChip}
 
       ${currentUser.isAdmin?`<div class="text-xs text-blue-500 mb-1.5 font-medium" style="white-space:normal;line-height:1.4">${
         [deal.advisorName||deal.advisorEmail||'']
