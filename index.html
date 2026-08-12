@@ -2484,6 +2484,49 @@ function handleGiftConfirmAutomation(deal){
   });
 }
 
+// ── Auto-add critical dates to advisor + co-advisor Google Calendars (elc-v418) ──
+// Creates one all-day event per dated critical date on the ACTING user's primary
+// calendar, with the deal's advisor and every co-advisor added as attendees and
+// sendUpdates=all, so Google delivers the event onto each of their calendars. The
+// app only holds the acting user's calendar.events token, so inviting attendees is
+// how we reach co-advisors' calendars without domain-wide delegation.
+// Returns {created, dated, noToken} so the caller can fall back to click-to-add
+// links if the acting user hasn't enabled Calendar Editing.
+async function _autoCalendarCriticalDates(deal, dateRows, name, addr){
+  try{
+    const emails = new Set();
+    const advEmail=(deal.advisorEmail||allProfiles[deal.advisorUid]?.email||'').toLowerCase();
+    if(advEmail) emails.add(advEmail);
+    (deal.coAdvisors||[]).forEach(ca=>{ const e=(ca.email||allProfiles[ca.uid]?.email||'').toLowerCase(); if(e) emails.add(e); });
+    (deal.coAdvisorUids||[]).forEach(uid=>{ const e=(allProfiles[uid]?.email||'').toLowerCase(); if(e) emails.add(e); });
+    if(deal.coAdvisorUid){ const e=(deal.coAdvisorEmail||allProfiles[deal.coAdvisorUid]?.email||'').toLowerCase(); if(e) emails.add(e); }
+    const attendees=[...emails].map(email=>({email}));
+
+    const dated=(dateRows||[]).filter(r=>/^\d{4}-\d{2}-\d{2}$/.test(r.date||'')).slice(0,15);
+    if(!dated.length) return {created:0, dated:[]};
+
+    const token=localStorage.getItem('gcal_token');
+    const exp=parseInt(localStorage.getItem('gcal_token_exp')||'0');
+    if(!token || Date.now()>exp) return {created:0, dated, noToken:true};
+
+    let created=0;
+    for(const r of dated){
+      const next=(()=>{const d=new Date(r.date+'T12:00:00');d.setDate(d.getDate()+1);return d.toISOString().slice(0,10);})();
+      const body={
+        summary:'⚖️ '+r.item+' — '+name,
+        description:'Critical date for '+addr+'.'+(r.notes?('\n\n'+r.notes):'')+'\n\nAuto-added by the ELC Deal Dashboard when the deal went under contract.',
+        start:{date:r.date}, end:{date:next},
+        transparency:'transparent',
+        ...(attendees.length?{attendees}:{}),
+        reminders:{useDefault:false, overrides:[{method:'popup',minutes:1440},{method:'popup',minutes:4320}]},
+      };
+      try{ await window._calApiReq('POST','/calendars/primary/events?sendUpdates=all',body); created++; }
+      catch(ce){ console.warn('[auto-cal]',r.item,ce.message||ce); }
+    }
+    return {created, dated};
+  }catch(e){ console.warn('[_autoCalendarCriticalDates]',e); return {created:0, dated:[]}; }
+}
+
 async function handleDDAutomation(deal){
   const dueDate=n=>{const d=new Date();d.setDate(d.getDate()+n);return d.toISOString().slice(0,10);};
   const apiKey=APP_CONFIG.ai?.anthropicKey;
@@ -2671,24 +2714,50 @@ async function handleDDAutomation(deal){
       }).catch(e=>console.error('[DD-deposit-confirm]',e));
     }
 
-    // Task: Add critical dates to Google Calendar
-    const calLinks=dateRows.slice(0,10).map(r=>{
-      const parts=(r.date||'').split('-').map(Number);
-      if(parts.length<3||!parts[0])return'';
-      const pad=n=>String(n).padStart(2,'0');
-      const dt=parts[0]+''+pad(parts[1])+''+pad(parts[2]);
-      const url='https://calendar.google.com/calendar/r/eventedit?text='+encodeURIComponent(r.item+' — '+addr)+'&dates='+dt+'/'+dt+'&details='+encodeURIComponent((r.notes||'')+' | '+addr);
-      return '• '+r.item+' ('+r.date+'):\n  '+url;
-    }).filter(Boolean).join('\n\n');
+    // ── Auto-add all key critical dates to the advisor + co-advisor Google
+    //    Calendars (elc-v418). Replaces the old "click each link" task. ─────────
+    const _calRes = await _autoCalendarCriticalDates(deal, dateRows, _taskHeadlineName(deal), addr);
+    if(_calRes.created>0){
+      showToast('📅 '+_calRes.created+' critical date'+(_calRes.created!==1?'s':'')+' added to advisor + co-advisor calendars','success',6000);
+    } else if(_calRes.noToken && _calRes.dated.length){
+      // Acting user hasn't enabled Calendar Editing — fall back to click-to-add
+      // links so the dates are never silently lost.
+      const calLinks=_calRes.dated.slice(0,12).map(r=>{
+        const p=(r.date||'').split('-').map(Number); if(p.length<3||!p[0])return'';
+        const pad=n=>String(n).padStart(2,'0'); const dt=p[0]+''+pad(p[1])+''+pad(p[2]);
+        return '• '+r.item+' ('+r.date+'):\n  https://calendar.google.com/calendar/r/eventedit?text='+encodeURIComponent(r.item+' — '+addr)+'&dates='+dt+'/'+dt+'&details='+encodeURIComponent((r.notes||'')+' | '+addr);
+      }).filter(Boolean).join('\n\n');
+      if(calLinks){
+        await Store.createTask({
+          title:'Add critical dates to Google Calendar — '+_taskHeadlineName(deal),
+          description:'Auto-add needs Calendar Editing enabled (Calendar tab → Enable Calendar Editing). For now, click each link to add the date to your calendar:\n\n'+calLinks,
+          assignedTo:deal.advisorUid,assignedToName:deal.advisorName||deal.advisorEmail,
+          dealId:deal.id,dealAddress:deal.propertyAddress,dueDate:dueDate(1),status:'pending',
+          createdBy:currentUser?.uid||'system',createdByName:'Automation',createdAt:Date.now(),
+        });
+      }
+    }
 
-    if(calLinks){
+    // ── Krissy tracking task — copy of the PSA + critical dates for her list ────
+    {
+      const krissyEmail='krissy@thedirtdog.com';
+      const km=Object.entries(allProfiles).find(([,p])=>(p.email||'').toLowerCase()===krissyEmail);
+      const psaLink=deal.psaUrl||deal.contractUrl||remoteUrl||'';
+      const psaNm=deal.psaFileName||deal.contractFileName||('PSA — '+addr);
+      const kBody='New under-contract deal — please add it to your tracking list.\n\n'
+        +'Property: '+addr+'\nBuyer: '+buyerName+'  |  Price: '+price+'\nAdvisor: '+(deal.advisorName||deal.advisorEmail||'')+'\n\n'
+        +'CRITICAL DATES:\n'+datesSec+'\n\n'
+        +(escrowSec?('ESCROW AGENT:\n'+escrowSec+'\n\n'):'')
+        +(psaLink?('PSA document: '+psaLink+'\n'):'PSA is attached to the deal card.\n')
+        +(attachmentUrl?('Critical dates spreadsheet: '+attachmentUrl+'\n'):'');
       await Store.createTask({
-        title:'Add critical dates to Google Calendar — '+_taskHeadlineName(deal),
-        description:'Click each link to add a critical date to your Google Calendar:\n\n'+calLinks,
-        assignedTo:deal.advisorUid,assignedToName:deal.advisorName||deal.advisorEmail,
-        dealId:deal.id,dealAddress:deal.propertyAddress,dueDate:dueDate(1),status:'pending',
+        title:'🗂️ Add to Tracking List — '+_taskHeadlineName(deal)+' (Under Contract)',
+        description:kBody,
+        assignedTo:km?km[0]:'',assignedToName:km?(km[1].name||'Krissy'):'Krissy',assignedToEmail:krissyEmail,
+        dealId:deal.id,dealAddress:deal.propertyAddress,dueDate:dueDate(2),status:'pending',
         createdBy:currentUser?.uid||'system',createdByName:'Automation',createdAt:Date.now(),
-      });
+        ...(psaLink?{attachmentUrl:psaLink,attachmentName:psaNm}:(attachmentUrl?{attachmentUrl,attachmentName}:{})),
+      }).catch(e=>console.error('[DD-krissy-track]',e));
     }
 
     showToast('DD tasks created — critical dates extracted','success',5000);
