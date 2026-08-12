@@ -2714,50 +2714,24 @@ async function handleDDAutomation(deal){
       }).catch(e=>console.error('[DD-deposit-confirm]',e));
     }
 
-    // ── Auto-add all key critical dates to the advisor + co-advisor Google
-    //    Calendars (elc-v418). Replaces the old "click each link" task. ─────────
-    const _calRes = await _autoCalendarCriticalDates(deal, dateRows, _taskHeadlineName(deal), addr);
-    if(_calRes.created>0){
-      showToast('📅 '+_calRes.created+' critical date'+(_calRes.created!==1?'s':'')+' added to advisor + co-advisor calendars','success',6000);
-    } else if(_calRes.noToken && _calRes.dated.length){
-      // Acting user hasn't enabled Calendar Editing — fall back to click-to-add
-      // links so the dates are never silently lost.
-      const calLinks=_calRes.dated.slice(0,12).map(r=>{
-        const p=(r.date||'').split('-').map(Number); if(p.length<3||!p[0])return'';
-        const pad=n=>String(n).padStart(2,'0'); const dt=p[0]+''+pad(p[1])+''+pad(p[2]);
-        return '• '+r.item+' ('+r.date+'):\n  https://calendar.google.com/calendar/r/eventedit?text='+encodeURIComponent(r.item+' — '+addr)+'&dates='+dt+'/'+dt+'&details='+encodeURIComponent((r.notes||'')+' | '+addr);
-      }).filter(Boolean).join('\n\n');
-      if(calLinks){
-        await Store.createTask({
-          title:'Add critical dates to Google Calendar — '+_taskHeadlineName(deal),
-          description:'Auto-add needs Calendar Editing enabled (Calendar tab → Enable Calendar Editing). For now, click each link to add the date to your calendar:\n\n'+calLinks,
-          assignedTo:deal.advisorUid,assignedToName:deal.advisorName||deal.advisorEmail,
-          dealId:deal.id,dealAddress:deal.propertyAddress,dueDate:dueDate(1),status:'pending',
-          createdBy:currentUser?.uid||'system',createdByName:'Automation',createdAt:Date.now(),
-        });
-      }
-    }
+    // Task: Add critical dates to Google Calendar
+    const calLinks=dateRows.slice(0,10).map(r=>{
+      const parts=(r.date||'').split('-').map(Number);
+      if(parts.length<3||!parts[0])return'';
+      const pad=n=>String(n).padStart(2,'0');
+      const dt=parts[0]+''+pad(parts[1])+''+pad(parts[2]);
+      const url='https://calendar.google.com/calendar/r/eventedit?text='+encodeURIComponent(r.item+' — '+addr)+'&dates='+dt+'/'+dt+'&details='+encodeURIComponent((r.notes||'')+' | '+addr);
+      return '• '+r.item+' ('+r.date+'):\n  '+url;
+    }).filter(Boolean).join('\n\n');
 
-    // ── Krissy tracking task — copy of the PSA + critical dates for her list ────
-    {
-      const krissyEmail='krissy@thedirtdog.com';
-      const km=Object.entries(allProfiles).find(([,p])=>(p.email||'').toLowerCase()===krissyEmail);
-      const psaLink=deal.psaUrl||deal.contractUrl||remoteUrl||'';
-      const psaNm=deal.psaFileName||deal.contractFileName||('PSA — '+addr);
-      const kBody='New under-contract deal — please add it to your tracking list.\n\n'
-        +'Property: '+addr+'\nBuyer: '+buyerName+'  |  Price: '+price+'\nAdvisor: '+(deal.advisorName||deal.advisorEmail||'')+'\n\n'
-        +'CRITICAL DATES:\n'+datesSec+'\n\n'
-        +(escrowSec?('ESCROW AGENT:\n'+escrowSec+'\n\n'):'')
-        +(psaLink?('PSA document: '+psaLink+'\n'):'PSA is attached to the deal card.\n')
-        +(attachmentUrl?('Critical dates spreadsheet: '+attachmentUrl+'\n'):'');
+    if(calLinks){
       await Store.createTask({
-        title:'🗂️ Add to Tracking List — '+_taskHeadlineName(deal)+' (Under Contract)',
-        description:kBody,
-        assignedTo:km?km[0]:'',assignedToName:km?(km[1].name||'Krissy'):'Krissy',assignedToEmail:krissyEmail,
-        dealId:deal.id,dealAddress:deal.propertyAddress,dueDate:dueDate(2),status:'pending',
+        title:'Add critical dates to Google Calendar — '+_taskHeadlineName(deal),
+        description:'Click each link to add a critical date to your Google Calendar:\n\n'+calLinks,
+        assignedTo:deal.advisorUid,assignedToName:deal.advisorName||deal.advisorEmail,
+        dealId:deal.id,dealAddress:deal.propertyAddress,dueDate:dueDate(1),status:'pending',
         createdBy:currentUser?.uid||'system',createdByName:'Automation',createdAt:Date.now(),
-        ...(psaLink?{attachmentUrl:psaLink,attachmentName:psaNm}:(attachmentUrl?{attachmentUrl,attachmentName}:{})),
-      }).catch(e=>console.error('[DD-krissy-track]',e));
+      });
     }
 
     showToast('DD tasks created — critical dates extracted','success',5000);
@@ -6196,6 +6170,54 @@ async function _dispatchCriticalDatesTasks({vals, dealId, address, name, advUid,
       ...(attachmentUrl ? {attachmentUrl, attachmentName} : {}),
     }).catch(e=>console.error('[critical-dates-task-2]',e));
 
+    // ── Look up the deal for co-advisors + PSA link ────────────────────────────
+    const _deal = (typeof allDeals!=='undefined') ? (allDeals.find(d=>d.id===dealId)||null) : null;
+
+    // Task 3: Auto-add key critical dates to advisor + co-advisor Google Calendars
+    //         (elc-v418). Reaches co-advisors by adding them as invited attendees.
+    if(_deal){
+      const _dateFields=[
+        ['effectiveDate','Contract Effective Date'],
+        ['psaEffectiveDate','PSA Effective Date'],
+        ['titleCommitmentDate','Title Commitment Deadline'],
+        ['ddExpirationDate','Due Diligence Expiration'],
+        ['financingContingencyDate','Financing Contingency Deadline'],
+        ['closeDate','Closing Date'],
+      ];
+      const _calRows=_dateFields
+        .filter(([k])=>/^\d{4}-\d{2}-\d{2}$/.test(String(vals[k]||'')))
+        .map(([k,lbl])=>({item:lbl, date:String(vals[k]), notes:''}));
+      if(_calRows.length){
+        try{
+          const _r=await _autoCalendarCriticalDates(_deal, _calRows, name, address);
+          if(_r.created>0) showToast('📅 '+_r.created+' critical date'+(_r.created!==1?'s':'')+' added to advisor + co-advisor calendars','success',6000);
+          else if(_r.noToken) showToast('📅 Enable Calendar Editing (Calendar tab) to auto-add critical dates to your calendar','warning',6000);
+        }catch(ce){ console.warn('[critical-dates-calendar]',ce); }
+      }
+    }
+
+    // Task 4: Krissy tracking task — copy of the PSA + the critical dates list
+    {
+      const krissyEmail='krissy@thedirtdog.com';
+      const km=Object.entries(allProfiles||{}).find(([,p])=>(p.email||'').toLowerCase()===krissyEmail);
+      const psaLink=_deal?(_deal.psaUrl||_deal.contractUrl||''):'';
+      const psaNm=(_deal&&(_deal.psaFileName||_deal.contractFileName))||('PSA — '+address);
+      const kBody='New under-contract deal — please add it to your tracking list.\n\n'
+        +'Property: '+address+'\nAdvisor: '+(advName||'')+'\n\n'
+        +'CRITICAL DATES:\n'+bulletLines.join('\n')+'\n\n'
+        +(psaLink?('PSA document: '+psaLink+'\n'):'PSA is attached to the deal card.\n')
+        +(attachmentUrl?('Critical dates spreadsheet: '+attachmentUrl+'\n'):'');
+      const _kDue=new Date(Date.now()+2*86400000).toISOString().split('T')[0];
+      await Store.createTask({
+        ...taskBase,
+        title:'🗂️ Add to Tracking List — '+name+' (Under Contract)',
+        description:kBody,
+        assignedTo:km?km[0]:'', assignedToName:km?(km[1].name||'Krissy'):'Krissy', assignedToEmail:krissyEmail,
+        dueDate:_kDue,
+        ...(psaLink?{attachmentUrl:psaLink,attachmentName:psaNm}:(attachmentUrl?{attachmentUrl,attachmentName}:{})),
+      }).catch(e=>console.error('[critical-dates-krissy]',e));
+    }
+
   } catch(e){ console.error('[_dispatchCriticalDatesTasks]',e); }
 }
 window._dispatchCriticalDatesTasks = _dispatchCriticalDatesTasks;
@@ -8440,7 +8462,8 @@ function fireAutomations(deal, oldStage){
   // Phase 2: unify drag/stage-change with the Task Automation config for the
   // listing-lifecycle stages (Listing, LOI, Under Contract). The overlapping
   // legacy rule types are skipped in the loop below (see _TA_REPLACED_TYPES).
-  try { const _taKey = _taStageToKey(deal); if(_taKey && window.applyTaskAutomation) window.applyTaskAutomation(deal.id, _taKey); }
+  let _taManagedKey = null;
+  try { _taManagedKey = _taStageToKey(deal); if(_taManagedKey && window.applyTaskAutomation) window.applyTaskAutomation(deal.id, _taManagedKey); }
   catch(e){ console.warn('[taskAutomation hook]', e); }
   console.log('[fireAutomations] deal.stage='+deal.stage+' lostType='+_lt+' oldStage='+oldStage+' matching rules:', allAutomations.filter(r=>r.active&&autoStageMatches(r.stage,deal.stage,_lt)).map(r=>r.id+':'+r.type));
   const rules=allAutomations.filter(r=>r.active&&autoStageMatches(r.stage,deal.stage,_lt));
@@ -8448,7 +8471,8 @@ function fireAutomations(deal, oldStage){
   for(const rule of rules){
     const _key=deal.id+':'+rule.id;
     if(now-(_firedAutoLog.get(_key)||0)<30000) continue;
-    if(_TA_REPLACED_TYPES[rule.type]) continue; // superseded by Task Automation config (Phase 2)
+    if(_TA_REPLACED_TYPES[rule.type]) continue; // always superseded (listing/loi/dd)
+    if(_taIsPlainSkippable(rule, _taManagedKey)) continue; // plain-task rule now owned by the editable ⚡ set on this managed stage; rich types (invoice/DocuSign/AI/press/Gmail-draft) still fire
     // ── Persistent, per-entry idempotency guard ──────────────────────────────
     // The in-memory _firedAutoLog above only lives for the current browser tab,
     // so a page reload, a second open tab/device, or another teammate acting on
@@ -24712,6 +24736,9 @@ const _TA_NAME_HINTS = {
 // This is the built-in DEFAULT — the live config (TASK_AUTOMATIONS) is loaded
 // below and may be edited by admins on the Automations page (synced via Firestore).
 const TASK_AUTOMATIONS_DEFAULT = {
+  prospect: { label:'Prospect', terminal:false, tasks:[
+    ['Initial contact & qualify lead', _TA.ADV, 2],
+  ]},
   price_change: { label:'Price Change', terminal:false, tasks:[
     ['Reduce price on package & put new package on server', _TA.PAT, 2],
     ['Reduce Price on All Websites', _TA.KRISSY, 1],
@@ -24798,16 +24825,20 @@ const TASK_AUTOMATIONS_DEFAULT = {
     ['⏰ Check-in reminder — proposal still outstanding', _TA.ADV, 3],
     ['✉️ Draft follow-up email to client', _TA.ADV, 3],
   ]},
+  closing: { label:'Closing', terminal:false, tasks:[
+    ['Confirm closing date, time & location with all parties', _TA.ADV, 3],
+    ['Review closing statement / settlement figures', _TA.ADV, 2],
+    ['Confirm final walkthrough complete', _TA.ADV, 2],
+  ]},
+  // NOTE (elc-v421): the Sold DRAG set holds only the MANUAL closeout tasks.
+  // Wire confirmation / payout breakdown / approve commission (sold_wire_confirm),
+  // the closing gift (gift_confirm), and sign pickup (sign_pickup_confirm) are left
+  // to their RICH coded rules — plus the commission invoice (commission_invoice)
+  // and press release (press_release) — so those aren't duplicated here.
   sold: { label:'Sold Listing', terminal:true, tasks:[
     ['Send closing statement', _TA.KRISSY, 3],
     ['Remove from websites + archive Google Drive', _TA.KRISSY, 7],
-    ['Send thank-you email to client', _TA.ADV, 3],
-    ['Order closing gift for client', _TA.KRISSY, 5],
     ['Mark as Sold on Eshenbaugh Report + remove from Available Land', _TA.MKTG, 7],
-    ['Confirm wire received', _TA.MGR, 3],
-    ['Advisor payout breakdown', _TA.MGR, 3],
-    ['Approve commission payment', _TA.MGR, 3],
-    ['🪧 Pick up sign + take down Telzio', _TA.MKTG, 3],
   ]},
   uc_buyer_rep: { label:'Under Contract — Buyer Rep', terminal:false, tasks:[
     ['Remind advisor to verify deposit', _TA.KELLIE, 2],
@@ -24849,7 +24880,7 @@ const TASK_AUTOMATIONS_DEFAULT = {
   ]},
 };
 // Order shown in the dropdown (matches how Ryan listed them).
-const TASK_AUTOMATION_ORDER = ['price_change','fell_out','under_contract','listing_canceled','listing_renewed','begin_marketing','loi','new_listing','proposal_todo','sold','uc_buyer_rep','uc_seller_rep','expired_listing'];
+const TASK_AUTOMATION_ORDER = ['prospect','new_listing','loi','under_contract','uc_seller_rep','uc_buyer_rep','proposal_todo','begin_marketing','price_change','listing_renewed','closing','sold','fell_out','listing_canceled','expired_listing'];
 
 // ── Editable config: default merged with any admin-saved overrides ──────────
 function _mergeTaskAutomations(stored){
@@ -24892,6 +24923,7 @@ window.saveTaskAutomations = saveTaskAutomations;
    commission/payout flow). Under Contract picks the set by representation. */
 function _taStageToKey(deal){
   const s = String(deal && deal.stage || '');
+  if(/^prospect$/i.test(s)) return 'prospect';
   if(/^listing$/i.test(s)) return 'new_listing';
   if(/^loi$/i.test(s))     return 'loi';
   if(/due.?diligence|under.?contract/i.test(s)){
@@ -24899,11 +24931,37 @@ function _taStageToKey(deal){
     if(deal.representation)             return 'uc_seller_rep';
     return 'under_contract';
   }
+  if(/^closing$/i.test(s)) return 'closing';
+  // Won / Sold columns → the (terminal) Sold checklist set.
+  if(typeof isWonStage === 'function' ? isWonStage(s) : /closed.?won|^sold$/i.test(s)) return 'sold';
   return null;
+  // NOTE (elc-v421): Buyer Opportunities (rolling weekly-follow-up chain,
+  // handleBuyerOpportunityAutomation) and Lost / Terminated (AI listing-extension
+  // via contract_terminated) are intentionally left UNMAPPED — their behavior is
+  // richer than a plain checklist, so they stay coded rather than being flattened.
 }
 // Legacy fireAutomations rule types now superseded by the config for the
 // unified stages — skipped so drag doesn't create duplicate/old task lists.
 const _TA_REPLACED_TYPES = { listing:1, loi_research:1, dd_research:1 };
+// (elc-v421) Plain-task rule types whose tasks are now owned by the editable ⚡
+// drag set, so they are skipped ONLY on stages that HAVE a set (managed stages).
+// Rich types — commission_invoice, press_release, sold_wire_confirm,
+// sign_pickup_confirm, gift_confirm, contract_terminated, calendar/email/etc. —
+// are deliberately NOT here, so their documents/DocuSign/AI still fire on those
+// stages. `assign_task` is skipped on managed stages because the set replaces the
+// manual checklist there (it still fires normally on unmanaged stages).
+const _TA_MANAGED_SKIP_TYPES = { assign_task:1, prospect:1 };
+// True when a rule's PLAIN tasks are now owned by the editable ⚡ set on a managed
+// stage, so the rule should be skipped. Rich `assign_task` rules that generate a
+// Gmail draft (e.g. the Sold thank-you email) are preserved.
+function _taIsPlainSkippable(rule, managedKey){
+  if(!managedKey || !rule || !_TA_MANAGED_SKIP_TYPES[rule.type]) return false;
+  if(rule.type==='assign_task'){
+    const c=rule.config||{};
+    if(c.gmailDraft || c.gmailUrl || c.gmailSubject) return false; // keep rich (draft-generating) tasks
+  }
+  return true;
+}
 // Guards against the same automation being applied twice concurrently (the
 // Phase 2 hook can fire from multiple fireAutomations call sites per action).
 const _taInFlight = new Set();
@@ -25803,6 +25861,104 @@ window.deleteAdvisor = async (uid, name, email) => {
 };
 
 /* =======================================================
+   AUTOMATION AUDIT / MAP (admin) — elc-v420
+   One place to see, per Kanban column, everything that fires when a card is
+   dragged/saved into it: the editable Task Automation activity set AND any
+   rule-based stage automations. Flags true overlaps so duplicate task sets are
+   easy to spot and remove. Reads live data (allAutomations + TASK_AUTOMATIONS).
+   ======================================================= */
+// Rule types that CREATE tasks (used to detect two-system overlap).
+const _AUDIT_TASK_TYPES = new Set(['assign_task','dd_research','loi_research','proposal_todo','proposal_outstanding','contract_terminated','lost_listing','prospect','listing','sold_wire_confirm','sign_pickup_confirm','gift_confirm','commission_invoice','press_release']);
+// Handler types that should appear AT MOST ONCE per stage (two = real duplicate).
+// assign_task/note/email/toast/calendar are intentionally multi-instance, so excluded.
+const _AUDIT_SINGLE_TYPES = new Set(['dd_research','loi_research','proposal_todo','proposal_outstanding','contract_terminated','lost_listing','prospect','listing','sold_wire_confirm','commission_invoice','press_release','gift_confirm','sign_pickup_confirm']);
+
+function _renderAutomationAudit(){
+  const esc=s=>String(s||'').replace(/</g,'&lt;');
+  const stages=(typeof STAGES!=='undefined'&&STAGES.length)?STAGES:DEFAULT_STAGES;
+  const isSA=!!(currentUser&&currentUser.isSuperAdmin);
+  let overlapCount=0;
+  const cards=stages.map(stage=>{
+    const rules=(allAutomations||[]).filter(r=>r.active&&(()=>{try{return autoStageMatches(r.stage,stage,'');}catch(_){return r.stage===stage;}})());
+    // Task Automation set(s) that fire on drag into this column
+    let taKeys=[];
+    if(/due.?diligence|under.?contract/i.test(stage)){ taKeys=['uc_seller_rep','uc_buyer_rep','under_contract']; }
+    else { let k=null; try{ k=_taStageToKey({stage,representation:''}); }catch(_){}
+      if(k) taKeys=[k]; }
+    const taSets=taKeys.filter(k=>TASK_AUTOMATIONS&&TASK_AUTOMATIONS[k]).map(k=>({key:k,cfg:TASK_AUTOMATIONS[k]}));
+    const managed=taSets.length>0;
+    // A rule is "superseded" if always-replaced (listing/loi/dd) OR a plain-task
+    // type on a managed stage (the ⚡ set owns the checklist there).
+    const _isSkipped=r=>_TA_REPLACED_TYPES[r.type]||_taIsPlainSkippable(r, managed?taKeys[0]:null);
+    const firing=rules.filter(r=>!_isSkipped(r));
+    const superseded=rules.filter(r=>_isSkipped(r));
+    // Overlap detection
+    const firingTaskRules=firing.filter(r=>_AUDIT_TASK_TYPES.has(r.type));
+    const typeCounts={}; firing.forEach(r=>{ if(_AUDIT_SINGLE_TYPES.has(r.type)) typeCounts[r.type]=(typeCounts[r.type]||0)+1; });
+    const dupTypes=Object.entries(typeCounts).filter(([,n])=>n>1).map(([t])=>t);
+    const twoSystem=taSets.length>0&&firingTaskRules.length>0;
+    const overlap=dupTypes.length>0||twoSystem;
+    if(overlap) overlapCount++;
+
+    const taHtml=taSets.map(s=>{
+      const n=(s.cfg.tasks||[]).length;
+      return `<div class="flex items-center justify-between gap-2 py-1">
+        <div class="min-w-0"><span class="text-xs bg-indigo-50 text-indigo-600 px-1.5 py-0.5 rounded mr-1">⚡ drag set</span><span class="text-sm text-gray-700">${esc(s.cfg.label)}</span> <span class="text-xs text-gray-400">· ${n} activit${n===1?'y':'ies'}</span></div>
+        <button onclick="window.openStageActivitiesEditor('${s.key}')" class="text-xs text-blue-600 hover:underline shrink-0">Edit activities</button>
+      </div>`;
+    }).join('');
+
+    const ruleRow=(r,dim)=>`<div class="flex items-center justify-between gap-2 py-1 ${dim?'opacity-50':''}">
+        <div class="min-w-0">
+          <span class="text-xs font-bold uppercase text-gray-500 mr-1">${esc(r.type)}</span>
+          ${dim?'<span class="text-xs bg-amber-50 text-amber-600 px-1.5 py-0.5 rounded mr-1">↑ superseded</span>':''}
+          ${!dim&&_AUDIT_TASK_TYPES.has(r.type)?'<span class="text-xs bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded mr-1">creates tasks</span>':''}
+          <span class="text-sm text-gray-600">${esc((typeof autoSummary==='function'?autoSummary(r):'')||'').slice(0,90)}</span>
+        </div>
+        ${isSA?`<div class="flex gap-2 shrink-0">
+          <button onclick="openAutoModal('${r.id}')" class="text-xs text-blue-600 hover:underline">Edit</button>
+          <button onclick="confirmDeleteAuto('${r.id}')" class="text-xs text-red-400 hover:underline">Delete</button>
+        </div>`:''}
+      </div>`;
+
+    const rulesHtml=[...firing.map(r=>ruleRow(r,false)),...superseded.map(r=>ruleRow(r,true))].join('')
+      || '<div class="text-xs text-gray-400 py-1">No rule automations on this column.</div>';
+
+    const overlapBanner=overlap?`<div class="mt-2 text-xs bg-red-50 text-red-600 rounded-lg px-2.5 py-1.5">
+        ⚠️ Possible duplication: ${[
+          twoSystem?`a ⚡ drag set <b>and</b> ${firingTaskRules.length} task-creating rule${firingTaskRules.length!==1?'s':''} both fire here`:'',
+          dupTypes.length?`duplicate rule type${dupTypes.length!==1?'s':''}: ${dupTypes.map(esc).join(', ')}`:'',
+        ].filter(Boolean).join(' · ')}. Consider removing the redundant rule(s) so only the ⚡ drag set (or a single rule) remains.
+      </div>`:'';
+
+    return `<div class="border rounded-xl p-3 ${overlap?'border-red-200 bg-red-50/30':''}">
+      <div class="flex items-center gap-2 mb-1">
+        <span class="text-sm font-semibold text-gray-800">${esc(stage)}</span>
+        ${taSets.length?'<span class="text-xs text-indigo-500">⚡ drag set</span>':'<span class="text-xs text-gray-300">no drag set</span>'}
+        <span class="text-xs text-gray-400">· ${firing.length} active rule${firing.length!==1?'s':''}${superseded.length?` (+${superseded.length} superseded)`:''}</span>
+        ${overlap?'<span class="text-xs bg-red-100 text-red-600 px-1.5 py-0.5 rounded-full ml-auto">overlap</span>':''}
+      </div>
+      ${taHtml}
+      ${rulesHtml}
+      ${overlapBanner}
+    </div>`;
+  }).join('');
+
+  return `
+    <details class="bg-white rounded-2xl border p-5 mb-4" ${overlapCount?'open':''}>
+      <summary class="cursor-pointer select-none flex items-center gap-2">
+        <span class="text-base">🔎</span>
+        <h3 class="text-sm font-bold text-gray-700">Automation Audit — what fires on each column</h3>
+        <span class="text-xs px-2 py-0.5 rounded-full ml-1 ${overlapCount?'bg-red-100 text-red-600':'bg-green-100 text-green-700'}">${overlapCount?`${overlapCount} column${overlapCount!==1?'s':''} with possible duplicates`:'no overlaps found'}</span>
+      </summary>
+      <p class="text-xs text-gray-400 mt-2 mb-3">For every Kanban column, this shows the editable ⚡ drag task set (if any) and every rule automation that fires when a card lands there. Columns flagged <span class="text-red-500">overlap</span> have two task-creating automations firing — a common source of duplicate tasks. "Superseded" rules are already skipped by the ⚡ drag set and safe to leave or delete.</p>
+      <div class="grid gap-2 md:grid-cols-2">
+        ${cards}
+      </div>
+    </details>`;
+}
+
+/* =======================================================
    VIEW: AUTOMATIONS (admin)
    ======================================================= */
 function viewAutomations(){
@@ -25816,6 +25972,7 @@ function viewAutomations(){
       ${currentUser.isSuperAdmin?'<button onclick="openAutoModal(null)" class="brand-btn px-4 py-2 rounded-lg text-sm font-semibold">+ Add Rule</button>':''}
     </div>
     <span id="view-automations-marker" style="display:none"></span>
+    ${_renderAutomationAudit()}
     <!-- Task Automations editor — activities by stage -->
     <div class="bg-white rounded-2xl border p-5 mb-4">
       <div class="flex items-center gap-2 mb-1">
