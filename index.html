@@ -8379,8 +8379,25 @@ function fireAutomations(deal, oldStage){
   for(const rule of rules){
     const _key=deal.id+':'+rule.id;
     if(now-(_firedAutoLog.get(_key)||0)<30000) continue;
-    _firedAutoLog.set(_key,now);
     if(_TA_REPLACED_TYPES[rule.type]) continue; // superseded by Task Automation config (Phase 2)
+    // ── Persistent, per-entry idempotency guard ──────────────────────────────
+    // The in-memory _firedAutoLog above only lives for the current browser tab,
+    // so a page reload, a second open tab/device, or another teammate acting on
+    // the same deal could re-run this automation and create a DUPLICATE task set
+    // (this is what caused advisors to see doubled proposal/DD/etc. tasks).
+    // Fix: stamp the deal in Firestore with the stage-entry timestamp each rule
+    // last fired on, and skip if this exact rule already fired for this exact
+    // stage entry. Because `stageEnteredAt` changes every time a deal RE-enters a
+    // stage, a genuine re-entry still fires (new token) — only a repeat of the
+    // same entry is suppressed, and that holds across reloads and across clients.
+    const _entryToken = deal.stageEnteredAt || 0;
+    if(_entryToken && deal._autoFired && deal._autoFired[rule.id]===_entryToken) continue;
+    _firedAutoLog.set(_key,now);
+    if(_entryToken){
+      deal._autoFired = {...(deal._autoFired||{}), [rule.id]:_entryToken};
+      const _local=allDeals.find(d=>d.id===deal.id); if(_local) _local._autoFired=deal._autoFired;
+      try{ Store.updateDeal(deal.id,{_autoFired:deal._autoFired}); }catch(e){ console.warn('[autoFired stamp]',e); }
+    }
     const cfg=rule.config||{};
     switch(rule.type){
       case 'toast':
