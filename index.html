@@ -19410,6 +19410,8 @@ function viewTasks(){
   // Read from sessionStorage so filter persists across tab switches and Firestore re-renders
   const advisorFilter = isAdmin ? (sessionStorage.getItem('taskAdvisorFilter') || '') : '';
   const statusFilter  = sessionStorage.getItem('taskStatusFilter') || '';
+  // Group the pending "to do" list by property (default) vs a flat list
+  const groupByProp   = (sessionStorage.getItem('taskGroupBy') || 'property') === 'property';
 
   // Full admin mode sees all tasks; everyone else (advisors, staff, advisor/staff view) sees only assigned tasks
   const _allMyTasks = isAdmin ? allTasks : allTasks.filter(t=>t.assignedTo===uid);
@@ -19455,7 +19457,7 @@ function viewTasks(){
   };
 
   const canManage = t => isAdmin || isStaffView() || t.createdBy===uid;
-  const taskCard = (t, done=false) => `
+  const taskCard = (t, done=false, hideAddr=false) => `
     <div class="bg-white rounded-xl border p-4 flex gap-3 items-start ${urgency(t)} transition">
       <button onclick="toggleTask('${t.id}','${done?'pending':'complete'}')"
         class="mt-0.5 shrink-0 w-5 h-5 rounded border-2 ${done?'bg-blue-500 border-blue-500 text-white flex items-center justify-center':'border-gray-300 hover:border-blue-400'} text-xs">
@@ -19464,7 +19466,7 @@ function viewTasks(){
       <div class="flex-1 min-w-0">
         <div class="flex items-start gap-2 flex-wrap">
           <span class="text-sm font-medium ${done?'line-through text-gray-400':'text-gray-800'}">${t.title}</span>
-          ${t.dealAddress?`<a onclick="switchView('board')" class="text-xs text-blue-500 hover:underline cursor-pointer shrink-0">${t.dealAddress}</a>`:''}
+          ${t.dealAddress&&!hideAddr?`<a onclick="switchView('board')" class="text-xs text-blue-500 hover:underline cursor-pointer shrink-0">${t.dealAddress}</a>`:''}
         </div>
         ${t.description?`<div class="text-xs text-gray-500 mt-0.5">${(()=>{
   const esc=s=>s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
@@ -19489,6 +19491,63 @@ function viewTasks(){
       ${canManage(t)?`<button onclick="openTaskModal('${t.id}')" class="text-gray-300 hover:text-blue-500 text-base shrink-0">✏️</button>`:''}
       ${canManage(t)?`<button onclick="deleteTask('${t.id}')" class="text-gray-200 hover:text-red-500 text-sm shrink-0 mt-0.5">✕</button>`:''}
     </div>`;
+
+  // ── Group a task list by property (deal), rendering tasks as subtasks ──
+  // Tasks with no linked project fall into a trailing "No project" group.
+  const groupTasksByProperty = (list) => {
+    const dealLabel = (t) => {
+      if(t.dealId && typeof allDeals!=='undefined' && allDeals){
+        const d = allDeals.find(x=>x.id===t.dealId);
+        if(d) return d.projectName||d.propertyAddress||t.dealAddress||'Project';
+      }
+      return t.dealAddress||'';
+    };
+    const groups = new Map();   // key -> {label, tasks}
+    const noProp = [];
+    list.forEach(t=>{
+      const label = dealLabel(t);
+      const key = t.dealId || label.trim().toLowerCase();
+      if(!key){ noProp.push(t); return; }
+      if(!groups.has(key)) groups.set(key, {label: label||'Project', tasks:[]});
+      groups.get(key).tasks.push(t);
+    });
+    const earliestDue = ts => ts.map(x=>x.dueDate).filter(Boolean).sort()[0]||'';
+    const arr = [...groups.values()].sort((a,b)=>{
+      const da=earliestDue(a.tasks), db=earliestDue(b.tasks);
+      if(da&&db) return da<db?-1:da>db?1:0;
+      if(da) return -1;
+      if(db) return 1;
+      return String(a.label).localeCompare(String(b.label));
+    });
+    if(noProp.length) arr.push({label:'— No project —', tasks:noProp, _noProp:true});
+
+    const grpDueBadge = ts => {
+      const d = earliestDue(ts); if(!d) return '';
+      const diff = Math.ceil((new Date(d)-new Date())/86400000);
+      if(diff<0)  return `<span class="text-xs text-red-600 font-semibold shrink-0">⚠ Overdue</span>`;
+      if(diff===0)return `<span class="text-xs text-amber-600 font-semibold shrink-0">Due today</span>`;
+      if(diff<=2) return `<span class="text-xs text-amber-600 shrink-0">Next due ${diff}d</span>`;
+      return `<span class="text-xs text-gray-400 shrink-0">Next due ${fmtDate(d)}</span>`;
+    };
+    const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+    return `<div class="space-y-3 mb-6">${arr.map(g=>`
+      <div class="bg-white rounded-xl border overflow-hidden">
+        <details open>
+          <summary class="cursor-pointer select-none px-4 py-3 flex items-center justify-between gap-3 hover:bg-gray-50">
+            <div class="flex items-center gap-2 min-w-0">
+              <span class="text-base shrink-0">${g._noProp?'📋':'🏠'}</span>
+              <span class="font-semibold ${g._noProp?'text-gray-500':'text-gray-800'} truncate">${esc(g.label)}</span>
+              <span class="text-xs text-gray-400 shrink-0">${g.tasks.length} task${g.tasks.length!==1?'s':''}</span>
+            </div>
+            ${grpDueBadge(g.tasks)}
+          </summary>
+          <div class="ml-5 pl-3 pr-3 pb-3 border-l-2 border-gray-100 space-y-2">
+            ${g.tasks.map(t=>taskCard(t,false,true)).join('')}
+          </div>
+        </details>
+      </div>`).join('')}</div>`;
+  };
 
   // ── Admin-only per-person task analytics ─────────────────────────
   const taskAnalyticsHtml = isAdmin ? (()=>{
@@ -19631,6 +19690,10 @@ function viewTasks(){
         <option value="pending"  ${statusFilter==='pending'?'selected':''}>Pending</option>
         <option value="complete" ${statusFilter==='complete'?'selected':''}>Completed</option>
       </select>
+      <select onchange="sessionStorage.setItem('taskGroupBy',this.value);viewTasks()" class="border rounded-lg px-3 py-1.5 text-sm outline-none" title="How to arrange the pending to-do list">
+        <option value="property" ${groupByProp?'selected':''}>Group by property</option>
+        <option value="flat"     ${!groupByProp?'selected':''}>Flat list</option>
+      </select>
     </div>
 
     ${(showPending?pending:[]).length===0&&(showCompleted?completed:[]).length===0&&(showPending?delegated:[]).length===0?`
@@ -19638,9 +19701,11 @@ function viewTasks(){
       <div class="text-5xl mb-3">✅</div>
       <div class="font-medium text-gray-500">${myTasks.length===0&&delegated.length===0?'No tasks yet — create one above.':'No tasks match the selected filter.'}</div>
     </div>`:`
-    ${showPending&&pending.length>0?`<div class="space-y-2 mb-6">
+    ${showPending&&pending.length>0?(groupByProp
+      ? groupTasksByProperty(pending)
+      : `<div class="space-y-2 mb-6">
       ${pending.map(t=>taskCard(t,false)).join('')}
-    </div>`:''}
+    </div>`):''}
     ${showPending&&delegated.length>0?`
     <div class="mt-2 mb-6">
       <div class="flex items-center gap-2 mb-2">
