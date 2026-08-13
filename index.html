@@ -22913,8 +22913,8 @@ window._execManualMergeContacts = async () => {
 };
 
 // ── CRM Outreach Imports (updated nightly by daily-crm-outreach-sync task) ──
-const _CRM_OUTREACH_SYNC_DATE = '2026-08-08';
-const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-08-07_0","emailDate":"2026-08-07","emailSubject":"Fwd: Urgent - Lakeland, FL - I-4 & SR 33 Proposed Extension Amendment","attachmentNames":["2026-08-05--Second Amendment to Real Estate Purchase Agreement (Lakeland, FL).docx"],"recipientEmail":"aielloturner@aol.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"","propertyHint":"Lakeland I-4 & SR 33","matchedDealId":null,"imported":false,"skipped":false}];
+const _CRM_OUTREACH_SYNC_DATE = '2026-08-13';
+const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-08-12_0","emailDate":"2026-08-12","emailSubject":"Fwd: 3223 14th St Survey","attachmentNames":["Commercial Contract (CC-6) (version 1) (3) (1) (version 2).pdf","DD ADDENDUM (version 2).pdf","Compensation Agreement - Seller or Seller's Broker to Buyer's Broker (CASSB-1) (version 2) (2).pdf"],"recipientEmail":"vincent.crisci@gmail.com","recipientName":"Vincent Crisci","recipientFirstName":"Vincent","recipientLastName":"Crisci","companyName":"","propertyHint":"14th St","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-08-12_1","emailDate":"2026-08-12","emailSubject":"Fwd: LOI - 10568 Gandy Blvd","attachmentNames":["Pursuit Capabilities Brochure (April 2026).pdf","LOI - 10568 Gandy Blvd - Pursuit 8.12.26.pdf","LOI - 10568 Gandy Blvd - Pursuit 8.12.26.docx"],"recipientEmail":"ryan@snyderlawgroup.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Snyderlawgroup","propertyHint":"Gandy Blvd","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-08-12_2","emailDate":"2026-08-12","emailSubject":"Re: 5207 Palm River Rd \u2013 Land Listing","attachmentNames":["Listing Agmt 5207 Palm River Rd.docx"],"recipientEmail":"gpeterson.172@gmail.com","recipientName":"Graham Peterson","recipientFirstName":"Graham","recipientLastName":"Peterson","companyName":"","propertyHint":"Palm River Rd","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-08-12_3","emailDate":"2026-08-12","emailSubject":"Fwd: Lake Catherine Development Deal Info 8-11-2026","attachmentNames":["OM - Preserve at Lake Catherine (07.29.26).pdf","Court Order.pdf","FARBAR - Cornerstone $6.55M.pdf"],"recipientEmail":"ccarter@maurycarter.com","recipientName":"Conrad Carter","recipientFirstName":"Conrad","recipientLastName":"Carter","companyName":"Maurycarter","propertyHint":"Lake Catherine","matchedDealId":null,"imported":false,"skipped":false}];
 
 // ── Gmail Sync ───────────────────────────────────────────────────────
 let _GMAIL_SYNC_DATE;  // set at runtime by crmGmailSync; blank = never synced this session
@@ -27737,8 +27737,65 @@ function eosSave(key,val){
   }
 }
 
+// ── Scorecard hover tooltip ────────────────────────────────────────────────
+// A single body-appended floating tooltip. Any element carrying a data-sctip
+// attribute (its value is ready-to-render HTML) shows that HTML on hover. We
+// append to <body> so the tooltip is never clipped by the scorecard's
+// overflow-x containers. Listeners are installed once (idempotent).
+window._scEsc = s => String(s==null?'':s)
+  .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+// title + pre-escaped item strings → tooltip HTML (single-quoted styles only,
+// so the result is safe to embed inside a double-quoted data-sctip="...").
+window._scTipHtml = (title, items) => {
+  if(!items || !items.length) return '';
+  const head = "<div style='font-weight:700;margin-bottom:5px;font-size:12.5px'>"+window._scEsc(title)+"</div>";
+  const rows = items.slice(0,14).map(t=>"<div style='display:flex;gap:7px;padding:1px 0'><span style='opacity:.5'>•</span><span>"+t+"</span></div>").join('');
+  const more = items.length>14 ? "<div style='opacity:.6;margin-top:4px'>+ "+(items.length-14)+" more</div>" : '';
+  // The result lives inside a double-quoted data-sctip="..." attribute and is
+  // later re-parsed via innerHTML. Ampersand-escape so the already-escaped deal
+  // names (&lt; &amp; &quot;) survive the attribute decode as TEXT rather than
+  // being double-decoded back into live markup. Structural single-quoted tags
+  // stay intact (they carry no & and are legal inside a quoted attribute value).
+  return (head + rows + more).replace(/&/g,'&amp;');
+};
+window._initScTip = function(){
+  if(window.__scTipReady) return; window.__scTipReady = true;
+  const tip = document.createElement('div');
+  tip.id = 'sc-hover-tip';
+  tip.style.cssText = 'position:fixed;z-index:99999;pointer-events:none;background:#111827;color:#fff;'
+    + 'font-size:12px;line-height:1.5;padding:8px 11px;border-radius:9px;'
+    + 'box-shadow:0 12px 34px rgba(0,0,0,.30);max-width:300px;display:none';
+  const place = (el)=>{
+    const html = el.getAttribute('data-sctip');
+    if(!html){ tip.style.display='none'; return; }
+    tip.innerHTML = html;
+    tip.style.display = 'block';
+    const r = el.getBoundingClientRect();
+    const tw = tip.offsetWidth, th = tip.offsetHeight;
+    let top = r.top - th - 8;              // prefer above the cell
+    let left = r.left + r.width/2 - tw/2;  // centered horizontally
+    if(top < 6) top = r.bottom + 8;        // flip below if no room above
+    if(left < 6) left = 6;
+    if(left + tw > window.innerWidth - 6) left = window.innerWidth - tw - 6;
+    tip.style.top = top + 'px';
+    tip.style.left = left + 'px';
+  };
+  document.addEventListener('mouseover', e=>{
+    const el = e.target && e.target.closest && e.target.closest('[data-sctip]');
+    if(el) place(el);
+  });
+  document.addEventListener('mouseout', e=>{
+    const el = e.target && e.target.closest && e.target.closest('[data-sctip]');
+    if(el) tip.style.display = 'none';
+  });
+  // Never leave a tooltip floating detached during a scroll.
+  window.addEventListener('scroll', ()=>{ tip.style.display='none'; }, true);
+  document.body.appendChild(tip);
+};
+
 function viewEOS(sub='rocks'){
   window._eosSub = sub; // remember active sub-tab so live-sync re-renders don't reset to Rocks
+  if(window._initScTip) window._initScTip(); // ensure hover-tooltip listeners exist
   if(activeChart){ activeChart.destroy(); activeChart=null; }
   const uid=currentUser.uid, isAdmin=currentUser.isAdmin;
   const effectiveAdminGlobal = isAdmin && !adminViewAsAdvisor && !staffViewMode;
@@ -28158,15 +28215,34 @@ function viewEOS(sub='rocks'){
       const weekScore = Math.round(pts.reduce((a,b)=>a+b,0));
       const grade = weekGrade(weekScore);
 
+      // ── Hover tooltips: which deals/tasks earned each cell's points ────────
+      const _nm  = d => window._scEsc(d.projectName||d.propertyAddress||'Unnamed');
+      const _suf = txt => " <span style='opacity:.6'>· "+window._scEsc(txt)+"</span>";
+      const qTip        = window._scTipHtml('Q'+qNum+' Goal volume',
+                            qDeals.map(d=>_nm(d)+_suf(fmt$(d.purchasePrice||d.contractPrice||0))));
+      const overdueTip  = window._scTipHtml('Overdue tasks · −2 pts each',
+                            advTasks.filter(t=>t.status==='pending'&&t.dueDate&&t.dueDate<todayStr)
+                              .map(t=>window._scEsc(t.title||'Untitled')+_suf('due '+t.dueDate)));
+      const prospectTip = window._scTipHtml('Prospects · 5 pts each', prospectDeals.map(_nm));
+      const loiTip      = window._scTipHtml('LOIs · 10 pts each',
+                            advDeals.map(d=>({d,n:_loiCntPW(d)})).filter(x=>x.n>0)
+                              .map(x=>_nm(x.d)+(x.n>1?_suf(x.n+' offers'):'')));
+      const propTip     = window._scTipHtml('Proposals · 10 pts each', propDeals.map(_nm));
+      const listTip     = window._scTipHtml('Listings · 20 pts each', listingDeals.map(_nm));
+      const contractTip = window._scTipHtml('Under Contract · 30 pts each',
+                            advDeals.filter(d=>_ctCntPW(d)>0).map(_nm));
+
       const ptsBadge = p => {
         const rounded = Math.round(p * 10) / 10;
         const c = p >= 10 ? '#059669' : p >= 5 ? '#D97706' : '#DA291C';
         return `<span style="font-size:.65rem;font-weight:700;color:${c};line-height:1">${rounded} pts</span>`;
       };
-      const cell = (val, target, p) => {
+      const cell = (val, target, p, tip) => {
         const color = target!=null ? (val>=target?'#059669':'#DA291C') : 'var(--text-1)';
+        const tipA = tip ? ` data-sctip="${tip}"` : '';
+        const cur  = tip ? ';cursor:help' : '';
         return `<td class="px-3 py-4 text-center">
-          <div style="display:flex;flex-direction:column;align-items:center;gap:2px">
+          <div${tipA} style="display:flex;flex-direction:column;align-items:center;gap:2px${cur}">
             <span class="text-sm font-bold" style="color:${color}">${val}</span>
             ${p!=null ? ptsBadge(p) : ''}
           </div>
@@ -28281,7 +28357,7 @@ function viewEOS(sub='rocks'){
           </div>
         </td>
         <td class="px-3 py-4 text-center">
-          <div class="inline-flex flex-col items-center gap-1">
+          <div class="inline-flex flex-col items-center gap-1"${qTip?` data-sctip="${qTip}" style="cursor:help"`:''}>
             <span class="text-sm font-bold" style="color:${qColor}">${qPct}%</span>
             <div style="width:48px;height:4px;background:#e5e7eb;border-radius:9999px;overflow:hidden">
               <div style="width:${qPct}%;height:100%;background:${qColor};border-radius:9999px"></div>
@@ -28289,12 +28365,12 @@ function viewEOS(sub='rocks'){
             ${ptsBadge(pts[0])}
           </div>
         </td>
-        ${cell(openTasks, null, pts[1])}
-        ${cell(prospects + (prospectPts!==prospects*5?' ('+Math.round(prospectPts*10)/10+'pts)':''), prospectPts>0?1:null, pts[2])}
-        ${cell(newLOIs + (loiPts!==newLOIs*10?' ('+Math.round(loiPts*10)/10+'pts)':''), loiPts>0?1:null, pts[3])}
-        ${cell(newProps + (propPts!==newProps*10?' ('+Math.round(propPts*10)/10+'pts)':''), propPts>0?1:null, pts[4])}
-        ${cell(newListings + (listingPts!==newListings*20?' ('+Math.round(listingPts*10)/10+'pts)':''), listingPts>0?1:null, pts[5])}
-        ${cell(newContracts + (contractPts!==newContracts*30?' ('+Math.round(contractPts*10)/10+'pts)':''), contractPts>0?1:null, pts[6])}
+        ${cell(openTasks, null, pts[1], overdueTip)}
+        ${cell(prospects + (prospectPts!==prospects*5?' ('+Math.round(prospectPts*10)/10+'pts)':''), prospectPts>0?1:null, pts[2], prospectTip)}
+        ${cell(newLOIs + (loiPts!==newLOIs*10?' ('+Math.round(loiPts*10)/10+'pts)':''), loiPts>0?1:null, pts[3], loiTip)}
+        ${cell(newProps + (propPts!==newProps*10?' ('+Math.round(propPts*10)/10+'pts)':''), propPts>0?1:null, pts[4], propTip)}
+        ${cell(newListings + (listingPts!==newListings*20?' ('+Math.round(listingPts*10)/10+'pts)':''), listingPts>0?1:null, pts[5], listTip)}
+        ${cell(newContracts + (contractPts!==newContracts*30?' ('+Math.round(contractPts*10)/10+'pts)':''), contractPts>0?1:null, pts[6], contractTip)}
         ${netEventCell}
         ${driveCell}
       </tr>`;
@@ -29577,7 +29653,7 @@ function viewEOS(sub='rocks'){
     const _gr=s=>s>=100?{l:'A+',c:'#7c3aed',b:'#f5f3ff'}:s>=90?{l:'A',c:'#059669',b:'#f0fdf4'}:s>=80?{l:'B',c:'#0891b2',b:'#f0f9ff'}:s>=70?{l:'C',c:'#D97706',b:'#fffbeb'}:s>=60?{l:'D',c:'#ea580c',b:'#fff7ed'}:{l:'F',c:'#DA291C',b:'#fef2f2'};
     // Small "X pts" badge shown under each box so the live card matches the prior-week full scorecard.
     const _ptB=p=>{if(p==null)return'';const r=Math.round(p*10)/10;const c=p>=10?'#059669':p>=5?'#D97706':'#DA291C';return `<div style="font-size:.6rem;font-weight:700;color:${c};line-height:1;margin-top:3px">${r} pts</div>`;};
-    const _mc=(lbl,val,good,pts)=>`<div class="bg-gray-50 rounded-xl p-2.5 text-center min-w-0"><div class="text-xs font-bold text-gray-400 uppercase tracking-wide leading-none mb-1" style="font-size:.6rem">${lbl}</div><div class="text-sm font-bold" style="color:${good?'#059669':'var(--text-1)'}">${val}</div>${_ptB(pts)}</div>`;
+    const _mc=(lbl,val,good,pts,tip)=>`<div class="bg-gray-50 rounded-xl p-2.5 text-center min-w-0"${tip?` data-sctip="${tip}" style="cursor:help"`:''}><div class="text-xs font-bold text-gray-400 uppercase tracking-wide leading-none mb-1" style="font-size:.6rem">${lbl}</div><div class="text-sm font-bold" style="color:${good?'#059669':'var(--text-1)'}">${val}</div>${_ptB(pts)}</div>`;
     const _isStaff=isStaffView();
     let _sc=0,_gObj={l:'F',c:'#DA291C',b:'#fef2f2'},_mHtml='',_ttl='';
     if(!_isStaff){
@@ -29603,6 +29679,16 @@ function viewEOS(sub='rocks'){
       // Point scale mirrors the Advisor Weekly Scorecard exactly (Open Tasks 20 · Prospects 5 · LOIs 10 · Proposals 10 · Listings 20 · Contracts 30 · Net Event/Prop Visit 10). Tasks Done removed from scoring so both cards grade on the identical A+≥100 scale.
       const _pts=[_qp>=10?10:0,Math.max(0,20-_od*2),_pr.reduce((s,d)=>s+_sp(d,5),0),_lo.reduce((s,d)=>s+_sp(d,10),0),_po.reduce((s,d)=>s+_sp(d,10),0),_li.reduce((s,d)=>s+_sp(d,20),0),_co.reduce((s,d)=>s+_sp(d,30),0),_ne==='yes'?10:0,_dp==='yes'?10:0];
       _sc=Math.round(_pts.reduce((a,b)=>a+b,0)); _gObj=_gr(_sc); _ttl='📊 My Weekly Scorecard';
+      // Hover tooltips: contributing deals/tasks per cell (matches the counts shown)
+      const _cnm=d=>window._scEsc(d.projectName||d.propertyAddress||'Unnamed');
+      const _csuf=t=>" <span style='opacity:.6'>· "+window._scEsc(t)+"</span>";
+      const _tQ =window._scTipHtml('Q'+_qn+' Goal volume',_qd.map(d=>_cnm(d)+_csuf(fmt$(d.purchasePrice||d.contractPrice||0))));
+      const _tOd=window._scTipHtml('Overdue tasks · −2 pts each',_mt.filter(t=>t.status==='pending'&&t.dueDate&&t.dueDate<_tdStr).map(t=>window._scEsc(t.title||'Untitled')+_csuf('due '+t.dueDate)));
+      const _tPr=window._scTipHtml('Prospects · 5 pts each',_pr.map(_cnm));
+      const _tLo=window._scTipHtml('LOIs · 10 pts each',_lo.map(_cnm));
+      const _tPo=window._scTipHtml('Proposals · 10 pts each',_po.map(_cnm));
+      const _tLi=window._scTipHtml('Listings · 20 pts each',_li.map(_cnm));
+      const _tCo=window._scTipHtml('Under Contract · 30 pts each',_co.map(_cnm));
       // Editable Yes/No cell — current week is in progress, so the advisor logs these here.
       const _mcYN=(lbl,field,val,pts)=>`<div class="bg-gray-50 rounded-xl p-2.5 text-center min-w-0">
         <div class="text-xs font-bold text-gray-400 uppercase tracking-wide leading-none mb-1" style="font-size:.6rem">${lbl}</div>
@@ -29613,9 +29699,9 @@ function viewEOS(sub='rocks'){
         ${_ptB(pts)}
       </div>`;
       _mHtml=`<div class="grid gap-2 flex-1 min-w-0" style="grid-template-columns:repeat(auto-fill,minmax(64px,1fr))">
-        ${_mc('Q'+_qn+' Goal',_qp+'%',_qp>=10,_pts[0])}${_mc('Open Tasks',_ot,_ot===0,_pts[1])}
-        ${_mc('Prospects',_pr.length,_pr.length>0,_pts[2])}${_mc('LOIs',_lo.length,_lo.length>0,_pts[3])}${_mc('Proposals',_po.length,_po.length>0,_pts[4])}
-        ${_mc('Listings',_li.length,_li.length>0,_pts[5])}${_mc('Contracts',_co.length,_co.length>0,_pts[6])}
+        ${_mc('Q'+_qn+' Goal',_qp+'%',_qp>=10,_pts[0],_tQ)}${_mc('Open Tasks',_ot,_ot===0,_pts[1],_tOd)}
+        ${_mc('Prospects',_pr.length,_pr.length>0,_pts[2],_tPr)}${_mc('LOIs',_lo.length,_lo.length>0,_pts[3],_tLo)}${_mc('Proposals',_po.length,_po.length>0,_pts[4],_tPo)}
+        ${_mc('Listings',_li.length,_li.length>0,_pts[5],_tLi)}${_mc('Contracts',_co.length,_co.length>0,_pts[6],_tCo)}
         ${_mcYN('Net. Event','networkEvent',_ne,_pts[7])}
         ${_mcYN('Prop. Visit','driveProperties',_dp,_pts[8])}
       </div>`;
