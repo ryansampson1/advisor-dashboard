@@ -16441,6 +16441,13 @@ window._dealLogActivity = async (dealId, type, data = {}) => {
       if (!dup.empty) { return dup.docs[0].id; }
     } catch(e){ console.warn('[dealLogActivity] dedup check failed (continuing)', e); }
   }
+  // Dedup: same physical email linked from Apple Mail (RFC Message-ID) — see MAILLINK-20260818.
+  if (data.rfcId) {
+    try {
+      const dup = await getDocs(query(collection(_fbDb, 'deals', dealId, 'activities'), where('rfcId', '==', data.rfcId)));
+      if (!dup.empty) { return dup.docs[0].id; }
+    } catch(e){ console.warn('[dealLogActivity] rfcId dedup check failed (continuing)', e); }
+  }
   // Dedup: never log the same Google Calendar event twice on one property.
   if (data.gcalEventId) {
     try {
@@ -16461,10 +16468,12 @@ window._dealLogActivity = async (dealId, type, data = {}) => {
     ...( data.gcalEventId  ? {gcalEventId: data.gcalEventId}   : {} ),
     ...( data.gmailId      ? {gmailId: data.gmailId, gmailSubject: data.gmailSubject||'', gmailFrom: data.gmailFrom||'', gmailDate: data.gmailDate||''} : {} ),
     ...( data.gmailThreadId ? {gmailThreadId: data.gmailThreadId} : {} ),
+    ...( data.rfcId        ? {rfcId: data.rfcId, gmailSubject: data.gmailSubject||'', gmailFrom: data.gmailFrom||'', gmailDate: data.gmailDate||''} : {} ),
+    ...( data.source       ? {source: data.source} : {} ),
     ...( data.aiSummary    ? {aiSummary: true} : {} ),
   };
   // Write to deal sub-collection
-  await addDoc(collection(_fbDb, 'deals', dealId, 'activities'), activity);
+  const _actRef = await addDoc(collection(_fbDb, 'deals', dealId, 'activities'), activity);
   // Cross-log to linked CRM contacts — isolated so failures here never roll back the deal write
   try {
     const deal = allDeals.find(d => d.id === dealId);
@@ -16479,6 +16488,7 @@ window._dealLogActivity = async (dealId, type, data = {}) => {
       } catch(e){ console.warn('[dealLogActivity] cross-log failed for contact', c.id, e); }
     }
   } catch(e){ console.warn('[dealLogActivity] cross-log setup error', e); }
+  return _actRef.id;
 };
 
 // ── Log a stage change to the deal activity feed ─────────────────────────────
@@ -32779,6 +32789,8 @@ async function launchApp(){
   initGlobalAIWidget();
   // Apply any pending commission updates from profile (advisor) or flush them (admin)
   setTimeout(() => _applyPendingCommissions(), 1200);
+  // Apple Mail quick-link handoff (marker: MAILLINK-20260818)
+  setTimeout(() => { try{ window._mailLinkCheck(); }catch(e){ console.warn('[mailLink]', e); } }, 800);
   // Show commission completion prompt for active contract deals missing commission info
   if(currentUser && !currentUser.isAdmin && !currentUser.isStaff){
     setTimeout(() => _checkCommissionRequirements(), 800);
@@ -38527,6 +38539,164 @@ window._siUnlink = function(){
   _siSetThreadDeal(e.threadId, null);
   showToast('Unlinked. New emails in this thread won’t auto-link.','info');
   _siRenderLinkBar(e);
+};
+
+/* =======================================================
+   APPLE MAIL QUICK-LINK RECEIVER   (marker: MAILLINK-20260818)
+   The "Link to Terra" AppleScript (terra-mail-assistant/apple-mail/) opens
+   Terra at  #mailLink=<base64url JSON>  with the selected message's RFC
+   Message-ID, subject, sender, date and a snippet. This receiver shows a
+   property picker and files the email onto the chosen card:
+     · activity → deals/{dealId}/activities  (dedup on rfcId)
+     · shared   → emailLinks/{key}           (deal-mail-sync honors it: the
+       nightly run resolves the Gmail thread and locks in threadLinks)
+   ======================================================= */
+function _mlEsc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+window._mailLinkCheck = function(attempt){
+  let raw = '';
+  try{
+    const m = (location.hash||'').match(/mailLink=([A-Za-z0-9_\-=]+)/);
+    if(!m) return;
+    raw = m[1];
+  }catch(_){ return; }
+  // wait for deals to load (Firestore listener may still be filling allDeals)
+  if(!(allDeals||[]).length){
+    if((attempt||0) < 14){ setTimeout(()=>window._mailLinkCheck((attempt||0)+1), 600); }
+    return;
+  }
+  // clear the hash so a refresh doesn't re-open the modal
+  try{ history.replaceState(null,'',location.pathname+location.search); }catch(_){}
+  let payload = null;
+  try{
+    const b64 = raw.replace(/-/g,'+').replace(/_/g,'/');
+    payload = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(b64), c=>c.charCodeAt(0))));
+  }catch(e){ console.warn('[mailLink] bad payload', e); showToast('Could not read the email link from Apple Mail','error'); return; }
+  if(!payload || !payload.subject && !payload.rfcId){ showToast('Could not read the email link from Apple Mail','error'); return; }
+  window._mailLinkOpen(payload);
+};
+
+// naive suggestion: exact property name/address phrase in the subject
+function _mlSuggest(p){
+  const clean = s => String(s||'').toLowerCase().replace(/[^a-z0-9\s]/g,' ').replace(/\s+/g,' ').trim();
+  const subj = clean(p.subject);
+  if(!subj) return null;
+  let fallback = null;
+  for(const d of (allDeals||[])){
+    for(const n of [d.projectName, d.propertyAddress, d.address].filter(Boolean)){
+      const nn = clean(n);
+      if(nn.length >= 5 && subj.includes(nn)) return d.id;
+    }
+    const m = clean(d.propertyAddress||d.address||'').match(/^(\d{2,6})\s+([a-z]+)/);
+    if(m && subj.includes(m[1]+' '+m[2])) fallback = fallback || d.id;
+  }
+  return fallback;
+}
+
+window._mailLinkOpen = function(p){
+  window._mailLinkPayload = p;
+  document.getElementById('mail-link-modal')?.remove();
+  const suggested = _mlSuggest(p);
+  const deals = _siDealsSorted();
+  const when = (p.date||'').replace('T',' ').slice(0,16);
+  const overlay = document.createElement('div');
+  overlay.id = 'mail-link-modal';
+  overlay.className = 'fixed inset-0 flex items-center justify-center';
+  overlay.style.cssText = 'z-index:10050;background:rgba(0,0,0,.55);padding:16px';
+  overlay.innerHTML = `
+    <div style="background:#fff;border-radius:18px;box-shadow:0 24px 80px rgba(0,0,0,.35);width:100%;max-width:520px;max-height:90vh;display:flex;flex-direction:column;overflow:hidden">
+      <div style="padding:18px 22px 12px;border-bottom:1px solid #f1f5f9">
+        <div style="font-size:1rem;font-weight:800;color:#111">📧 Link email to a property</div>
+        <div style="font-size:.75rem;color:#64748b;margin-top:2px">From Apple Mail — the whole thread will follow this link for every advisor.</div>
+      </div>
+      <div style="padding:14px 22px;border-bottom:1px solid #f1f5f9;background:#f8fafc">
+        <div style="font-weight:700;font-size:.85rem;color:#111;word-break:break-word">${_mlEsc(p.subject||'(no subject)')}</div>
+        <div style="font-size:.75rem;color:#64748b;margin-top:2px">${_mlEsc(p.from||'')}${when?' · '+_mlEsc(when):''}</div>
+        ${p.snippet?`<div style="font-size:.75rem;color:#6b7280;margin-top:6px;word-break:break-word">${_mlEsc(p.snippet)}</div>`:''}
+      </div>
+      <div style="padding:14px 22px;flex:1;min-height:0;display:flex;flex-direction:column;gap:8px">
+        ${suggested?`<div style="font-size:.75rem;color:#0f766e;font-weight:600">Suggested match pre-selected — double-check it below.</div>`:''}
+        <input id="ml-filter" type="text" placeholder="Type to filter properties…" aria-label="Filter properties"
+          oninput="_mailLinkFilter()"
+          style="width:100%;border:1px solid #d1d5db;border-radius:10px;padding:10px 12px;font-size:16px;outline:none;box-sizing:border-box"/>
+        <select id="ml-deal-list" size="8" aria-label="Choose a property"
+          style="width:100%;border:1px solid #d1d5db;border-radius:10px;padding:6px;font-size:.85rem;flex:1;min-height:150px">
+          ${deals.map(d=>`<option value="${d.id}"${d.id===suggested?' selected':''}>${_mlEsc(_siDealLabel(d))}</option>`).join('')}
+        </select>
+      </div>
+      <div style="padding:14px 22px;border-top:1px solid #f1f5f9;display:flex;gap:10px;justify-content:flex-end">
+        <button onclick="_mailLinkClose()" style="border:1px solid #d1d5db;background:#fff;border-radius:10px;padding:.6rem 1.1rem;font-size:.85rem;font-weight:600;cursor:pointer;min-height:44px">Cancel</button>
+        <button onclick="_mailLinkAssign(this)" style="border:none;background:#0f766e;color:#fff;border-radius:10px;padding:.6rem 1.2rem;font-size:.85rem;font-weight:700;cursor:pointer;min-height:44px">🔗 Link to property</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  setTimeout(()=>{ try{ document.getElementById('ml-filter')?.focus(); }catch(_){} }, 60);
+};
+
+window._mailLinkFilter = function(){
+  const q = (document.getElementById('ml-filter')?.value||'').toLowerCase().trim();
+  const sel = document.getElementById('ml-deal-list'); if(!sel) return;
+  const cur = sel.value;
+  const deals = _siDealsSorted().filter(d => !q || (_siDealLabel(d)+' '+(d.county||'')).toLowerCase().includes(q));
+  sel.innerHTML = deals.map(d=>`<option value="${d.id}"${d.id===cur?' selected':''}>${_mlEsc(_siDealLabel(d))}</option>`).join('');
+  if(deals.length===1) sel.value = deals[0].id;
+};
+
+window._mailLinkClose = function(){
+  document.getElementById('mail-link-modal')?.remove();
+  window._mailLinkPayload = null;
+};
+
+window._mailLinkAssign = async function(btn){
+  const sel = document.getElementById('ml-deal-list');
+  const dealId = sel && sel.value;
+  if(!dealId){ showToast('Pick a property first','error'); return; }
+  const p = window._mailLinkPayload; if(!p) return;
+  const restore = elcBusy(btn, 'Linking…');
+  try{
+    const body = (p.subject||'(no subject)') + (p.snippet?('\n'+p.snippet):'');
+    const actId = await window._dealLogActivity(dealId, 'email', {
+      body,
+      rfcId: p.rfcId||'',
+      gmailSubject: p.subject||'',
+      gmailFrom: p.from||'',
+      gmailDate: (p.date||'').replace('T',' ').slice(0,16),
+      autoLogged: false,
+      source: 'apple-mail'
+    });
+    // shared record so the nightly deal-mail-sync locks the whole Gmail thread
+    // onto this property (it resolves rfcId → threadId → threadLinks)
+    let linkKey = '';
+    if(p.rfcId && _fbDb && _fbFns){
+      try{
+        const {doc, setDoc} = _fbFns;
+        linkKey = String(p.rfcId).replace(/[^a-zA-Z0-9._-]/g,'_').slice(0,900) || ('ml_'+Date.now());
+        await setDoc(doc(_fbDb,'emailLinks',linkKey), {
+          rfcId: p.rfcId, dealId,
+          subject: p.subject||'',
+          linkedBy: currentUser?.uid||'',
+          linkedByName: currentUser?.displayName||currentUser?.name||'',
+          linkedAt: Date.now(),
+          source: 'apple-mail'
+        });
+      }catch(e){ console.warn('[mailLink] emailLinks write failed', e); }
+    }
+    const deal = (allDeals||[]).find(d=>d.id===dealId);
+    const label = deal ? (deal.projectName||deal.propertyAddress||'property') : 'property';
+    window._mailLinkClose();
+    showUndoToast('📧 Linked to '+label, async ()=>{
+      try{
+        const {doc, deleteDoc} = _fbFns;
+        if(actId) await deleteDoc(doc(_fbDb,'deals',dealId,'activities',actId));
+        if(linkKey) await deleteDoc(doc(_fbDb,'emailLinks',linkKey));
+        showToast('Link removed','info');
+      }catch(e){ showToast('Could not undo: '+e.message,'error'); }
+    });
+    try{ _siRefreshDealFeed(dealId); }catch(_){}
+  }catch(err){
+    console.error('[mailLink] link failed', err);
+    showToast('Could not link: '+err.message,'error');
+  }finally{ restore(); }
 };
 
 /* ─────────── CRM: matching, add-to-CRM prompt, auto history logging ─────────── */
