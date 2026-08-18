@@ -6648,7 +6648,11 @@ function renderStageFields(stage, data={}){
   if(!container) return;
 
   const dealKey = editingDealId||'new';
-  const reqFields = new Set(getStageRequiredFields(stage, data).map(f=>f.id));
+  // elc-v424 — moving a deal BACK a stage never asks for inputs, so don't paint
+  // required markers on the destination stage's fields either.
+  const _backSrc = editingDealId ? (allDeals.find(d=>d.id===editingDealId)||null) : null;
+  const _isBackTarget = !!(_backSrc && isBackwardMove(_backSrc.stage, stage));
+  const reqFields = new Set(_isBackTarget ? [] : getStageRequiredFields(stage, data).map(f=>f.id));
 
   // ── helpers ──────────────────────────────────────────────────────
   // req=true forces required; req omitted → auto-detect from reqFields set
@@ -7470,18 +7474,24 @@ const FB = {
           if(typeof _ta === 'string'){ try{ _ta = JSON.parse(_ta); }catch(e){ _ta = null; } }
           if(_ta && typeof _ta === 'object'){
             const _hadDupes = _taHasDupeRows(_ta);
+            const _fellOutStale = _taFellOutNeedsFix(_ta);   // elc-v426
             TASK_AUTOMATIONS = _mergeTaskAutomations(_ta);
             try{ localStorage.setItem(K('taskAutomations'), JSON.stringify(TASK_AUTOMATIONS)); }catch(e){}
             // One-time repair: a set saved with the same activity listed twice
             // created duplicate tasks (e.g. "Cancel any pre set emails" ×2).
             // The merge above already collapsed them locally — push the cleaned
             // config back once so every teammate's copy is fixed too (elc-v423).
-            if(_hadDupes && currentUser?.isAdmin && !window._taDupeRepairDone){
+            if((_hadDupes || _fellOutStale) && currentUser?.isAdmin && !window._taDupeRepairDone){
               window._taDupeRepairDone = true;
+              const _msg = _hadDupes && _fellOutStale
+                ? '⚡ Task automation config repaired — duplicate rows removed, fell-out now re-activates the listing'
+                : (_hadDupes
+                    ? '⚡ Cleaned duplicate rows out of the task automation config'
+                    : '⚡ Fell out of Contract no longer removes the listing from the websites or takes the sign down');
               const {doc, setDoc} = _fbFns;
               setDoc(doc(_fbDb,'eos','taskAutomations'), {data: JSON.stringify(TASK_AUTOMATIONS)}, {merge:false})
-                .then(()=>{ try{ showToast('⚡ Cleaned duplicate rows out of the task automation config','success',5000); }catch(_){} })
-                .catch(e=>console.warn('[taskAutomations] dupe repair write-back failed', e));
+                .then(()=>{ try{ showToast(_msg,'success',6000); }catch(_){} })
+                .catch(e=>console.warn('[taskAutomations] config repair write-back failed', e));
             }
           }
         } else if(docId === 'pendingProfiles'){
@@ -7719,6 +7729,79 @@ const isLostStage = s => {
 // A stage is "active contract" — past listing/LOI but not yet won or lost
 const isContractActiveStage = s => !isLostStage(s||'') && !isWonStage(s||'')
   && /due.?diligence|rezoning|permitting|closing/i.test(s||'');
+
+/* ═══════════════════════════════════════════════════════════════════════
+   STAGE DIRECTION — elc-v424        (marker: STAGEDIR-20260818)
+
+   A stage move is not just a move: its DIRECTION is what it means.
+
+     · FORWARD (card dragged RIGHT / stage advanced) = progress.
+       Everything runs: ⚡ task set, rule automations, EOS scorecard credit,
+       critical dates, Drive workflow, required-field prompts.
+
+     · BACKWARD (card dragged LEFT / stage moved back) = a LOSS event —
+       the deal fell out of contract or the LOI died. It is NOT a workflow
+       step. Nothing fires: no automations, no tasks, no scorecard credit,
+       no date writes, no required-field modal. The card just moves, and a
+       toast offers the matching fell-out task set as a one-click option.
+
+     · TERMINAL (Lost / Dead / Sold) = always behaves normally regardless of
+       which side of the board it came from — the dead column IS the outcome.
+   ═══════════════════════════════════════════════════════════════════════ */
+// Position of a stage in the live board order (respects STAGE_ALIAS + custom stages)
+function _stageIdx(s){
+  const eff = ((typeof STAGE_ALIAS!=='undefined' ? (STAGE_ALIAS[s]||s) : s) || '').trim();
+  if(!eff) return -1;
+  let i = STAGES.indexOf(eff);
+  if(i < 0) i = STAGES.findIndex(x => (x||'').trim().toLowerCase() === eff.toLowerCase());
+  return i;
+}
+// 'new' | 'same' | 'forward' | 'backward' | 'terminal'
+function stageDirection(oldStage, newStage){
+  const from = ((typeof STAGE_ALIAS!=='undefined' ? (STAGE_ALIAS[oldStage]||oldStage) : oldStage) || '').trim();
+  const to   = ((typeof STAGE_ALIAS!=='undefined' ? (STAGE_ALIAS[newStage]||newStage) : newStage) || '').trim();
+  if(!from) return 'new';
+  if(from === to) return 'same';
+  // Dead / Sold columns own their behaviour from any direction
+  if(isLostStage(to) || isWonStage(to)) return 'terminal';
+  // Reviving a deal out of the dead column is progress, not a backward move
+  if(isLostStage(from)) return 'forward';
+  const a = _stageIdx(from), b = _stageIdx(to);
+  if(a < 0 || b < 0) return 'forward';   // unknown stage → old behaviour
+  return b < a ? 'backward' : 'forward';
+}
+function isBackwardMove(oldStage, newStage){ return stageDirection(oldStage,newStage) === 'backward'; }
+window.stageDirection = stageDirection;
+window.isBackwardMove = isBackwardMove;
+
+/* Scorecard-safe timestamps. A backward move still stamps stageEnteredAt (so
+   "days in stage" stays honest on the board) but must never earn EOS credit,
+   so scoring reads these helpers instead of the raw fields. */
+// stageHistory entries that represent forward progress (backward moves are tagged direction:'back')
+function _fwdHist(d){ return (d && Array.isArray(d.stageHistory) ? d.stageHistory : []).filter(h => h && h.direction !== 'back'); }
+// Most recent forward entry matching stageTest — so a deal that fell out and was
+// re-listed / re-contracted earns credit again for the NEW event.
+function _lastFwdEntry(d, stageTest){
+  const m = _fwdHist(d).filter(h => stageTest(h.stage||''));
+  return m.length ? m[m.length-1] : null;
+}
+// Current-stage timestamp, or 0 when the card landed here by moving BACKWARD.
+function _fwdStageTs(d){
+  const h = (d && Array.isArray(d.stageHistory)) ? d.stageHistory : [];
+  const last = h[h.length-1];
+  if(last && last.direction === 'back' && (last.stage||'') === (d.stage||'')) return 0;
+  return (d && d.stageEnteredAt) || 0;
+}
+window._fwdStageTs = _fwdStageTs;
+// True when the card is sitting in this column because it was moved BACKWARD
+// (fell out of contract / LOI died). Such a card never earns scorecard credit.
+function _landedBackward(d){
+  const h = (d && Array.isArray(d.stageHistory)) ? d.stageHistory : [];
+  const last = h[h.length-1];
+  return !!(last && last.direction === 'back' && (last.stage||'') === (d.stage||''));
+}
+window._landedBackward = _landedBackward;
+
 // Compute effective revenue from the deal — falls back to price × commission% if expectedRevenue is missing
 // If the deal has a referral fee (referralDue==='yes'), it is deducted from the gross to give net ELC revenue.
 function getEffectiveRevenue(deal){
@@ -8595,6 +8678,12 @@ function autoStageMatches(ruleStage, dealStage, dealLostType){
 }
 
 function fireAutomations(deal, oldStage){
+  // elc-v424 — a backward move is a loss event, not progress. Nothing fires.
+  // (Single choke point: covers drag-to-column, stage gate and modal-save paths.)
+  if(oldStage && isBackwardMove(oldStage, deal.stage)){
+    console.log('[fireAutomations] backward move '+oldStage+' → '+deal.stage+' — suppressed (no automations, no tasks, no scorecard)');
+    return;
+  }
   const _lt = deal.lostType||'';
   // Phase 2: unify drag/stage-change with the Task Automation config for the
   // listing-lifecycle stages (Listing, LOI, Under Contract). The overlapping
@@ -17671,6 +17760,95 @@ window.handleDragStart = (ev,id) => {
   ev.dataTransfer.effectAllowed='move';
   ev.dataTransfer.setData('text/plain',id);
 };
+/* ── Backward move (card dragged LEFT) — elc-v424 ────────────────────────
+   Moves the card and nothing else: no automations, no ⚡ tasks, no gate, no
+   required fields, no Drive workflow, no critical dates, no scorecard credit.
+   The history entry is tagged direction:'back' so scoring ignores it. */
+window._moveDealBackward = (id, deal, newStage, desiredIds) => {
+  const oldStage = deal.stage;
+  const _sh = [...(deal.stageHistory||[])];
+  if(!_sh.length && deal.stageEnteredAt) _sh.push({stage:oldStage, enteredAt:deal.stageEnteredAt});
+  if(_sh.length){ const _l=_sh[_sh.length-1]; if(!_l.exitedAt){ _l.exitedAt=Date.now(); _l.durationMs=_l.exitedAt-_l.enteredAt; } }
+  _sh.push({stage:newStage, enteredAt:Date.now(), direction:'back', fromStage:oldStage});
+  const upd = {stage:newStage, stageEnteredAt:Date.now(), updatedAt:Date.now(), stageHistory:_sh, lastBackwardAt:Date.now()};
+  return Store.updateDeal(id, upd).then(()=>{
+    Object.assign(deal, upd);
+    try{ window._logStageChange(id, oldStage, newStage); }catch(e){}
+    if(desiredIds){ try{ _applyColumnOrder(desiredIds); }catch(e){} }
+    window._pendingDropOrder = null;
+    viewBoard();
+    window._offerBackwardTasks(deal, oldStage, newStage);
+  }).catch(e=>{ console.error('[backward-move]', e); showToast('Error saving deal: '+e.message,'error'); });
+};
+
+/* ── Fell OUT of contract (elc-v425) ─────────────────────────────────────
+   A backward move only counts as a fall-out when the deal LEAVES contract
+   status entirely — Under Contract / Due Diligence / Rezoning / Permitting /
+   Closing → Listing, LOI, Prospect, etc. Closing → Due Diligence is still a
+   backward move, but the deal is very much still under contract, so it is NOT
+   a fall-out and nobody gets notified.
+   Signed LOI/Contract Drafting is deliberately NOT a contract stage here — a
+   deal dropping out of drafting is treated like a dead LOI (silent). */
+const _CONTRACT_STAGE_RE = /under.?contract|due.?diligence|rezoning|permitting|closing/i;
+window._fellOutOfContract = (oldStage, newStage) => {
+  const from = (STAGE_ALIAS[oldStage]||oldStage||'').trim();
+  const to   = (STAGE_ALIAS[newStage]||newStage||'').trim();
+  if(isWonStage(from) || isLostStage(to)) return false;   // Sold / Dead own their handling
+  return _CONTRACT_STAGE_RE.test(from) && !_CONTRACT_STAGE_RE.test(to);
+};
+
+/* The heads-up that lands on Nick's and Krissy's tasks so they know WHY. */
+window._fellOutNote = (deal, oldStage, newStage) => {
+  const name  = (typeof _taskHeadlineName==='function') ? _taskHeadlineName(deal) : (deal.projectName||deal.propertyAddress||'This property');
+  const price = deal.purchasePrice || deal.contractPrice || 0;
+  const buyer = deal.buyer || deal.buyerName || deal.loiBuyer || '';
+  const who   = (currentUser && (currentUser.name || currentUser.email)) || 'someone';
+  const when  = new Date().toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+  const lines = [
+    `🔻 FELL OUT OF CONTRACT — ${name} is BACK AVAILABLE.`,
+    '',
+    `Moved from "${oldStage}" back to "${newStage}" by ${who} on ${when}.`,
+  ];
+  if(deal.propertyAddress) lines.push(`Property: ${deal.propertyAddress}`);
+  if(price) lines.push(`Contract price was: ${fmt$(price)}`);
+  if(buyer) lines.push(`Buyer was: ${buyer}`);
+  lines.push('', 'Please put it back on the market — update tracking, marketing, the websites and any active listing feeds so it shows as available again.');
+  return lines.join('\n');
+};
+
+/* Which ⚡ set (if any) to OFFER after a backward move that is NOT a fall-out. */
+window._backwardOfferKey = (oldStage) => {
+  const s = (STAGE_ALIAS[oldStage]||oldStage||'').trim();
+  if(/^listing$/i.test(s)) return 'listing_canceled';
+  return null;   // LOI or Signed LOI died, or a plain step back — stay silent
+};
+
+window._offerBackwardTasks = (deal, oldStage, newStage) => {
+  // ── Fell OUT of contract → Nick & Krissy are told automatically (elc-v425) ──
+  // This is the one backward move that DOES fire something: the property is back
+  // on the market and marketing/tracking have to know. Everything else about a
+  // backward move stays silent (no dates, no inputs, no EOS credit).
+  if(window._fellOutOfContract(oldStage, newStage)){
+    const _nm = (typeof _taskHeadlineName==='function') ? _taskHeadlineName(deal) : (deal.projectName||deal.propertyAddress||'This deal');
+    showToast(`🔻 Fell out of contract — ${_nm} is back available. Notifying Nick & Krissy…`, 'warning', 6000);
+    Promise.resolve()
+      .then(()=>window.applyTaskAutomation(deal.id, 'fell_out', {note: window._fellOutNote(deal, oldStage, newStage), toast:false}))
+      .then(()=>showToast('🔻 Fell-out tasks created — Nick & Krissy notified · open tasks cleared', 'success', 7000))
+      .catch(e=>{ console.error('[fell-out notify]', e); showToast('Could not create the fell-out tasks: '+(e&&e.message||e), 'error', 8000); });
+    return;
+  }
+  const key = window._backwardOfferKey(oldStage);
+  const cfg = key && (typeof TASK_AUTOMATIONS!=='undefined') ? TASK_AUTOMATIONS[key] : null;
+  if(!cfg){ showToast(`Moved back to ${newStage} — no automations fired`, 'info', 4000); return; }
+  showToast(`Moved back to ${newStage} — no automations fired. Add “${cfg.label}” tasks?`, 'info', 12000, {
+    label: 'Add tasks',
+    onClick: () => {
+      try{ window.applyTaskAutomation(deal.id, key); }
+      catch(e){ console.error('[backward-offer]', e); showToast('Could not add tasks: '+e.message,'error'); }
+    }
+  });
+};
+
 window.handleDrop = (ev,newStage) => {
   ev.preventDefault();
   const _colEl = ev.currentTarget;
@@ -17688,6 +17866,12 @@ window.handleDrop = (ev,newStage) => {
   if(_effStage===newStage){
     _applyColumnOrder(_desiredIds);
     viewBoard();
+    return;
+  }
+  // ── Dragged LEFT — fell out of contract / LOI died (elc-v424) ────────────
+  // Silent move. No modals, no gates, no automations, no scorecard credit.
+  if(isBackwardMove(deal.stage, newStage)){
+    window._moveDealBackward(id, deal, newStage, _desiredIds);
     return;
   }
   // Stash the intended drop position so it can be applied once the move
@@ -23319,8 +23503,8 @@ window._execManualMergeContacts = async () => {
 };
 
 // ── CRM Outreach Imports (updated nightly by daily-crm-outreach-sync task) ──
-const _CRM_OUTREACH_SYNC_DATE = '2026-08-16';
-const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-08-15_0","emailDate":"2026-08-15","emailSubject":"See attached Swift PSA","attachmentNames":["20260815125544_001.pdf"],"recipientEmail":"vincent.crisci@gmail.com","recipientName":"Vincent Crisci","recipientFirstName":"Vincent","recipientLastName":"Crisci","companyName":"","propertyHint":"Swift","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-08-15_1","emailDate":"2026-08-15","emailSubject":"Re: Complete with Docusign: Commercial Contract (CC-6) (version 1) (3) (1) (version 2) (1).pdf, Untitled document.pdf","attachmentNames":["Commercial Contract (CC-6) (version 1) (3) (1) (version 2) (1).pdf","DD ADDENDUM (version 2).pdf"],"recipientEmail":"vincent.crisci@gmail.com","recipientName":"Vincent Crisci","recipientFirstName":"Vincent","recipientLastName":"Crisci","companyName":"","propertyHint":"Swift","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-08-15_2","emailDate":"2026-08-15","emailSubject":"Re: Complete with Docusign: Commercial Contract (CC-6) (version 1) (3) (1) (version 2) (1).pdf, Untitled document.pdf","attachmentNames":["Commercial Contract (CC-6) (version 1) (3) (1) (version 2) (1).pdf","DD ADDENDUM (version 2).pdf"],"recipientEmail":"tom.crisci1@gmail.com","recipientName":"Tom Crisci","recipientFirstName":"Tom","recipientLastName":"Crisci","companyName":"","propertyHint":"Swift","matchedDealId":null,"imported":false,"skipped":false}];
+const _CRM_OUTREACH_SYNC_DATE = '2026-08-18';
+const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-08-17_0","emailDate":"2026-08-17","emailSubject":"Fwd: Hanover Company_5416 Robert Tolle_Letter of Intent (08.17.2026)","attachmentNames":["Hanover Company_5416 Robert Tolle_LOI (08.17.2026).pdf","WSP DD Brandon Concept 8-17-26.pdf"],"recipientEmail":"fabbrit@richmancapital.com","recipientName":"Todd Fabbri","recipientFirstName":"Todd","recipientLastName":"Fabbri","companyName":"Richman Capital","propertyHint":"5416 Robert Tolle Brandon","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-08-17_1","emailDate":"2026-08-17","emailSubject":"Mathog Bank Site Plans","attachmentNames":["Avid - Concept Plan 1014395 F - 09.04.20.pdf","Avid - Concept Plan 1014395 D - 09.01.20.pdf"],"recipientEmail":"rg@rocwelldev.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Rocwell Development","propertyHint":"Mathog","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-08-17_2","emailDate":"2026-08-17","emailSubject":"Ripa SR 52 Layouts","attachmentNames":["2026-08-17 1020_COMM-LOT UPDATE EX.pdf"],"recipientEmail":"jaclyn.langholz@colliers.com","recipientName":"Jaclyn Langholz","recipientFirstName":"Jaclyn","recipientLastName":"Langholz","companyName":"Colliers","propertyHint":"SR 52","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-08-17_3","emailDate":"2026-08-17","emailSubject":"Hays and Hudson","attachmentNames":["OM Hays Hudson Retail (compressed).pdf"],"recipientEmail":"salsa3437@yahoo.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"","propertyHint":"Hays Hudson","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-08-17_4","emailDate":"2026-08-17","emailSubject":"Fwd: Gandy Blvd Termination Letter","attachmentNames":["Gandy Blvd - Termination Letter.doc"],"recipientEmail":"ryan@snyderlawgroup.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Snyder Law Group","propertyHint":"Gandy Blvd","matchedDealId":null,"imported":false,"skipped":false}];
 
 // ── Gmail Sync ───────────────────────────────────────────────────────
 let _GMAIL_SYNC_DATE;  // set at runtime by crmGmailSync; blank = never synced this session
@@ -25160,12 +25344,23 @@ const TASK_AUTOMATIONS_DEFAULT = {
     ['Send paperwork to client to sign', '', 1],
     ['Email blast to groups on price adjustment', _TA.NICK, 3],
   ]},
+  // A deal that falls out of contract is BACK ON the market — the listing has to
+  // go ACTIVE again and the sign stays up. Do not reuse the "listing canceled"
+  // teardown steps here (elc-v426).
+  // Mirrors the Under Contract set: every place the deal was flipped to "under
+  // contract" gets flipped back to ACTIVE. Nothing is torn down — the sign stays
+  // up and the listing goes back on the market (elc-v426/427).
   fell_out: { label:'Fell out of Contract', terminal:true, tasks:[
     ['🔄 Re-listing decision (contract terminated)', _TA.ADV, 3],
-    ['📊 Update tracking & remove from websites', _TA.KRISSY, 3],
+    ['📊 Update tracking & make ACTIVE again on websites', _TA.KRISSY, 3],
+    ['🌐 Mark as ACTIVE again on MLS', '', 2],
+    ['🏢 Make ACTIVE again on Buildout', _TA.NICK, 1],
+    ['🗂️ Set the Daylite project back to active listing', _TA.NICK, 1],
+    ['📰 Mark as ACTIVE again on the Eshenbaugh Report', _TA.KRISSY, 2],
+    ['📈 Move back to active listing in the pipeline', _TA.KELLIE, 1],
+    ['📉 Remove from Excel projected revenue', _TA.MICHAEL, 1],
     ['📣 Begin remarketing', _TA.MKTG, 3],
     ['📋 Create protection list', _TA.ADV, 3],
-    ['🪧 Remove sign & Telzio', _TA.MKTG, 3],
   ]},
   under_contract: { label:'Under Contract', terminal:false, tasks:[
     ['File PSA in Google Drive', _TA.KRISSY, 3],
@@ -25308,7 +25503,60 @@ function _mergeTaskAutomations(stored){
   for(const k of Object.keys(base)){
     if(Array.isArray(base[k].tasks)) base[k].tasks = _taDedupeRows(base[k].tasks);
   }
+  // A fall-out means the property is back on the market — strip the teardown
+  // rows a saved config may still carry (elc-v426).
+  if(base.fell_out && Array.isArray(base.fell_out.tasks)){
+    base.fell_out.tasks = _taFixFellOutRows(base.fell_out.tasks).rows;
+  }
   return base;
+}
+/* ── Fell-out row repair (elc-v426) ───────────────────────────────────────
+   The saved config may still carry the old teardown rows — "Update tracking &
+   remove from websites" (Krissy) and "Remove sign & Telzio" (marketing/Nick).
+   Those belong to a CANCELLED listing, not a fall-out: when a contract dies the
+   property is available again, so the websites go back to ACTIVE and the sign
+   stays where it is. Admin edits still win — this only rewrites the two rows
+   that contradict the meaning of the event. */
+const _TA_FELLOUT_DROP_RE     = /remove\s+sign|telzio/i;              // sign stays up
+const _TA_FELLOUT_WEBSITES_RE = /remove\s+from\s+(all\s+)?websites/i;  // → make active again
+/* Every "mark as under contract" flip in the Under Contract set has a matching
+   reactivation row here (elc-v427). `test` is what an equivalent row already in
+   the config looks like — if one matches, the admin's own wording is kept and
+   nothing is added. */
+const _TA_FELLOUT_REACTIVATE = [
+  { test:/websites/i,             row:['📊 Update tracking & make ACTIVE again on websites', _TA.KRISSY, 3] },
+  { test:/\bmls\b/i,              row:['🌐 Mark as ACTIVE again on MLS', '', 2] },
+  { test:/buildout/i,             row:['🏢 Make ACTIVE again on Buildout', _TA.NICK, 1] },
+  { test:/daylite/i,              row:['🗂️ Set the Daylite project back to active listing', _TA.NICK, 1] },
+  { test:/eshenbaugh\s*report/i,  row:['📰 Mark as ACTIVE again on the Eshenbaugh Report', _TA.KRISSY, 2] },
+  { test:/pipeline/i,             row:['📈 Move back to active listing in the pipeline', _TA.KELLIE, 1] },
+  { test:/projected\s*revenue/i,  row:['📉 Remove from Excel projected revenue', _TA.MICHAEL, 1] },
+];
+function _taFixFellOutRows(rows){
+  if(!Array.isArray(rows)) return {rows: rows, changed:false};
+  let changed = false;
+  const out = [];
+  for(const r of rows){
+    const title = String((r && r[0]) || '');
+    if(_TA_FELLOUT_DROP_RE.test(title)){ changed = true; continue; }
+    if(_TA_FELLOUT_WEBSITES_RE.test(title)){
+      out.push(['📊 Update tracking & make ACTIVE again on websites', r[1], r[2]]);
+      changed = true; continue;
+    }
+    out.push(r);
+  }
+  // Back-fill any reactivation step the saved config is missing.
+  for(const spec of _TA_FELLOUT_REACTIVATE){
+    if(out.some(r => spec.test.test(String((r && r[0]) || '')))) continue;
+    out.push(spec.row.slice());
+    changed = true;
+  }
+  return {rows: out, changed: changed};
+}
+// True when a stored config still has the outdated fell-out rows.
+function _taFellOutNeedsFix(stored){
+  const rows = stored && stored.fell_out && stored.fell_out.tasks;
+  return Array.isArray(rows) && _taFixFellOutRows(rows).changed;
 }
 // True when the stored config still carries duplicate rows (used to write the
 // cleaned version back to Firestore once, so every teammate gets it).
@@ -25456,7 +25704,11 @@ function _taResolveAssignee(token, deal){
   return {assignedTo:r.uid, assignedToName:r.name||token, assignedToEmail:r.email};
 }
 
-window.applyTaskAutomation = async function(dealId, key){
+window.applyTaskAutomation = async function(dealId, key, opts){
+  // opts (elc-v425): { note } writes a description onto every task this run
+  // creates (used to tell staff WHY the tasks appeared), { toast:false }
+  // suppresses the generic summary toast when the caller shows its own.
+  opts = opts || {};
   const deal=(allDeals||[]).find(d=>d.id===dealId);
   if(!deal){ showToast('Deal not found','error'); return; }
   const cfg=TASK_AUTOMATIONS[key];
@@ -25496,13 +25748,14 @@ window.applyTaskAutomation = async function(dealId, key){
       taskBase: base, autoKey: key, autoLabel: cfg.label, auto:true,
       assignedTo:a.assignedTo, assignedToName:a.assignedToName, assignedToEmail:a.assignedToEmail,
       dealId:deal.id, dealAddress:addr, dealName:deal.projectName||addr,
+      ...(opts.note ? {description: opts.note} : {}),
       dueDate:dd, status:'pending',
       createdBy: currentUser?.uid||'system', createdByName: currentUser?.name||'Task Automation', createdAt:Date.now(),
     };
     try{ const id=await Store.createTask(obj); if(id){ allTasks.push({...obj,id}); } created++; }
     catch(e){ console.error('[taskAutomation] create failed',e); }
   }
-  showToast(`${cfg.label}: ${created} task${created===1?'':'s'} added${skipped?`, ${skipped} already present`:''}${autoDone?`, ${autoDone} handled automatically`:''}${cfg.terminal?' · cleared open tasks':''}`,'success');
+  if(opts.toast !== false) showToast(`${cfg.label}: ${created} task${created===1?'':'s'} added${skipped?`, ${skipped} already present`:''}${autoDone?`, ${autoDone} handled automatically`:''}${cfg.terminal?' · cleared open tasks':''}`,'success');
   window._taRefreshDealTasks && window._taRefreshDealTasks(dealId);
   try{ if(typeof viewTasks==='function' && document.getElementById('tasks-view')) viewTasks(); }catch(e){}
   _taInFlight.delete(_lock);
@@ -27062,16 +27315,15 @@ function viewLeaderboard(){
     // ── Rolling 30-day pipeline activity ──────────────────────────
     const _30dAgo = Date.now() - 30*24*60*60*1000;
     // Count deals that first entered a matching stage within the last 30 days
+    // elc-v424 — backward entries (direction:'back') never count, and the MOST
+    // RECENT forward entry is used so a re-listed / re-contracted deal scores again.
     const _countRecent = (deals, stageTest) => {
       let n = 0;
       for (const d of deals) {
-        const hist = d.stageHistory || [];
-        if (hist.length) {
-          const entry = hist.find(h => stageTest(h.stage||''));
-          if (entry && (entry.enteredAt||0) >= _30dAgo) { n++; continue; }
-        }
-        // Fallback: current stage matches + stageEnteredAt is recent
-        if (stageTest(d.stage||'') && (d.stageEnteredAt||0) >= _30dAgo) n++;
+        const entry = _lastFwdEntry(d, stageTest);
+        if (entry) { if ((entry.enteredAt||0) >= _30dAgo) n++; continue; }
+        // Fallback: current stage matches + it was entered moving forward
+        if (stageTest(d.stage||'') && _fwdStageTs(d) >= _30dAgo) n++;
       }
       return n;
     };
@@ -27772,12 +28024,13 @@ function viewOfficeOverview(){
 
   // ── Leaderboard rows ──────────────────────────────────────
   const _30dAgo = Date.now() - 30*24*60*60*1000;
+  // elc-v424 — see _lastFwdEntry/_fwdStageTs: backward moves never score.
   const _countRecent = (deals, stageTest) => {
     let n=0;
     for(const d of deals){
-      const hist=d.stageHistory||[];
-      if(hist.length){ const e=hist.find(h=>stageTest(h.stage||'')); if(e&&(e.enteredAt||0)>=_30dAgo){n++;continue;} }
-      if(stageTest(d.stage||'')&&(d.stageEnteredAt||0)>=_30dAgo) n++;
+      const e=_lastFwdEntry(d, stageTest);
+      if(e){ if((e.enteredAt||0)>=_30dAgo) n++; continue; }
+      if(stageTest(d.stage||'') && _fwdStageTs(d)>=_30dAgo) n++;
     }
     return n;
   };
@@ -27794,10 +28047,14 @@ function viewOfficeOverview(){
     return [];
   };
   const _loiStageTs = (d) => {
-    const hist = d.stageHistory||[];
-    const e = hist.find(h=>/^loi$/i.test((h.stage||'').trim()));
+    // elc-v424 — latest FORWARD entry into LOI; a card dragged back into LOI never scores.
+    const e = _lastFwdEntry(d, s=>/^loi$/i.test((s||'').trim()));
     if(e && e.enteredAt) return e.enteredAt;
-    if(/^loi$/i.test((d.stage||'').trim())) return d.stageEnteredAt||d.createdAt||0;
+    if(/^loi$/i.test((d.stage||'').trim())){
+      const h=d.stageHistory||[], last=h[h.length-1];
+      if(last && last.direction==='back' && (last.stage||'')===(d.stage||'')) return 0;  // landed here moving backward
+      return d.stageEnteredAt||d.createdAt||0;
+    }
     return 0;
   };
   // Count offers on a deal whose credit falls within [start,end].
@@ -27816,10 +28073,11 @@ function viewOfficeOverview(){
   // window OR the card entered an under-contract stage in the window. Attaching a
   // signed contract now scores without needing to drag the card.
   const _ctStageTs = (d) => {
-    const h = d.stageHistory||[];
-    const e = h.find(x=>/under.?contract/i.test(x.stage||''));
+    // elc-v424 — latest FORWARD entry into an under-contract stage. A deal that fell
+    // out and went back under contract earns contract credit again for the new contract.
+    const e = _lastFwdEntry(d, s=>/under.?contract/i.test(s||''));
     if(e && e.enteredAt) return e.enteredAt;
-    if(/under.?contract/i.test(d.stage||'')) return d.stageEnteredAt||d.createdAt||0;
+    if(/under.?contract/i.test(d.stage||'')) return _fwdStageTs(d);
     return 0;
   };
   const _ctInWindow = (d, start, end) => {
@@ -27891,7 +28149,7 @@ function viewOfficeOverview(){
 
   // ── Advisor Scorecards ─────────────────────────────────────
   const todayStr = new Date().toISOString().slice(0,10);
-  const inPW = d => { const ts=(d.stageEnteredAt||d.createdAt||0); return ts>=pwS&&ts<=pwE; };
+  const inPW = d => { if(_landedBackward(d)) return false; /* elc-v424 */ const ts=(d.stageEnteredAt||d.createdAt||0); return ts>=pwS&&ts<=pwE; };
   const splitPts = (d, advUid, base) => {
     if(d.advisorUid===advUid){ const c=(d.coAdvisors||[]).reduce((s,ca)=>s+(ca.splitPct||0),0); return base*Math.max(0,100-c)/100; }
     const ca=(d.coAdvisors||[]).find(c=>c.uid===advUid); return ca?base*(ca.splitPct||0)/100:0;
@@ -28686,7 +28944,7 @@ function viewEOS(sub='rocks'){
       const overdueTaskCount = advTasks.filter(t=>t.status==='pending' && t.dueDate && t.dueDate < todayStr).length;
 
       // Weekly deal activity — point-weighted, split between co-advisors by deal percentage
-      const inPW = d => { const ts=(d.stageEnteredAt||d.createdAt||0); return ts>=pwS&&ts<=pwE; };
+      const inPW = d => { if(_landedBackward(d)) return false; /* elc-v424 */ const ts=(d.stageEnteredAt||d.createdAt||0); return ts>=pwS&&ts<=pwE; };
       // Returns the fraction of base points this advisor earns on a deal
       const splitPts = (d, base) => {
         if(d.advisorUid === advUid) {
@@ -29722,7 +29980,7 @@ function viewEOS(sub='rocks'){
               const doneT = advTasks.filter(t=>t.status==='complete'&&(t.updatedAt||0)>=pwSts&&(t.updatedAt||0)<=pwEts).length;
               const openT = advTasks.filter(t=>t.status==='pending').length;
               const taskDonePts2 = (doneT+openT)===0?10:Math.min(10,Math.round(doneT/(doneT+openT)*10));
-              const inPW = d=>{const ts=(d.stageEnteredAt||d.createdAt||0);return ts>=pwSts&&ts<=pwEts;};
+              const inPW = d=>{if(_landedBackward(d))return false; /* elc-v424 */ const ts=(d.stageEnteredAt||d.createdAt||0);return ts>=pwSts&&ts<=pwEts;};
               const spl = (d,base)=>{
                 if(d.advisorUid===a.uid){const ct=(d.coAdvisors||[]).reduce((s,ca)=>s+(ca.splitPct||0),0);return base*Math.max(0,100-ct)/100;}
                 const ca=(d.coAdvisors||[]).find(c=>c.uid===a.uid);return ca?base*(ca.splitPct||0)/100:0;
@@ -30207,7 +30465,7 @@ function viewEOS(sub='rocks'){
       const _dt=_mt.filter(t=>t.status==='complete'&&(t.updatedAt||0)>=_pwS&&(t.updatedAt||0)<=_pwE).length;
       const _tdStr=new Date().toISOString().slice(0,10);
       const _od=_mt.filter(t=>t.status==='pending'&&t.dueDate&&t.dueDate<_tdStr).length;
-      const _inPW=d=>{const ts=(d.stageEnteredAt||d.createdAt||0);return ts>=_pwS&&ts<=_pwE;};
+      const _inPW=d=>{if(_landedBackward(d))return false; /* elc-v424 — backward moves never score */ const ts=(d.stageEnteredAt||d.createdAt||0);return ts>=_pwS&&ts<=_pwE;};
       const _sp=(d,b)=>{if(d.advisorUid===uid){const ct=(d.coAdvisors||[]).reduce((s,ca)=>s+(ca.splitPct||0),0);return b*Math.max(0,100-ct)/100;}const ca=(d.coAdvisors||[]).find(c=>c.uid===uid);return ca?b*(ca.splitPct||0)/100:0;};
       const _pr=_md.filter(d=>d.stage==='Prospect'&&(d.createdAt||0)>=_pwS&&(d.createdAt||0)<=_pwE);
       const _lo=_md.filter(d=>d.stage==='LOI'&&_inPW(d));
@@ -31724,7 +31982,9 @@ window.handleDealSubmit = async ev => {
   // ── Unified required-field validation (driven by STAGE_REQUIRED_FIELDS) ──
   // Pass existing deal data so carryForward fields aren't re-required if already set
   const _existingForReq = allDeals.find(d=>d.id===id) || {};
-  const _reqFields = getStageRequiredFields(stage, _existingForReq);
+  // elc-v424 — moving a deal BACK a stage never asks for inputs.
+  const _isBackwardSave = isBackwardMove(_existingForReq.stage, stage);
+  const _reqFields = _isBackwardSave ? [] : getStageRequiredFields(stage, _existingForReq);
   for(const {id, label} of _reqFields){
     const el = document.getElementById(id);
     if(!el) continue;
@@ -31740,7 +32000,7 @@ window.handleDealSubmit = async ev => {
   }
 
   // Legacy manual-mode validation (kept for custom gate stages)
-  if(sf.docMode === 'manual'){
+  if(sf.docMode === 'manual' && !_isBackwardSave){
     const manualRequired = {
       'Listing':         [{id:'sf-listed-price',label:'Listing Price'},{id:'sf-listing-effective',label:'Effective Date'},{id:'sf-listing-expiration',label:'Expiration Date'},{id:'sf-elc-commission',label:'Commission %'}],
       'LOI':             [{id:'sf-loi-price',label:'LOI Price'},{id:'sf-loi-buyer',label:'Buyer'},{id:'sf-close-date',label:'Expected Closing Date'}],
@@ -32020,8 +32280,10 @@ window.handleDealSubmit = async ev => {
       const _sh=[...(existing?.stageHistory||[])];
       if(!_sh.length && existing?.stageEnteredAt) _sh.push({stage:oldStage,enteredAt:existing.stageEnteredAt});
       if(_sh.length){const _l=_sh[_sh.length-1];if(!_l.exitedAt){_l.exitedAt=Date.now();_l.durationMs=_l.exitedAt-_l.enteredAt;}}
-      _sh.push({stage,enteredAt:Date.now()});
+      // elc-v424 — tag backward moves so the EOS scorecard ignores them
+      _sh.push({stage, enteredAt:Date.now(), ...(isBackwardMove(oldStage, stage) ? {direction:'back', fromStage:oldStage} : {})});
       data.stageHistory=_sh;
+      if(isBackwardMove(oldStage, stage)) data.lastBackwardAt = Date.now();
       // ─────────────────────────────────────────────────────────────
     }
     await Store.updateDeal(id,data);
@@ -32033,7 +32295,9 @@ window.handleDealSubmit = async ev => {
     }
     if(oldStage!==stage) fireAutomations(existing,oldStage);
     if(oldStage!==stage) window._logStageChange(id, oldStage, stage);
-    if(oldStage!==stage) _fireMentorStageTask(existing, oldStage, stage);
+    if(oldStage!==stage && !isBackwardMove(oldStage, stage)) _fireMentorStageTask(existing, oldStage, stage);
+    // elc-v425 — a backward stage pick in the modal behaves exactly like a drag left
+    if(oldStage!==stage && isBackwardMove(oldStage, stage)) window._offerBackwardTasks(existing, oldStage, stage);
     // ── Log attachment uploads to activity feed ──────────────────────────
     if(loiUploadUrl && _snapLoi) window._logAttachmentActivity(id, _snapLoi, 'loi', loiUploadUrl);
     if(psaUploadUrl && _snapPsa) window._logAttachmentActivity(id, _snapPsa, 'psa', psaUploadUrl);
@@ -32049,7 +32313,7 @@ window.handleDealSubmit = async ev => {
       listing: listingFiles[fileKey],
       contract: contractFiles[fileKey],
     };
-    if(oldStage!==stage) window._driveStageWorkflow(existing, stage, { fileKey, files: _driveSnap }).catch(()=>{});
+    if(oldStage!==stage && !isBackwardMove(oldStage, stage)) window._driveStageWorkflow(existing, stage, { fileKey, files: _driveSnap }).catch(()=>{});
     // NOTE: auto-create intentionally removed from edit path — running on every save
     // caused deleted CRM contacts to reappear. Contacts are seeded once at deal creation only.
     // ── "Ready for websites?" task — fire only when answer newly set to yes ──
@@ -32078,7 +32342,8 @@ window.handleDealSubmit = async ev => {
     Object.keys(gateFiles).forEach(k => { if(k.startsWith(fileKey+'__')) delete gateFiles[k]; });
     showToast('Deal updated','success');
     // Trigger gate modal if stage changed and gate has questions (same as drag-and-drop)
-    if(oldStage!==stage && !inlineGateData){
+    // elc-v424 — a backward move never asks for gate inputs
+    if(oldStage!==stage && !inlineGateData && !isBackwardMove(oldStage, stage)){
       const editGate=getStageGate(stage);
       if(editGate?.enabled && editGate.fields?.length){
         closeDealModal();
