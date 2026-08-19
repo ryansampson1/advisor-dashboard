@@ -16429,6 +16429,11 @@ window._pgaNextPage = async (logSelected) => {
   window._pgaRenderPage(page + 1);
 };
 
+// ── Local YYYY-MM-DD (elc-v429). toISOString() is UTC — in the evening ET it
+// already reads tomorrow, so date inputs prefilled from it were a day ahead. ──
+window._elcLocalDateStr = (d = new Date()) =>
+  `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+
 // ── Deal activity logger: writes to deals/{dealId}/activities + cross-logs to linked contacts ──
 window._dealLogActivity = async (dealId, type, data = {}) => {
   if (!_fbDb || !_fbFns) { elcAlert('Not connected to database.'); return; }
@@ -16455,9 +16460,23 @@ window._dealLogActivity = async (dealId, type, data = {}) => {
       if (!dup.empty) { return dup.docs[0].id; }
     } catch(e){ console.warn('[dealLogActivity] gcal dedup check failed (continuing)', e); }
   }
+  // elc-v429 (marker: NOTEDATE-20260819): manual entries can carry a user-chosen
+  // date (activityDate for notes; callDate / meetingDate already existed). When
+  // that date isn't today, backdate createdAt to noon LOCAL on that day so the
+  // entry sorts and displays on the day it actually happened — e.g. a July email
+  // blast logged in August shows under July, not "today". Noon avoids the entry
+  // slipping a day in other US timezones.
+  const _manualDate = data.activityDate || data.callDate || data.meetingDate || '';
+  let _createdAt = Date.now(), _backdated = false;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(_manualDate) && _manualDate !== window._elcLocalDateStr()) {
+    const _ts = new Date(_manualDate + 'T12:00:00').getTime();
+    if (!isNaN(_ts)) { _createdAt = _ts; _backdated = true; }
+  }
   const activity = {
     type,
-    createdAt: Date.now(),
+    createdAt: _createdAt,
+    ...( _backdated ? {backdated: true} : {} ),
+    ...( data.activityDate ? {activityDate: data.activityDate} : {} ),
     createdBy: currentUser?.uid || '',
     createdByName: currentUser?.displayName || currentUser?.name || '',
     body: data.body || '',
@@ -16749,7 +16768,8 @@ window._propLoadActivities = async (dealId, feedElId) => {
         const meta   = a.type === 'call'    && a.callDate    ? ` · ${a.callDate}${a.callDuration ? ` (${a.callDuration} min)` : ''}`
                      : a.type === 'meeting' && a.meetingDate ? ` · ${a.meetingDate}`
                      : a.type === 'email'   && a.gmailDate   ? ` · ${a.gmailDate}` : '';
-        const tsStr  = a.createdAt ? new Date(a.createdAt).toLocaleString() : '';
+        // Backdated entries carry a user-chosen day, not a real clock time — show date only (elc-v429)
+        const tsStr  = a.createdAt ? (a.backdated ? new Date(a.createdAt).toLocaleDateString() : new Date(a.createdAt).toLocaleString()) : '';
         activities.push({ id: a.id, dealId, ts: a.createdAt || 0, tsStr, icon, text: a.body || '', title, meta, createdByName: a.createdByName || '', type: a.type, gmailSubject: a.gmailSubject||'', gmailId: a.gmailId||'', aiSummary: !!a.aiSummary });
       });
     } catch (e) { /* sub-collection may not exist yet — that's fine */ }
@@ -16789,7 +16809,7 @@ window._propLoadActivities = async (dealId, feedElId) => {
 window._pdwOpenLog = (dealId, type) => {
   const form = document.getElementById('pdw-log-form');
   if (!form) return;
-  const today = new Date().toISOString().split('T')[0];
+  const today = window._elcLocalDateStr();
   form.classList.remove('hidden');
   if (type === 'note') {
     form.innerHTML = `
@@ -16797,6 +16817,8 @@ window._pdwOpenLog = (dealId, type) => {
         <span style="font-size:.75rem;font-weight:700;color:#4f46e5">📝 Log Note</span>
         <button onclick="document.getElementById('pdw-log-form').classList.add('hidden')" style="margin-left:auto;background:none;border:none;color:#9ca3af;cursor:pointer;font-size:1.1rem;line-height:1">&times;</button>
       </div>
+      <div style="margin-bottom:.5rem"><label for="pdw-log-note-date" style="font-size:.7rem;color:#6b7280;display:block;margin-bottom:.2rem">Date (backdate for things done earlier)</label>
+      <input id="pdw-log-note-date" type="date" value="${today}" max="${today}" style="width:100%;border:1px solid #e5e7eb;border-radius:.5rem;padding:.4rem .6rem;font-size:.82rem;outline:none;box-sizing:border-box"/></div>
       <textarea id="pdw-log-body" rows="3" placeholder="What happened?" style="width:100%;border:1px solid #e5e7eb;border-radius:.5rem;padding:.5rem .75rem;font-size:.85rem;outline:none;resize:none;box-sizing:border-box"></textarea>
       <div style="display:flex;gap:.5rem;margin-top:.5rem">
         ${window._micBtn('pdw-log-body')}
@@ -16848,7 +16870,9 @@ window._pdwOpenLog = (dealId, type) => {
 window._pdwSaveLog = async (dealId, type) => {
   const body = document.getElementById('pdw-log-body')?.value.trim() || '';
   const data = { body };
-  if (type === 'call') {
+  if (type === 'note') {
+    data.activityDate = document.getElementById('pdw-log-note-date')?.value || '';
+  } else if (type === 'call') {
     data.callDate = document.getElementById('pdw-log-call-date')?.value || '';
     const dur = parseInt(document.getElementById('pdw-log-call-dur')?.value);
     if (dur) data.callDuration = dur;
@@ -16878,9 +16902,10 @@ window._pdwEditActivity = async (dealId, activityId, type, feedElId) => {
       if (snap.exists()) data = snap.data();
     } catch(e) { console.warn('[pdwEditActivity]', e); }
   }
-  window._pdwEditState = { dealId, activityId, type, feedElId };
+  window._pdwEditState = { dealId, activityId, type, feedElId, createdAt: data.createdAt || 0 };
   form.classList.remove('hidden');
-  const today = new Date().toISOString().split('T')[0];
+  const today = window._elcLocalDateStr();
+  const entryDate = data.createdAt ? window._elcLocalDateStr(new Date(data.createdAt)) : today;
   const esc = s => (s||'').replace(/</g,'&lt;').replace(/"/g,'&quot;');
   const closeX = `<button onclick="document.getElementById('pdw-log-form').classList.add('hidden')" style="margin-left:auto;background:none;border:none;color:#9ca3af;cursor:pointer;font-size:1.1rem;line-height:1">&times;</button>`;
   const cancelBtn = `<button onclick="document.getElementById('pdw-log-form').classList.add('hidden')" style="padding:.45rem .75rem;border:1px solid #e5e7eb;border-radius:.5rem;font-size:.8rem;cursor:pointer;background:#fff">Cancel</button>`;
@@ -16889,6 +16914,8 @@ window._pdwEditActivity = async (dealId, activityId, type, feedElId) => {
       <div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.5rem">
         <span style="font-size:.75rem;font-weight:700;color:#4f46e5">📝 Edit Note</span>${closeX}
       </div>
+      <div style="margin-bottom:.5rem"><label for="pdw-log-note-date" style="font-size:.7rem;color:#6b7280;display:block;margin-bottom:.2rem">Date</label>
+      <input id="pdw-log-note-date" type="date" value="${entryDate}" max="${today}" style="width:100%;border:1px solid #e5e7eb;border-radius:.5rem;padding:.4rem .6rem;font-size:.82rem;outline:none;box-sizing:border-box"/></div>
       <textarea id="pdw-log-body" rows="3" style="width:100%;border:1px solid #e5e7eb;border-radius:.5rem;padding:.5rem .75rem;font-size:.85rem;outline:none;resize:none;box-sizing:border-box">${esc(data.body)}</textarea>
       <div style="display:flex;gap:.5rem;margin-top:.5rem">
         ${window._micBtn('pdw-log-body')}
@@ -16947,6 +16974,23 @@ window._pdwSaveEdit = async () => {
     patch.meetingTitle = document.getElementById('pdw-log-mtg-title')?.value.trim() || '';
     patch.meetingDate  = document.getElementById('pdw-log-mtg-date')?.value || '';
   }
+  // elc-v429 (NOTEDATE-20260819): if the user changed the entry's date, move
+  // createdAt to noon local on the new day so the feed re-sorts and displays it
+  // under the day it actually happened. Unchanged date → createdAt untouched.
+  const _editDate = type === 'note' ? (document.getElementById('pdw-log-note-date')?.value || '')
+                  : type === 'call' ? patch.callDate
+                  : patch.meetingDate;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(_editDate)) {
+    const _curDate = state.createdAt ? window._elcLocalDateStr(new Date(state.createdAt)) : '';
+    if (_editDate !== _curDate) {
+      const _ts = new Date(_editDate + 'T12:00:00').getTime();
+      if (!isNaN(_ts)) {
+        patch.createdAt = _ts;
+        patch.backdated = true;
+        if (type === 'note') patch.activityDate = _editDate;
+      }
+    }
+  }
   try {
     const { doc, updateDoc } = _fbFns;
     await updateDoc(doc(_fbDb, 'deals', dealId, 'activities', activityId), patch);
@@ -16976,7 +17020,7 @@ window._pdwDeleteActivity = async (dealId, activityId, feedElId) => {
 window._propOpenLog = (dealId, type) => {
   const form = document.getElementById('prop-log-form-' + dealId);
   if (!form) return;
-  const today = new Date().toISOString().split('T')[0];
+  const today = window._elcLocalDateStr();
   form.classList.remove('hidden');
   const closeBtn = `<button onclick="event.stopPropagation();document.getElementById('prop-log-form-${dealId}').classList.add('hidden')" style="margin-left:auto;background:none;border:none;color:#9ca3af;cursor:pointer;font-size:1.1rem;line-height:1">&times;</button>`;
   const cancelBtn = `<button onclick="event.stopPropagation();document.getElementById('prop-log-form-${dealId}').classList.add('hidden')" style="padding:.35rem .65rem;border:1px solid #e5e7eb;border-radius:.5rem;font-size:.75rem;cursor:pointer;background:#fff">Cancel</button>`;
@@ -16985,6 +17029,7 @@ window._propOpenLog = (dealId, type) => {
       <div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem">
         <span style="font-size:.72rem;font-weight:700;color:#4f46e5">📝 Log Note</span>${closeBtn}
       </div>
+      <input id="plo-note-date" type="date" value="${today}" max="${today}" aria-label="Note date" title="Date this actually happened" onclick="event.stopPropagation()" style="width:100%;border:1px solid #e5e7eb;border-radius:.5rem;padding:.35rem .55rem;font-size:.78rem;outline:none;box-sizing:border-box;margin-bottom:.4rem"/>
       <textarea id="plo-body" rows="2" placeholder="What happened?" onclick="event.stopPropagation()" style="width:100%;border:1px solid #e5e7eb;border-radius:.5rem;padding:.4rem .6rem;font-size:.8rem;outline:none;resize:none;box-sizing:border-box"></textarea>
       <div style="display:flex;gap:.4rem;margin-top:.4rem">
         ${window._micBtn('plo-body',{small:true})}
@@ -17030,7 +17075,9 @@ window._propOpenLog = (dealId, type) => {
 window._propSaveLog = async (dealId, type) => {
   const body = document.getElementById('plo-body')?.value.trim() || '';
   const data = { body };
-  if (type === 'call') {
+  if (type === 'note') {
+    data.activityDate = document.getElementById('plo-note-date')?.value || '';
+  } else if (type === 'call') {
     data.callDate = document.getElementById('plo-call-date')?.value || '';
     const dur = parseInt(document.getElementById('plo-call-dur')?.value);
     if (dur) data.callDuration = dur;
@@ -21802,7 +21849,7 @@ function _crmRenderActivities(acts) {
     return;
   }
   feed.innerHTML = acts.map(a => {
-    const ts = a.createdAt ? new Date(a.createdAt).toLocaleString('en-US',{month:'short',day:'numeric',year:'2-digit',hour:'numeric',minute:'2-digit'}) : '';
+    const ts = a.createdAt ? (a.backdated ? new Date(a.createdAt).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'2-digit'}) : new Date(a.createdAt).toLocaleString('en-US',{month:'short',day:'numeric',year:'2-digit',hour:'numeric',minute:'2-digit'})) : '';
     const icon = _ACTIVITY_ICONS[a.type] || '📌';
     const color = _ACTIVITY_COLORS[a.type] || '#9ca3af';
     const label = _ACTIVITY_LABELS[a.type] || a.type;
@@ -21910,7 +21957,9 @@ window._crmLogActivity = async (contactId, type, data = {}) => {
   const {collection, addDoc} = _fbFns;
   const activity = {
     type,
-    createdAt: Date.now(),
+    // Honor a backdated createdAt passed from the deal cross-log (elc-v429)
+    createdAt: (data.backdated && data.createdAt) ? data.createdAt : Date.now(),
+    ...( data.backdated ? {backdated: true} : {} ),
     createdBy: currentUser?.uid || '',
     createdByName: currentUser?.name || '',
     autoLogged: data.autoLogged || false,
@@ -23513,8 +23562,8 @@ window._execManualMergeContacts = async () => {
 };
 
 // ── CRM Outreach Imports (updated nightly by daily-crm-outreach-sync task) ──
-const _CRM_OUTREACH_SYNC_DATE = '2026-08-18';
-const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-08-17_0","emailDate":"2026-08-17","emailSubject":"Fwd: Hanover Company_5416 Robert Tolle_Letter of Intent (08.17.2026)","attachmentNames":["Hanover Company_5416 Robert Tolle_LOI (08.17.2026).pdf","WSP DD Brandon Concept 8-17-26.pdf"],"recipientEmail":"fabbrit@richmancapital.com","recipientName":"Todd Fabbri","recipientFirstName":"Todd","recipientLastName":"Fabbri","companyName":"Richman Capital","propertyHint":"5416 Robert Tolle Brandon","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-08-17_1","emailDate":"2026-08-17","emailSubject":"Mathog Bank Site Plans","attachmentNames":["Avid - Concept Plan 1014395 F - 09.04.20.pdf","Avid - Concept Plan 1014395 D - 09.01.20.pdf"],"recipientEmail":"rg@rocwelldev.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Rocwell Development","propertyHint":"Mathog","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-08-17_2","emailDate":"2026-08-17","emailSubject":"Ripa SR 52 Layouts","attachmentNames":["2026-08-17 1020_COMM-LOT UPDATE EX.pdf"],"recipientEmail":"jaclyn.langholz@colliers.com","recipientName":"Jaclyn Langholz","recipientFirstName":"Jaclyn","recipientLastName":"Langholz","companyName":"Colliers","propertyHint":"SR 52","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-08-17_3","emailDate":"2026-08-17","emailSubject":"Hays and Hudson","attachmentNames":["OM Hays Hudson Retail (compressed).pdf"],"recipientEmail":"salsa3437@yahoo.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"","propertyHint":"Hays Hudson","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-08-17_4","emailDate":"2026-08-17","emailSubject":"Fwd: Gandy Blvd Termination Letter","attachmentNames":["Gandy Blvd - Termination Letter.doc"],"recipientEmail":"ryan@snyderlawgroup.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Snyder Law Group","propertyHint":"Gandy Blvd","matchedDealId":null,"imported":false,"skipped":false}];
+const _CRM_OUTREACH_SYNC_DATE = '2026-08-19';
+const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-08-18_0","emailDate":"2026-08-18","emailSubject":"Fwd: Hillsborough - Riverview - 5416 Robert Tolle Dr. - Trinsic Residential Purchase LOI","attachmentNames":["2026.08.13 Riverview 5416 Robert Tolle Dr - Trinsic Purchase LOI.docx"],"recipientEmail":"fabbrit@richmancapital.com","recipientName":"Todd Fabbri","recipientFirstName":"Todd","recipientLastName":"Fabbri","companyName":"Richmancapital","propertyHint":"Robert Tolle","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-08-18_1","emailDate":"2026-08-18","emailSubject":"Fwd: Riverview Apt site","attachmentNames":["CDP LOI_Robert Tolle_8.17.26.pdf","CDP Profile_Robert Tolle Site.pdf"],"recipientEmail":"fabbrit@richmancapital.com","recipientName":"Todd Fabbri","recipientFirstName":"Todd","recipientLastName":"Fabbri","companyName":"Richmancapital","propertyHint":"Riverview","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-08-18_2","emailDate":"2026-08-18","emailSubject":"Offer on 955 SE 12th Street, Hialeah","attachmentNames":["LOI Rocwell Hialeah.doc"],"recipientEmail":"kirk.olson@marcusmillichap.com","recipientName":"Kirk Olson","recipientFirstName":"Kirk","recipientLastName":"Olson","companyName":"Marcusmillichap","propertyHint":"955 SE 12th St Hialeah","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-08-18_3","emailDate":"2026-08-18","emailSubject":"Re: 26-06080CHE/26-06499CH: 10568 Gandy Blvd, St. Petersburg, FL, 4 Rivers - SELLER ACKN REQ & AMEND REQ","attachmentNames":["Gandy Blvd - Termination Letter.pdf"],"recipientEmail":"ryan@snyderlawgroup.com","recipientName":"Ryan Snyder","recipientFirstName":"Ryan","recipientLastName":"Snyder","companyName":"Snyderlawgroup","propertyHint":"Gandy Blvd","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-08-18_4","emailDate":"2026-08-18","emailSubject":"Offer on 10765 NW 19th Ave, Sweetwater, FL","attachmentNames":["LOI Rocwell Sweetwater.doc"],"recipientEmail":"fernando@arenciproperties.com","recipientName":"Fernando","recipientFirstName":"Fernando","recipientLastName":"","companyName":"Arenciproperties","propertyHint":"10765 NW 19th Ave Sweetwater","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-08-18_5","emailDate":"2026-08-18","emailSubject":"Re: 918 E. 2nd Ave, 173 E 9 St, Hialeah, FL","attachmentNames":["LOI Rocwell 2nd Avenue Hialeah.doc"],"recipientEmail":"mf@faustocommercial.com","recipientName":"Moises Figueroa","recipientFirstName":"Moises","recipientLastName":"Figueroa","companyName":"Faustocommercial","propertyHint":"918 E 2nd Ave Hialeah","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-08-18_6","emailDate":"2026-08-18","emailSubject":"Offer on Lakeland BK","attachmentNames":["LOI Rocwell Lakeland BK.doc"],"recipientEmail":"mercedes.martin@expcommercial.com","recipientName":"Mercedes Martin","recipientFirstName":"Mercedes","recipientLastName":"Martin","companyName":"Expcommercial","propertyHint":"Lakeland BK","matchedDealId":null,"imported":false,"skipped":false}];
 
 // ── Gmail Sync ───────────────────────────────────────────────────────
 let _GMAIL_SYNC_DATE;  // set at runtime by crmGmailSync; blank = never synced this session
