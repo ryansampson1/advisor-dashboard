@@ -649,29 +649,49 @@ body {
   #mobile-tab-bar { display: none !important; }
 }
 
-/* ── Property Detail Drawer ──────────────────────────────────────── */
+/* ── Property Detail — centered modal card (elc-v430, marker: DEALMODAL-20260819)
+   Was a full-width slide-in drawer; now a VEED-style dialog floating over a
+   darkened, click-to-close backdrop. Phones keep the edge-to-edge layout. */
 #prop-detail-drawer {
-  position: fixed; top: 0; right: 0; bottom: 0; left: 0;
-  width: 100vw;
+  position: fixed; top: 50%; left: 50%;
+  width: min(1240px, calc(100vw - 4rem));
+  height: min(92vh, calc(100vh - 3rem));
   background: #fff;
-  box-shadow: -4px 0 32px rgba(0,0,0,.18);
+  border-radius: 18px;
+  box-shadow: 0 24px 80px rgba(0,0,0,.30), 0 4px 16px rgba(0,0,0,.12);
   z-index: 9999;
   display: flex; flex-direction: column;
-  transform: translateX(100%);
-  transition: transform .28s cubic-bezier(.4,0,.2,1);
-  border-left: 1px solid #e5e7eb;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, -48%) scale(.97);
+  transition: transform .22s cubic-bezier(.4,0,.2,1), opacity .22s ease;
 }
-#prop-detail-drawer.open { transform: translateX(0); }
+#prop-detail-drawer.open { opacity: 1; pointer-events: auto; transform: translate(-50%, -50%) scale(1); }
+@media (max-width: 767px) {
+  /* A floating card is too cramped at 390px — go edge-to-edge on phones */
+  #prop-detail-drawer {
+    top: 0; left: 0; width: 100vw; height: 100%;
+    border-radius: 0;
+    transform: translateY(14px);
+  }
+  #prop-detail-drawer.open { transform: translateY(0); }
+}
 .pdw-cols { display: flex; gap: 1rem; align-items: flex-start; flex-wrap: wrap; padding: 0 .25rem; }
 .pdw-col-main { flex: 1 1 460px; min-width: 0; }
 .pdw-col-side { flex: 0 0 340px; width: 340px; max-width: 100%; position: sticky; top: 0; }
 .pdw-col-side .att-chip { white-space: normal; word-break: break-word; }
 @media (max-width: 860px) { .pdw-col-side { flex-basis: 100%; width: 100%; position: static; } }
 #prop-detail-overlay {
-  display: none; position: fixed; inset: 0; z-index: 9998;
-  background: rgba(0,0,0,.25);
+  position: fixed; inset: 0; z-index: 9998;
+  background: rgba(15,23,42,.55);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+  opacity: 0; pointer-events: none;
+  transition: opacity .22s ease;
+  cursor: pointer;
 }
-#prop-detail-overlay.open { display: block; }
+#prop-detail-overlay.open { opacity: 1; pointer-events: auto; }
 .prop-section {
   padding: .875rem 1.125rem;
   border-bottom: 1px solid #f0f0f0;
@@ -1130,17 +1150,17 @@ button:disabled, button[disabled], [aria-busy="true"] {
 
 <!-- ===== DEAL MODAL ===== -->
 <!-- ── Property Detail Drawer ─────────────────────────────────── -->
-<div id="prop-detail-overlay" onclick="closePropertyDetail()"></div>
-<div id="prop-detail-drawer">
-  <div style="display:flex;align-items:center;justify-content:space-between;padding:.875rem 1.125rem;border-bottom:2px solid #f0f0f0;flex-shrink:0">
-    <div>
+<div id="prop-detail-overlay" onclick="requestClosePropertyDetail()" aria-hidden="true"></div>
+<div id="prop-detail-drawer" role="dialog" aria-modal="true" aria-labelledby="pdw-title" tabindex="-1">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:1rem 1.25rem;border-bottom:1px solid #eef0f3;flex-shrink:0;gap:.75rem">
+    <div style="min-width:0">
       <div id="pdw-title" style="font-size:1.05rem;font-weight:700;color:#111827;line-height:1.3"></div>
       <div id="pdw-sub" style="font-size:.75rem;color:#6b7280;margin-top:.2rem"></div>
     </div>
     <div style="display:flex;align-items:center;gap:.5rem;flex-shrink:0">
       <button id="pdw-ext-btn" onclick="" style="background:#eff6ff;border:none;border-radius:8px;padding:.4rem .8rem;font-size:.8rem;font-weight:600;color:#2563eb;cursor:pointer;display:none">📋 Extension</button>
       <button id="pdw-edit-btn" onclick="" style="background:#f3f4f6;border:none;border-radius:8px;padding:.4rem .8rem;font-size:.8rem;font-weight:600;color:#374151;cursor:pointer">✏️ Edit</button>
-      <button onclick="closePropertyDetail()" style="background:none;border:none;font-size:1.4rem;color:#9ca3af;cursor:pointer;line-height:1;padding:.2rem">&times;</button>
+      <button onclick="requestClosePropertyDetail()" aria-label="Close" title="Close (Esc)" style="background:none;border:none;font-size:1.4rem;color:#6b7280;cursor:pointer;line-height:1;width:2.5rem;height:2.5rem;display:flex;align-items:center;justify-content:center;border-radius:9999px;transition:background .15s,color .15s" onmouseover="this.style.background='#f3f4f6';this.style.color='#111827'" onmouseout="this.style.background='none';this.style.color='#6b7280'">&times;</button>
     </div>
   </div>
   <div id="pdw-body" style="flex:1;overflow-y:auto;width:100%;max-width:1400px;margin:0 auto;padding:0 1rem"></div>
@@ -15722,8 +15742,13 @@ window.openPropertyDetail = (dealId) => {
     </div><!-- /pdw-cols -->
   `;
 
+  // elc-v430 (DEALMODAL-20260819): centered modal — remember what was focused,
+  // lock the page behind the backdrop, and move focus into the dialog.
+  window._pdwRestoreFocus = document.activeElement;
   drawer.classList.add('open');
   overlay.classList.add('open');
+  document.body.style.overflow = 'hidden';
+  setTimeout(() => drawer.focus({ preventScroll: true }), 30);
   // Load activity feed async (sub-collection + legacy notes)
   setTimeout(() => window._propLoadActivities(dealId, 'pdw-activity-feed'), 50);
   setTimeout(() => window._taRenderDealTasks(dealId), 50);
@@ -15732,7 +15757,39 @@ window.openPropertyDetail = (dealId) => {
 window.closePropertyDetail = () => {
   document.getElementById('prop-detail-drawer')?.classList.remove('open');
   document.getElementById('prop-detail-overlay')?.classList.remove('open');
+  document.body.style.overflow = '';
+  const rf = window._pdwRestoreFocus;
+  if (rf && document.contains(rf) && typeof rf.focus === 'function') rf.focus({ preventScroll: true });
+  window._pdwRestoreFocus = null;
 };
+
+/* elc-v430 (DEALMODAL-20260819): backdrop click / ✕ / Esc all come through here
+   so a half-typed activity note isn't silently thrown away. */
+function _pdwLogFormDirty(){
+  const form = document.getElementById('pdw-log-form');
+  if (!form || form.classList.contains('hidden')) return false;
+  return Array.from(form.querySelectorAll('input, textarea')).some(f =>
+    f.type !== 'hidden' && (f.value || '') !== (f.defaultValue || ''));
+}
+window.requestClosePropertyDetail = async () => {
+  if (_pdwLogFormDirty()){
+    const go = await elcConfirm('You have an unsaved entry in this window. Close it and discard the entry?',
+                                { title: 'Discard entry?', okLabel: 'Discard', danger: true });
+    if (!go) return;
+  }
+  closePropertyDetail();
+};
+/* Esc closes the deal detail modal — but only when it's the top layer:
+   confirm dialogs and any overlay stacked above it get the Esc first. */
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  const drawer = document.getElementById('prop-detail-drawer');
+  if (!drawer?.classList.contains('open')) return;
+  if (document.querySelector('.elc-confirm-overlay')) return;   // branded confirm handles its own Esc
+  if (document.getElementById('pdw-gmail-modal')) return;       // Gmail review modal sits above
+  if (_elcVisibleOverlays().length) return;                     // some other dialog is on top
+  window.requestClosePropertyDetail();
+});
 
 // ── Property Gmail Email Sync ──────────────────────────────────────────────
 // Fetches last 30 days of Gmail emails mentioning this property, lets user
