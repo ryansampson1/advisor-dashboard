@@ -1403,7 +1403,7 @@ button:disabled, button[disabled], [aria-busy="true"] {
           <div class="grid grid-cols-2 gap-3">
             <div>
               <label class="block text-sm font-medium text-gray-700 mb-1">Phone</label>
-              <input id="f-contact-phone" type="tel" placeholder="(407) 555-0100"
+              <input id="f-contact-phone" type="tel" placeholder="407-555-0100"
                 class="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none"/>
             </div>
             <div>
@@ -10346,7 +10346,7 @@ function _vpAdvisorContact(uid){
   const da=getDistinctAdvisors().find(x=>x.uid===uid)||{};
   const name =(uid===currentUser.uid?(currentUser.name||''):'')||da.name||prof.name||'';
   const email=(uid===currentUser.uid?(currentUser.email||''):'')||da.email||prof.email||'';
-  const c={ name, phone:DD.fmtPhone(prof.phone||prof.officePhone||''), email };
+  const c={ name, phone:window._fmtPhone(prof.phone||prof.officePhone||''), email };
   return (c.name||c.phone||c.email)?c:null;
 }
 function _vpDealTeamUids(dealId){ const d=allDeals.find(x=>x.id===dealId); if(!d) return [];
@@ -10826,7 +10826,7 @@ function _vpPaintEditor(){
           <div class="vp-hint" style="margin-bottom:8px">Shown to the client. Saved for next time.</div>
           <label>Name</label><input type="text" id="vp-bname" value="${DD.esc(b.name||'')}" placeholder="Your name">
           <div class="vp-row2">
-            <div><label>Phone</label><input type="tel" id="vp-bphone" value="${DD.esc(DD.fmtPhone(b.phone||''))}" placeholder="(813) 555-5555" onblur="this.value=DD.fmtPhone(this.value)"></div>
+            <div><label>Phone</label><input type="tel" id="vp-bphone" value="${DD.esc(window._fmtPhone(b.phone||''))}" placeholder="813-555-5555"></div>
             <div><label>Email</label><input type="email" id="vp-bemail" value="${DD.esc(b.email||'')}" placeholder="you@thedirtdog.com"></div>
           </div>
         </div>
@@ -10902,7 +10902,7 @@ function _vpCollectRecord(){
   const val=id=>{ const e=document.getElementById(id); return e?e.value.trim():''; };
   const existing=window._vpEditing?allProposals.find(p=>p.id===window._vpEditing):null;
   const pwPlain=val('vp-pw');
-  const broker={name:val('vp-bname'),phone:DD.fmtPhone(val('vp-bphone')),email:val('vp-bemail')};
+  const broker={name:val('vp-bname'),phone:window._fmtPhone(val('vp-bphone')),email:val('vp-bemail')};
   try{ localStorage.setItem('dd_broker_default',JSON.stringify(broker)); }catch(e){}
   const office=(allProfiles[(existing?existing.advisorUid:currentUser.uid)]||{}).office || (existing&&existing.office) || allProfiles[currentUser.uid]?.office || '';
   return { projectName:val('vp-proj'), acreage:val('vp-acre'), client:val('vp-client'),
@@ -15744,6 +15744,7 @@ window.openPropertyDetail = (dealId) => {
 
   // elc-v430 (DEALMODAL-20260819): centered modal — remember what was focused,
   // lock the page behind the backdrop, and move focus into the dialog.
+  window._pdwDealId = dealId;   // elc-v431: which deal the open card shows (saveTask refreshes its list)
   window._pdwRestoreFocus = document.activeElement;
   drawer.classList.add('open');
   overlay.classList.add('open');
@@ -15757,6 +15758,7 @@ window.openPropertyDetail = (dealId) => {
 window.closePropertyDetail = () => {
   document.getElementById('prop-detail-drawer')?.classList.remove('open');
   document.getElementById('prop-detail-overlay')?.classList.remove('open');
+  window._pdwDealId = null;
   document.body.style.overflow = '';
   const rf = window._pdwRestoreFocus;
   if (rf && document.contains(rf) && typeof rf.focus === 'function') rf.focus({ preventScroll: true });
@@ -15780,16 +15782,19 @@ window.requestClosePropertyDetail = async () => {
   closePropertyDetail();
 };
 /* Esc closes the deal detail modal — but only when it's the top layer:
-   confirm dialogs and any overlay stacked above it get the Esc first. */
+   confirm dialogs and any overlay stacked above it get the Esc first.
+   Registered in the CAPTURE phase (elc-v431) so it inspects the layer stack
+   BEFORE the v422 bubble-phase manager closes the top overlay — otherwise one
+   Esc press would close both that overlay and the card behind it. */
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   const drawer = document.getElementById('prop-detail-drawer');
   if (!drawer?.classList.contains('open')) return;
   if (document.querySelector('.elc-confirm-overlay')) return;   // branded confirm handles its own Esc
   if (document.getElementById('pdw-gmail-modal')) return;       // Gmail review modal sits above
-  if (_elcVisibleOverlays().length) return;                     // some other dialog is on top
+  if (_elcVisibleOverlays().length) return;                     // some other dialog is on top — it gets this Esc
   window.requestClosePropertyDetail();
-});
+}, true);
 
 // ── Property Gmail Email Sync ──────────────────────────────────────────────
 // Fetches last 30 days of Gmail emails mentioning this property, lets user
@@ -20265,7 +20270,7 @@ function viewTasks(){
       <div class="flex-1 min-w-0">
         <div class="flex items-start gap-2 flex-wrap">
           <span class="text-sm font-medium ${done?'line-through text-gray-400':'text-gray-800'}">${t.title}</span>
-          ${t.dealAddress&&!hideAddr?`<a onclick="switchView('board')" class="text-xs text-blue-500 hover:underline cursor-pointer shrink-0">${t.dealAddress}</a>`:''}
+          ${t.dealAddress&&!hideAddr?`<a onclick="${t.dealId&&(allDeals||[]).some(d=>d.id===t.dealId)?`openPropertyDetail('${t.dealId}')`:`switchView('board')`}" class="text-xs text-blue-500 hover:underline cursor-pointer shrink-0" title="Open this property's card">${t.dealAddress}</a>`:''}
         </div>
         ${t.description?`<div class="text-xs text-gray-500 mt-0.5">${(()=>{
   const esc=s=>s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
@@ -20307,8 +20312,12 @@ function viewTasks(){
       const label = dealLabel(t);
       const key = t.dealId || label.trim().toLowerCase();
       if(!key){ noProp.push(t); return; }
-      if(!groups.has(key)) groups.set(key, {label: label||'Project', tasks:[]});
-      groups.get(key).tasks.push(t);
+      if(!groups.has(key)) groups.set(key, {label: label||'Project', dealId:'', tasks:[]});
+      const g = groups.get(key);
+      // elc-v431 (TASKUX-20260819): keep the deal id (when the deal still exists)
+      // so the header can link straight to the property card.
+      if(!g.dealId && t.dealId && (allDeals||[]).some(d=>d.id===t.dealId)) g.dealId = t.dealId;
+      g.tasks.push(t);
     });
     const earliestDue = ts => ts.map(x=>x.dueDate).filter(Boolean).sort()[0]||'';
     const arr = [...groups.values()].sort((a,b)=>{
@@ -20338,6 +20347,7 @@ function viewTasks(){
               <span class="text-base shrink-0">${g._noProp?'📋':'🏠'}</span>
               <span class="font-semibold ${g._noProp?'text-gray-500':'text-gray-800'} truncate">${esc(g.label)}</span>
               <span class="text-xs text-gray-400 shrink-0">${g.tasks.length} task${g.tasks.length!==1?'s':''}</span>
+              ${g.dealId?`<button type="button" onclick="event.preventDefault();event.stopPropagation();openPropertyDetail('${g.dealId}')" class="text-xs text-blue-600 hover:text-blue-800 hover:underline font-semibold shrink-0 whitespace-nowrap px-1.5 py-0.5 rounded" title="Open this property's card">Property Card ↗</button>`:''}
             </div>
             ${grpDueBadge(g.tasks)}
           </summary>
@@ -24617,16 +24627,53 @@ window._gssBlockRow = async (i) => {
 };
 
 // ── Phone formatting helper ──────────────────────────────────────────
-// Normalizes US numbers to "(XXX) XXX-XXXX". Leaves anything that isn't a
-// clean 10-digit (or 1+10) number untouched (extensions, intl, partials).
+// Normalizes US numbers to "XXX-XXX-XXXX" (elc-v431: hyphen style, was
+// "(XXX) XXX-XXXX"). Leaves anything that isn't a clean 10-digit (or 1+10)
+// number untouched (extensions, intl, partials).
 window._fmtPhone = v => {
   if(!v) return v;
   const raw = (''+v).trim();
   let digits = raw.replace(/\D/g,'');
   if(digits.length===11 && digits[0]==='1') digits = digits.slice(1);
-  if(digits.length===10) return `(${digits.slice(0,3)}) ${digits.slice(3,6)}-${digits.slice(6)}`;
+  if(digits.length===10) return `${digits.slice(0,3)}-${digits.slice(3,6)}-${digits.slice(6)}`;
   return raw;
 };
+
+/* ── Live phone auto-format (elc-v431, marker: PHONEFMT-20260819) ──────────
+   Every input[type=tel] app-wide: key in bare digits and the hyphens appear
+   as you type → XXX-XXX-XXXX. Delegated on document, so it covers the static
+   inputs, stage fields (sf-*), and every modal built later — no per-field
+   wiring. Hands off numbers that start with "+" (international) or carry
+   more than 10 digits (extension typed inline, etc.). While deleting, the
+   value is left alone (re-hyphenating would fight the backspace); it
+   re-normalizes on the next keystroke or on blur. */
+window._elcTelFormat = (el) => {
+  const raw = el.value;
+  if(raw.trim().startsWith('+')) return;                    // international — leave alone
+  let d = raw.replace(/\D/g,'');
+  if(d.length===11 && d[0]==='1') d = d.slice(1);           // strip US country code
+  if(d.length>10) return;                                   // more than a US number — leave alone
+  const digitsBeforeCaret = raw.slice(0, el.selectionStart ?? raw.length).replace(/\D/g,'').length;
+  const out = d.length>6 ? `${d.slice(0,3)}-${d.slice(3,6)}-${d.slice(6)}`
+            : d.length>3 ? `${d.slice(0,3)}-${d.slice(3)}`
+            : d;
+  if(out===raw) return;
+  el.value = out;
+  // Put the caret back after the same digit it followed before the reformat
+  let pos=0, seen=0;
+  while(pos<out.length && seen<digitsBeforeCaret){ if(/\d/.test(out[pos])) seen++; pos++; }
+  try { el.setSelectionRange(pos,pos); } catch(_){ /* input type without selection API */ }
+};
+document.addEventListener('input', (e) => {
+  const el = e.target;
+  if(!(el instanceof HTMLInputElement) || el.type!=='tel') return;
+  if(e.inputType && e.inputType.startsWith('delete')) return;   // don't fight backspace
+  window._elcTelFormat(el);
+});
+document.addEventListener('focusout', (e) => {
+  const el = e.target;
+  if(el instanceof HTMLInputElement && el.type==='tel') window._elcTelFormat(el);
+});
 
 // ── Paste Signature Modal ────────────────────────────────────────────
 window._parseContactSignature = text => {
@@ -25321,6 +25368,9 @@ window.openTaskModal = (id, presetDealId) => {
   const modal = document.createElement('div');
   modal.id='task-modal';
   modal.className='fixed inset-0 z-40 flex items-center justify-center modal-bg bg-black/40 p-4';
+  // elc-v431 (TASKUX-20260819): stack above the property detail modal (z 9999)
+  // so "+ Task" from inside a card opens on TOP of it, not hidden behind.
+  modal.style.zIndex = '10000';
   modal.innerHTML=`
     <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md">
       <div class="p-6">
@@ -25402,7 +25452,14 @@ window.saveTask = async () => {
     }
     document.getElementById('task-modal')?.remove();
     showToast(`Task ${editingTaskId?'updated':'created'} ✓`,'success');
-    viewTasks();
+    // elc-v431 (TASKUX-20260819): saved from inside an open property card →
+    // refresh that card's task list and stay put; don't yank the underlying
+    // view over to the Tasks tab.
+    if(document.getElementById('prop-detail-drawer')?.classList.contains('open')){
+      if(window._pdwDealId) window._taRenderDealTasks?.(window._pdwDealId);
+    } else {
+      viewTasks();
+    }
   } catch(err){
     console.error('[saveTask]',err);
     showToast('Save failed — try again','error');
@@ -35262,7 +35319,7 @@ function _buyersShowProfileModal(contact){
       </div>
       <div style="margin-bottom:14px;">
         <label style="font-size:12px;font-weight:600;color:#374151;display:block;margin-bottom:4px;">Phone</label>
-        <input id="bp-phone" type="tel" placeholder="(813) 555-0000" style="width:100%;padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;">
+        <input id="bp-phone" type="tel" placeholder="813-555-0000" style="width:100%;padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;">
       </div>` : ''}
 
       <div style="margin-bottom:14px;">
