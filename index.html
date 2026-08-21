@@ -15771,10 +15771,14 @@ function renderCard(deal, opts){
   // ── Acreage + Zoning universal footer rows ────────────────────────────
   const acreageVal = deal.acreage || deal.acres || '';
   const zoningVal  = deal.zoning  || '';
-  const propFooter = (acreageVal || zoningVal)
+  // LISTING-20260821: tiny "site live" chip when this deal has a published listing website
+  const lsLiveChip = (deal.listingSiteId && deal.listingPublished !== false)
+    ? `<div style="margin-top:2px"><span style="display:inline-flex;align-items:center;gap:3px;font-size:9.5px;font-weight:700;letter-spacing:.04em;color:#047a72;background:#e6f7f5;border:1px solid #b3e6e2;border-radius:999px;padding:1px 7px" title="This property has a live buyer-facing listing website">🌐 SITE LIVE</span></div>`
+    : '';
+  const propFooter = (acreageVal || zoningVal || lsLiveChip)
     ? `<div class="mt-1 pt-1 border-t border-gray-100 space-y-0.5">${
         acreageVal ? row('Acres', acreageVal + (String(acreageVal).includes('ac') ? '' : '')) : ''
-      }${zoningVal ? row('Zoning', zoningVal) : ''}</div>`
+      }${zoningVal ? row('Zoning', zoningVal) : ''}${lsLiveChip}</div>`
     : '';
 
   const photoUrl = deal.primaryPhotoUrl || (photoFiles[deal.id]?.dataUrl) || '';
@@ -16079,6 +16083,11 @@ window.openPropertyDetail = (dealId) => {
     </div><!-- /pdw-col-main -->
 
     <aside class="pdw-col-side">
+    <!-- Listing Website (LISTING-20260821): buyer-facing marketing page for this property -->
+    <div class="prop-section">
+      <div class="prop-section-title">Marketing</div>
+      <div id="pdw-listing-block">${window._lsModalBlock ? window._lsModalBlock(deal) : ''}</div>
+    </div>
     <!-- Attachments -->
     <div class="prop-section">
       <div class="prop-section-title">Attachments &amp; Files</div>
@@ -16977,6 +16986,10 @@ window._dealLogActivity = async (dealId, type, data = {}) => {
 // ── Log a stage change to the deal activity feed ─────────────────────────────
 window._logStageChange = async (dealId, fromStage, toStage) => {
   if (!dealId || !toStage || !_fbDb || !_fbFns) return;
+  // LISTING-20260821: every stage change (forward, backward, terminal) flows through
+  // here, so this is the single hook that keeps the public listing website's status
+  // banner in step with the board — incl. a fall-out putting it back to Available.
+  try { window._lsSyncStatusFromStage && window._lsSyncStatusFromStage(dealId, toStage); } catch(_){}
   try {
     const { collection, addDoc } = _fbFns;
     await addDoc(collection(_fbDb, 'deals', dealId, 'activities'), {
@@ -16996,6 +17009,524 @@ window._logStageChange = async (dealId, fromStage, toStage) => {
       { dealId, dealName, fromStage: fromStage||'', toStage }); } catch(_){}
   } catch(e) { console.warn('[logStageChange]', e); }
 };
+
+/* ═══════════════════════════════════════════════════════════════════════
+   LISTING WEBSITE — elc-v434        (marker: LISTING-20260821)
+
+   One button on the deal card builds a shareable, buyer-facing web page
+   for the property. Everything the card already knows is pre-filled —
+   address, banner photo, price, acreage, zoning, county, the advisor(s)
+   with their bios — the advisor just adds the sales details (description,
+   highlights, photos, property-info documents) and hits Publish.
+
+   · Public page lives at  <site>/listing/#<Slug>  (new /listing folder,
+     same share-link model as the proposals viewer: Firestore rules allow
+     a public GET of one `listings/{id}` doc when you know its exact id —
+     the collection cannot be listed).
+   · The doc is self-contained (advisor names/phones/bios are baked in at
+     publish time) so the public page never needs to read profiles.
+   · Status auto-follows the board via _logStageChange → _lsSyncStatusFromStage:
+     contract stages show "Under Contract", Closed Won shows "Sold", a
+     fall-out back to Listing returns it to "Available" (fell-out = back
+     on the market). Advisors can override with a manual status.
+   · Firestore rules to paste: docs/listing-firebase-rules.txt
+   ═══════════════════════════════════════════════════════════════════════ */
+
+function _lsEsc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+function _lsSlug(s){ return (String(s||'').trim().replace(/[^A-Za-z0-9]+/g,'_').replace(/^_+|_+$/g,'')) || 'Listing'; }
+function _lsViewerBase(){ let u=location.href.split('#')[0].split('?')[0]; u=u.replace(/[^/]*$/,''); return u+'listing/'; }
+function _lsShareLink(id){ return _lsViewerBase()+'#'+encodeURIComponent(id).replace(/%20/g,'_'); }
+
+// Map a board stage onto the public page's status banner.
+function _lsStageToStatus(stage){
+  const s = ((typeof STAGE_ALIAS!=='undefined' && STAGE_ALIAS[stage]) || stage || '').trim();
+  if (typeof isLostStage==='function' && isLostStage(s)) return 'off_market';
+  if (typeof isWonStage ==='function' && isWonStage(s))  return 'sold';
+  if (/signed.?loi|contract drafting|due.?diligence|under contract|closing|rezoning|permitting/i.test(s)) return 'under_contract';
+  return 'available';
+}
+
+// Called from _logStageChange on EVERY stage move (forward, backward, terminal).
+// Fire-and-forget: never blocks or breaks the stage change itself.
+window._lsSyncStatusFromStage = async (dealId, toStage) => {
+  try {
+    if(!_fbDb || !_fbFns) return;
+    const deal = (allDeals||[]).find(d => d.id === dealId);
+    const siteId = deal && deal.listingSiteId;
+    if(!siteId) return;
+    const want = _lsStageToStatus(toStage);
+    const { doc, getDoc, setDoc } = _fbFns;
+    const snap = await getDoc(doc(_fbDb,'listings',siteId));
+    if(!snap.exists()) return;
+    const cur = snap.data();
+    if(cur.statusMode === 'manual') return;      // advisor pinned a status by hand
+    if(cur.status === want) return;
+    await setDoc(doc(_fbDb,'listings',siteId), { status: want, updatedAt: Date.now() }, { merge:true });
+    console.log('[listingSite] public status → '+want+' ('+siteId+')');
+  } catch(e){ console.warn('[lsSyncStatus]', e); }
+};
+
+// The "Marketing" block inside the deal detail modal's side column.
+window._lsModalBlock = (deal) => {
+  if(!deal) return '';
+  const live = deal.listingSiteId && deal.listingPublished !== false;
+  if(live){
+    const link = _lsShareLink(deal.listingSiteId);
+    return `
+      <div style="font-size:.78rem;color:#047a72;font-weight:700;margin-bottom:.45rem">🌐 Listing website is live</div>
+      <div style="display:flex;flex-wrap:wrap;gap:.4rem">
+        <button class="prop-note-btn" onclick="window._lsCopyLink('${_lsEsc(deal.listingSiteId)}')" title="Copy the shareable buyer link">🔗 Copy Link</button>
+        <a class="prop-note-btn" style="text-decoration:none;display:inline-flex;align-items:center" href="${_lsEsc(link)}" target="_blank" rel="noopener" title="Open the public page in a new tab">👁 View</a>
+        <button class="prop-note-btn" onclick="window._lsOpenBuilder('${deal.id}')" title="Edit the public listing page">✏️ Edit Site</button>
+      </div>`;
+  }
+  return `
+    <button class="prop-note-btn" onclick="window._lsOpenBuilder('${deal.id}')"
+      title="Build a shareable buyer-facing web page for this property — pre-filled from this card">🌐 Create Listing Website</button>
+    <div style="font-size:.7rem;color:#6E7480;margin-top:.35rem;line-height:1.4">
+      Builds a shareable web page for buyers — photo, price, acreage, advisors and property-info docs, pre-filled from this card.</div>`;
+};
+
+window._lsCopyLink = async (siteId) => {
+  const link = _lsShareLink(siteId);
+  try { await navigator.clipboard.writeText(link); showToast('🔗 Listing link copied — paste it to any buyer','success',3500); }
+  catch(_) { window.prompt('Copy this listing link:', link); }
+};
+
+/* ---- builder state ---- */
+window._lsState = null;
+
+// Guess a document category from its file name (advisor can change it).
+function _lsGuessCat(name){
+  const n = (name||'').toLowerCase();
+  if(/aerial|drone|flyover/.test(n))                return 'aerial';
+  if(/survey|alta/.test(n))                         return 'survey';
+  if(/site.?plan|concept|layout|render/.test(n))    return 'siteplan';
+  if(/demo|population|traffic|income/.test(n))      return 'demographics';
+  if(/zon|flu|land.?use|entitle/.test(n))           return 'zoning';
+  if(/enviro|wetland|phase.?(i|1|one)|soil/.test(n))return 'environmental';
+  if(/flyer|brochure|package|offering|om\b/.test(n))return 'flyer';
+  if(/map|parcel|plat|boundar/.test(n))             return 'map';
+  return 'other';
+}
+const _LS_CATS = [['aerial','🛩️ Aerial'],['map','🗺️ Map'],['siteplan','📐 Site Plan'],['demographics','📊 Demographics'],
+                  ['survey','📏 Survey'],['flyer','📄 Flyer / Brochure'],['zoning','🏛️ Zoning'],['environmental','🌿 Environmental'],['other','📁 Other']];
+
+// Pull the advisor roster for the deal (primary + co-advisors) with contact info + bio.
+function _lsDealAdvisors(deal){
+  const out = [];
+  const push = (uid, email, fallbackName) => {
+    const p = (uid && allProfiles[uid]) || {};
+    const em = (email || p.email || '').toLowerCase();
+    const name = p.name || fallbackName || em || '';
+    if(!name) return;
+    if(out.some(a => a.email === em && em)) return;
+    out.push({
+      include: true,
+      name,
+      title: p.title || 'Land Advisor',
+      phone: (typeof window._fmtPhone==='function' ? window._fmtPhone(p.phone||p.officePhone||'') : (p.phone||p.officePhone||'')),
+      email: em,
+      bio: (typeof ADVISOR_BIOS!=='undefined' && ADVISOR_BIOS[em]) || ''
+    });
+  };
+  push(deal.advisorUid, deal.advisorEmail, deal.advisorName);
+  (deal.coAdvisors||[]).forEach(ca => push(ca.uid, ca.email, ca.name));
+  if(!(deal.coAdvisors||[]).length && deal.coAdvisorUid) push(deal.coAdvisorUid, deal.coAdvisorEmail, '');
+  return out;
+}
+
+/* ---- open the builder (pre-filled from the card, or from the saved site) ---- */
+window._lsOpenBuilder = async (dealId) => {
+  const deal = (allDeals||[]).find(d => d.id === dealId);
+  if(!deal){ showToast('Deal not found','error'); return; }
+  if(!_fbDb || !_fbFns){ showToast('Not connected — try again in a moment','error'); return; }
+
+  // Load the saved site if one exists, so Edit re-opens exactly what's live.
+  let saved = null;
+  if(deal.listingSiteId){
+    try {
+      const { doc, getDoc } = _fbFns;
+      const snap = await getDoc(doc(_fbDb,'listings',deal.listingSiteId));
+      if(snap.exists()) saved = snap.data();
+    } catch(e){ console.warn('[lsOpenBuilder] load', e); }
+  }
+
+  const price = saved ? saved.price : (deal.listedPrice||deal.listPrice||deal.askingPrice||deal.purchasePrice||'');
+  const st = window._lsState = {
+    dealId,
+    siteId: deal.listingSiteId || null,
+    published: saved ? saved.published !== false : false,
+    heroPhoto: saved ? (saved.heroPhoto||'') : (deal.primaryPhotoUrl||''),
+    gallery: saved ? (saved.gallery||[]).map(g=>({url:g.url,caption:g.caption||''})) : [],
+    docs: saved
+      ? (saved.docs||[]).map(d=>({include:true,label:d.label||d.name||'',category:d.category||'other',url:d.url,name:d.name||''}))
+      : [],
+    advisors: saved && (saved.advisors||[]).length
+      ? saved.advisors.map(a=>({include:true,...a}))
+      : _lsDealAdvisors(deal),
+    statusMode: saved ? (saved.statusMode||'auto') : 'auto',
+    status: saved ? (saved.status||_lsStageToStatus(deal.stage)) : _lsStageToStatus(deal.stage)
+  };
+  // Offer the deal's existing attachments as candidate property-info docs (unchecked
+  // ones aren't published). Skip any file already saved on the site.
+  (deal.dealAttachments||[]).forEach(a => {
+    if(!a || !a.url) return;
+    if(st.docs.some(d => d.url === a.url)) return;
+    st.docs.push({ include:false, label:(a.name||'Document').replace(/\.[a-z0-9]+$/i,''), category:_lsGuessCat(a.name), url:a.url, name:a.name||'' });
+  });
+
+  const f = {
+    headline:    saved ? (saved.headline||'')    : (deal.projectName||''),
+    address:     saved ? (saved.address||'')     : (deal.propertyAddress||deal.address||''),
+    priceText:   saved ? (saved.priceText||'')   : '',
+    acreage:     saved ? (saved.acreage||'')     : (deal.acreage||deal.acres||''),
+    zoning:      saved ? (saved.zoning||'')      : (deal.zoning||''),
+    county:      saved ? (saved.county||'')      : (deal.county||''),
+    parcelId:    saved ? (saved.parcelId||'')    : (deal.parcelId||deal.folio||''),
+    description: saved ? (saved.description||'') : '',
+    highlights:  saved ? (saved.highlights||[]).join('\n') : '',
+    mapQuery:    saved ? (saved.mapQuery||'')    : (deal.propertyAddress||deal.address||''),
+    price
+  };
+
+  const inp = (id,label,val,ph,extra) => `
+    <label style="display:block;font-size:.72rem;font-weight:700;color:#374151;margin-bottom:.15rem">${label}</label>
+    <input id="${id}" type="text" value="${_lsEsc(val)}" placeholder="${_lsEsc(ph||'')}" ${extra||''}
+      style="width:100%;font-size:16px;padding:.5rem .65rem;border:1px solid #d1d5db;border-radius:8px;margin-bottom:.65rem">`;
+
+  const bg = document.createElement('div');
+  bg.id = 'ls-builder-modal';
+  bg.className = 'fixed inset-0 flex items-center justify-center';
+  bg.style.cssText = 'z-index:10015;background:rgba(8,9,11,.55);padding:14px';
+  bg.innerHTML = `
+  <div style="width:100%;max-width:760px;max-height:92vh;overflow:auto;background:#fff;border-radius:16px;box-shadow:0 24px 80px rgba(0,0,0,.35)">
+    <div style="position:sticky;top:0;background:#fff;z-index:2;display:flex;align-items:center;justify-content:space-between;gap:1rem;padding:1.1rem 1.4rem .85rem;border-bottom:1px solid #eef0f2;border-radius:16px 16px 0 0">
+      <div>
+        <div style="font-size:1.05rem;font-weight:800">🌐 Listing Website — ${_lsEsc(deal.projectName||deal.propertyAddress||'Property')}</div>
+        <div style="font-size:.72rem;color:#6E7480">Pre-filled from the card. Anyone with the link can view the published page.</div>
+      </div>
+      <button onclick="window._lsCloseBuilder()" aria-label="Close" style="background:none;border:0;color:#9ca3af;font-size:24px;cursor:pointer;line-height:1;padding:.35rem">×</button>
+    </div>
+    <div style="padding:1.1rem 1.4rem 1.3rem">
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:0 1rem">
+        <div style="grid-column:1/-1">${inp('ls-f-headline','Headline (shown big on the page)',f.headline,'e.g. 47± Acres on I-4 — Prime Development Site')}</div>
+        <div style="grid-column:1/-1">${inp('ls-f-address','Property address',f.address,'Street, City, FL')}</div>
+        <div>${inp('ls-f-price','Asking price ($)',f.price,'e.g. 2500000','inputmode="numeric"')}</div>
+        <div>${inp('ls-f-pricetext','…or price label (overrides $)',f.priceText,'e.g. Call for Offers')}</div>
+        <div>${inp('ls-f-acreage','Acreage',f.acreage,'e.g. 47.2')}</div>
+        <div>${inp('ls-f-zoning','Zoning',f.zoning,'e.g. AG / PD')}</div>
+        <div>${inp('ls-f-county','County',f.county,'e.g. Hillsborough')}</div>
+        <div>${inp('ls-f-parcel','Parcel ID (optional)',f.parcelId,'')}</div>
+      </div>
+
+      <label style="display:block;font-size:.72rem;font-weight:700;color:#374151;margin-bottom:.15rem">Property description</label>
+      <textarea id="ls-f-desc" rows="5" placeholder="Sell the dirt — location, access, utilities, entitlements, the story…"
+        style="width:100%;font-size:16px;padding:.55rem .65rem;border:1px solid #d1d5db;border-radius:8px;margin-bottom:.65rem">${_lsEsc(f.description)}</textarea>
+
+      <label style="display:block;font-size:.72rem;font-weight:700;color:#374151;margin-bottom:.15rem">Highlights — one per line</label>
+      <textarea id="ls-f-highlights" rows="4" placeholder="1,200 ft of road frontage&#10;Utilities at the site&#10;No wetlands per FEMA"
+        style="width:100%;font-size:16px;padding:.55rem .65rem;border:1px solid #d1d5db;border-radius:8px;margin-bottom:.9rem">${_lsEsc(f.highlights)}</textarea>
+
+      <div style="font-size:.8rem;font-weight:800;margin:.2rem 0 .4rem">📸 Hero photo</div>
+      <div id="ls-hero-row" style="display:flex;align-items:center;gap:.8rem;margin-bottom:.9rem"></div>
+
+      <div style="font-size:.8rem;font-weight:800;margin:.2rem 0 .4rem">🖼 Photo gallery</div>
+      <div id="ls-gal-list" style="display:flex;flex-direction:column;gap:.45rem;margin-bottom:.45rem"></div>
+      <button class="prop-note-btn" onclick="document.getElementById('ls-gal-input').click()">+ Add photos</button>
+      <input id="ls-gal-input" type="file" accept="image/*" multiple style="display:none" onchange="window._lsAddGalleryFiles(this.files);this.value=''">
+      <div style="height:.9rem"></div>
+
+      <div style="font-size:.8rem;font-weight:800;margin:.2rem 0 .1rem">📂 Property information for buyers</div>
+      <div style="font-size:.7rem;color:#6E7480;margin-bottom:.45rem">Maps, aerials, site plans, demographics, surveys… Check the deal files to include, upload new ones, or paste a link. Only checked rows are published.</div>
+      <div id="ls-doc-list" style="display:flex;flex-direction:column;gap:.45rem;margin-bottom:.45rem"></div>
+      <div style="display:flex;gap:.4rem;flex-wrap:wrap">
+        <button class="prop-note-btn" onclick="document.getElementById('ls-doc-input').click()">⏫ Upload files</button>
+        <button class="prop-note-btn" onclick="window._lsAddDocUrl()">🔗 Add by link</button>
+      </div>
+      <input id="ls-doc-input" type="file" multiple style="display:none" onchange="window._lsAddDocFiles(this.files);this.value=''">
+      <div style="height:.9rem"></div>
+
+      <div style="font-size:.8rem;font-weight:800;margin:.2rem 0 .4rem">🤝 Advisors on the page</div>
+      <div id="ls-adv-list" style="display:flex;flex-direction:column;gap:.45rem;margin-bottom:.9rem"></div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:0 1rem">
+        <div>
+          <label style="display:block;font-size:.72rem;font-weight:700;color:#374151;margin-bottom:.15rem">Status banner</label>
+          <select id="ls-f-status" style="width:100%;font-size:16px;padding:.5rem .65rem;border:1px solid #d1d5db;border-radius:8px;margin-bottom:.65rem">
+            <option value="auto">Auto — follows the board stage (now: ${_lsEsc(_lsStageToStatus(deal.stage).replace('_',' '))})</option>
+            <option value="available">Available</option>
+            <option value="under_contract">Under Contract</option>
+            <option value="sold">Sold</option>
+            <option value="off_market">Off Market</option>
+          </select>
+        </div>
+        <div>${inp('ls-f-mapq','Map search (Google Maps)',f.mapQuery,'address or “lat,lng”')}</div>
+      </div>
+
+      <div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;justify-content:flex-end;border-top:1px solid #eef0f2;padding-top:.9rem;margin-top:.4rem">
+        ${st.siteId && st.published ? `<button class="prop-note-btn" style="background:#fef2f2;color:#b91c1c;border-color:#fecaca" onclick="window._lsUnpublish()">Take page offline</button>` : ''}
+        <span style="flex:1"></span>
+        <button class="prop-note-btn" onclick="window._lsCloseBuilder()">Cancel</button>
+        <button id="ls-publish-btn" class="prop-note-btn" style="background:#00b2a9;color:#fff;border-color:#00b2a9;font-weight:800;padding:.45rem 1.1rem" onclick="window._lsPublish()">
+          ${st.siteId && st.published ? '💾 Save & Update Live Page' : '🌐 Publish Listing Website'}</button>
+      </div>
+    </div>
+  </div>`;
+  document.body.appendChild(bg);
+  if(st.statusMode==='manual'){ const sel=document.getElementById('ls-f-status'); if(sel) sel.value = st.status; }
+  _lsRenderHero(); _lsRenderGallery(); _lsRenderDocs(); _lsRenderAdvisors();
+};
+
+window._lsCloseBuilder = () => { document.getElementById('ls-builder-modal')?.remove(); window._lsState = null; };
+
+/* ---- dynamic sub-lists ---- */
+function _lsRenderHero(){
+  const st = window._lsState; const el = document.getElementById('ls-hero-row'); if(!st||!el) return;
+  el.innerHTML = `
+    ${st.heroPhoto ? `<img src="${_lsEsc(st.heroPhoto)}" alt="" style="width:96px;height:64px;object-fit:cover;border-radius:8px;border:1px solid #e5e7eb">`
+                   : `<div style="width:96px;height:64px;border-radius:8px;background:#f3f4f6;border:1px dashed #d1d5db;display:flex;align-items:center;justify-content:center;font-size:.65rem;color:#9ca3af">No photo</div>`}
+    <div style="display:flex;flex-direction:column;gap:.3rem">
+      <button class="prop-note-btn" onclick="document.getElementById('ls-hero-input').click()">${st.heroPhoto?'Replace photo':'Upload photo'}</button>
+      <span style="font-size:.68rem;color:#6E7480">${st.heroPhoto?'Pre-filled from the card banner.':'Tip: drop a photo on the deal card first and it auto-fills here.'}</span>
+    </div>
+    <input id="ls-hero-input" type="file" accept="image/*" style="display:none" onchange="window._lsSetHeroFile(this.files);this.value=''">`;
+}
+function _lsRenderGallery(){
+  const st = window._lsState; const el = document.getElementById('ls-gal-list'); if(!st||!el) return;
+  el.innerHTML = st.gallery.length ? st.gallery.map((g,i)=>`
+    <div style="display:flex;align-items:center;gap:.55rem">
+      <img src="${_lsEsc(g.url)}" alt="" style="width:64px;height:44px;object-fit:cover;border-radius:6px;border:1px solid #e5e7eb;flex:0 0 auto">
+      <input type="text" value="${_lsEsc(g.caption)}" placeholder="Caption (optional)" onchange="window._lsState.gallery[${i}].caption=this.value"
+        style="flex:1;font-size:16px;padding:.35rem .55rem;border:1px solid #d1d5db;border-radius:7px">
+      <button onclick="window._lsRemoveGallery(${i})" title="Remove photo" style="background:none;border:0;color:#b91c1c;font-size:1rem;cursor:pointer;padding:.35rem">✕</button>
+    </div>`).join('')
+    : '<div style="font-size:.72rem;color:#9ca3af;font-style:italic">No gallery photos yet.</div>';
+}
+function _lsRenderDocs(){
+  const st = window._lsState; const el = document.getElementById('ls-doc-list'); if(!st||!el) return;
+  el.innerHTML = st.docs.length ? st.docs.map((d,i)=>`
+    <div style="display:flex;align-items:center;gap:.5rem;background:${d.include?'#f0fdfa':'#f9fafb'};border:1px solid ${d.include?'#99e5df':'#e5e7eb'};border-radius:8px;padding:.4rem .55rem">
+      <input type="checkbox" ${d.include?'checked':''} onchange="window._lsState.docs[${i}].include=this.checked;window._lsRenderDocsPublic()" style="width:16px;height:16px;accent-color:#00b2a9;flex:0 0 auto">
+      <input type="text" value="${_lsEsc(d.label)}" placeholder="Label buyers will see" onchange="window._lsState.docs[${i}].label=this.value"
+        style="flex:1;min-width:100px;font-size:16px;padding:.3rem .5rem;border:1px solid #d1d5db;border-radius:6px">
+      <select onchange="window._lsState.docs[${i}].category=this.value" style="font-size:.78rem;padding:.3rem;border:1px solid #d1d5db;border-radius:6px;max-width:130px">
+        ${_LS_CATS.map(c=>`<option value="${c[0]}" ${d.category===c[0]?'selected':''}>${c[1]}</option>`).join('')}
+      </select>
+      <a href="${_lsEsc(d.url)}" target="_blank" rel="noopener" title="Preview" style="text-decoration:none;font-size:.85rem">👁</a>
+    </div>`).join('')
+    : '<div style="font-size:.72rem;color:#9ca3af;font-style:italic">No documents yet — upload files or check items from the deal’s attachments.</div>';
+}
+window._lsRenderDocsPublic = _lsRenderDocs;
+function _lsRenderAdvisors(){
+  const st = window._lsState; const el = document.getElementById('ls-adv-list'); if(!st||!el) return;
+  el.innerHTML = st.advisors.length ? st.advisors.map((a,i)=>`
+    <div style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:.4rem .55rem">
+      <input type="checkbox" ${a.include?'checked':''} onchange="window._lsState.advisors[${i}].include=this.checked" style="width:16px;height:16px;accent-color:#00b2a9">
+      <b style="font-size:.82rem">${_lsEsc(a.name)}</b>
+      <input type="text" value="${_lsEsc(a.title)}" title="Title shown on the page" onchange="window._lsState.advisors[${i}].title=this.value"
+        style="width:110px;font-size:16px;padding:.25rem .45rem;border:1px solid #d1d5db;border-radius:6px">
+      <input type="tel" value="${_lsEsc(a.phone)}" placeholder="Phone" onchange="window._lsState.advisors[${i}].phone=this.value"
+        style="width:120px;font-size:16px;padding:.25rem .45rem;border:1px solid #d1d5db;border-radius:6px">
+      <span style="font-size:.72rem;color:#6E7480">${_lsEsc(a.email)}</span>
+      ${a.bio?'<span style="font-size:.66rem;color:#047a72;font-weight:700" title="Company bio will show on the page">BIO ✓</span>':''}
+    </div>`).join('')
+    : '<div style="font-size:.72rem;color:#9ca3af;font-style:italic">No advisors found on this deal.</div>';
+}
+
+/* ---- uploads (Storage) ---- */
+// Downscale big photos so the public page loads fast (max 1920px, jpeg .82).
+function _lsShrinkImage(file){
+  return new Promise((resolve) => {
+    try {
+      const img = new Image();
+      img.onload = () => {
+        const MAX = 1920;
+        let { width:w, height:h } = img;
+        if(Math.max(w,h) <= MAX || !/image\/(jpe?g|png|webp)/i.test(file.type)){ URL.revokeObjectURL(img.src); return resolve(file); }
+        const k = MAX/Math.max(w,h); w = Math.round(w*k); h = Math.round(h*k);
+        const c = document.createElement('canvas'); c.width = w; c.height = h;
+        c.getContext('2d').drawImage(img,0,0,w,h);
+        c.toBlob(b => { URL.revokeObjectURL(img.src); resolve(b||file); }, 'image/jpeg', .82);
+      };
+      img.onerror = () => resolve(file);
+      img.src = URL.createObjectURL(file);
+    } catch(_){ resolve(file); }
+  });
+}
+async function _lsUpload(path, blob){
+  if(!_fbStorage) throw new Error('Storage not connected');
+  const { ref, uploadBytes, getDownloadURL } = _fbFns;
+  const snap = await uploadBytes(ref(_fbStorage, path), blob);
+  return await getDownloadURL(snap.ref);
+}
+window._lsSetHeroFile = async (files) => {
+  const st = window._lsState; const file = files && files[0]; if(!st||!file) return;
+  try {
+    showToast('⏫ Uploading photo…','info',2000);
+    const blob = await _lsShrinkImage(file);
+    st.heroPhoto = await _lsUpload(`dealPhotos/${st.dealId}/listing_hero_${Date.now()}.jpg`, blob);
+    _lsRenderHero(); showToast('📸 Hero photo set','success',2000);
+  } catch(e){ console.warn('[lsHero]',e); showToast('Upload failed: '+(e.message||e),'error'); }
+};
+window._lsAddGalleryFiles = async (files) => {
+  const st = window._lsState; if(!st||!files||!files.length) return;
+  for(const file of Array.from(files)){
+    try {
+      showToast('⏫ Uploading '+file.name+'…','info',1800);
+      const blob = await _lsShrinkImage(file);
+      const url = await _lsUpload(`dealPhotos/${st.dealId}/listing_gal_${Date.now()}_${Math.random().toString(36).slice(2,7)}.jpg`, blob);
+      st.gallery.push({ url, caption:'' });
+    } catch(e){ console.warn('[lsGal]',e); showToast('Upload failed: '+(e.message||e),'error'); }
+  }
+  _lsRenderGallery();
+};
+window._lsRemoveGallery = (i) => { const st=window._lsState; if(!st) return; st.gallery.splice(i,1); _lsRenderGallery(); };
+window._lsAddDocFiles = async (files) => {
+  const st = window._lsState; if(!st||!files||!files.length) return;
+  for(const file of Array.from(files)){
+    try {
+      showToast('⏫ Uploading '+file.name+'…','info',1800);
+      const safe = file.name.replace(/[^a-zA-Z0-9._-]/g,'_');
+      const url = await _lsUpload(`dealDocs/${st.dealId}/listing_${Date.now()}_${safe}`, file);
+      st.docs.push({ include:true, label:file.name.replace(/\.[a-z0-9]+$/i,''), category:_lsGuessCat(file.name), url, name:file.name });
+    } catch(e){ console.warn('[lsDoc]',e); showToast('Upload failed: '+(e.message||e),'error'); }
+  }
+  _lsRenderDocs();
+};
+window._lsAddDocUrl = () => {
+  const st = window._lsState; if(!st) return;
+  const url = window.prompt('Paste the link (Google Drive share link, PDF URL, etc.):','');
+  if(!url || !/^https?:\/\//i.test(url.trim())){ if(url) showToast('That doesn’t look like a link','error'); return; }
+  st.docs.push({ include:true, label:'Document', category:'other', url:url.trim(), name:'' });
+  _lsRenderDocs();
+};
+
+/* ---- publish / unpublish ---- */
+async function _lsUniqueId(base, dealId){
+  const { doc, getDoc } = _fbFns;
+  let id = base || 'Listing', n = 2;
+  for(let i=0;i<30;i++){
+    const snap = await getDoc(doc(_fbDb,'listings',id));
+    if(!snap.exists() || snap.data().dealId === dealId) return id;
+    id = base + '-' + n; n++;
+  }
+  return base + '-' + Date.now();
+}
+window._lsPublish = async () => {
+  const st = window._lsState; if(!st) return;
+  const deal = (allDeals||[]).find(d => d.id === st.dealId);
+  if(!deal){ showToast('Deal not found','error'); return; }
+  const v = id => (document.getElementById(id)?.value||'').trim();
+  const address  = v('ls-f-address'), headline = v('ls-f-headline');
+  if(!address && !headline){ showToast('Give the page an address or a headline first','error'); return; }
+
+  const statusSel = v('ls-f-status') || 'auto';
+  const statusMode = statusSel === 'auto' ? 'auto' : 'manual';
+  const status = statusSel === 'auto' ? _lsStageToStatus(deal.stage) : statusSel;
+
+  const btn = document.getElementById('ls-publish-btn');
+  const done = (typeof elcBusy === 'function' && btn) ? elcBusy(btn,'Publishing…') : (()=>{});
+  try {
+    const siteId = st.siteId || await _lsUniqueId(_lsSlug(deal.projectName || address || headline), st.dealId);
+    const rec = {
+      v:1,
+      dealId: st.dealId,
+      advisorUid: deal.advisorUid || '',
+      coAdvisorUids: (deal.coAdvisors||[]).map(c=>c.uid).filter(Boolean),
+      office: (allProfiles[deal.advisorUid]?.office) || '',
+      published: true,
+      status, statusMode,
+      headline, address,
+      price: parseFloat(String(v('ls-f-price')).replace(/[^0-9.]/g,'')) || 0,
+      priceText: v('ls-f-pricetext'),
+      acreage: v('ls-f-acreage'),
+      zoning: v('ls-f-zoning'),
+      county: v('ls-f-county'),
+      parcelId: v('ls-f-parcel'),
+      description: (document.getElementById('ls-f-desc')?.value||'').trim(),
+      highlights: (document.getElementById('ls-f-highlights')?.value||'').split('\n').map(s=>s.trim()).filter(Boolean),
+      heroPhoto: st.heroPhoto || '',
+      gallery: st.gallery.map(g=>({url:g.url,caption:(g.caption||'').trim()})),
+      docs: st.docs.filter(d=>d.include && d.url).map(d=>({label:(d.label||'Document').trim(),category:d.category||'other',url:d.url,name:d.name||''})),
+      advisors: st.advisors.filter(a=>a.include).map(a=>({name:a.name,title:a.title||'Land Advisor',phone:a.phone||'',email:a.email||'',bio:a.bio||''})),
+      mapQuery: v('ls-f-mapq') || address,
+      updatedAt: Date.now(),
+      updatedBy: currentUser?.displayName || currentUser?.name || currentUser?.email || ''
+    };
+    if(!st.siteId) { rec.createdAt = Date.now(); rec.createdBy = rec.updatedBy; }
+
+    const { doc, setDoc } = _fbFns;
+    await setDoc(doc(_fbDb,'listings',siteId), rec, { merge:true });
+    await Store.updateDeal(st.dealId, { listingSiteId: siteId, listingPublished: true, updatedAt: Date.now() });
+    deal.listingSiteId = siteId; deal.listingPublished = true;
+
+    done();
+    window._lsCloseBuilder();
+    const block = document.getElementById('pdw-listing-block');
+    if(block && window._pdwDealId === st.dealId) block.innerHTML = window._lsModalBlock(deal);
+    if(typeof renderBoard === 'function') renderBoard();
+    _lsShareModal(siteId, deal);
+  } catch(e){
+    done();
+    console.error('[lsPublish]', e);
+    showToast('Publish failed: '+(e.message||e),'error',6000);
+  }
+};
+window._lsUnpublish = async () => {
+  const st = window._lsState; if(!st || !st.siteId) return;
+  const ok = await elcConfirm('Take this listing page offline? Buyers who open the link will see “no longer available”. You can republish any time.',
+                              { title:'Take page offline?', okLabel:'Take offline', danger:true });
+  if(!ok) return;
+  const siteId = st.siteId, dealId = st.dealId;
+  try {
+    const { doc, setDoc } = _fbFns;
+    await setDoc(doc(_fbDb,'listings',siteId), { published:false, updatedAt:Date.now() }, { merge:true });
+    await Store.updateDeal(dealId, { listingPublished:false, updatedAt:Date.now() });
+    const deal = (allDeals||[]).find(d=>d.id===dealId);
+    if(deal) deal.listingPublished = false;
+    window._lsCloseBuilder();
+    const block = document.getElementById('pdw-listing-block');
+    if(block && window._pdwDealId === dealId) block.innerHTML = window._lsModalBlock(deal);
+    if(typeof renderBoard === 'function') renderBoard();
+    showUndoToast('Listing page taken offline.', async () => {
+      await setDoc(doc(_fbDb,'listings',siteId), { published:true, updatedAt:Date.now() }, { merge:true });
+      await Store.updateDeal(dealId, { listingPublished:true, updatedAt:Date.now() });
+      if(deal){ deal.listingPublished = true; }
+      const b2 = document.getElementById('pdw-listing-block');
+      if(b2 && window._pdwDealId === dealId) b2.innerHTML = window._lsModalBlock(deal);
+      if(typeof renderBoard === 'function') renderBoard();
+    });
+  } catch(e){ console.warn('[lsUnpublish]', e); showToast('Failed: '+(e.message||e),'error'); }
+};
+
+/* ---- share modal (shown right after publish) ---- */
+function _lsShareModal(siteId, deal){
+  const link = _lsShareLink(siteId);
+  const addr = deal.projectName || deal.propertyAddress || 'this property';
+  const bg = document.createElement('div');
+  bg.className = 'fixed inset-0 flex items-center justify-center';
+  bg.style.cssText = 'z-index:10025;background:rgba(8,9,11,.5);padding:16px';
+  bg.addEventListener('click', e => { if(e.target===bg) bg.remove(); });
+  bg.innerHTML = `
+  <div style="width:100%;max-width:540px;background:#fff;border-radius:16px;padding:22px 24px;box-shadow:0 24px 70px rgba(0,0,0,.3)">
+    <button onclick="this.closest('.fixed').remove()" aria-label="Close" style="float:right;background:none;border:0;color:#9ca3af;font-size:24px;cursor:pointer;line-height:1">×</button>
+    <h3 style="margin:0 0 4px;font-size:19px;font-weight:800">✓ Listing website is live</h3>
+    <div style="font-size:.78rem;color:#6E7480">Share this link with any potential buyer — no login, works on any phone.</div>
+    <div style="display:flex;gap:8px;margin-top:14px">
+      <input type="text" id="ls-outlink" readonly value="${_lsEsc(link)}" onclick="this.select()"
+        style="flex:1;font-size:13px;padding:10px 12px;border:1px solid #d1d5db;border-radius:9px">
+      <button class="prop-note-btn" style="background:#00b2a9;color:#fff;border-color:#00b2a9;font-weight:800" onclick="window._lsCopyLink('${_lsEsc(siteId)}')">Copy</button>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px">
+      <a class="prop-note-btn" style="text-decoration:none" href="${_lsEsc(link)}" target="_blank" rel="noopener">👁 View page</a>
+      <a class="prop-note-btn" style="text-decoration:none" href="mailto:?subject=${encodeURIComponent('For Sale: '+addr)}&body=${encodeURIComponent('Take a look at this property:\n\n'+link+'\n\n')}">✉ Email to a buyer</a>
+    </div>
+    <div style="font-size:.68rem;color:#9ca3af;margin-top:12px">The page updates the moment you save changes — the link never changes. Status follows the board automatically (Under Contract, Sold, back to Available on a fall-out) unless you pinned it.</div>
+  </div>`;
+  document.body.appendChild(bg);
+}
 
 // ── Log an attachment upload + AI term summary to the deal activity feed ──────
 window._logAttachmentActivity = async (dealId, fileObj, docType, downloadUrl, extractPromise) => {
@@ -24124,8 +24655,8 @@ window._execManualMergeContacts = async () => {
 };
 
 // ── CRM Outreach Imports (updated nightly by daily-crm-outreach-sync task) ──
-const _CRM_OUTREACH_SYNC_DATE = '2026-08-20';
-const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-08-19_0","emailDate":"2026-08-19","emailSubject":"Fwd: LOI - 10568 Gandy Blvd","attachmentNames":["Pursuit Capabilities Brochure (April 2026).pdf","LOI - 10568 Gandy Blvd - Pursuit 8.12.26.pdf","LOI - 10568 Gandy Blvd - Pursuit 8.12.26.docx"],"recipientEmail":"ryan@snyderlawgroup.com","recipientName":"Ryan","recipientFirstName":"Ryan","recipientLastName":"","companyName":"Snyder Law Group","propertyHint":"Gandy Blvd","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-08-19_1","emailDate":"2026-08-19","emailSubject":"Re: CCC Contract Proposal","attachmentNames":["SKM_C25826081813340.pdf"],"recipientEmail":"andrew@cccfla.com","recipientName":"Andrew Ketchel","recipientFirstName":"Andrew","recipientLastName":"Ketchel","companyName":"Capital City Consulting","propertyHint":"Tallahassee","matchedDealId":null,"imported":false,"skipped":false}];
+const _CRM_OUTREACH_SYNC_DATE = '2026-08-21';
+const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-08-20_0","emailDate":"2026-08-20","emailSubject":"Re: Brandon Apts Offer Summary","attachmentNames":["Robert_Tolle_Buyer_Review.pptx"],"recipientEmail":"fabbrit@richmancapital.com","recipientName":"Todd Fabbri","recipientFirstName":"Todd","recipientLastName":"Fabbri","companyName":"Richman Capital","propertyHint":"Robert Tolle","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-08-20_1","emailDate":"2026-08-20","emailSubject":"Fwd: Englewood Site","attachmentNames":["Stellar_at_Artist_Ave_OM.pdf"],"recipientEmail":"ccauble@cproperties.com","recipientName":"Clay Cauble","recipientFirstName":"Clay","recipientLastName":"Cauble","companyName":"Cproperties","propertyHint":"Englewood","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-08-20_2","emailDate":"2026-08-20","emailSubject":"Fwd: RWD - Fremont Distribution and Sale Agreements","attachmentNames":["RWD Fremont Distribution and Assignment Agreement.docx","RW Fremont, Westben Seller -Membership Interest Purchase and Assignment Agreement.docx"],"recipientEmail":"awoodruff@shutts.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Shutts","propertyHint":"Fremont","matchedDealId":null,"imported":false,"skipped":false}];
 
 // ── Gmail Sync ───────────────────────────────────────────────────────
 let _GMAIL_SYNC_DATE;  // set at runtime by crmGmailSync; blank = never synced this session
