@@ -2544,8 +2544,22 @@ window.handleSoldConfirmation = function(id, deal, onConfirmed){
   const addr    = deal.propertyAddress||deal.projectName||deal.address||'property';
   const gross   = getEffectiveRevenue(deal);
   const fmt     = n => '$'+Math.round(n||0).toLocaleString();
-  const price   = deal.purchasePrice||deal.contractPrice||deal.suggestedPrice||0;
-  const commPct = deal.elcCommissionPct||deal.dealCommissionPct||deal.commissionPct||0;
+  // elc-v435 (marker: SOLDEDIT-20260823) — the closing statement is the first
+  // time the REAL numbers are known, so sale price and commission % are editable
+  // here and everything recalculates live. Source chains match getEffectiveRevenue.
+  const isLease  = deal.dealType === 'lease';
+  const price    = isLease
+    ? (deal.grossLeaseValue||deal.purchasePrice||0)
+    : (deal.purchasePrice||deal.contractPrice||deal.suggestedPrice||deal.listedPrice||deal.loiPrice||0);
+  const commPct  = isLease
+    ? (deal.leaseCommissionPct||deal.elcCommissionPct||deal.commissionPct||0)
+    : (deal.elcCommissionPct||deal.dealCommissionPct||deal.listingCommissionPct||deal.commissionPct||0);
+  const priceKey = isLease ? 'grossLeaseValue'    : 'purchasePrice';
+  const pctKey   = isLease ? 'leaseCommissionPct' : 'elcCommissionPct';
+  const priceLbl = isLease ? 'Gross Lease Value'  : 'Sale Price';
+  const refPct   = (deal.referralDue==='yes' && (deal.referralPct||0)>0) ? deal.referralPct : 0;
+  // Live values, kept in sync by _sccRecalc()
+  let _livePrice = price, _livePct = commPct, _liveGross = gross;
 
   const overlay = document.createElement('div');
   overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;display:flex;align-items:center;justify-content:center;padding:1rem;overflow-y:auto';
@@ -2576,19 +2590,33 @@ window.handleSoldConfirmation = function(id, deal, onConfirmed){
     <!-- Commission Verification -->
     <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:12px;padding:1rem;margin-bottom:1rem">
       <div style="font-size:.68rem;font-weight:700;color:#166534;text-transform:uppercase;letter-spacing:.06em;margin-bottom:.65rem">Commission Verification</div>
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:.5rem;margin-bottom:.8rem">
-        <div style="background:#fff;border-radius:8px;padding:.6rem;border:1px solid #d1fae5;text-align:center">
-          <div style="font-size:.68rem;color:#6b7280;margin-bottom:.2rem">Sale Price</div>
-          <div style="font-weight:700;color:#111827;font-size:.88rem">${price>0?fmt(price):'—'}</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:.5rem;margin-bottom:.6rem">
+        <div style="background:#fff;border-radius:8px;padding:.55rem;border:1px solid #d1fae5">
+          <label for="scc-price" style="display:block;font-size:.68rem;color:#4b5563;margin-bottom:.25rem;text-align:center">${priceLbl}</label>
+          <div style="display:flex;align-items:center;border:1px solid #d1d5db;border-radius:7px;overflow:hidden;background:#fff">
+            <span style="padding:.35rem .35rem;background:#f9fafb;color:#4b5563;font-size:.85rem;border-right:1px solid #d1d5db">$</span>
+            <input id="scc-price" type="text" inputmode="numeric" aria-label="${priceLbl}"
+              value="${price>0?price.toLocaleString():''}" placeholder="0" oninput="_sccFmtPrice(this);_sccRecalc()"
+              style="flex:1;min-width:0;width:100%;padding:.35rem .4rem;font-size:1rem;font-weight:700;color:#111827;border:none;outline:none;text-align:right;background:transparent"/>
+          </div>
         </div>
-        <div style="background:#fff;border-radius:8px;padding:.6rem;border:1px solid #d1fae5;text-align:center">
-          <div style="font-size:.68rem;color:#6b7280;margin-bottom:.2rem">Commission %</div>
-          <div style="font-weight:700;color:#111827;font-size:.88rem">${commPct>0?commPct+'%':'—'}</div>
+        <div style="background:#fff;border-radius:8px;padding:.55rem;border:1px solid #d1fae5">
+          <label for="scc-pct" style="display:block;font-size:.68rem;color:#4b5563;margin-bottom:.25rem;text-align:center">Commission %</label>
+          <div style="display:flex;align-items:center;border:1px solid #d1d5db;border-radius:7px;overflow:hidden;background:#fff">
+            <input id="scc-pct" type="number" min="0" max="100" step="0.25" inputmode="decimal" aria-label="Commission percent"
+              value="${commPct>0?commPct:''}" placeholder="0" oninput="_sccRecalc()"
+              style="flex:1;min-width:0;width:100%;padding:.35rem .4rem;font-size:1rem;font-weight:700;color:#111827;border:none;outline:none;text-align:right;background:transparent"/>
+            <span style="padding:.35rem .35rem;background:#f9fafb;color:#4b5563;font-size:.85rem;border-left:1px solid #d1d5db">%</span>
+          </div>
         </div>
-        <div style="background:#fff;border-radius:8px;padding:.6rem;border:1px solid #d1fae5;text-align:center">
-          <div style="font-size:.68rem;color:#6b7280;margin-bottom:.2rem">Projected Gross</div>
-          <div style="font-weight:700;color:#16a34a;font-size:.88rem">${gross>0?fmt(gross):'—'}</div>
+        <div style="background:#fff;border-radius:8px;padding:.55rem;border:1px solid #d1fae5;text-align:center;display:flex;flex-direction:column;justify-content:center">
+          <div style="font-size:.68rem;color:#4b5563;margin-bottom:.2rem">Gross Commission</div>
+          <div id="scc-gross" style="font-weight:800;color:#16a34a;font-size:1rem">${gross>0?fmt(gross):'—'}</div>
+          ${refPct>0?`<div style="font-size:.62rem;color:#92400e;margin-top:.15rem">after ${refPct}% referral</div>`:''}
         </div>
+      </div>
+      <div id="scc-recalc-note" role="status" style="display:none;font-size:.75rem;color:#92400e;background:#fffbeb;border:1px solid #fde68a;border-radius:7px;padding:.4rem .55rem;margin-bottom:.65rem;line-height:1.35">
+        ↻ <strong>Recalculated.</strong> <span id="scc-recalc-detail"></span> Confirming saves the new figures to the deal.
       </div>
       <label style="display:flex;align-items:center;gap:.5rem;margin-bottom:.6rem;cursor:pointer">
         <input type="checkbox" id="scc-comm-confirmed" style="width:1rem;height:1rem;accent-color:#16a34a" onchange="_sccToggleOverride()"/>
@@ -2662,6 +2690,46 @@ window.handleSoldConfirmation = function(id, deal, onConfirmed){
     const file = ev.dataTransfer.files[0]; if(!file) return;
     window._sccHandleFile({target:{files:[file]}});
   };
+  // elc-v435 (SOLDEDIT-20260823): re-derive the gross the same way
+  // getEffectiveRevenue() does — including the referral haircut — whenever the
+  // advisor corrects the sale price or the commission %.
+  // Thousands separators on the price field as you type (same idea as the
+  // app-wide phone auto-format), with the caret held in place after the same
+  // number of digits so editing mid-number isn't fought.
+  window._sccFmtPrice = el => {
+    const raw   = String(el.value);
+    const caret = el.selectionStart == null ? raw.length : el.selectionStart;
+    const before = raw.slice(0, caret).replace(/\D/g,'').length;
+    const digits = raw.replace(/\D/g,'');
+    const out    = digits ? parseInt(digits,10).toLocaleString() : '';
+    if(out !== raw) el.value = out;
+    let i = 0, seen = 0;
+    while(i < out.length && seen < before){ if(out[i] >= '0' && out[i] <= '9') seen++; i++; }
+    try{ el.setSelectionRange(i, i); }catch(_){}
+  };
+  window._sccRecalc = () => {
+    const pEl = card.querySelector('#scc-price'), cEl = card.querySelector('#scc-pct');
+    if(!pEl || !cEl) return;
+    _livePrice = parseFloat(String(pEl.value).replace(/[^0-9.]/g,''))||0;
+    _livePct   = parseFloat(cEl.value)||0;
+    let g = 0;
+    if(_livePrice>0 && _livePct>0 && _livePct<=100) g = Math.round(_livePrice*_livePct/100);
+    else if((deal.commissionAmount||0)>0) g = deal.commissionAmount;
+    else if((deal.expectedRevenue||0)>0) g = deal.expectedRevenue;
+    if(refPct>0 && g>0) g = Math.round(g*(1-refPct/100));
+    _liveGross = g;
+    const gEl = card.querySelector('#scc-gross');
+    if(gEl) gEl.textContent = g>0 ? fmt(g) : '—';
+    const ov = card.querySelector('#scc-comm-override');
+    if(ov) ov.placeholder = g>0 ? String(g) : '';
+    const bits = [];
+    if(_livePrice!==price)  bits.push(`${priceLbl} ${price>0?fmt(price):'—'} → ${_livePrice>0?fmt(_livePrice):'—'}`);
+    if(_livePct!==commPct)  bits.push(`Commission ${commPct>0?commPct+'%':'—'} → ${_livePct>0?_livePct+'%':'—'}`);
+    const note = card.querySelector('#scc-recalc-note');
+    const det  = card.querySelector('#scc-recalc-detail');
+    if(det)  det.textContent = bits.length ? bits.join(' · ')+'.' : '';
+    if(note) note.style.display = bits.length ? 'block' : 'none';
+  };
   window._sccToggleOverride = () => {
     const checked = card.querySelector('#scc-comm-confirmed').checked;
     card.querySelector('#scc-override-row').style.display = checked ? 'none' : 'flex';
@@ -2714,14 +2782,26 @@ window.handleSoldConfirmation = function(id, deal, onConfirmed){
       card.querySelector('#scc-cs-zone').style.borderColor='#dc2626';
       return;
     }
-    // 2. Commission confirmed or overridden
+    // 2. Commission confirmed or overridden — elc-v435: the confirmed gross is
+    //    the LIVE recalculated figure, so edits above flow straight through.
+    window._sccRecalc();
     const commConfirmed = card.querySelector('#scc-comm-confirmed').checked;
     const overrideVal   = parseFloat(card.querySelector('#scc-comm-override').value)||0;
     if(!commConfirmed && overrideVal<=0){
       showToast('Confirm the commission matches the closing statement, or enter the actual gross amount','warning',4000);
       return;
     }
-    const confirmedGross = commConfirmed ? gross : overrideVal;
+    if(_livePct>100){
+      showToast('Commission % looks wrong — it must be 100 or less','warning',4000);
+      card.querySelector('#scc-pct').focus();
+      return;
+    }
+    if(commConfirmed && _liveGross<=0){
+      showToast('Enter the sale price and commission % from the closing statement — or uncheck the box and enter the actual gross','warning',5000);
+      card.querySelector('#scc-price').focus();
+      return;
+    }
+    const confirmedGross = commConfirmed ? _liveGross : overrideVal;
 
     // 3. Collect payout rows (if Yes was selected)
     const payouts = [];
@@ -2752,8 +2832,28 @@ window.handleSoldConfirmation = function(id, deal, onConfirmed){
       commissionConfirmedBy:     currentUser?.uid||'advisor',
       soldPayouts:               payouts,
     };
+    // elc-v435 (SOLDEDIT-20260823): persist corrections to the closing numbers so
+    // the deal card, pay views, EOS revenue and the advisor payout breakdown all
+    // use the real figures — not the pre-closing estimate.
+    const _numChanges = [];
+    if(_livePrice>0 && _livePrice!==price){
+      saveData[priceKey] = _livePrice;
+      _numChanges.push(`${priceLbl} ${price>0?fmt(price):'—'} → ${fmt(_livePrice)}`);
+    }
+    if(_livePct>0 && _livePct!==commPct){
+      saveData[pctKey] = _livePct;
+      _numChanges.push(`Commission ${commPct>0?commPct+'%':'—'} → ${_livePct}%`);
+    }
     await Store.updateDeal(id, saveData).catch(e=>console.error('[sold-confirm]',e));
     Object.assign(deal, saveData);
+    // Audit trail on the property card's history
+    if(_numChanges.length){
+      try{
+        await window._dealLogActivity(id, 'note', {
+          body: `💰 Closing numbers corrected at Sold confirmation — ${_numChanges.join(' · ')}. Confirmed gross commission ${fmt(confirmedGross)}.`
+        });
+      }catch(e){ console.warn('[sold-confirm] history log failed', e); }
+    }
 
     // Fire Michael pay task
     await _handleSoldPayTask(deal, confirmedGross, payouts);
@@ -24655,8 +24755,8 @@ window._execManualMergeContacts = async () => {
 };
 
 // ── CRM Outreach Imports (updated nightly by daily-crm-outreach-sync task) ──
-const _CRM_OUTREACH_SYNC_DATE = '2026-08-21';
-const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-08-20_0","emailDate":"2026-08-20","emailSubject":"Re: Brandon Apts Offer Summary","attachmentNames":["Robert_Tolle_Buyer_Review.pptx"],"recipientEmail":"fabbrit@richmancapital.com","recipientName":"Todd Fabbri","recipientFirstName":"Todd","recipientLastName":"Fabbri","companyName":"Richman Capital","propertyHint":"Robert Tolle","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-08-20_1","emailDate":"2026-08-20","emailSubject":"Fwd: Englewood Site","attachmentNames":["Stellar_at_Artist_Ave_OM.pdf"],"recipientEmail":"ccauble@cproperties.com","recipientName":"Clay Cauble","recipientFirstName":"Clay","recipientLastName":"Cauble","companyName":"Cproperties","propertyHint":"Englewood","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-08-20_2","emailDate":"2026-08-20","emailSubject":"Fwd: RWD - Fremont Distribution and Sale Agreements","attachmentNames":["RWD Fremont Distribution and Assignment Agreement.docx","RW Fremont, Westben Seller -Membership Interest Purchase and Assignment Agreement.docx"],"recipientEmail":"awoodruff@shutts.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Shutts","propertyHint":"Fremont","matchedDealId":null,"imported":false,"skipped":false}];
+const _CRM_OUTREACH_SYNC_DATE = '2026-08-22';
+const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-08-21_0","emailDate":"2026-08-21","emailSubject":"SR 52 Ripa","attachmentNames":["2026-08-20 1020_Sandridge Lot Exhibit.pdf"],"recipientEmail":"jaclyn.langholz@colliers.com","recipientName":"Jaclyn Langholz","recipientFirstName":"Jaclyn","recipientLastName":"Langholz","companyName":"Colliers","propertyHint":"SR 52","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-08-21_1","emailDate":"2026-08-21","emailSubject":"Re: PSA- 3272 Bachelor St, East Point, GA","attachmentNames":["PSA- 3732 Bachelor St, East Point, GAv2.doc","PSA- 3732 Bachelor St, East Point, GA v2 clean.doc"],"recipientEmail":"monty@courseyproperties.com","recipientName":"Monty","recipientFirstName":"Monty","recipientLastName":"","companyName":"Coursey Properties","propertyHint":"Bachelor St","matchedDealId":null,"imported":false,"skipped":false}];
 
 // ── Gmail Sync ───────────────────────────────────────────────────────
 let _GMAIL_SYNC_DATE;  // set at runtime by crmGmailSync; blank = never synced this session
