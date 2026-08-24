@@ -1063,7 +1063,7 @@ button:disabled, button[disabled], [aria-busy="true"] {
 
 /* ── 4. Touch targets + no iOS zoom-on-focus (mobile-first) ─────── */
 @media (pointer: coarse) {
-  .tab-btn, #mobile-tab-bar .mtab, .brand-btn, .ghost-btn, .pv-seg, .elc-cbtn {
+  .tab-btn, #mobile-tab-bar .mtab, .brand-btn, .ghost-btn, .pv-seg, .l10-seg, .elc-cbtn {
     min-height: 44px;
   }
   .brand-btn, .ghost-btn, .elc-cbtn {
@@ -31094,6 +31094,33 @@ function viewEOS(sub='rocks'){
   else if(sub==='l10'){
     const l10Sub = (typeof window._l10Sub!=='undefined') ? window._l10Sub : 'advisor';
 
+    // ── OFFICE FILTER · L10OFFICE-20260824 (elc-v436) ────────────────────
+    // Most L-10s are a single-market meeting, so the whole agenda can be scoped
+    // to one office (Tampa / Orlando / Both). Remembered per device.
+    // The Staff L-10 is a fixed four-person roster, so the filter is not
+    // offered there and that tab always runs unscoped.
+    const _l10Offices = [...new Set(Object.values(allProfiles)
+      .filter(p=>!p.removed).map(p=>(p.office||'').trim()).filter(Boolean))]
+      .sort((a,b)=> a==='Tampa' ? -1 : b==='Tampa' ? 1 : a.localeCompare(b));
+    if(typeof window._l10Office === 'undefined'){
+      let _sv=''; try{ _sv = localStorage.getItem('elcL10Office')||''; }catch(e){}
+      window._l10Office = (_sv==='both'||_l10Offices.includes(_sv)) ? _sv : 'both';
+    }
+    const l10OfficeSel = (window._l10Office==='both'||_l10Offices.includes(window._l10Office))
+      ? window._l10Office : 'both';
+    const l10Office = (l10Sub==='staff') ? 'both' : l10OfficeSel;
+    const _officeOf = uid => ((allProfiles[uid]||{}).office||'').trim();
+    // People: strict match — an advisor with no office set only shows under Both.
+    const _l10InOffice = uid => l10Office==='both' || _officeOf(uid)===l10Office;
+    // Issues: lenient — never hide something someone submitted just because
+    // their profile has no office on it.
+    const _l10IssueIn  = uid => l10Office==='both' || !_officeOf(uid) || _officeOf(uid)===l10Office;
+    // Deals: in scope when the primary advisor OR any co-advisor is in scope.
+    const _l10DealIn = d => l10Office==='both' || _officeOf(d.advisorUid)===l10Office
+      || (d.coAdvisors||[]).some(ca=>_officeOf(ca.uid)===l10Office);
+    const l10Deals    = l10Office==='both' ? allDeals : allDeals.filter(_l10DealIn);
+    const l10Advisors = () => getDistinctAdvisors().filter(a=>_l10InOffice(a.uid));
+
     // ── helpers ──────────────────────────────────────────────────────────
     const l10Key = k => 'l10-'+k+'-'+l10Sub;
     const getTodos     = () => eosGet(l10Key('todos'), []);
@@ -31116,7 +31143,7 @@ function viewEOS(sub='rocks'){
     // ── issues ───────────────────────────────────────────────────────────
     const allIssues = eosGet('issues',[]);
     // Each issue only appears in the L-10 it was explicitly submitted for
-    const filterIssues = roleFilter => allIssues.filter(i => (i.role||'advisor') === roleFilter);
+    const filterIssues = roleFilter => allIssues.filter(i => (i.role||'advisor') === roleFilter && _l10IssueIn(i.advisorUid));
 
     // ── deal headlines ───────────────────────────────────────────────────
     // Match headline-worthy moves against the CURRENT pipeline stage names
@@ -31124,7 +31151,7 @@ function viewEOS(sub='rocks'){
     //  Closing, Closed Won/Sold, Closed Lost). Substring match — NOT anchored —
     // so multi-word stage names like "Due Diligence (Under Contract)" still hit.
     const headlineStages = /listing|contract|closing|closed\s*won|^sold$|closed\s*lost|terminat/i;
-    const newDealHeadlines = allDeals
+    const newDealHeadlines = l10Deals
       .filter(d=>{ const ts=d.stageEnteredAt||d.createdAt||0; return ts>=pwSts&&ts<=pwEts&&headlineStages.test(d.stage||''); })
       .sort((a,b)=>(b.stageEnteredAt||b.createdAt||0)-(a.stageEnteredAt||a.createdAt||0));
     const stageIcon = s => /listing/i.test(s)?'🏠':/proposal/i.test(s)?'📄':/closing/i.test(s)?'🤝':/closed.?won|^sold$/i.test(s)?'🏆':/closed.?lost|terminat/i.test(s)?'❌':/contract/i.test(s)?'📝':'📌';
@@ -31252,7 +31279,7 @@ function viewEOS(sub='rocks'){
                   return {uid:s.email, name:(_p&&_p.name)||s.name};
                 });
               }
-              return getDistinctAdvisors();
+              return l10Advisors();
             })().map(a=>`
               <div class="flex items-center gap-2 p-2 bg-gray-50 rounded-lg">
                 <div class="w-6 h-6 rounded-full bg-gray-200 flex items-center justify-center text-xs font-bold text-gray-600">${(a.name||'?')[0].toUpperCase()}</div>
@@ -31264,7 +31291,7 @@ function viewEOS(sub='rocks'){
         ${section('📊','Scorecard Review','5',`
           <p class="text-xs font-bold text-gray-400 uppercase tracking-wide mb-3">Prior Week: ${weekLabel2}</p>
           ${(()=>{
-            const advs = (roleFilter==='staff') ? [] : getDistinctAdvisors();
+            const advs = (roleFilter==='staff') ? [] : l10Advisors();
             const now2 = new Date();
             const qNum2 = Math.floor(now2.getMonth()/3)+1;
             const qStart2 = new Date(now2.getFullYear(),(qNum2-1)*3,1).getTime();
@@ -31359,7 +31386,7 @@ function viewEOS(sub='rocks'){
             const allMyRocks = eosGet('myRocks',{});
             const rockMembers = roleFilter==='staff'
               ? Object.entries(allProfiles).filter(([,p])=>(p.roles||[]).some(r=>r==='staff')||STAFF_ONLY_EMAILS.includes((p.email||'').toLowerCase())).map(([uid,p])=>({uid,name:p.name||p.email||uid})).filter(m=>m.name&&m.name.length<60)
-              : getDistinctAdvisors();
+              : l10Advisors();
             const rockLabel = roleFilter==='staff' ? 'Staff Rocks' : 'Advisor Rocks';
             const compHtml = compRocks.length===0
               ? '<p class="text-sm text-gray-400 italic mb-3">No company rocks set.</p>'
@@ -31429,7 +31456,7 @@ function viewEOS(sub='rocks'){
           // Checks stageHistory first, falls back to stageEnteredAt on the deal.
           const _dealsEnteredStage = stageTest => {
             const seen = new Set(), results = [];
-            for(const d of allDeals){
+            for(const d of l10Deals){
               const id = d.id||d._id;
               const hist = d.stageHistory||[];
               for(const h of hist){
@@ -31456,7 +31483,7 @@ function viewEOS(sub='rocks'){
           // Lost listings: entered a lost stage last week AND previous stage was Listing
           const _lostListings = (()=>{
             const seen = new Set(), results = [];
-            for(const d of allDeals){
+            for(const d of l10Deals){
               const id = d.id||d._id;
               const hist = d.stageHistory||[];
               for(let i=0;i<hist.length;i++){
@@ -31499,7 +31526,7 @@ function viewEOS(sub='rocks'){
             +'</div>';
 
           // Q% per advisor — current quarter
-          const _advs = getDistinctAdvisors();
+          const _advs = l10Advisors();
           const _qRows = _advs.map(a=>{
             const qVol = allDeals.filter(d=>isDealAdvisor(d,a.uid)&&!isLostStage(d.stage||'')&&(isContractActiveStage(d.stage)||isWonStage(d.stage||''))&&getEffectiveDealTs(d)>=_pqStart&&getEffectiveDealTs(d)<=_pqEnd)
               .reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||0),0);
@@ -31540,7 +31567,7 @@ function viewEOS(sub='rocks'){
           // Projected revenue only counts active contract stages —
           // Due Diligence, Rezoning/Permitting, and Closing. LOI (and earlier
           // listing/prospect stages) and won/lost deals are excluded.
-          const _deals=filterDealsByOffice(allDeals).filter(d=>isContractActiveStage(d.stage||''));
+          const _deals=l10Deals.filter(d=>isContractActiveStage(d.stage||''));
           // Resolve a deal's revenue-recognition date (ms). Won deals without a
           // close date default to today so already-closed revenue still counts.
           const _dt=d=>{
@@ -31625,6 +31652,18 @@ function viewEOS(sub='rocks'){
       {id:'staff',   label:'🏢 Staff L-10'},
       {id:'admin',   label:'⚙️ Admin L-10'},
     ];
+    // ── office segmented control (sits under the sub-tab nav) ─────────────
+    const _noOfficeCount = getDistinctAdvisors().filter(a=>!_officeOf(a.uid)).length;
+    const officeBar = (l10Sub==='staff' || _l10Offices.length<2) ? '' : `
+      <div class="flex items-center gap-2 flex-wrap mt-2 sm:justify-end" role="group" aria-label="Filter this agenda by office">
+        <span class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Office</span>
+        ${[..._l10Offices.map(o=>({v:o,l:o})),{v:'both',l:'Both'}].map(o=>`
+          <button type="button" onclick="setL10Office('${o.v}')" aria-pressed="${l10Office===o.v}"
+            class="l10-seg px-3.5 py-1.5 text-xs font-semibold rounded-full border transition ${l10Office===o.v?'text-white shadow-sm':'bg-white text-gray-700 hover:border-red-400 hover:text-red-700'}"
+            style="${l10Office===o.v?'background:var(--brand-red);border-color:var(--brand-red)':'border-color:#e5e7eb'}">${o.l}</button>`).join('')}
+        ${(l10Office!=='both'&&_noOfficeCount)?`<span class="text-xs text-gray-500 basis-full sm:text-right">${_noOfficeCount} advisor${_noOfficeCount>1?'s':''} with no office set \u2014 shown under Both only</span>`:''}
+      </div>`;
+
     const subNav = subTabs.map(t=>`
       <button onclick="window._l10Sub='${t.id}';viewEOS('l10')"
         class="px-4 py-2 text-sm font-semibold rounded-lg transition whitespace-nowrap ${l10Sub===t.id?'text-white':'text-gray-600 hover:bg-white/60'}"
@@ -31647,7 +31686,7 @@ function viewEOS(sub='rocks'){
       <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
         <div>
           <h3 class="font-bold text-gray-800 text-base">📋 L-10 Meeting Agenda</h3>
-          <p class="text-xs text-gray-400 mt-0.5">${printDate} · 90 min · EOS Format</p>
+          <p class="text-xs text-gray-400 mt-0.5">${printDate} · 90 min · EOS Format${l10Office!=='both'?' · <span class="font-bold" style="color:var(--brand-red)">'+l10Office+' only</span>':''}</p>
         </div>
         <div class="flex items-center gap-3 flex-wrap">
           <!-- Timer -->
@@ -31659,8 +31698,11 @@ function viewEOS(sub='rocks'){
               : `<button onclick="l10StartTimer()" class="text-xs font-bold px-2.5 py-1 rounded-lg text-white transition" style="background:#059669">▶ Start</button>`}
             <button onclick="l10ResetTimer()" class="text-xs text-gray-500 hover:text-gray-300 transition" title="Reset timer">↺</button>
           </div>
-          <!-- Sub-tab nav -->
-          <div class="flex gap-2 bg-gray-100 p-1 rounded-xl">${subNav}</div>
+          <!-- Sub-tab nav + office filter -->
+          <div class="flex flex-col items-start sm:items-end">
+            <div class="flex gap-2 bg-gray-100 p-1 rounded-xl">${subNav}</div>
+            ${officeBar}
+          </div>
         </div>
       </div>
       <div class="max-w-2xl">
@@ -32370,6 +32412,17 @@ window.l10DeleteItem = (storeKey, id) => {
   const list = eosGet(storeKey,[]).filter(i=>i.id!==id);
   eosSave(storeKey, list);
   window._eosRerender('l10');
+};
+
+// Office scope for the L-10 agenda — Tampa / Orlando / Both (elc-v436).
+// Remembered per device so the weekly single-market meeting opens ready to go.
+window.setL10Office = v => {
+  if(window._l10Office === v) return;
+  window._l10Office = v;
+  try{ localStorage.setItem('elcL10Office', v); }catch(e){}
+  // Keep an in-progress meeting exactly where it is on the page.
+  window._eosRerender('l10');
+  showToast(v==='both' ? 'Showing both offices' : 'Showing '+v+' only','info',2000);
 };
 
 window.l10RateMeeting = rating => {
