@@ -8209,15 +8209,18 @@ const FB = {
             const _hadDupes = _taHasDupeRows(_ta);
             const _fellOutStale = _taFellOutNeedsFix(_ta);   // elc-v426
             const _filingStale  = _taFilingNeedsFix(_ta);    // elc-v440
+            const _richStale    = _taRichOwnedNeedsFix(_ta); // elc-v441
             TASK_AUTOMATIONS = _mergeTaskAutomations(_ta);
             try{ localStorage.setItem(K('taskAutomations'), JSON.stringify(TASK_AUTOMATIONS)); }catch(e){}
             // One-time repair: a set saved with the same activity listed twice
             // created duplicate tasks (e.g. "Cancel any pre set emails" ×2).
             // The merge above already collapsed them locally — push the cleaned
             // config back once so every teammate's copy is fixed too (elc-v423).
-            if((_hadDupes || _fellOutStale || _filingStale) && currentUser?.isAdmin && !window._taDupeRepairDone){
+            if((_hadDupes || _fellOutStale || _filingStale || _richStale) && currentUser?.isAdmin && !window._taDupeRepairDone){
               window._taDupeRepairDone = true;
-              const _msg = _filingStale && !_hadDupes && !_fellOutStale
+              const _msg = _richStale
+                ? '⚡ Sold checklist cleaned — the wire, payout, approve, thank-you, gift, sign and press-release steps come from their own automations now, not twice'
+                : _filingStale && !_hadDupes && !_fellOutStale
                 ? '⚡ Dropped the manual "File LOI in Google Drive" step — the LOI files itself to the Offers folder'
                 : (_hadDupes && _fellOutStale
                   ? '⚡ Task automation config repaired — duplicate rows removed, fell-out now re-activates the listing'
@@ -25145,8 +25148,8 @@ window._execManualMergeContacts = async () => {
 };
 
 // ── CRM Outreach Imports (updated nightly by daily-crm-outreach-sync task) ──
-const _CRM_OUTREACH_SYNC_DATE = '2026-08-28';
-const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-08-27_0","emailDate":"2026-08-27","emailSubject":"Bachelor St Thank you!","attachmentNames":["1st Amendment Bachelor Rocwell.docx.pdf"],"recipientEmail":"monty@courseyproperties.com","recipientName":"Monty","recipientFirstName":"Monty","recipientLastName":"","companyName":"Courseyproperties","propertyHint":"Bachelor St","matchedDealId":null,"imported":false,"skipped":false}];
+const _CRM_OUTREACH_SYNC_DATE = '2026-08-29';
+const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-08-28_0","emailDate":"2026-08-28","emailSubject":"LOI Bradenton/905 301 Blvd West","attachmentNames":["LOI_Bradenton FL_905 301 Blvd W.docx"],"recipientEmail":"vincent.crisci@gmail.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"","propertyHint":"905 301 Blvd West","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-08-28_1","emailDate":"2026-08-28","emailSubject":"2 Offers on Granite Peaks","attachmentNames":["Psh - LOI - Granite Peaks.pdf","2026.08.27 Darby Rd SFD LOI.pdf"],"recipientEmail":"s.sebring.sierra@gmail.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"","propertyHint":"Granite Peaks","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-08-28_2","emailDate":"2026-08-28","emailSubject":"Signed PSA for East Point Parcel","attachmentNames":["Complete_with_Docusign_Alex_signpdf_Screen.pdf"],"recipientEmail":"monty@courseyproperties.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Courseyproperties","propertyHint":"East Point","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-08-28_3","emailDate":"2026-08-28","emailSubject":"Signed PSA for East Point Parcel","attachmentNames":["Complete_with_Docusign_Alex_signpdf_Screen.pdf"],"recipientEmail":"ericslepian@slepianfirm.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Slepianfirm","propertyHint":"East Point","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-08-28_4","emailDate":"2026-08-28","emailSubject":"Signed PSA for East Point Parcel","attachmentNames":["Complete_with_Docusign_Alex_signpdf_Screen.pdf"],"recipientEmail":"jillian@rocwellinvestments.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Rocwellinvestments","propertyHint":"East Point","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-08-28_5","emailDate":"2026-08-28","emailSubject":"Signed PSA for East Point Parcel","attachmentNames":["Complete_with_Docusign_Alex_signpdf_Screen.pdf"],"recipientEmail":"justin@rocwell.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Rocwell","propertyHint":"East Point","matchedDealId":null,"imported":false,"skipped":false}];
 
 // ── Gmail Sync ───────────────────────────────────────────────────────
 let _GMAIL_SYNC_DATE;  // set at runtime by crmGmailSync; blank = never synced this session
@@ -27104,6 +27107,10 @@ const TASK_AUTOMATIONS_DEFAULT = {
     ['Buyer research', _TA.ADV, 3],
     ['Draft owner response to LOI', _TA.ADV, 3],
   ]},
+  // DUPEFIX-20260828 (elc-v441): no "Email client — marketing prep underway"
+  // row. _fireListingClientEmailTask already creates that task with the drafted
+  // email attached every time a deal enters the Listing stage, so a checklist
+  // row here only put a bare-title twin next to it.
   new_listing: { label:'New Listing', terminal:false, tasks:[
     ['📸 Schedule aerial photography', _TA.MKTG, 3],
     ['📧 Send property details to proposal team', _TA.ADV, 3],
@@ -27113,7 +27120,6 @@ const TASK_AUTOMATIONS_DEFAULT = {
     ['📣 Add to marketing groups', _TA.BILL, 3],
     ['🪧 Order sign & request Telzio', _TA.MKTG, 3],
     ['🌐 List on websites', _TA.KRISSY, 3],
-    ['✉️ Email client — marketing prep underway', _TA.ADV, 3],
   ]},
   proposal_todo: { label:'Proposal to Do', terminal:false, tasks:[
     ['📞 Follow up on outstanding proposal', _TA.ADV, 3],
@@ -27206,6 +27212,11 @@ function _mergeTaskAutomations(stored){
   for(const k of Object.keys(base)){
     if(Array.isArray(base[k].tasks)) base[k].tasks = _taFixFilingRows(base[k].tasks).rows;
   }
+  // Never list an activity a RICH coded rule already creates — that is what put
+  // two of every closing task on Michael's board (DUPEFIX-20260828, elc-v441).
+  for(const k of Object.keys(base)){
+    if(Array.isArray(base[k].tasks)) base[k].tasks = _taFixRichOwnedRows(base[k].tasks, k).rows;
+  }
   return base;
 }
 /* ── Fell-out row repair (elc-v426) ───────────────────────────────────────
@@ -27270,6 +27281,48 @@ function _taFixFilingRows(rows){
 function _taFilingNeedsFix(stored){
   if(!stored || typeof stored !== 'object') return false;
   return Object.keys(stored).some(k => _taFixFilingRows(stored[k] && stored[k].tasks).changed);
+}
+/* ── Rows a RICH coded rule already owns (DUPEFIX-20260828, elc-v441) ───
+   The ⚡ set and the coded rules BOTH fire on a stage move, and neither could
+   see the other's tasks — applyTaskAutomation only de-duped against rows
+   carrying its own autoKey, and the coded handlers de-duped against nothing.
+   So every activity a saved set named that a rich rule ALSO creates landed on
+   the board twice: Michael got two "Confirm wire received", two "Advisor payout
+   breakdown" and two "Approve commission payment" on every closing, Nick two
+   sign pick-ups and two press releases, Krissy two closing gifts, the advisor
+   two thank-you emails.
+   The rich copy always wins — it carries the payout figures, the Gmail draft and
+   the ✅ Approve & Mark Paid button, while the checklist twin is a bare title —
+   so the ROW is stripped from the set. Keyed by SET, so another set that happens
+   to use the same words is left alone. */
+const _TA_RICH_OWNED = {
+  // Sold: sold_wire_confirm (auto-15) → wire / payout / approve;
+  // auto-10 thank-you Gmail draft; gift_confirm (auto-11); sign_pickup_confirm
+  // (auto-9); press_release (auto-6). The plain closing-statement / websites /
+  // Eshenbaugh Report rows stay — _taIsPlainSkippable already mutes those rules.
+  sold: [
+    /\bwire\b/i,
+    /\bpayout\b[\s\S]*\bbreakdown\b|\bbreakdown\b[\s\S]*\bpayout\b/i,
+    /\bapprove\b[\s\S]*\bcommission\b/i,
+    /\bthank[\s-]*you\b/i,
+    /\bclosing\s+gift\b|\bgift\b[\s\S]*\bclient\b/i,
+    /\btelzio\b/i,
+    /\bpress\s+rel/i,            // matches the "Press Relase" typo too
+  ],
+  // Listing: _fireListingClientEmailTask drafts this one in Gmail on every
+  // entry into the Listing stage, for a new deal and for a stage change alike.
+  new_listing: [ /\bmarketing\s+prep\b/i ],
+};
+function _taFixRichOwnedRows(rows, key){
+  const pats = _TA_RICH_OWNED[key];
+  if(!pats || !Array.isArray(rows)) return {rows: rows, changed:false};
+  const out = rows.filter(r => !pats.some(re => re.test(String((r && r[0]) || ''))));
+  return {rows: out, changed: out.length !== rows.length};
+}
+// True when a stored config still lists an activity a rich coded rule owns.
+function _taRichOwnedNeedsFix(stored){
+  if(!stored || typeof stored !== 'object') return false;
+  return Object.keys(stored).some(k => _taFixRichOwnedRows(stored[k] && stored[k].tasks, k).changed);
 }
 // True when a stored config still has the outdated fell-out rows.
 function _taFellOutNeedsFix(stored){
@@ -27376,6 +27429,27 @@ const _taInFlight = new Set();
 // point in the script and would hit the temporal-dead-zone on an arrow const)
 function _taNorm(s){ return String(s||'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim(); }
 
+/* The identity of an ACTIVITY, whichever system created the task
+   (DUPEFIX-20260828, elc-v441). ⚡ tasks carry `taskBase`; the rich coded rules
+   carry none and title themselves "<activity> — <property>", so a plain compare
+   never paired the two and each side happily created its own copy. Strip the
+   property suffix and both normalize to the same key. */
+function _taBaseKey(t){
+  if(!t) return '';
+  if(t.taskBase) return _taNorm(t.taskBase);
+  let s = String(t.title||'');
+  const d = (typeof allDeals!=='undefined' ? (allDeals||[]) : []).find(x=>x && x.id===t.dealId);
+  // Longest name first — "376 S Croft Ave" must win over a shorter alias that
+  // is also a suffix of it, or the strip stops halfway through the address.
+  const names = [t.dealName, t.dealAddress, d&&d.projectName, d&&d.propertyAddress, d&&d.address]
+    .filter(Boolean).sort((a,b)=>String(b).length-String(a).length);
+  for(const n of names){
+    const i = s.lastIndexOf(' — '+n);
+    if(i>0){ s = s.slice(0,i); break; }
+  }
+  return _taNorm(s);
+}
+
 // Collapse repeated activities in a set, keeping the first occurrence.
 function _taDedupeRows(rows){
   const seen = new Set(), out = [];
@@ -27461,7 +27535,11 @@ window.applyTaskAutomation = async function(dealId, key, opts){
     const base=row[0], token=row[1], dueDays=row[2]||3;
     const _nb=_taNorm(base);
     if(_madeThisRun.has(_nb)){ skipped++; continue; }
-    if(existing.find(t=>t.autoKey===key && _taNorm(t.taskBase)===_nb && t.status!=='cancelled')){ skipped++; continue; }
+    // Any task already on this deal for the same activity counts — including one
+    // a RICH coded rule created under its "<activity> — <property>" title. The
+    // old check only saw rows carrying this set's own autoKey, which is how the
+    // ⚡ set and the coded rules each created their own copy (DUPEFIX-20260828).
+    if(existing.find(t=>t.status!=='cancelled' && _taBaseKey(t)===_nb)){ skipped++; continue; }
     // The dashboard already does this one for you — don't add busywork.
     if(_taAutoSatisfied(base, deal)){ autoDone++; continue; }
     _madeThisRun.add(_nb);
@@ -27488,25 +27566,38 @@ window.applyTaskAutomation = async function(dealId, key, opts){
 /* Cancel identical OPEN tasks left behind by the old duplicate rows (elc-v423).
    Only collapses exact twins — same property, same activity, same assignee, both
    still open — keeping the oldest. Everything it touches is undoable. */
+// How much a task is worth keeping when two describe the same activity: the
+// ✅ Approve button outranks a Gmail draft, which outranks a written brief; a
+// bare ⚡ checklist row ranks below all of them (DUPEFIX-20260828, elc-v441).
+function _taRichness(t){
+  if(!t) return 0;
+  return (t.approvePaymentDealId?4:0) + (t.gmailUrl?2:0) + (t.description?1:0)
+       - ((t.auto===true || t.autoKey)?1:0);
+}
 window._taCleanupDuplicateTasks = async function(opts={}){
   const tasks = (typeof allTasks!=='undefined' ? allTasks : []);
   const isOpen = t => t && t.status!=='complete' && t.status!=='completed' && t.status!=='cancelled';
   const groups = {};
   for(const t of tasks){
     if(!isOpen(t) || !t.dealId) continue;
-    const k = [t.dealId, _taNorm(t.taskBase||t.title), (t.assignedTo||t.assignedToEmail||'')].join('|');
+    const k = [t.dealId, _taBaseKey(t), (t.assignedTo||t.assignedToEmail||'')].join('|');
     (groups[k] = groups[k] || []).push(t);
   }
   const dupes = [];
   for(const k of Object.keys(groups)){
     const g = groups[k];
     if(g.length < 2) continue;
-    g.sort((a,b)=>(a.createdAt||0)-(b.createdAt||0));      // keep the original
+    // Keep the RICHEST copy, not simply the oldest (DUPEFIX-20260828): a coded
+    // rule's task carries the payout figures, the Gmail draft or the ✅ Approve
+    // & Mark Paid button, while the ⚡ checklist twin is a bare title. Same
+    // richness → the original oldest-wins rule decides.
+    g.sort((a,b)=> (_taRichness(b)-_taRichness(a)) || ((a.createdAt||0)-(b.createdAt||0)));
     for(const t of g.slice(1)){
-      // Only collapse a twin that an automation produced, or one that is
-      // identical down to the due date — never a deliberate manual re-add.
+      // Only collapse a twin that an automation produced, one that is identical
+      // down to the due date, or one the keeper plainly supersedes — never a
+      // deliberate manual re-add.
       const isAuto = t.auto === true || !!t.autoKey;
-      if(isAuto || t.dueDate === g[0].dueDate) dupes.push(t);
+      if(isAuto || t.dueDate === g[0].dueDate || _taRichness(t) < _taRichness(g[0])) dupes.push(t);
     }
   }
   if(!dupes.length){ if(opts.verbose) showToast('No duplicate tasks found','info',3000); return 0; }
