@@ -2034,6 +2034,7 @@ html.dark .theme-seg button[aria-checked="true"] { background:#3A414D; color:#ff
             <button type="button" onclick="event.stopPropagation();window._toggleDictation('f-notes',this)" title="Dictate" class="dict-mic" style="background:#fff;border:1px solid #d1d5db;border-radius:.5rem;padding:.25rem .55rem;font-size:.72rem;font-weight:600;color:#374151;cursor:pointer;white-space:nowrap">🎤 Dictate</button>
           </div>
           <textarea id="f-notes" rows="2" placeholder="Any additional context or details…"
+            oninput="window._syncNotesField(this,'sf-sold-notes')"
             class="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none resize-none"></textarea>
         </div>
 
@@ -7820,8 +7821,9 @@ function renderStageFields(stage, data={}){
           ${sel('sf-remove-sign','Remove Sign?',[{v:'no',l:'No'},{v:'yes',l:'Yes'}],data.removeSign||'no')}
         </div>
         <div>
-          <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Closing Notes</label>
+          <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Closing Notes <span class="normal-case font-normal text-gray-400 tracking-normal">— same field as “Notes” near the top of this form</span></label>
           <textarea id="sf-sold-notes" rows="2" placeholder="Any additional notes for closing…"
+            oninput="window._syncNotesField(this,'f-notes')"
             class="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-red-300">${data.notes||''}</textarea>
         </div>
         <button type="button" onclick="window.genCommissionInvoiceFromForm()"
@@ -7850,7 +7852,25 @@ function renderStageFields(stage, data={}){
   </div>`;
 
   appendInlineGateFields(container, stage, data, dealKey);
+
+  // elc-v442 — NOTES FIX. The unified stage form always renders a "Closing Notes"
+  // textarea (sf-sold-notes) bound to the SAME deal.notes field as the main Notes box
+  // (f-notes). collectStageFields() is spread AFTER notes in handleDealSubmit, so a
+  // stale sf-sold-notes silently overwrote whatever the user typed in f-notes and the
+  // note never stuck. Record what we rendered; the override now only applies when the
+  // user actually edited the closing-notes box.
+  const _snEl = document.getElementById('sf-sold-notes');
+  if(_snEl) _snEl.dataset.baseline = _snEl.value;
 }
+
+// Keep the two textareas that edit deal.notes in lockstep (Notes ↔ Closing Notes)
+window._syncNotesField = (src, targetId) => {
+  const t = document.getElementById(targetId);
+  if(t && t !== src && t.value !== src.value){
+    t.value = src.value;
+    if(targetId === 'sf-sold-notes') t.dataset.baseline = t.value; // typed in f-notes → not an override
+  }
+};
 
 
 window.handleStageFileSelect = (ev, type) => {
@@ -16403,6 +16423,18 @@ window.openPropertyDetail = (dealId) => {
 
   // ── Render ──────────────────────────────────────────────────
   const primaryPhoto = deal.primaryPhotoUrl || '';
+
+  // ── Notes (the "Notes" box on the edit form) — elc-v442 ──────────────
+  const _freeNotes = window._dealFreeNotes(deal.notes);
+  const notesSection = _freeNotes ? `
+    <div class="prop-section">
+      <div class="prop-section-title" style="display:flex;align-items:center;justify-content:space-between">
+        <span>Notes</span>
+        <button class="prop-note-btn" style="padding:.2rem .55rem;background:#6b7280" onclick="closePropertyDetail();openDealModal('${dealId}')" title="Edit this deal's notes">✏️ Edit</button>
+      </div>
+      <div style="font-size:.82rem;color:#1f2937;line-height:1.55;white-space:pre-wrap;word-break:break-word;background:#f9fafb;border:1px solid #eef0f2;border-radius:.6rem;padding:.55rem .7rem;margin-top:.35rem">${String(_freeNotes).replace(/</g,'&lt;')}</div>
+    </div>` : '';
+
   body.innerHTML = `
     ${primaryPhoto ? `
     <!-- Primary Photo -->
@@ -16444,6 +16476,9 @@ window.openPropertyDetail = (dealId) => {
       <div class="prop-section-title">Stage Journey</div>
       ${histHtml}
     </div>
+
+    <!-- Notes -->
+    ${notesSection}
 
     <!-- Activity Log -->
     <div class="prop-section">
@@ -18121,6 +18156,183 @@ window._elcOnVacationWeek = (uid, wKey) => {
   const end = new Date(s); end.setDate(end.getDate()+7); end.setMilliseconds(-1);
   return window._elcOnVacation(uid, s, end.getTime());
 };
+/* ═══════════════════════════════════════════════════════════════════════
+   SHARED WEEK SCORING — elc-v441        (marker: SCAUTO-20260831)
+
+   One implementation of the advisor weekly score, used by all three
+   surfaces: the trailing-12-week history, the Quarterly Report Card, and
+   the admin auto-lock sweep.
+
+   WHY THIS EXISTS: the formula used to live inline inside
+   buildScorecardHistory(), which (a) bailed out for admins and (b) only ran
+   for the logged-in uid. Combined with the Firestore rule
+   `match /eos/{docId} { allow write: if isAdmin() }`, that meant a
+   non-admin advisor's weeks were NEVER saved — their browser computed the
+   row, tried to persist it, and the write was silently denied. The report
+   card averaged saved rows only, so 17 of 21 advisors showed blank.
+
+   THE RULE NOW: display never depends on write permission. Every surface
+   computes the score live from deals/tasks/calls (which everyone can read)
+   and uses a locked snapshot only when one exists. Locking is purely to
+   freeze the past so old weeks stop drifting as deals move stages — it is
+   an accuracy mechanism, not a prerequisite for seeing your own numbers.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+// Monday 00:00 → Sunday 23:59:59.999 window for the week containing `d`.
+window._elcWeekWindow = (d) => {
+  const s = new Date(d), dow = s.getDay();
+  s.setDate(s.getDate() - (dow === 0 ? 6 : dow - 1));
+  s.setHours(0,0,0,0);
+  const e = new Date(s); e.setDate(e.getDate()+7); e.setMilliseconds(-1);
+  // Key format matches every row already stored (local-midnight Monday → ISO date).
+  return { wS: s.getTime(), wE: e.getTime(), wKey: s.toISOString().split('T')[0] };
+};
+
+/* The advisor week score. Returns the same shape that gets locked into
+   eos/scoreHistory, so a computed row and a stored row are interchangeable.
+   `asOf` caps "current state" reads (open/overdue tasks) at the end of the
+   week being scored, so recomputing an old week doesn't credit work that
+   happened after it. */
+window._elcWeekScore = (uid, wS, wE, wKey) => {
+  const prof     = allProfiles[uid] || {};
+  const Q_GOAL   = prof.quarterlyUCGoal || 10000000;
+  const myDeals  = allDeals.filter(d => isDealAdvisor(d, uid));
+  const myTasks  = allTasks.filter(t => t.assignedTo === uid);
+  const wStart   = new Date(wS);
+
+  // Q goal: cumulative for that week's quarter, up to the end of that week
+  const wYear   = wStart.getFullYear();
+  const wQNum   = Math.floor(wStart.getMonth()/3)+1;
+  const wQStart = new Date(wYear,(wQNum-1)*3,1).getTime();
+  const wQDeals = myDeals.filter(d=>{
+    if(isLostStage(d.stage||'')) return false;
+    if(!isContractActiveStage(d.stage)&&!isWonStage(d.stage||'')) return false;
+    const ts=getEffectiveDealTs(d); return ts>=wQStart&&ts<=wE;
+  });
+  const wQVol = wQDeals.reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||0),0);
+  const wQPct = Math.min(Math.round(wQVol/Q_GOAL*100),100);
+
+  // Tasks — overdue penalty + counts, reconstructed as of the week's end so a
+  // task finished later doesn't retroactively rescue an old week.
+  const wEndStr   = new Date(wE).toISOString().slice(0,10);
+  const pendingAt = t => (t.createdAt||0) <= wE && (t.status==='pending' || (t.updatedAt||0) > wE);
+  const overdueInWk = myTasks.filter(t=>pendingAt(t)&&t.dueDate&&t.dueDate<=wEndStr).length;
+  const doneT = myTasks.filter(t=>t.status==='complete'&&(t.updatedAt||0)>=wS&&(t.updatedAt||0)<=wE).length;
+  const openT = myTasks.filter(t=>pendingAt(t)).length;
+
+  /* Deal activity. index.html historically matched `d.stage===X &&
+     d.stageEnteredAt in window`, but stageEnteredAt only ever holds the
+     CURRENT stage's timestamp — so a deal that was an LOI in July and is
+     under contract today has silently lost its July LOI credit. Replay the
+     stageHistory array where the deal has one. */
+  const _initialStage = d => (Array.isArray(d.stageHistory)&&d.stageHistory.length)
+    ? d.stageHistory[0].stage : d.stage;
+  const _enteredInWk = (d, match) => {
+    if(Array.isArray(d.stageHistory)&&d.stageHistory.length)
+      return d.stageHistory.some(h=>match(h.stage||'')&&(+h.enteredAt||0)>=wS&&(+h.enteredAt||0)<=wE);
+    const ts=(d.stageEnteredAt||d.createdAt||0);
+    return match(d.stage||'')&&ts>=wS&&ts<=wE;
+  };
+  const sp = (d,base)=>{
+    if(d.advisorUid===uid){ const co=(d.coAdvisors||[]).reduce((s,ca)=>s+(ca.splitPct||0),0); return base*Math.max(0,100-co)/100; }
+    const ca=(d.coAdvisors||[]).find(c=>c.uid===uid); return ca?base*(ca.splitPct||0)/100:0;
+  };
+  const bornInWk = d => (d.createdAt||0)>=wS && (d.createdAt||0)<=wE;
+  const pDeals  = myDeals.filter(d=>bornInWk(d)&&_initialStage(d)==='Prospect');
+  const caN     = window._elcCallsInWindow(uid,wS,wE).length; // elc-v432: calls score like prospects
+  const lDeals  = myDeals.filter(d=>_enteredInWk(d,st=>st==='LOI'));
+  const prDeals = myDeals.filter(d=>_enteredInWk(d,st=>st==='Proposal To Do'||st==='Proposal Outstanding'));
+  const lstDls  = myDeals.filter(d=>_enteredInWk(d,st=>st==='Listing'));
+  const cDeals  = myDeals.filter(d=>_enteredInWk(d,st=>/under.?contract/i.test(st||'')));
+  const pPts=pDeals.reduce((s,d)=>s+sp(d,5),0),   lPts=lDeals.reduce((s,d)=>s+sp(d,10),0);
+  const prPts=prDeals.reduce((s,d)=>s+sp(d,10),0), lstPts=lstDls.reduce((s,d)=>s+sp(d,20),0);
+  const cPts=cDeals.reduce((s,d)=>s+sp(d,30),0);
+
+  // Self-reported weekly inputs
+  const wi = prof.weeklyInputs?.[wKey] || {};
+  const netEv = wi.networkEvent||'', drPr = wi.driveProperties||'';
+
+  const pts_w = [wQPct>=10?10:0, Math.max(0,20-overdueInWk*2),
+    pPts+caN*5, lPts, prPts, lstPts, cPts, netEv==='yes'?10:0, drPr==='yes'?10:0];
+  const score = Math.round(pts_w.reduce((a,b)=>a+b,0));
+
+  return {score, wQPct, pLen:pDeals.length, lLen:lDeals.length, prLen:prDeals.length,
+          lstLen:lstDls.length, cLen:cDeals.length, netEv, drPr, doneT, openT, caN};
+};
+
+/* Every Monday-start week of a quarter, oldest first. `includeCurrent` keeps
+   the in-progress week so the current quarter can grade in real time. */
+window._elcQuarterWeeks = (year, qn, includeCurrent) => {
+  const QUARTER_OVERRIDES = window._ELC_QUARTER_OVERRIDES || {};
+  const oKey    = `${year}-Q${qn}`;
+  const qStart  = new Date(year,(qn-1)*3,1).getTime();
+  const qEnd    = new Date(year,qn*3,0,23,59,59,999).getTime();
+  const effStart= QUARTER_OVERRIDES[oKey] ?? qStart;
+  const fm = new Date(effStart), fdow = fm.getDay();
+  fm.setDate(fm.getDate()-(fdow===0?6:fdow-1)); fm.setHours(0,0,0,0);
+  const now = Date.now(), weeks = [], cur = new Date(fm);
+  while(cur.getTime() < Math.min(qEnd, now)){
+    const w = window._elcWeekWindow(cur);
+    if(w.wE < now)            weeks.push({...w, inProgress:false});
+    else if(includeCurrent)   weeks.push({...w, inProgress:true});
+    cur.setDate(cur.getDate()+7);
+  }
+  return weeks;
+};
+
+// Tracking didn't start Jan 1 — Q2 2026 begins the week containing May 15.
+window._ELC_QUARTER_OVERRIDES = { '2026-Q2': new Date(2026,4,11).getTime() };
+// Quarters before this have no data at all and are never rendered.
+window._ELC_TRACKING_START_Q = {year:2026, qn:2};
+
+/* AUTO-LOCK SWEEP — the reason nobody's weeks were being recorded.
+   Firestore only lets admins write eos/*, so an advisor's own browser can
+   never persist their history. When an admin has the app open, lock every
+   advisor's ended, unlocked weeks — not just the admin's own. Runs once per
+   session, after data has loaded, and writes only when something is missing. */
+window._elcSweepScoreHistory = async () => {
+  try{
+    if(!currentUser?.isAdmin) return;              // rules would reject the write
+    if(window._elcSweepDone) return;
+    if(!allDeals?.length || !Object.keys(allProfiles||{}).length) return;
+    window._elcSweepDone = true;
+
+    const SCORECARD_VER = 5;
+    const hist = eosGet('scoreHistory',{});
+    if((hist.__ver||1) < SCORECARD_VER) return;    // a version bump wipes on its own terms
+
+    // Staff-only accounts are graded by the STAFF formula and their rows are
+    // shaped {score, doneTasks} — writing advisor rows over them corrupts data.
+    const staffOnly = new Set(STAFF_ONLY_EMAILS.map(e=>e.toLowerCase()));
+    const advisors  = getDistinctAdvisors()
+      .filter(a=>!allProfiles[a.uid]?.removed)
+      .filter(a=>!staffOnly.has(String(allProfiles[a.uid]?.email||'').toLowerCase()));
+
+    // Sweep the trailing 12 weeks — the same window the history screen shows.
+    const anchor = new Date(); anchor.setDate(anchor.getDate()-7);
+    const weeks  = [];
+    for(let i=0;i<12;i++){ const d=new Date(anchor); d.setDate(anchor.getDate()-i*7); weeks.push(window._elcWeekWindow(d)); }
+
+    const next = {...hist}; let added = 0;
+    advisors.forEach(({uid:aUid})=>{
+      const mine = {...(next[aUid]||{})};
+      let dirty = false;
+      weeks.forEach(({wS,wE,wKey})=>{
+        if(wE >= Date.now())   return;             // not finished — stays live
+        if(mine[wKey])         return;             // already frozen, never overwrite
+        if(window._elcOnVacation(aUid,wS,wE)) return; // time off is never graded
+        mine[wKey] = {...window._elcWeekScore(aUid,wS,wE,wKey), autoLocked:true};
+        dirty = true; added++;
+      });
+      if(dirty) next[aUid] = mine;
+    });
+    if(!added) return;
+    next.__ver = SCORECARD_VER;
+    eosSave('scoreHistory', next);
+    console.log(`[scorecard] auto-locked ${added} week-row(s) across ${advisors.length} advisors`);
+  }catch(e){ console.warn('[scorecard] sweep skipped:', e?.message||e); }
+};
+
 // Which weeks a candidate date range would/wouldn't grade — powers the modal preview.
 window._elcVacWeekPreview = (start, end) => {
   const out = [];
@@ -18265,6 +18477,14 @@ window._actLogRender = function() {
   <div style="margin-top:.75rem;color:#94a3b8;font-size:.75rem">Showing ${rows.length} of ${_actLogCache.length} events (most recent 300)</div>`;
 };
 
+// ── deal.notes does double duty: the free-form "Notes" box on the edit form AND a
+// legacy append-log of "[timestamp] what happened" lines written by older automations.
+// Split them so each shows up in exactly one place (elc-v442).
+window._dealFreeNotes = txt => String(txt||'')
+  .split('\n')
+  .filter(l => l.trim() && !/^\s*\[[^\]]+\]/.test(l))
+  .join('\n').trim();
+
 // ── Load + render property activity feed (Firestore sub-collection + legacy deal.notes) ──
 window._propLoadActivities = async (dealId, feedElId) => {
   const feedEl = document.getElementById(feedElId || ('prop-act-feed-' + dealId));
@@ -18273,11 +18493,13 @@ window._propLoadActivities = async (dealId, feedElId) => {
   const deal = allDeals.find(d => d.id === dealId);
   const activities = [];
 
-  // Legacy entries from deal.notes string (backward compat)
+  // Legacy entries from deal.notes string (backward compat).
+  // Only the timestamped "[when] what happened" lines are activity — the untimestamped
+  // remainder is the free-form Notes box and renders in its own Notes section instead.
   if (deal?.notes) {
-    const lines = deal.notes.split('\n').filter(Boolean);
+    const lines = deal.notes.split('\n').filter(l => /^\s*\[[^\]]+\]/.test(l));
     for (const line of lines) {
-      const m = line.match(/^\[([^\]]+)\]\s*(.*)/);
+      const m = line.match(/^\s*\[([^\]]+)\]\s*(.*)/);
       const tsStr = m ? m[1] : '';
       const text  = m ? m[2] : line;
       const ts    = tsStr ? new Date(tsStr).getTime() : 0;
@@ -30411,6 +30633,12 @@ window._initScTip = function(){
 function viewEOS(sub='rocks'){
   window._eosSub = sub; // remember active sub-tab so live-sync re-renders don't reset to Rocks
   if(window._initScTip) window._initScTip(); // ensure hover-tooltip listeners exist
+  /* elc-v441 (SCAUTO-20260831): record every advisor's ended weeks, not just
+     the viewer's. Only an admin session can write eos/* (Firestore rules), so
+     this is where the whole team's history actually gets frozen. Guarded to
+     run once per session; the weekly service-account job is the backstop for
+     stretches when no admin opens the app. */
+  if(window._elcSweepScoreHistory) window._elcSweepScoreHistory();
   if(activeChart){ activeChart.destroy(); activeChart=null; }
   const uid=currentUser.uid, isAdmin=currentUser.isAdmin;
   const effectiveAdminGlobal = isAdmin && !adminViewAsAdvisor && !staffViewMode;
@@ -31224,7 +31452,8 @@ function viewEOS(sub='rocks'){
 
     // ── Trailing 12-week history (individual / non-admin view only) ──────────
     const buildScorecardHistory = () => {
-      if(effectiveAdmin) return '';
+      // elc-v441 (SCAUTO-20260831): admins used to bail out here, so an admin
+      // could never see their own trailing weeks. Everyone gets their history.
       const WEEKS = 12;
       const myDeals = allDeals.filter(d => isDealAdvisor(d, uid));
       const myTasks = allTasks.filter(t => t.assignedTo===uid);
@@ -31357,51 +31586,15 @@ function viewEOS(sub='rocks'){
           if(openT===undefined) openT = 0;
           if(caN===undefined)   caN   = 0; // rows locked before elc-v432 call credit
         } else {
-          // Q goal: accumulative for that week's quarter up to end of that week
-          const wYear   = wStart.getFullYear();
-          const wQNum   = Math.floor(wStart.getMonth()/3)+1;
-          const wQStart = new Date(wYear,(wQNum-1)*3,1).getTime();
-          const wQDeals = myDeals.filter(d=>{
-            if(isLostStage(d.stage||'')) return false;
-            if(!isContractActiveStage(d.stage)&&!isWonStage(d.stage||'')) return false;
-            const ts=getEffectiveDealTs(d); return ts>=wQStart&&ts<=wE;
-          });
-          const wQVol  = wQDeals.reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||0),0);
-          wQPct = Math.min(Math.round(wQVol/Q_GOAL*100),100);
+          // elc-v441: one shared implementation (window._elcWeekScore) now backs
+          // the history, the report card and the auto-lock sweep, so the three
+          // can never drift apart again.
+          ({score, wQPct, pLen, lLen, prLen, lstLen, cLen, netEv, drPr, doneT, openT, caN}
+            = window._elcWeekScore(uid, wS, wE, wKey));
 
-          // Tasks — overdue penalty + % of the week's tasks completed
-          const wEndStr = new Date(wE).toISOString().slice(0,10);
-          const overdueInWk = myTasks.filter(t=>t.status==='pending'&&t.dueDate&&t.dueDate<=wEndStr).length;
-          doneT = myTasks.filter(t=>t.status==='complete'&&(t.updatedAt||0)>=wS&&(t.updatedAt||0)<=wE).length;
-          openT = myTasks.filter(t=>t.status==='pending'&&(t.createdAt||0)<=wE).length;
-          const taskDonePts = (doneT+openT)===0 ? 10 : Math.min(10, Math.round(doneT/(doneT+openT)*10));
-
-          // Deal activity
-          const inW = d=>{ const ts=(d.stageEnteredAt||d.createdAt||0); return ts>=wS&&ts<=wE; };
-          const sp = (d,base)=>{
-            if(d.advisorUid===uid){ const co=(d.coAdvisors||[]).reduce((s,ca)=>s+(ca.splitPct||0),0); return base*Math.max(0,100-co)/100; }
-            const ca=(d.coAdvisors||[]).find(c=>c.uid===uid); return ca?base*(ca.splitPct||0)/100:0;
-          };
-          const pDeals = myDeals.filter(d=>d.stage==='Prospect'&&(d.createdAt||0)>=wS&&(d.createdAt||0)<=wE);
-          caN = window._elcCallsInWindow(uid,wS,wE).length; // elc-v432: calls score like prospects
-          const lDeals = myDeals.filter(d=>d.stage==='LOI'&&inW(d));
-          const prDeals= myDeals.filter(d=>(d.stage==='Proposal To Do'||d.stage==='Proposal Outstanding')&&inW(d));
-          const lstDls = myDeals.filter(d=>d.stage==='Listing'&&inW(d));
-          const cDeals = myDeals.filter(d=>/under.?contract/i.test(d.stage||'')&&inW(d));
-          const pPts=pDeals.reduce((s,d)=>s+sp(d,5),0),  lPts=lDeals.reduce((s,d)=>s+sp(d,10),0);
-          const prPts=prDeals.reduce((s,d)=>s+sp(d,10),0), lstPts=lstDls.reduce((s,d)=>s+sp(d,20),0);
-          const cPts=cDeals.reduce((s,d)=>s+sp(d,30),0);
-
-          // Self-reported
-          const wi = allProfiles[uid]?.weeklyInputs?.[wKey]||{};
-          netEv = wi.networkEvent||''; drPr = wi.driveProperties||'';
-
-          const pts_w=[wQPct>=10?10:0, Math.max(0,20-overdueInWk*2),
-            pPts+caN*5,lPts,prPts,lstPts,cPts, netEv==='yes'?10:0, drPr==='yes'?10:0];
-          score = Math.round(pts_w.reduce((a,b)=>a+b,0));
-          pLen=pDeals.length; lLen=lDeals.length; prLen=prDeals.length; lstLen=lstDls.length; cLen=cDeals.length;
-
-          // Lock this week once it has fully ended.
+          // Lock this week once it has fully ended. NOTE: this only lands for
+          // admins — Firestore denies eos/* writes to everyone else. It is a
+          // best-effort freeze, never what the display depends on.
           if(wE < _nowMs){
             _myHist[wKey] = {score, wQPct, pLen, lLen, prLen, lstLen, cLen, netEv, drPr, doneT, openT, caN};
             _histDirty = true;
@@ -31492,39 +31685,30 @@ function viewEOS(sub='rocks'){
     const effectiveAdmin = isAdmin && !adminViewAsAdvisor && !staffViewMode;
     const showAdv = !isStaffView() || effectiveAdmin;
 
-      // Special per-quarter start overrides (key = "YYYY-QN")
-      const QUARTER_OVERRIDES = {
-        '2026-Q2': new Date(2026,4,11).getTime() // Mon May 11 — week containing May 15
-      };
+      const QUARTER_OVERRIDES = window._ELC_QUARTER_OVERRIDES;
       const nowMs2 = Date.now();
 
-      // Collect quarters to render: current + prior (if ≥ Q2-2026)
+      /* elc-v441 (SCAUTO-20260831): trailing 3 quarters + the current one.
+         Was current + 1 prior. Quarters before tracking began (Q2 2026) are
+         never listed — they'd render as four empty cards. */
       const _curYear = now.getFullYear();
+      const _TS = window._ELC_TRACKING_START_Q;
       const quartersToRender = [];
-      quartersToRender.push({year:_curYear, qNum});
-      const prQNum = qNum===1?4:qNum-1, prYear = qNum===1?_curYear-1:_curYear;
-      if(prYear>2026||(prYear===2026&&prQNum>=2)) quartersToRender.push({year:prYear,qNum:prQNum});
+      let _qy = _curYear, _qn = qNum;
+      for(let i=0;i<4;i++){
+        if(_qy<_TS.year || (_qy===_TS.year && _qn<_TS.qn)) break;
+        quartersToRender.push({year:_qy, qNum:_qn});
+        if(_qn===1){ _qn=4; _qy--; } else _qn--;
+      }
 
-      // Get elapsed week keys for a quarter
-      const getQWeeks = (year, qn) => {
-        const oKey = `${year}-Q${qn}`;
-        const qStartMs2 = new Date(year,(qn-1)*3,1).getTime();
-        const qEndMs2   = new Date(year,qn*3,0,23,59,59,999).getTime();
-        const effStart  = QUARTER_OVERRIDES[oKey] ?? qStartMs2;
-        // First Monday on or before effStart
-        const fm = new Date(effStart);
-        const fdow = fm.getDay();
-        fm.setDate(fm.getDate()-(fdow===0?6:fdow-1));
-        fm.setHours(0,0,0,0);
-        const weeks=[];
-        const cur=new Date(fm);
-        while(cur.getTime()<Math.min(qEndMs2,nowMs2)){
-          const sunMs=cur.getTime()+6*86400000+23*3600000+3599999;
-          if(sunMs<nowMs2) weeks.push({wKey:cur.toISOString().split('T')[0], sunMs});
-          cur.setDate(cur.getDate()+7);
-        }
-        return weeks;
-      };
+      /* Weeks of a quarter, COMPLETED ones only — the average updates the moment
+         each week closes, which is the real-time cadence that matters.
+         The in-progress week is deliberately excluded: on a Monday a one-day-old
+         week averages in at near zero and craters the quarter grade, so it gets
+         its own live "this week so far" readout instead of polluting the average. */
+      const getQWeeks = (year, qn) =>
+        window._elcQuarterWeeks(year, qn, false).map(w=>({...w, sunMs:w.wE}));
+      const _liveWeek = window._elcWeekWindow(new Date());
 
       const _scoreHist2 = eosGet('scoreHistory',{});
       const _sv2        = _scoreHist2.__ver||1;
@@ -31554,21 +31738,50 @@ function viewEOS(sub='rocks'){
           // elc-v437 (VACMODE-20260824): weeks the advisor was out are dropped from the
           // average entirely — they don't count as a bad week OR as a missing one.
           const _vacN  = qWeeks2.filter(({wKey})=>window._elcOnVacationWeek(aUid,wKey)).length;
-          const scores = qWeeks2.filter(({wKey})=>!window._elcOnVacationWeek(aUid,wKey))
-                                .map(({wKey})=>hist[wKey]?.score).filter(s=>s!==undefined);
+          /* elc-v441: this used to read `hist[wKey]?.score` and nothing else, so
+             an advisor with no SAVED weeks averaged nothing and the whole card
+             was suppressed. Saving needs admin rights (Firestore denies eos/*
+             writes to everyone else), which made the report card invisible to
+             the people it grades. Now a locked snapshot is used when one
+             exists and the week is computed live when it isn't — so every
+             advisor sees a real grade whether or not anything was ever saved. */
+          let live = 0;
+          const scores = qWeeks2
+            .filter(({wKey})=>!window._elcOnVacationWeek(aUid,wKey))
+            .map(({wKey,wS,wE})=>{
+              const locked = hist[wKey];
+              if(locked && locked.score!==undefined) return locked.score;
+              live++;   // never recorded (or recorded by a session without write rights)
+              return window._elcWeekScore(aUid,wS,wE,wKey).score;
+            });
           const avg = scores.length>0 ? Math.round(scores.reduce((a,b)=>a+b,0)/scores.length) : null;
-          return {aUid,aName,avg,filled:scores.length,total:qWeeks2.length-_vacN,vacN:_vacN};
+          // This week so far — only on the current quarter's card, and never for
+          // someone who is out this week.
+          const nowScore = (isCurQ && !window._elcOnVacationWeek(aUid,_liveWeek.wKey))
+            ? window._elcWeekScore(aUid,_liveWeek.wS,_liveWeek.wE,_liveWeek.wKey).score
+            : null;
+          return {aUid,aName,avg,filled:scores.length,total:qWeeks2.length-_vacN,vacN:_vacN,live,nowScore};
         }).sort((a,b)=>(b.avg??-1)-(a.avg??-1));
 
-        if(!advisorQRows.some(r=>r.avg!==null)) return '';
+        // Never suppress the card: an advisor looking at their own report card
+        // must always see it, even in a quarter where they scored nothing.
+        if(!advisorQRows.length) return '';
 
-        const qRows = advisorQRows.map(({aName,avg,filled,total,vacN})=>{
+        const qRows = advisorQRows.map(({aName,avg,filled,total,vacN,live,nowScore})=>{
           if(avg===null) return `<tr class="border-b border-gray-100">
             <td class="px-5 py-4 sticky left-0 bg-white z-10 border-r border-gray-100"><span class="text-sm font-semibold text-gray-800">${aName}</span></td>
-            <td class="px-4 py-4 text-center" colspan="3"><span class="text-xs text-gray-400 italic">No scorecard data yet</span></td>
+            <td class="px-4 py-4 text-center" colspan="${isCurQ?4:3}"><span class="text-xs text-gray-400 italic">No graded weeks in this quarter</span></td>
           </tr>`;
           const g = weekGrade(avg);
           const barPct = Math.min(100,avg);
+          const ng = nowScore===null ? null : weekGrade(nowScore);
+          const nowCell = !isCurQ ? '' : `<td class="px-4 py-4 text-center">${
+            ng===null
+              ? '<span class="text-xs" style="color:#10b981;font-weight:600">🌴 off</span>'
+              : `<span class="text-sm font-bold" style="color:${ng.color}">${nowScore}</span>
+                 <span class="text-xs text-gray-400"> pts</span>
+                 <div class="text-xs text-gray-400 mt-0.5">${ng.letter} pace</div>`
+          }</td>`;
           return `<tr class="border-b border-gray-100 hover:bg-gray-50 transition-colors">
             <td class="px-5 py-4 sticky left-0 bg-white z-10 border-r border-gray-100">
               <span class="text-sm font-semibold text-gray-800">${aName}</span>
@@ -31581,6 +31794,7 @@ function viewEOS(sub='rocks'){
                 <span style="font-size:.72rem;color:${g.color};font-weight:700">${avg} avg pts</span>
               </div>
             </td>
+            ${nowCell}
             <td class="px-5 py-4">
               <div class="flex flex-col gap-1.5">
                 <div style="height:8px;background:#e5e7eb;border-radius:9999px;overflow:hidden;width:140px">
@@ -31592,6 +31806,7 @@ function viewEOS(sub='rocks'){
             <td class="px-4 py-4 text-center">
               <span class="text-sm font-semibold text-gray-700">${filled} <span class="text-xs text-gray-400 font-normal">/ ${total} wks</span></span>
               ${vacN>0?`<div class="text-xs mt-0.5" style="color:#10b981;font-weight:600" title="Weeks off are excluded from this average">🌴 ${vacN} wk${vacN!==1?'s':''} off</div>`:''}
+              ${live>0?`<div class="text-xs mt-0.5 text-gray-400" title="${live} week${live!==1?'s':''} calculated live from current deal, task and call activity. Ended weeks are frozen once an admin session records them.">${live} live</div>`:''}
             </td>
           </tr>`;
         }).join('');
@@ -31604,7 +31819,7 @@ function viewEOS(sub='rocks'){
           <div class="px-6 py-4 border-b flex items-center justify-between flex-wrap gap-2">
             <div>
               <h3 class="font-bold text-gray-800 text-base">📊 Q${qn} ${yr} Quarterly Report Card</h3>
-              <p class="text-xs text-gray-400 mt-0.5">${rangeLabel} · ${qWeeks2.length} week${qWeeks2.length!==1?'s':''} averaged</p>
+              <p class="text-xs text-gray-400 mt-0.5">${rangeLabel} · ${qWeeks2.length} completed week${qWeeks2.length!==1?'s':''} averaged${isCurQ?' · updates as each week closes':''}</p>
             </div>
             <div class="flex items-center gap-2">
               ${badge}
@@ -31617,6 +31832,7 @@ function viewEOS(sub='rocks'){
                 <tr class="bg-gray-50 border-b border-gray-200">
                   <th class="px-5 py-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide sticky left-0 bg-gray-50 z-10 border-r border-gray-100">Advisor</th>
                   <th class="px-4 py-3 text-center text-xs font-bold text-gray-500 uppercase tracking-wide">Q${qn} Grade</th>
+                  ${isCurQ?'<th class="px-4 py-3 text-center text-xs font-bold text-gray-500 uppercase tracking-wide" title="Points earned so far in the current Mon–Sun week. Live, not yet part of the quarter average.">This Week</th>':''}
                   <th class="px-5 py-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide">Avg Score</th>
                   <th class="px-4 py-3 text-center text-xs font-bold text-gray-500 uppercase tracking-wide">Weeks Scored</th>
                 </tr>
@@ -31625,13 +31841,15 @@ function viewEOS(sub='rocks'){
             </table>
           </div>
           <div class="px-6 py-3 border-t bg-gray-50 text-xs text-gray-400">
-            Average of weekly scorecard points · Weeks with no saved score excluded · 🌴 Time-off weeks excluded · Sorted by avg score
+            Average of completed weekly scorecards · Every week counts — frozen once recorded, calculated live until then${isCurQ?' · <strong>This Week</strong> is the current Mon–Sun week so far and is not yet in the average':''} · 🌴 Time-off weeks excluded · Sorted by avg score
           </div>
         </div>`;
       }).join('');
 
 
-    body = showAdv ? cardsHtml : '<div class="bg-white rounded-2xl border p-8 text-center text-gray-400 text-sm">No report card available.</div>';
+    body = showAdv
+      ? (cardsHtml || '<div class="bg-white rounded-2xl border p-8 text-center text-gray-400 text-sm">No graded weeks yet — your first grade appears once a full week (Mon–Sun) has elapsed.</div>')
+      : '<div class="bg-white rounded-2xl border p-8 text-center text-gray-400 text-sm">No report card available.</div>';
   }
 
   // ── L-10 AGENDA ────────────────────────────────────────────────────────
@@ -34042,8 +34260,11 @@ function collectStageFields(){
     boContactName:g('sf-bo-contact-search'),
     boCriteria:   g('sf-bo-criteria'),
     boNotes:      g('sf-bo-notes'),
-    // Sold notes override (shown in comprehensive Sold edit view)
-    ...(document.getElementById('sf-sold-notes') ? {notes: g('sf-sold-notes')} : {}),
+    // Closing Notes override — only when the user actually edited that box (elc-v442).
+    // It is rendered on EVERY stage and bound to the same deal.notes field as f-notes,
+    // so an unconditional override wiped out notes typed in the main Notes box.
+    ...(()=>{ const el=document.getElementById('sf-sold-notes');
+              return (el && el.value !== (el.dataset.baseline ?? '')) ? {notes: el.value} : {}; })(),
     // Property details — only override base form values if explicitly filled in the stage section
     ...(document.getElementById('sf-acreage')?.value ? {acreage: parseFloat(document.getElementById('sf-acreage').value)||''} : {}),
     ...(document.getElementById('sf-zoning')?.value?.trim() ? {zoning: document.getElementById('sf-zoning').value.trim()} : {}),
