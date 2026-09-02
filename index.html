@@ -3365,9 +3365,11 @@ async function _autoCalendarCriticalDates(deal, dateRows, name, addr){
     const dated=(dateRows||[]).filter(r=>/^\d{4}-\d{2}-\d{2}$/.test(r.date||'')).slice(0,15);
     if(!dated.length) return {created:0, dated:[]};
 
-    const token=localStorage.getItem('gcal_token');
-    const exp=parseInt(localStorage.getItem('gcal_token_exp')||'0');
-    if(!token || Date.now()>exp) return {created:0, dated, noToken:true};
+    // Silent refresh first; prompt only if Google actually requires consent.
+    // (Was: a bare localStorage check that silently no-opped once the hard-coded
+    //  1-hour expiry passed — CALTOKEN-20260902.)
+    const token = await window._calEnsureToken({interactive:true});
+    if(!token) return {created:0, dated, noToken:true};
 
     let created=0;
     for(const r of dated){
@@ -7044,7 +7046,26 @@ async function _dispatchCriticalDatesTasks({vals, dealId, address, name, advUid,
         try{
           const _r=await _autoCalendarCriticalDates(_deal, _calRows, name, address);
           if(_r.created>0) showToast('📅 '+_r.created+' critical date'+(_r.created!==1?'s':'')+' added to advisor + co-advisor calendars','success',6000);
-          else if(_r.noToken) showToast('📅 Enable Calendar Editing (Calendar tab) to auto-add critical dates to your calendar','warning',6000);
+          else if(_r.noToken){
+            // A 6-second toast in the middle of eight other toasts is how this
+            // failure went unnoticed for months. Leave a task behind instead,
+            // with one-click add links for every date (CALTOKEN-20260902).
+            const _addLinks = _calRows.map(r=>{
+              const _e=(()=>{const d=new Date(r.date+'T12:00:00');d.setDate(d.getDate()+1);return d.toISOString().slice(0,10).replace(/-/g,'');})();
+              return '  • '+r.item+' — '+r.date+'\n    https://calendar.google.com/calendar/render?action=TEMPLATE'
+                +'&text='+encodeURIComponent('⚖️ '+r.item+' — '+name)
+                +'&dates='+r.date.replace(/-/g,'')+'/'+_e
+                +'&details='+encodeURIComponent('Critical date for '+address+'.');
+            }).join('\n');
+            await Store.createTask({
+              ...taskBase,
+              title:'📅 Add critical dates to your calendar — '+name,
+              description:'Google Calendar access could not be refreshed, so these dates were NOT added to your calendar automatically.\n\n'
+                +'Fix it once: Calendar tab → Enable Calendar Editing.\n'
+                +'Or click a link below to add each date right now.\n\n'+_addLinks,
+            }).catch(e=>console.error('[critical-dates-cal-fallback]',e));
+            showToast('📅 Could not reach Google Calendar — a task with one-click add links was created','warning',10000);
+          }
         }catch(ce){ console.warn('[critical-dates-calendar]',ce); }
       }
     }
@@ -8051,9 +8072,13 @@ const FB = {
     const _signInResult = await signInWithPopup(_fbAuth, _gProvider);
     try {
       const _gcred = GoogleAuthProvider.credentialFromResult(_signInResult);
-      if(_gcred?.accessToken){
-        localStorage.setItem('gcal_token', _gcred.accessToken);
-        localStorage.setItem('gcal_token_exp', String(Date.now() + 3600*1000));
+      if(_gcred){
+        // Cache the OAuth client id so the calendar token can be re-minted
+        // silently later (CALTOKEN-20260902).
+        window._calCaptureClientId && window._calCaptureClientId(_gcred);
+        if(_gcred.accessToken) window._calStoreToken
+          ? window._calStoreToken(_gcred.accessToken, 3600)
+          : localStorage.setItem('gcal_token', _gcred.accessToken);
       }
     } catch(e){}
     return _signInResult;
@@ -21444,9 +21469,9 @@ window._calEnableEditing = async function(){
   try {
     const result = await signInWithPopup(_fbAuth, provider);
     const cred = GoogleAuthProvider.credentialFromResult(result);
+    if(cred) window._calCaptureClientId(cred);
     if(cred && cred.accessToken){
-      localStorage.setItem('gcal_token', cred.accessToken);
-      localStorage.setItem('gcal_token_exp', String(Date.now() + 3600*1000));
+      window._calStoreToken(cred.accessToken, 3600);
       showToast('Calendar editing enabled ✓','success');
       if(currentView==='calendar') viewCalendar();
     } else {
@@ -21738,16 +21763,114 @@ window._calBackfillConfirmAll = async function(){
 };
 
 // ── Calendar API helpers ─────────────────────────────────────────────────────
+// ── Calendar token: silent auto-refresh (elc-v481, marker CALTOKEN-20260902) ─
+// gcal_token used to be written ONLY by the Google sign-in popup and by
+// "Enable Calendar Editing", each hard-stamping a 1-hour expiry with no refresh
+// path. Once the hour was up — or immediately, on a restored session that never
+// ran the popup — every calendar write silently no-opped. That is why
+// auto-added critical dates never reached anyone's calendar.
+//
+// _calEnsureToken() is now the ONLY supported way to get a calendar token. It
+// re-mints silently through Google Identity Services using the OAuth client id
+// captured from the Google credential at sign-in, and prompts only when Google
+// genuinely requires consent.
+const _GCAL_SCOPE = 'https://www.googleapis.com/auth/calendar.events';
+const _GIS_SRC    = 'https://accounts.google.com/gsi/client';
+
+// The Firebase-auto-created OAuth web client id is the `aud` claim of the Google
+// idToken handed back by signInWithPopup — capture it once, reuse it forever.
+window._calCaptureClientId = function(cred){
+  try{
+    const idt = cred && cred.idToken; if(!idt) return;
+    const aud = JSON.parse(atob(idt.split('.')[1].replace(/-/g,'+').replace(/_/g,'/'))).aud;
+    if(aud && /\.apps\.googleusercontent\.com$/.test(aud)) localStorage.setItem('gcal_client_id', aud);
+  }catch(e){ /* non-fatal: we just lose silent refresh until the next sign-in */ }
+};
+
+window._calStoreToken = function(token, expiresInSec){
+  if(!token) return null;
+  localStorage.setItem('gcal_token', token);
+  localStorage.setItem('gcal_token_exp', String(Date.now() + (Number(expiresInSec)||3600)*1000));
+  return token;
+};
+
+window._calClientId = function(){
+  try { if(APP_CONFIG && APP_CONFIG.googleOAuthClientId) return APP_CONFIG.googleOAuthClientId; } catch(e){}
+  return localStorage.getItem('gcal_client_id') || '';
+};
+
+let _gisReady = null;
+function _calLoadGis(){
+  if(_gisReady) return _gisReady;
+  _gisReady = (async ()=>{
+    if(window.google && window.google.accounts && window.google.accounts.oauth2) return true;
+    await _loadScript(_GIS_SRC);
+    for(let i=0;i<40 && !(window.google && window.google.accounts && window.google.accounts.oauth2);i++){
+      await new Promise(r=>setTimeout(r,50));
+    }
+    return !!(window.google && window.google.accounts && window.google.accounts.oauth2);
+  })().catch(()=>false);
+  return _gisReady;
+}
+
+// prompt:''        → silent; succeeds when the scope is already granted and the
+//                    browser still holds a Google session (the normal case).
+// prompt:'consent' → shows Google's account/consent screen.
+function _calGisToken(prompt){
+  return new Promise(async (resolve, reject)=>{
+    const client_id = window._calClientId();
+    if(!client_id) return reject(new Error('no OAuth client id cached yet'));
+    if(!await _calLoadGis()) return reject(new Error('Google Identity Services unavailable'));
+    let settled = false;
+    const done = (fn, v) => { if(!settled){ settled = true; fn(v); } };
+    try{
+      const tc = google.accounts.oauth2.initTokenClient({
+        client_id, scope: _GCAL_SCOPE, prompt,
+        hint: (typeof currentUser !== 'undefined' && currentUser && currentUser.email) || undefined,
+        callback: r => (r && r.access_token)
+          ? done(resolve, window._calStoreToken(r.access_token, r.expires_in))
+          : done(reject, new Error((r && r.error) || 'no access_token returned')),
+        error_callback: e => done(reject, new Error((e && e.type) || 'token request failed')),
+      });
+      setTimeout(()=>done(reject, new Error('timeout')), prompt === '' ? 8000 : 120000);
+      tc.requestAccessToken();
+    }catch(e){ done(reject, e); }
+  });
+}
+
+// Returns a usable calendar token, or null. Refreshes 2 minutes BEFORE expiry so
+// a long batch of writes can't die halfway through.
+window._calEnsureToken = async function(opts){
+  opts = opts || {};
+  const tok = localStorage.getItem('gcal_token');
+  const exp = parseInt(localStorage.getItem('gcal_token_exp')||'0');
+  if(tok && Date.now() < exp - 120000) return tok;
+  try { return await _calGisToken(''); }
+  catch(e){ console.warn('[cal] silent token refresh failed:', e.message||e); }
+  if(!opts.interactive) return null;
+  try { return await _calGisToken('consent'); }
+  catch(e){ console.warn('[cal] consent token request failed:', e.message||e); }
+  return null;
+};
+
 window._calApiReq = async function(method, path, body){
-  const token = localStorage.getItem('gcal_token');
+  let token = await window._calEnsureToken({interactive:false});
   if(!token) throw new Error('No calendar token — click "Enable Calendar Editing" first');
-  const resp = await fetch('https://www.googleapis.com/calendar/v3'+path, {
-    method, headers: {'Authorization':'Bearer '+token, 'Content-Type':'application/json'},
+  const send = t => fetch('https://www.googleapis.com/calendar/v3'+path, {
+    method, headers: {'Authorization':'Bearer '+t, 'Content-Type':'application/json'},
     ...(body ? {body:JSON.stringify(body)} : {}),
   });
+  let resp = await send(token);
+  if(resp.status===401){
+    // Rejected server-side (revoked, or an expiry we mis-tracked). Drop it and
+    // re-mint ONCE before giving up, rather than dead-ending the caller.
+    localStorage.removeItem('gcal_token'); localStorage.removeItem('gcal_token_exp');
+    token = await window._calEnsureToken({interactive:false});
+    if(token) resp = await send(token);
+  }
   if(!resp.ok){
     const err = await resp.json().catch(()=>({}));
-    if(resp.status===401){ localStorage.removeItem('gcal_token'); throw new Error('Calendar token expired — please re-enable calendar editing'); }
+    if(resp.status===401) throw new Error('Calendar token expired — please re-enable calendar editing');
     throw new Error(err.error?.message || 'Calendar API error '+resp.status);
   }
   return resp.status===204 ? null : resp.json();
@@ -38071,9 +38194,9 @@ window._reauthCalendarReminders = async function(){
   try {
     const result = await signInWithPopup(_fbAuth, provider);
     const cred = GoogleAuthProvider.credentialFromResult(result);
+    if(cred) window._calCaptureClientId(cred);
     if(cred?.accessToken){
-      localStorage.setItem('gcal_token', cred.accessToken);
-      localStorage.setItem('gcal_token_exp', String(Date.now() + 3600*1000));
+      window._calStoreToken(cred.accessToken, 3600);
       showToast('Calendar reminders enabled ✓', 'success');
       _startCalendarReminders();
     }
