@@ -11023,6 +11023,7 @@ window.agCommSync = agCommSync;
 
 
 function renderCurrentView(){
+  window._elcScoreCache?.clear();   // elc-v443: week scores are memoised per paint
   const map={board:viewBoard,tasks:viewTasks,calendar:viewCalendar,dashboard:viewDashboard,projection:viewProjection,
     commissions:viewMyCommissions,
     splits:viewSplits,automations:viewAutomations,users:viewUsers,leaderboard:viewLeaderboard,
@@ -18193,7 +18194,105 @@ window._elcWeekWindow = (d) => {
    `asOf` caps "current state" reads (open/overdue tasks) at the end of the
    week being scored, so recomputing an old week doesn't credit work that
    happened after it. */
+/* ── SHARED DEAL-CREDIT HELPERS — elc-v443 (marker: SCUNIFY-20260901) ──────
+   These rules (per-offer LOI credit, contract-doc credit, "a backward move
+   never scores") existed in FOUR hand-copied variants: viewOfficeOverview,
+   advRow, the L-10 agenda row and the sort helper — with three different point
+   scales between them. One copy lives here now and every surface calls it. */
+window._elcDealLoiList = (d) => {
+  if(Array.isArray(d.lois) && d.lois.length) return d.lois;
+  if(d.loiBuyer||d.loiPrice||d.loiUrl||d.loiFileName)
+    return [{buyer:d.loiBuyer||'', price:d.loiPrice||'', addedAt:+d.loiAddedAt||0}];
+  return [];
+};
+// elc-v424 — latest FORWARD entry into LOI; a card dragged BACK into LOI never scores.
+window._elcLoiStageTs = (d) => {
+  const e = _lastFwdEntry(d, s=>/^loi$/i.test((s||'').trim()));
+  if(e && e.enteredAt) return e.enteredAt;
+  if(/^loi$/i.test((d.stage||'').trim())){
+    if(_landedBackward(d)) return 0;
+    return d.stageEnteredAt || d.createdAt || 0;
+  }
+  return 0;
+};
+/* Offers on a deal whose credit lands in [start,end]. Every uploaded offer on
+   deal.lois[] earns credit, so three offers on one property score three times
+   without needing three cards. Credited by the offer's upload date OR the week
+   the card entered LOI — whichever falls in the window. */
+window._elcLoiCountInWindow = (d, start, end) => {
+  const list = window._elcDealLoiList(d); if(!list.length) return 0;
+  const sTs = window._elcLoiStageTs(d);
+  const stageIn = sTs>=start && sTs<=end;
+  let n=0;
+  for(const l of list){
+    const a = +l.addedAt||0;
+    /* A DATED offer scores in the week it was uploaded. The LOI-stage week is
+       the fallback for offers with no addedAt (uploaded before elc-v399 stamped
+       them) — NOT an alternative credit for dated ones. Written as
+       `(a in window) || stageIn` it handed a deal every offer it would ever
+       collect in the single week the card entered LOI: one advisor's July 13
+       week scored 98 LOI points off one property. */
+    if(a){ if(a>=start && a<=end) n++; }
+    else if(stageIn) n++;
+  }
+  return n;
+};
+window._elcCtStageTs = (d) => {
+  const e = _lastFwdEntry(d, s=>/under.?contract/i.test(s||''));
+  if(e && e.enteredAt) return e.enteredAt;
+  if(/under.?contract/i.test(d.stage||'')){
+    if(_landedBackward(d)) return 0;
+    return d.stageEnteredAt || d.createdAt || 0;
+  }
+  return 0;
+};
+// Contract credit, once per deal: signed contract attached in the window OR the
+// card entered an under-contract stage in the window.
+window._elcCtInWindow = (d, start, end) => {
+  const c = +d.contractAttachedAt||0;
+  const st = window._elcCtStageTs(d);
+  return ((c>=start && c<=end) || (st>=start && st<=end)) ? 1 : 0;
+};
+/* Did this deal enter a matching stage inside [wS,wE]? Replays stageHistory —
+   `stageEnteredAt` only ever holds the CURRENT stage's timestamp, so a deal that
+   was a Listing in July and is under contract today has otherwise silently lost
+   its July credit. Backward entries are skipped (elc-v424). */
+window._elcEnteredInWk = (d, match, wS, wE) => {
+  const h = Array.isArray(d.stageHistory) ? d.stageHistory : [];
+  if(h.length) return h.some(x => x && x.direction!=='back' && match(x.stage||'')
+    && (+x.enteredAt||0)>=wS && (+x.enteredAt||0)<=wE);
+  if(_landedBackward(d)) return false;
+  const ts = d.stageEnteredAt || d.createdAt || 0;
+  return match(d.stage||'') && ts>=wS && ts<=wE;
+};
+
+/* Locked-row freshness — elc-v443. The formula version used to be a single
+   doc-level `__ver`, which made a bump all-or-nothing and, worse, half-applied:
+   the first browser to save stamped the whole doc as current while every OTHER
+   advisor's rows were still scored by the OLD formula, and the admin sweep then
+   refused to touch them ("already frozen"). Stamped per ROW now, so a stale row
+   is recomputed by whichever surface reaches it first and nothing is ever
+   wholesale deleted. Bump this to re-derive every locked week. */
+window._ELC_SCORECARD_VER = 6;
+// `docVer` (the doc-level __ver) is accepted for call-site readability but is
+// deliberately NOT trusted: it is exactly what let one browser's save mark every
+// other advisor's old-formula rows as current. A row with no `v` is stale.
+window._elcRowFresh = (row, docVer) =>
+  !!row && row.score !== undefined && (+row.v || 0) >= window._ELC_SCORECARD_VER;
+
+/* Per-render memo. Every scorecard surface calls this now, and the Quarterly
+   Report Card alone asks for ~19 advisors x 4 quarters of weeks in a single
+   paint — each call filtering every deal and task. Cleared at the top of
+   renderCurrentView() so a re-render after any data change always recomputes. */
+window._elcScoreCache = new Map();
 window._elcWeekScore = (uid, wS, wE, wKey) => {
+  const _ck = uid+'|'+wS+'|'+wE;
+  if(window._elcScoreCache.has(_ck)) return window._elcScoreCache.get(_ck);
+  const _v = window._elcWeekScoreRaw(uid, wS, wE, wKey);
+  window._elcScoreCache.set(_ck, _v);
+  return _v;
+};
+window._elcWeekScoreRaw = (uid, wS, wE, wKey) => {
   const prof     = allProfiles[uid] || {};
   const Q_GOAL   = prof.quarterlyUCGoal || 10000000;
   const myDeals  = allDeals.filter(d => isDealAdvisor(d, uid));
@@ -18216,48 +18315,58 @@ window._elcWeekScore = (uid, wS, wE, wKey) => {
   // task finished later doesn't retroactively rescue an old week.
   const wEndStr   = new Date(wE).toISOString().slice(0,10);
   const pendingAt = t => (t.createdAt||0) <= wE && (t.status==='pending' || (t.updatedAt||0) > wE);
-  const overdueInWk = myTasks.filter(t=>pendingAt(t)&&t.dueDate&&t.dueDate<=wEndStr).length;
+  /* elc-v443: for a week still IN PROGRESS the cutoff is today, not Sunday —
+     otherwise the live card docks you 2 pts for a task that isn't due until
+     Friday. An ended week is unchanged (due by Sunday and still open = late),
+     so this can never move a historical score. */
+  const _liveWk   = wE > Date.now();
+  const _dueCut   = _liveWk ? new Date().toISOString().slice(0,10) : wEndStr;
+  const _isLate   = t => t.dueDate && (_liveWk ? t.dueDate < _dueCut : t.dueDate <= _dueCut);
+  const overdueInWk = myTasks.filter(t=>pendingAt(t)&&_isLate(t)).length;
   const doneT = myTasks.filter(t=>t.status==='complete'&&(t.updatedAt||0)>=wS&&(t.updatedAt||0)<=wE).length;
   const openT = myTasks.filter(t=>pendingAt(t)).length;
 
-  /* Deal activity. index.html historically matched `d.stage===X &&
-     d.stageEnteredAt in window`, but stageEnteredAt only ever holds the
-     CURRENT stage's timestamp — so a deal that was an LOI in July and is
-     under contract today has silently lost its July LOI credit. Replay the
-     stageHistory array where the deal has one. */
+  /* Deal activity — elc-v443: all four surfaces now share these rules.
+     Prospect credit keys off the deal's FIRST stage (a deal created as a
+     prospect keeps that week's credit after it advances); LOIs are per-offer;
+     contracts count an attached contract doc as well as the stage move. */
   const _initialStage = d => (Array.isArray(d.stageHistory)&&d.stageHistory.length)
     ? d.stageHistory[0].stage : d.stage;
-  const _enteredInWk = (d, match) => {
-    if(Array.isArray(d.stageHistory)&&d.stageHistory.length)
-      return d.stageHistory.some(h=>match(h.stage||'')&&(+h.enteredAt||0)>=wS&&(+h.enteredAt||0)<=wE);
-    const ts=(d.stageEnteredAt||d.createdAt||0);
-    return match(d.stage||'')&&ts>=wS&&ts<=wE;
-  };
+  const _enteredInWk = (d, match) => window._elcEnteredInWk(d, match, wS, wE);
   const sp = (d,base)=>{
     if(d.advisorUid===uid){ const co=(d.coAdvisors||[]).reduce((s,ca)=>s+(ca.splitPct||0),0); return base*Math.max(0,100-co)/100; }
     const ca=(d.coAdvisors||[]).find(c=>c.uid===uid); return ca?base*(ca.splitPct||0)/100:0;
   };
   const bornInWk = d => (d.createdAt||0)>=wS && (d.createdAt||0)<=wE;
   const pDeals  = myDeals.filter(d=>bornInWk(d)&&_initialStage(d)==='Prospect');
-  const caN     = window._elcCallsInWindow(uid,wS,wE).length; // elc-v432: calls score like prospects
-  const lDeals  = myDeals.filter(d=>_enteredInWk(d,st=>st==='LOI'));
+  const caN     = window._elcCallsInWindow(uid,wS,wE);        // elc-v432: calls score like prospects
+  const loiRows = myDeals.map(d=>({d,n:window._elcLoiCountInWindow(d,wS,wE)})).filter(x=>x.n>0);
   const prDeals = myDeals.filter(d=>_enteredInWk(d,st=>st==='Proposal To Do'||st==='Proposal Outstanding'));
   const lstDls  = myDeals.filter(d=>_enteredInWk(d,st=>st==='Listing'));
-  const cDeals  = myDeals.filter(d=>_enteredInWk(d,st=>/under.?contract/i.test(st||'')));
-  const pPts=pDeals.reduce((s,d)=>s+sp(d,5),0),   lPts=lDeals.reduce((s,d)=>s+sp(d,10),0);
+  const ctRows  = myDeals.map(d=>({d,n:window._elcCtInWindow(d,wS,wE)})).filter(x=>x.n>0);
+  const pPts=pDeals.reduce((s,d)=>s+sp(d,5),0),   lPts=loiRows.reduce((s,x)=>s+sp(x.d,10*x.n),0);
   const prPts=prDeals.reduce((s,d)=>s+sp(d,10),0), lstPts=lstDls.reduce((s,d)=>s+sp(d,20),0);
-  const cPts=cDeals.reduce((s,d)=>s+sp(d,30),0);
+  const cPts=ctRows.reduce((s,x)=>s+sp(x.d,30*x.n),0);
 
   // Self-reported weekly inputs
   const wi = prof.weeklyInputs?.[wKey] || {};
   const netEv = wi.networkEvent||'', drPr = wi.driveProperties||'';
 
   const pts_w = [wQPct>=10?10:0, Math.max(0,20-overdueInWk*2),
-    pPts+caN*5, lPts, prPts, lstPts, cPts, netEv==='yes'?10:0, drPr==='yes'?10:0];
+    pPts+caN.length*5, lPts, prPts, lstPts, cPts, netEv==='yes'?10:0, drPr==='yes'?10:0];
   const score = Math.round(pts_w.reduce((a,b)=>a+b,0));
 
-  return {score, wQPct, pLen:pDeals.length, lLen:lDeals.length, prLen:prDeals.length,
-          lstLen:lstDls.length, cLen:cDeals.length, netEv, drPr, doneT, openT, caN};
+  /* `pts` is returned so no renderer ever has to re-index the array by hand —
+     that is exactly how the Network Event / Property Visit badges ended up one
+     column off (pts[8]/pts[9] on a 9-element array → "10 pts" under a No and a
+     literal "NaN pts"). `det` carries the contributing rows for tooltips. */
+  return {score, pts:pts_w, wQPct, pLen:pDeals.length,
+          lLen:loiRows.reduce((s,x)=>s+x.n,0), prLen:prDeals.length,
+          lstLen:lstDls.length, cLen:ctRows.length, netEv, drPr, doneT, openT,
+          caN:caN.length,
+          det:{qDeals:wQDeals, overdueTasks:myTasks.filter(t=>pendingAt(t)&&_isLate(t)),
+               prospectDeals:pDeals, calls:caN, loiRows, propDeals:prDeals,
+               lstDeals:lstDls, ctRows}};
 };
 
 /* Every Monday-start week of a quarter, oldest first. `includeCurrent` keeps
@@ -18297,9 +18406,8 @@ window._elcSweepScoreHistory = async () => {
     if(!allDeals?.length || !Object.keys(allProfiles||{}).length) return;
     window._elcSweepDone = true;
 
-    const SCORECARD_VER = 5;
+    const SCORECARD_VER = window._ELC_SCORECARD_VER;
     const hist = eosGet('scoreHistory',{});
-    if((hist.__ver||1) < SCORECARD_VER) return;    // a version bump wipes on its own terms
 
     // Staff-only accounts are graded by the STAFF formula and their rows are
     // shaped {score, doneTasks} — writing advisor rows over them corrupts data.
@@ -18319,9 +18427,10 @@ window._elcSweepScoreHistory = async () => {
       let dirty = false;
       weeks.forEach(({wS,wE,wKey})=>{
         if(wE >= Date.now())   return;             // not finished — stays live
-        if(mine[wKey])         return;             // already frozen, never overwrite
+        if(window._elcRowFresh(mine[wKey], hist.__ver)) return;  // frozen by the CURRENT formula
         if(window._elcOnVacation(aUid,wS,wE)) return; // time off is never graded
-        mine[wKey] = {...window._elcWeekScore(aUid,wS,wE,wKey), autoLocked:true};
+        const _r = window._elcWeekScore(aUid,wS,wE,wKey); delete _r.det; delete _r.pts;
+        mine[wKey] = {..._r, v:SCORECARD_VER, autoLocked:true};
         dirty = true; added++;
       });
       if(dirty) next[aUid] = mine;
@@ -25370,8 +25479,8 @@ window._execManualMergeContacts = async () => {
 };
 
 // ── CRM Outreach Imports (updated nightly by daily-crm-outreach-sync task) ──
-const _CRM_OUTREACH_SYNC_DATE = '2026-08-29';
-const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-08-28_0","emailDate":"2026-08-28","emailSubject":"LOI Bradenton/905 301 Blvd West","attachmentNames":["LOI_Bradenton FL_905 301 Blvd W.docx"],"recipientEmail":"vincent.crisci@gmail.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"","propertyHint":"905 301 Blvd West","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-08-28_1","emailDate":"2026-08-28","emailSubject":"2 Offers on Granite Peaks","attachmentNames":["Psh - LOI - Granite Peaks.pdf","2026.08.27 Darby Rd SFD LOI.pdf"],"recipientEmail":"s.sebring.sierra@gmail.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"","propertyHint":"Granite Peaks","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-08-28_2","emailDate":"2026-08-28","emailSubject":"Signed PSA for East Point Parcel","attachmentNames":["Complete_with_Docusign_Alex_signpdf_Screen.pdf"],"recipientEmail":"monty@courseyproperties.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Courseyproperties","propertyHint":"East Point","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-08-28_3","emailDate":"2026-08-28","emailSubject":"Signed PSA for East Point Parcel","attachmentNames":["Complete_with_Docusign_Alex_signpdf_Screen.pdf"],"recipientEmail":"ericslepian@slepianfirm.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Slepianfirm","propertyHint":"East Point","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-08-28_4","emailDate":"2026-08-28","emailSubject":"Signed PSA for East Point Parcel","attachmentNames":["Complete_with_Docusign_Alex_signpdf_Screen.pdf"],"recipientEmail":"jillian@rocwellinvestments.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Rocwellinvestments","propertyHint":"East Point","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-08-28_5","emailDate":"2026-08-28","emailSubject":"Signed PSA for East Point Parcel","attachmentNames":["Complete_with_Docusign_Alex_signpdf_Screen.pdf"],"recipientEmail":"justin@rocwell.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Rocwell","propertyHint":"East Point","matchedDealId":null,"imported":false,"skipped":false}];
+const _CRM_OUTREACH_SYNC_DATE = '2026-09-02';
+const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-09-01_0","emailDate":"2026-09-01","emailSubject":"Re: Self Storage Project","attachmentNames":["Kenton CC-MPUD Draft Concept M 2026-01-28.pdf","OM Kenton Commercial.pdf"],"recipientEmail":"mstevenson@arcomurraycc.com","recipientName":"Matt Stevenson","recipientFirstName":"Matt","recipientLastName":"Stevenson","companyName":"Arcomurraycc","propertyHint":"Kenton","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-09-01_1","emailDate":"2026-09-01","emailSubject":"Deltona Blvd Spring Hill Land","attachmentNames":["OM Forest Oaks Spring Hill (compressed).pdf"],"recipientEmail":"allanbalgley@gmail.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"","propertyHint":"Forest Oaks Spring Hill","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-09-01_2","emailDate":"2026-09-01","emailSubject":"Brandon Apt B&F","attachmentNames":["5416_Robert_Tolle_Buyer_Comparison_3.pdf"],"recipientEmail":"fabbrit@richmancapital.com","recipientName":"Todd Fabbri","recipientFirstName":"Todd","recipientLastName":"Fabbri","companyName":"Richmancapital","propertyHint":"Robert Tolle","matchedDealId":null,"imported":false,"skipped":false}];
 
 // ── Gmail Sync ───────────────────────────────────────────────────────
 let _GMAIL_SYNC_DATE;  // set at runtime by crmGmailSync; blank = never synced this session
@@ -30017,9 +30126,6 @@ function viewOfficeOverview(){
   const pwStart = new Date(thisMon); pwStart.setDate(thisMon.getDate()-7);
   const pwEnd   = new Date(thisMon); pwEnd.setMilliseconds(-1);
   const pwS = pwStart.getTime(), pwE = pwEnd.getTime();
-  // Current in-progress week — LOIs score live, not prior-week (elc-v408)
-  const _cwEndMain = new Date(thisMon); _cwEndMain.setDate(thisMon.getDate()+7); _cwEndMain.setMilliseconds(-1);
-  const cwS = thisMon.getTime(), cwE = _cwEndMain.getTime();
   const weekKey = pwStart.toISOString().split('T')[0];
 
   const weekGrade = score => {
@@ -30072,56 +30178,15 @@ function viewOfficeOverview(){
     return n;
   };
 
-  // ── Per-offer LOI scoring helpers ─────────────────────────────────────────
-  // LOIs are tracked as an array on the deal (deal.lois[]), so multiple offers on
-  // ONE property each earn credit without needing a separate card or a drag into
-  // the LOI column. Score is attributed by the offer's upload date (addedAt) OR
-  // the week the card entered the LOI stage — whichever lands in the window.
-  const _dealLoiList = (d) => {
-    if(Array.isArray(d.lois) && d.lois.length) return d.lois;
-    if(d.loiBuyer||d.loiPrice||d.loiUrl||d.loiFileName)
-      return [{buyer:d.loiBuyer||'', price:d.loiPrice||'', addedAt:+d.loiAddedAt||0}];
-    return [];
-  };
-  const _loiStageTs = (d) => {
-    // elc-v424 — latest FORWARD entry into LOI; a card dragged back into LOI never scores.
-    const e = _lastFwdEntry(d, s=>/^loi$/i.test((s||'').trim()));
-    if(e && e.enteredAt) return e.enteredAt;
-    if(/^loi$/i.test((d.stage||'').trim())){
-      const h=d.stageHistory||[], last=h[h.length-1];
-      if(last && last.direction==='back' && (last.stage||'')===(d.stage||'')) return 0;  // landed here moving backward
-      return d.stageEnteredAt||d.createdAt||0;
-    }
-    return 0;
-  };
-  // Count offers on a deal whose credit falls within [start,end].
-  const _loiCountInWindow = (d, start, end) => {
-    const list = _dealLoiList(d); if(!list.length) return 0;
-    const sTs = _loiStageTs(d);
-    const stageIn = sTs>=start && sTs<=end;
-    let n=0;
-    for(const l of list){
-      const a = +l.addedAt||0;
-      if((a>=start && a<=end) || stageIn) n++;
-    }
-    return n;
-  };
-  // Contract credit (once per deal): counts if a contract doc was attached in the
-  // window OR the card entered an under-contract stage in the window. Attaching a
-  // signed contract now scores without needing to drag the card.
-  const _ctStageTs = (d) => {
-    // elc-v424 — latest FORWARD entry into an under-contract stage. A deal that fell
-    // out and went back under contract earns contract credit again for the new contract.
-    const e = _lastFwdEntry(d, s=>/under.?contract/i.test(s||''));
-    if(e && e.enteredAt) return e.enteredAt;
-    if(/under.?contract/i.test(d.stage||'')) return _fwdStageTs(d);
-    return 0;
-  };
-  const _ctInWindow = (d, start, end) => {
-    const c = +d.contractAttachedAt||0;
-    const st = _ctStageTs(d);
-    return ((c>=start && c<=end) || (st>=start && st<=end)) ? 1 : 0;
-  };
+  // ── Per-offer LOI / contract credit — elc-v443 ────────────────────────────
+  // These four helpers used to be defined here and hand-copied into three other
+  // views. They live next to window._elcWeekScore now; these are just aliases so
+  // the leaderboard's 30-day counts keep reading the same rules as the scorecard.
+  const _dealLoiList      = window._elcDealLoiList;
+  const _loiStageTs       = window._elcLoiStageTs;
+  const _loiCountInWindow = window._elcLoiCountInWindow;
+  const _ctStageTs        = window._elcCtStageTs;
+  const _ctInWindow       = window._elcCtInWindow;
 
   const lbRows = allAdvs.map(adv => {
     const ad = allDeals.filter(d=>isDealAdvisor(d,adv.uid));
@@ -30192,27 +30257,20 @@ function viewOfficeOverview(){
     const ca=(d.coAdvisors||[]).find(c=>c.uid===advUid); return ca?base*(ca.splitPct||0)/100:0;
   };
 
+  /* elc-v443 (SCUNIFY-20260901) — this office table was scoring proposals at 5
+     and listings at 10 while the EOS scorecard scored them 10 and 20, and it
+     read LOIs from the CURRENT week. An advisor could be a B here and a C on
+     their own scorecard for the very same week. One formula now. */
   const scRowsSorted = allAdvs.map(adv => {
-    const aDeals  = allDeals.filter(d=>isDealAdvisor(d,adv.uid));
-    const aTasks  = allTasks.filter(t=>t.assignedTo===adv.uid);
-    const qGoal   = allProfiles[adv.uid]?.quarterlyUCGoal || 10000000;
-    const qDealsA = aDeals.filter(d=>!isLostStage(d.stage||'')&&(isContractActiveStage(d.stage)||isWonStage(d.stage||''))&&getEffectiveDealTs(d)>=qStart&&getEffectiveDealTs(d)<=qEnd);
-    const qVolA   = qDealsA.reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||0),0);
-    const qPct    = Math.min(Math.round(qVolA/qGoal*100),100);
-    const overdue = aTasks.filter(t=>t.status==='pending'&&t.dueDate&&t.dueDate<todayStr).length;
-    const wi      = allProfiles[adv.uid]?.weeklyInputs?.[weekKey]||{};
-    const prospPts = aDeals.filter(d=>d.stage==='Prospect'&&(d.createdAt||0)>=pwS&&(d.createdAt||0)<=pwE).reduce((s,d)=>s+splitPts(d,adv.uid,5),0)
-      + window._elcCallsInWindow(adv.uid,pwS,pwE).length*5; // elc-v432: logged calls score like prospects
-    // Per-offer LOI credit: every uploaded offer on deal.lois[] earns 10 pts, so
-    // multiple offers on one property all score without a new card or a drag into
-    // the LOI column. Counted by offer upload date OR LOI-stage entry this week.
-    const loiPts   = aDeals.reduce((s,d)=>s+splitPts(d,adv.uid,10*_loiCountInWindow(d,cwS,cwE)),0);
-    const propPts  = aDeals.filter(d=>d.stage==='Proposal To Do'&&inPW(d)).reduce((s,d)=>s+splitPts(d,adv.uid,5),0);
-    const listPts  = aDeals.filter(d=>d.stage==='Listing'&&inPW(d)).reduce((s,d)=>s+splitPts(d,adv.uid,10),0);
-    const ctPts    = aDeals.reduce((s,d)=>s+splitPts(d,adv.uid,30*_ctInWindow(d,pwS,pwE)),0);
-    const score    = (qPct>=10?10:0)+Math.max(0,20-overdue*2)+prospPts+loiPts+propPts+listPts+ctPts+(wi.networkEvent==='yes'?10:0)+(wi.driveProperties==='yes'?10:0);
     const _vacOv = window._elcOnVacation(adv.uid, pwS, pwE);   // elc-v437 (VACMODE-20260824)
-    return {adv, score:_vacOv?-1:score, qPct, qVolA, qGoal, overdue, wi, prospPts, loiPts, propPts, listPts, ctPts, vac:_vacOv};
+    const S      = window._elcWeekScore(adv.uid, pwS, pwE, weekKey);
+    const qGoal  = allProfiles[adv.uid]?.quarterlyUCGoal || 10000000;
+    const qVolA  = S.det.qDeals.reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||0),0);
+    return {adv, score:_vacOv?-1:S.score, qPct:S.wQPct, qVolA, qGoal,
+            overdue:S.det.overdueTasks.length,
+            wi:{networkEvent:S.netEv, driveProperties:S.drPr},
+            prospPts:S.pts[2], loiPts:S.pts[3], propPts:S.pts[4],
+            listPts:S.pts[5], ctPts:S.pts[6], vac:_vacOv};
   }).sort((a,b)=>b.score-a.score);
 
   const scHtml = `
@@ -30283,7 +30341,7 @@ function viewOfficeOverview(){
       </table>
       </div>
       <div class="px-5 py-2.5 border-t bg-gray-50 text-xs text-gray-400">
-        A+ ≥ 100 · A ≥ 90 · B ≥ 80 · C ≥ 70 · Contracts = 20pts · Listings = 20pts · LOIs = 5pts · Proposals = 10pts · Prospects/Calls = 5pts each · Network Event &amp; Site Visit = 10pts each
+        A+ ≥ 100 · A ≥ 90 · B ≥ 80 · C ≥ 70 · Contracts = 30pts · Listings = 20pts · LOIs = 10pts each offer · Proposals = 10pts · Prospects/Calls = 5pts each · Open Tasks = 20pts (−2 per overdue) · Network Event &amp; Site Visit = 10pts each
       </div>
     </div>`;
 
@@ -30940,9 +30998,6 @@ function viewEOS(sub='rocks'){
     const pwStart = new Date(thisMonday); pwStart.setDate(thisMonday.getDate()-7);
     const pwEnd   = new Date(thisMonday); pwEnd.setMilliseconds(-1);
     const pwS = pwStart.getTime(), pwE = pwEnd.getTime();
-    // Current in-progress week — LOIs score live (elc-v408)
-    const _cwEndAdv = new Date(thisMonday); _cwEndAdv.setDate(thisMonday.getDate()+7); _cwEndAdv.setMilliseconds(-1);
-    const cwS = thisMonday.getTime(), cwE = _cwEndAdv.getTime();
 
     const fmtD = d => d.toLocaleDateString('en-US',{month:'short',day:'numeric'});
     const weekLabel = fmtD(pwStart)+' – '+pwEnd.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
@@ -30965,123 +31020,56 @@ function viewEOS(sub='rocks'){
     // Week key for self-reported inputs (prior Monday date)
     const weekKey = pwStart.toISOString().split('T')[0];
 
+    /* elc-v443 (SCUNIFY-20260901) — RENDER ONLY. This row used to carry its own
+       copy of the week formula, and its LOI column read the CURRENT week
+       (cwS/cwE, elc-v408 "LOIs score live") while every other column read the
+       prior week — so the same week graded differently here than in the
+       trailing-12 history below it. Everything now comes from the one shared
+       window._elcWeekScore(); `det` carries the rows behind each tooltip. */
     const advRow = (advUid, advName) => {
-      const Q_GOAL   = (allProfiles[advUid]?.quarterlyUCGoal) || 10000000;
-      const advDeals = allDeals.filter(d => isDealAdvisor(d, advUid));
-      const advTasks = allTasks.filter(t => t.assignedTo===advUid);
+      const S    = window._elcWeekScore(advUid, pwS, pwE, weekKey);
+      const det  = S.det;
+      const pts  = S.pts;                 // indices 0-8, in column order
 
-      // Q Goal %
-      const qDeals = advDeals.filter(d => {
-        if(isLostStage(d.stage||'')) return false;
-        if(!isContractActiveStage(d.stage) && !isWonStage(d.stage||'')) return false;
-        const ts = getEffectiveDealTs(d);
-        return ts >= qStart && ts <= qEnd;
-      });
-      const qVol  = qDeals.reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||0),0);
-      const qPct  = Math.min(Math.round(qVol/Q_GOAL*100),100);
-      const qColor= qPct>=100?'#059669':qPct>=60?'#D97706':'#DA291C';
-
-      // Tasks
-      const openTasks      = advTasks.filter(t=>t.status==='pending').length;
-      const completedTasks = advTasks.filter(t=>t.status==='complete' && (t.updatedAt||0)>=pwS && (t.updatedAt||0)<=pwE).length;
-      // Only count tasks that are actually past their due date for scoring purposes
-      const todayStr       = new Date().toISOString().slice(0,10);
-      const overdueTaskCount = advTasks.filter(t=>t.status==='pending' && t.dueDate && t.dueDate < todayStr).length;
-
-      // Weekly deal activity — point-weighted, split between co-advisors by deal percentage
-      const inPW = d => { if(_landedBackward(d)) return false; /* elc-v424 */ const ts=(d.stageEnteredAt||d.createdAt||0); return ts>=pwS&&ts<=pwE; };
-      // Returns the fraction of base points this advisor earns on a deal
-      const splitPts = (d, base) => {
-        if(d.advisorUid === advUid) {
-          const coTotal = (d.coAdvisors||[]).reduce((s,ca)=>s+(ca.splitPct||0),0);
-          return base * Math.max(0, 100 - coTotal) / 100;
-        }
-        const ca = (d.coAdvisors||[]).find(c=>c.uid===advUid);
-        return ca ? base * (ca.splitPct||0) / 100 : 0;
-      };
-      const prospectDeals  = advDeals.filter(d=>d.stage==='Prospect'          && (d.createdAt||0)>=pwS && (d.createdAt||0)<=pwE);
-      // elc-v432 (CALLPTS-20260819): logged outgoing calls score like prospects
-      // (5 pts each, not split). Window-based → auto-resets every Monday.
-      const callsPW        = window._elcCallsInWindow(advUid, pwS, pwE);
-      const callPts        = callsPW.length * 5;
-      const propDeals      = advDeals.filter(d=>(d.stage==='Proposal To Do'||d.stage==='Proposal Outstanding') && inPW(d));
-      const listingDeals   = advDeals.filter(d=>d.stage==='Listing'           && inPW(d));
-      // Per-offer LOI credit (matches main scorecard + agenda): each offer on
-      // deal.lois[] earns 10 pts, counted by offer upload date OR LOI-stage entry.
-      const _loiCntPW = d=>{
-        let list = Array.isArray(d.lois)&&d.lois.length ? d.lois
-          : ((d.loiBuyer||d.loiPrice||d.loiUrl||d.loiFileName)?[{addedAt:+d.loiAddedAt||0}]:[]);
-        if(!list.length) return 0;
-        const hist=d.stageHistory||[];
-        const e=hist.find(h=>/^loi$/i.test((h.stage||'').trim()));
-        let sTs = e&&e.enteredAt ? e.enteredAt : (/^loi$/i.test((d.stage||'').trim())?(d.stageEnteredAt||d.createdAt||0):0);
-        const stageIn = sTs>=cwS && sTs<=cwE;
-        let n=0; for(const l of list){ const a=+l.addedAt||0; if((a>=cwS&&a<=cwE)||stageIn) n++; }
-        return n;
-      };
-      // Contract credit (once per deal): contract doc attached OR under-contract stage entry this week.
-      const _ctCntPW = d=>{
-        const c=+d.contractAttachedAt||0;
-        const hist=d.stageHistory||[];
-        const e=hist.find(h=>/under.?contract/i.test(h.stage||''));
-        let st = e&&e.enteredAt ? e.enteredAt : (/under.?contract/i.test(d.stage||'')?(d.stageEnteredAt||d.createdAt||0):0);
-        return ((c>=pwS&&c<=pwE)||(st>=pwS&&st<=pwE))?1:0;
-      };
-      const prospectPts    = prospectDeals.reduce((s,d)=>s+splitPts(d,5),0);
-      const loiPts         = advDeals.reduce((s,d)=>s+splitPts(d,10*_loiCntPW(d)),0);
-      const propPts        = propDeals.reduce((s,d)=>s+splitPts(d,10),0);
-      const listingPts     = listingDeals.reduce((s,d)=>s+splitPts(d,20),0);
-      const contractPts    = advDeals.reduce((s,d)=>s+splitPts(d,30*_ctCntPW(d)),0);
-      // Counts still used for display
-      const prospects   = prospectDeals.length;
-      const newLOIs     = advDeals.reduce((s,d)=>s+_loiCntPW(d),0);
-      const newProps    = propDeals.length;
-      const newListings = listingDeals.length;
-      const newContracts= advDeals.reduce((s,d)=>s+_ctCntPW(d),0);
+      const qPct   = S.wQPct;
+      const qColor = qPct>=100?'#059669':qPct>=60?'#D97706':'#DA291C';
+      const openTasks        = S.openT;   // pending as of week-end, not today
+      const overdueTaskCount = det.overdueTasks.length;
+      const prospects   = det.prospectDeals.length;
+      const callsPW     = det.calls;
+      const newLOIs     = S.lLen,   loiPts      = pts[3];
+      const newProps    = S.prLen,  propPts     = pts[4];
+      const newListings = S.lstLen, listingPts  = pts[5];
+      const newContracts= S.cLen,   contractPts = pts[6];
+      const weekScore   = S.score;
+      const grade       = weekGrade(weekScore);
 
       // Self-reported inputs (saved to advisorProfiles)
-      const weekInputs     = allProfiles[advUid]?.weeklyInputs?.[weekKey] || {};
-      const networkEvent   = weekInputs.networkEvent  || '';   // 'yes'|'no'|''
+      const weekInputs       = allProfiles[advUid]?.weeklyInputs?.[weekKey] || {};
+      const networkEvent     = S.netEv;                        // 'yes'|'no'|''
       const networkEventNote = weekInputs.networkEventNote || '';
-      const driveProps     = weekInputs.driveProperties || '';  // 'yes'|'no'|''
-      const isOwnRow       = advUid === uid;  // advisor viewing their own row
-      const isEditable     = isOwnRow && !isLocked;
+      const driveProps       = S.drPr;                         // 'yes'|'no'|''
+      const isOwnRow         = advUid === uid;  // advisor viewing their own row
+      const isEditable       = isOwnRow && !isLocked;
       // elc-v437 (VACMODE-20260824): a week this advisor was out 3+ weekdays
       // isn't graded — no letter, no points, skipped in the quarterly average.
-      const onVac          = window._elcOnVacation(advUid, pwS, pwE);
-
-      // ── 9-item scoring ──────────────────────────────────────────────
-      const pts = [
-        qPct >= 10 ? 10 : 0,                          // 1. Q Goal on pace
-        Math.max(0, 20 - overdueTaskCount * 2),        // 2. Open Tasks (20 − 2 per overdue task; full 20 if no overdue)
-        prospectPts + callPts,                         // 3. Prospects/Calls (5pts each; calls not split)
-        loiPts,                                        // 4. LOIs (10pts each, split)
-        propPts,                                       // 5. Proposals (10pts each, split)
-        listingPts,                                    // 6. Listings (20pts each, split)
-        contractPts,                                   // 7. Contracts (30pts each, split)
-        networkEvent === 'yes' ? 10 : 0,               // 8. Network Event
-        driveProps === 'yes' ? 10 : 0,                 // 9. Drive Properties
-      ];
-      const weekScore = Math.round(pts.reduce((a,b)=>a+b,0));
-      const grade = weekGrade(weekScore);
+      const onVac            = window._elcOnVacation(advUid, pwS, pwE);
 
       // ── Hover tooltips: which deals/tasks earned each cell's points ────────
       const _nm  = d => window._scEsc(d.projectName||d.propertyAddress||'Unnamed');
       const _suf = txt => " <span style='opacity:.6'>· "+window._scEsc(txt)+"</span>";
       const qTip        = window._scTipHtml('Q'+qNum+' Goal volume',
-                            qDeals.map(d=>_nm(d)+_suf(fmt$(d.purchasePrice||d.contractPrice||0))));
+                            det.qDeals.map(d=>_nm(d)+_suf(fmt$(d.purchasePrice||d.contractPrice||0))));
       const overdueTip  = window._scTipHtml('Overdue tasks · −2 pts each',
-                            advTasks.filter(t=>t.status==='pending'&&t.dueDate&&t.dueDate<todayStr)
-                              .map(t=>window._scEsc(t.title||'Untitled')+_suf('due '+t.dueDate)));
+                            det.overdueTasks.map(t=>window._scEsc(t.title||'Untitled')+_suf('due '+t.dueDate)));
       const prospectTip = window._scTipHtml('Prospects & Calls · 5 pts each',
-                            [...prospectDeals.map(_nm), ...callsPW.map(c=>'📞 '+window._scEsc(c.label||'Call'))]);
+                            [...det.prospectDeals.map(_nm), ...callsPW.map(c=>'📞 '+window._scEsc(c.label||'Call'))]);
       const loiTip      = window._scTipHtml('LOIs · 10 pts each',
-                            advDeals.map(d=>({d,n:_loiCntPW(d)})).filter(x=>x.n>0)
-                              .map(x=>_nm(x.d)+(x.n>1?_suf(x.n+' offers'):'')));
-      const propTip     = window._scTipHtml('Proposals · 10 pts each', propDeals.map(_nm));
-      const listTip     = window._scTipHtml('Listings · 20 pts each', listingDeals.map(_nm));
+                            det.loiRows.map(x=>_nm(x.d)+(x.n>1?_suf(x.n+' offers'):'')));
+      const propTip     = window._scTipHtml('Proposals · 10 pts each', det.propDeals.map(_nm));
+      const listTip     = window._scTipHtml('Listings · 20 pts each', det.lstDeals.map(_nm));
       const contractTip = window._scTipHtml('Under Contract · 30 pts each',
-                            advDeals.filter(d=>_ctCntPW(d)>0).map(_nm));
+                            det.ctRows.map(x=>_nm(x.d)));
 
       const ptsBadge = p => {
         if(onVac) return '';                          // elc-v437: week off, nothing scored
@@ -31129,14 +31117,14 @@ function viewEOS(sub='rocks'){
                 placeholder="Details (optional)…"
                 class="border rounded px-2 py-1 text-xs outline-none w-32 text-center focus:border-blue-400 mt-1"
                 onblur="saveAdvWeeklyInput('${advUid}','${weekKey}','networkEventNote',this.value)"/>
-              ${ptsBadge(pts[8])}
+              ${ptsBadge(pts[7])}
             </div>
           </td>`
         : `<td class="px-3 py-4 text-center">
             <div class="flex flex-col items-center gap-1">
               ${netReadOnly}
               ${isLocked ? '<span class="text-xs text-gray-400 mt-0.5" title="Locked after Sunday 9pm">🔒</span>' : ''}
-              ${ptsBadge(pts[8])}
+              ${ptsBadge(pts[7])}
             </div>
           </td>`;
 
@@ -31158,7 +31146,7 @@ function viewEOS(sub='rocks'){
                   <span class="font-medium text-red-600">No</span>
                 </label>
               </div>
-              ${ptsBadge(pts[9])}
+              ${ptsBadge(pts[8])}
             </div>
           </td>`
         : `<td class="px-3 py-4 text-center">
@@ -31167,7 +31155,7 @@ function viewEOS(sub='rocks'){
                 ${driveProps==='yes'?'✓ Yes':driveProps==='no'?'✗ No':'—'}
               </span>
               ${isLocked ? '<span class="text-xs text-gray-400 mt-0.5" title="Locked after Sunday 9pm">🔒</span>' : ''}
-              ${ptsBadge(pts[9])}
+              ${ptsBadge(pts[8])}
             </div>
           </td>`;
 
@@ -31233,29 +31221,13 @@ function viewEOS(sub='rocks'){
       ? getDistinctAdvisors()
       : [{uid, name: currentUser.name||currentUser.email}];
 
-    // Quick score for sorting (mirrors advRow scoring logic)
+    /* Sort key. elc-v443: this used to be a FOURTH hand-copy of the formula —
+       and a drifted one (contracts 20 instead of 30, a 10-pt task-completion
+       term that no longer exists), so the table could sort in an order the
+       grades themselves contradicted. Same score the row displays, now. */
     const scoreAdvisor = _uid => {
       if(window._elcOnVacation(_uid, pwS, pwE)) return -1;   // elc-v437: weeks off sort last
-      const _tod = new Date().toISOString().slice(0,10);
-      const _ads = allDeals.filter(d=>isDealAdvisor(d,_uid));
-      const _tsk = allTasks.filter(t=>t.assignedTo===_uid);
-      const _qg  = (allProfiles[_uid]?.quarterlyUCGoal)||10000000;
-      const _qv  = _ads.filter(d=>!isLostStage(d.stage||'')&&(isContractActiveStage(d.stage)||isWonStage(d.stage||''))&&getEffectiveDealTs(d)>=qStart&&getEffectiveDealTs(d)<=qEnd).reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||0),0);
-      const _qp  = Math.min(Math.round(_qv/_qg*100),100);
-      const _od  = _tsk.filter(t=>t.status==='pending'&&t.dueDate&&t.dueDate<_tod).length;
-      const _iPW = d=>{const ts=(d.stageEnteredAt||d.createdAt||0);return ts>=pwS&&ts<=pwE;};
-      const _sp  = (d,b)=>{if(d.advisorUid===_uid){const c=(d.coAdvisors||[]).reduce((s,ca)=>s+(ca.splitPct||0),0);return b*Math.max(0,100-c)/100;}const ca=(d.coAdvisors||[]).find(c=>c.uid===_uid);return ca?b*(ca.splitPct||0)/100:0;};
-      const _wi  = allProfiles[_uid]?.weeklyInputs?.[weekKey]||{};
-      const _dn  = _tsk.filter(t=>t.status==='complete'&&(t.updatedAt||0)>=pwS&&(t.updatedAt||0)<=pwE).length;
-      const _op  = _tsk.filter(t=>t.status==='pending').length;
-      return (_qp>=10?10:0)+Math.max(0,10-_od*2)+((_dn+_op)===0?10:Math.min(10,Math.round(_dn/(_dn+_op)*10)))
-        +_ads.filter(d=>d.stage==='Prospect'&&(d.createdAt||0)>=pwS&&(d.createdAt||0)<=pwE).reduce((s,d)=>s+_sp(d,1),0)
-        +window._elcCallsInWindow(_uid,pwS,pwE).length /* elc-v432: calls sort like prospects */
-        +_ads.filter(d=>d.stage==='LOI'&&_iPW(d)).reduce((s,d)=>s+_sp(d,5),0)
-        +_ads.filter(d=>(d.stage==='Proposal To Do'||d.stage==='Proposal Outstanding')&&_iPW(d)).reduce((s,d)=>s+_sp(d,10),0)
-        +_ads.filter(d=>d.stage==='Listing'&&_iPW(d)).reduce((s,d)=>s+_sp(d,20),0)
-        +_ads.filter(d=>/under.?contract/i.test(d.stage||'')&&_iPW(d)).reduce((s,d)=>s+_sp(d,20),0)
-        +(_wi.networkEvent==='yes'?10:0)+(_wi.driveProperties==='yes'?10:0);
+      return window._elcWeekScore(_uid, pwS, pwE, weekKey).score;
     };
 
     const col = lbl => `<th class="px-4 py-3 text-center text-xs font-bold text-gray-500 uppercase tracking-wide whitespace-nowrap">${lbl}</th>`;
@@ -31484,10 +31456,13 @@ function viewEOS(sub='rocks'){
       // Per-week lock store: once a week has fully ended, its computed row is
       // snapshotted here and never recomputed — so past weeks stop drifting when
       // deals move columns or tasks change status. Keyed by uid → weekKey.
-      const SCORECARD_VER = 5; // bump to wipe locked-week cache and recompute with new point values
+      const SCORECARD_VER = window._ELC_SCORECARD_VER;   // bump to re-derive every locked week
       const _scoreHist = eosGet('scoreHistory',{});
       const _storedVer = _scoreHist.__ver || 1;
-      const _myHist    = (_scoreHist[uid] && _storedVer >= SCORECARD_VER) ? {..._scoreHist[uid]} : {};
+      // Rows are kept and checked one at a time (window._elcRowFresh) rather than
+      // dropping the whole advisor on a version bump — a stale row is recomputed
+      // in place, so nobody's history disappears mid-quarter.
+      const _myHist    = {...(_scoreHist[uid] || {})};
       const _nowMs     = Date.now();
       let _histDirty   = false;
       const _saveHist  = () => { if(_histDirty){ const _l=eosGet('scoreHistory',{}); eosSave('scoreHistory',{..._l,[uid]:_myHist,__ver:SCORECARD_VER}); } };
@@ -31505,7 +31480,7 @@ function viewEOS(sub='rocks'){
           </tr>`;
           const openTasks = myTasks.filter(t=>t.status==='pending').length; // current count, by design
           let score, doneTasks;
-          const locked = _myHist[wKey];
+          const locked = window._elcRowFresh(_myHist[wKey], _storedVer) ? _myHist[wKey] : null;
           if(locked){
             ({score, doneTasks} = locked);
           } else {
@@ -31516,7 +31491,7 @@ function viewEOS(sub='rocks'){
             const taskScore33 = pwTotal===0?33:Math.round(doneTasks/pwTotal*33);
             const openScore34 = openTasks===0?34:(doneTasks===0?0:Math.round(doneTasks/(doneTasks+openTasks)*34));
             score = rockScore+taskScore33+openScore34;
-            if(wE < _nowMs){ _myHist[wKey] = {score, doneTasks}; _histDirty = true; }
+            if(wE < _nowMs){ _myHist[wKey] = {score, doneTasks, v:SCORECARD_VER}; _histDirty = true; }
           }
           const grade = weekGrade(score);
           return `<tr class="border-b border-gray-100 ${isCurr?'bg-blue-50/40':'hover:bg-gray-50'} transition-colors">
@@ -31577,7 +31552,7 @@ function viewEOS(sub='rocks'){
         </tr>`;
         let score, wQPct, pLen, lLen, prLen, lstLen, cLen, netEv, drPr, doneT, openT, caN;
 
-        const locked = _myHist[wKey];
+        const locked = window._elcRowFresh(_myHist[wKey], _storedVer) ? _myHist[wKey] : null;
         if(locked){
           // Frozen week — render exactly what was stored, never recompute.
           ({score, wQPct, pLen, lLen, prLen, lstLen, cLen, netEv, drPr, doneT, openT, caN} = locked);
@@ -31596,7 +31571,7 @@ function viewEOS(sub='rocks'){
           // admins — Firestore denies eos/* writes to everyone else. It is a
           // best-effort freeze, never what the display depends on.
           if(wE < _nowMs){
-            _myHist[wKey] = {score, wQPct, pLen, lLen, prLen, lstLen, cLen, netEv, drPr, doneT, openT, caN};
+            _myHist[wKey] = {score, wQPct, pLen, lLen, prLen, lstLen, cLen, netEv, drPr, doneT, openT, caN, v:SCORECARD_VER};
             _histDirty = true;
           }
         }
@@ -31712,7 +31687,7 @@ function viewEOS(sub='rocks'){
 
       const _scoreHist2 = eosGet('scoreHistory',{});
       const _sv2        = _scoreHist2.__ver||1;
-      const SCORECARD_VER2 = 5;
+      const SCORECARD_VER2 = window._ELC_SCORECARD_VER;
       const advisorList2 = effectiveAdmin
         ? getDistinctAdvisors()
         : (currentUser.isOfficeManager && !adminViewAsAdvisor && !staffViewMode)
@@ -31734,7 +31709,7 @@ function viewEOS(sub='rocks'){
           : fmtQD(new Date(qStartMs3))+' – '+fmtQD(new Date(Math.min(qEndMs3,Date.now())));
 
         const advisorQRows = advisorList2.map(({uid:aUid,name:aName})=>{
-          const hist = (_scoreHist2[aUid]&&_sv2>=SCORECARD_VER2)?_scoreHist2[aUid]:{};
+          const hist = _scoreHist2[aUid] || {};   // freshness is checked per row below
           // elc-v437 (VACMODE-20260824): weeks the advisor was out are dropped from the
           // average entirely — they don't count as a bad week OR as a missing one.
           const _vacN  = qWeeks2.filter(({wKey})=>window._elcOnVacationWeek(aUid,wKey)).length;
@@ -31749,8 +31724,8 @@ function viewEOS(sub='rocks'){
           const scores = qWeeks2
             .filter(({wKey})=>!window._elcOnVacationWeek(aUid,wKey))
             .map(({wKey,wS,wE})=>{
-              const locked = hist[wKey];
-              if(locked && locked.score!==undefined) return locked.score;
+              const locked = window._elcRowFresh(hist[wKey], _sv2) ? hist[wKey] : null;
+              if(locked) return locked.score;
               live++;   // never recorded (or recorded by a session without write rights)
               return window._elcWeekScore(aUid,wS,wE,wKey).score;
             });
@@ -31896,9 +31871,6 @@ function viewEOS(sub='rocks'){
     const pwS2 = new Date(thisMon2); pwS2.setDate(thisMon2.getDate()-7);
     const pwE2 = new Date(thisMon2); pwE2.setMilliseconds(-1);
     const pwSts=pwS2.getTime(), pwEts=pwE2.getTime();
-    // Current in-progress week — LOIs score live (elc-v408)
-    const _cwE2 = new Date(thisMon2); _cwE2.setDate(thisMon2.getDate()+7); _cwE2.setMilliseconds(-1);
-    const cwSts = thisMon2.getTime(), cwEts = _cwE2.getTime();
     const fmtD2 = d=>d.toLocaleDateString('en-US',{month:'short',day:'numeric'});
     const weekLabel2 = fmtD2(pwS2)+' – '+pwE2.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
 
@@ -32069,61 +32041,17 @@ function viewEOS(sub='rocks'){
                 +'<td class="py-2 px-2 text-center"><span title="Time off · '+window._elcVacLabel(_vacL10).replace(/"/g,'&quot;')+' — this week isn&#39;t graded" style="display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;border-radius:50%;background:#ecfdf5;border:2px dashed #10b981;font-size:.95rem;cursor:help">🌴</span></td>'
                 +'<td class="py-2 px-2 text-center" colspan="3"><span class="text-xs font-semibold" style="color:#10b981">Time off — not graded</span></td>'
                 +'</tr>'};
-              const Q_GOAL = (allProfiles[a.uid]?.quarterlyUCGoal)||10000000;
+              /* elc-v443 (SCUNIFY-20260901): this agenda row was a hand-copy of the
+                 week formula — same current-week LOI bug — so the L-10 could show
+                 an advisor a different letter than their own scorecard for the
+                 same week. Shared implementation now. */
+              const S        = window._elcWeekScore(a.uid, pwSts, pwEts, wk);
+              const score    = S.score;
+              const qPct     = S.wQPct;
+              const qColor   = qPct>=100?'#059669':qPct>=60?'#D97706':'#DA291C';
+              const overdueT = S.det.overdueTasks.length;
               const advDeals = allDeals.filter(d => isDealAdvisor(d, a.uid));
-              const advTasks = allTasks.filter(t=>t.assignedTo===a.uid);
-              const qVol = advDeals.filter(d=>{
-                if(isLostStage(d.stage||'')) return false;
-                if(!isContractActiveStage(d.stage)&&!isWonStage(d.stage||'')) return false;
-                const ts=getEffectiveDealTs(d); return ts>=qStart2&&ts<=qEnd2;
-              }).reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||0),0);
-              const qPct = Math.min(Math.round(qVol/Q_GOAL*100),100);
-              const qColor = qPct>=100?'#059669':qPct>=60?'#D97706':'#DA291C';
-              // Only past-due tasks penalize the score (matches main scorecard)
-              const overdueT = advTasks.filter(t=>t.status==='pending'&&t.dueDate&&t.dueDate<todayStr2).length;
-              const doneT = advTasks.filter(t=>t.status==='complete'&&(t.updatedAt||0)>=pwSts&&(t.updatedAt||0)<=pwEts).length;
-              const openT = advTasks.filter(t=>t.status==='pending').length;
-              const taskDonePts2 = (doneT+openT)===0?10:Math.min(10,Math.round(doneT/(doneT+openT)*10));
               const inPW = d=>{if(_landedBackward(d))return false; /* elc-v424 */ const ts=(d.stageEnteredAt||d.createdAt||0);return ts>=pwSts&&ts<=pwEts;};
-              const spl = (d,base)=>{
-                if(d.advisorUid===a.uid){const ct=(d.coAdvisors||[]).reduce((s,ca)=>s+(ca.splitPct||0),0);return base*Math.max(0,100-ct)/100;}
-                const ca=(d.coAdvisors||[]).find(c=>c.uid===a.uid);return ca?base*(ca.splitPct||0)/100:0;
-              };
-              const prosPts = advDeals.filter(d=>d.stage==='Prospect'&&(d.createdAt||0)>=pwSts&&(d.createdAt||0)<=pwEts).reduce((s,d)=>s+spl(d,5),0)
-                + window._elcCallsInWindow(a.uid,pwSts,pwEts).length*5; // elc-v432: logged calls score like prospects
-              // Per-offer LOI credit: each uploaded offer on deal.lois[] earns 10 pts,
-              // counted by offer upload date OR the week the card entered LOI stage.
-              const _loiCntPW = d=>{
-                let list = Array.isArray(d.lois)&&d.lois.length ? d.lois
-                  : ((d.loiBuyer||d.loiPrice||d.loiUrl||d.loiFileName)?[{addedAt:+d.loiAddedAt||0}]:[]);
-                if(!list.length) return 0;
-                const hist=d.stageHistory||[];
-                const e=hist.find(h=>/^loi$/i.test((h.stage||'').trim()));
-                let sTs = e&&e.enteredAt ? e.enteredAt : (/^loi$/i.test((d.stage||'').trim())?(d.stageEnteredAt||d.createdAt||0):0);
-                const stageIn = sTs>=cwSts && sTs<=cwEts;
-                let n=0; for(const l of list){ const a=+l.addedAt||0; if((a>=cwSts&&a<=cwEts)||stageIn) n++; }
-                return n;
-              };
-              // Contract credit (once per deal): contract doc attached OR under-contract stage entry this week.
-              const _ctCntPW = d=>{
-                const c=+d.contractAttachedAt||0;
-                const hist=d.stageHistory||[];
-                const e=hist.find(h=>/under.?contract/i.test(h.stage||''));
-                let st = e&&e.enteredAt ? e.enteredAt : (/under.?contract/i.test(d.stage||'')?(d.stageEnteredAt||d.createdAt||0):0);
-                return ((c>=pwSts&&c<=pwEts)||(st>=pwSts&&st<=pwEts))?1:0;
-              };
-              const loiPts  = advDeals.reduce((s,d)=>s+spl(d,10*_loiCntPW(d)),0);
-              const propPts = advDeals.filter(d=>(d.stage==='Proposal To Do'||d.stage==='Proposal Outstanding')&&inPW(d)).reduce((s,d)=>s+spl(d,10),0);
-              const listPts = advDeals.filter(d=>d.stage==='Listing'&&inPW(d)).reduce((s,d)=>s+spl(d,20),0);
-              const conPts  = advDeals.reduce((s,d)=>s+spl(d,30*_ctCntPW(d)),0);
-              const wi = allProfiles[a.uid]?.weeklyInputs?.[wk]||{};
-              const netPts = wi.networkEvent==='yes'?10:0;
-              const drvPts = wi.driveProperties==='yes'?10:0;
-              // Score mirrors advRow: overdue penalty + % of week's tasks completed
-              const score = Math.round(
-                (qPct>=10?10:0)+Math.max(0,20-overdueT*2)+
-                prosPts+loiPts+propPts+listPts+conPts+netPts+drvPts
-              );
               const g = gradeOf(score);
               const pwMoves = advDeals.filter(d=>inPW(d)&&!isLostStage(d.stage||'')).length;
               return {score, html: '<tr class="border-b border-gray-100">'
@@ -32578,40 +32506,33 @@ function viewEOS(sub='rocks'){
     const _isStaff=isStaffView();
     let _sc=0,_gObj={l:'F',c:'#DA291C',b:'#fef2f2'},_mHtml='',_ttl='';
     if(!_isStaff){
-      const _QG=(allProfiles[uid]?.quarterlyUCGoal)||10000000;
-      const _md=allDeals.filter(d => isDealAdvisor(d, uid));
-      const _mt=allTasks.filter(t=>t.assignedTo===uid);
-      const _qd=_md.filter(d=>{if(isLostStage(d.stage||''))return false;if(!isContractActiveStage(d.stage)&&!isWonStage(d.stage||''))return false;const ts=getEffectiveDealTs(d);return ts>=_qS&&ts<=_qE;});
-      const _qv=_qd.reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||0),0);
-      const _qp=Math.min(Math.round(_qv/_QG*100),100);
-      const _ot=_mt.filter(t=>t.status==='pending').length;
-      const _dt=_mt.filter(t=>t.status==='complete'&&(t.updatedAt||0)>=_pwS&&(t.updatedAt||0)<=_pwE).length;
-      const _tdStr=new Date().toISOString().slice(0,10);
-      const _od=_mt.filter(t=>t.status==='pending'&&t.dueDate&&t.dueDate<_tdStr).length;
-      const _inPW=d=>{if(_landedBackward(d))return false; /* elc-v424 — backward moves never score */ const ts=(d.stageEnteredAt||d.createdAt||0);return ts>=_pwS&&ts<=_pwE;};
-      const _sp=(d,b)=>{if(d.advisorUid===uid){const ct=(d.coAdvisors||[]).reduce((s,ca)=>s+(ca.splitPct||0),0);return b*Math.max(0,100-ct)/100;}const ca=(d.coAdvisors||[]).find(c=>c.uid===uid);return ca?b*(ca.splitPct||0)/100:0;};
-      const _pr=_md.filter(d=>d.stage==='Prospect'&&(d.createdAt||0)>=_pwS&&(d.createdAt||0)<=_pwE);
-      const _ca=window._elcCallsInWindow(uid,_pwS,_pwE); // elc-v432: logged calls score like prospects (5 pts each)
-      const _lo=_md.filter(d=>d.stage==='LOI'&&_inPW(d));
-      const _po=_md.filter(d=>(d.stage==='Proposal To Do'||d.stage==='Proposal Outstanding')&&_inPW(d));
-      const _li=_md.filter(d=>d.stage==='Listing'&&_inPW(d));
-      const _co=_md.filter(d=>/under.?contract/i.test(d.stage||'')&&_inPW(d));
-      const _wi=allProfiles[uid]?.weeklyInputs?.[_wk]||{};
-      const _ne=_wi.networkEvent||''; const _dp=_wi.driveProperties||'';
-      _vacNow=window._elcOnVacation(uid,_pwS,_pwE); // elc-v437: this week isn't graded
-      // Point scale mirrors the Advisor Weekly Scorecard exactly (Open Tasks 20 · Prospects/Calls 5 · LOIs 10 · Proposals 10 · Listings 20 · Contracts 30 · Net Event/Prop Visit 10). Tasks Done removed from scoring so both cards grade on the identical A+≥100 scale.
-      const _pts=[_qp>=10?10:0,Math.max(0,20-_od*2),_pr.reduce((s,d)=>s+_sp(d,5),0)+_ca.length*5,_lo.reduce((s,d)=>s+_sp(d,10),0),_po.reduce((s,d)=>s+_sp(d,10),0),_li.reduce((s,d)=>s+_sp(d,20),0),_co.reduce((s,d)=>s+_sp(d,30),0),_ne==='yes'?10:0,_dp==='yes'?10:0];
-      _sc=Math.round(_pts.reduce((a,b)=>a+b,0)); _gObj=_gr(_sc); _ttl='📊 My Weekly Scorecard';
+      /* elc-v443 (SCUNIFY-20260901) — the FIFTH copy of the week formula lived
+         here, and it was the one advisors look at daily: it scored LOIs only
+         when a card sat in the LOI column, so uploading three offers to a
+         listing moved this card by nothing and then appeared as 30 points on
+         Monday's scorecard. Same shared implementation as everything else now,
+         just pointed at the CURRENT week instead of the prior one. */
+      const _S  = window._elcWeekScore(uid, _pwS, _pwE, _wk);
+      const _dt = _S.det;
+      const _pts= _S.pts;
+      const _qp = _S.wQPct;
+      const _ot = _S.openT;
+      const _ca = _dt.calls;
+      const _ne = _S.netEv, _dp = _S.drPr;
+      _vacNow   = window._elcOnVacation(uid,_pwS,_pwE); // elc-v437: this week isn't graded
+      const _nPr=_dt.prospectDeals.length, _nLo=_S.lLen, _nPo=_S.prLen,
+            _nLi=_S.lstLen, _nCo=_S.cLen;
+      _sc=_S.score; _gObj=_gr(_sc); _ttl='📊 My Weekly Scorecard';
       // Hover tooltips: contributing deals/tasks per cell (matches the counts shown)
       const _cnm=d=>window._scEsc(d.projectName||d.propertyAddress||'Unnamed');
       const _csuf=t=>" <span style='opacity:.6'>· "+window._scEsc(t)+"</span>";
-      const _tQ =window._scTipHtml('Q'+_qn+' Goal volume',_qd.map(d=>_cnm(d)+_csuf(fmt$(d.purchasePrice||d.contractPrice||0))));
-      const _tOd=window._scTipHtml('Overdue tasks · −2 pts each',_mt.filter(t=>t.status==='pending'&&t.dueDate&&t.dueDate<_tdStr).map(t=>window._scEsc(t.title||'Untitled')+_csuf('due '+t.dueDate)));
-      const _tPr=window._scTipHtml('Prospects & Calls · 5 pts each',[..._pr.map(_cnm),..._ca.map(c=>'📞 '+window._scEsc(c.label||'Call'))]);
-      const _tLo=window._scTipHtml('LOIs · 10 pts each',_lo.map(_cnm));
-      const _tPo=window._scTipHtml('Proposals · 10 pts each',_po.map(_cnm));
-      const _tLi=window._scTipHtml('Listings · 20 pts each',_li.map(_cnm));
-      const _tCo=window._scTipHtml('Under Contract · 30 pts each',_co.map(_cnm));
+      const _tQ =window._scTipHtml('Q'+_qn+' Goal volume',_dt.qDeals.map(d=>_cnm(d)+_csuf(fmt$(d.purchasePrice||d.contractPrice||0))));
+      const _tOd=window._scTipHtml('Overdue tasks · −2 pts each',_dt.overdueTasks.map(t=>window._scEsc(t.title||'Untitled')+_csuf('due '+t.dueDate)));
+      const _tPr=window._scTipHtml('Prospects & Calls · 5 pts each',[..._dt.prospectDeals.map(_cnm),..._ca.map(c=>'📞 '+window._scEsc(c.label||'Call'))]);
+      const _tLo=window._scTipHtml('LOIs · 10 pts each',_dt.loiRows.map(x=>_cnm(x.d)+(x.n>1?_csuf(x.n+' offers'):'')));
+      const _tPo=window._scTipHtml('Proposals · 10 pts each',_dt.propDeals.map(_cnm));
+      const _tLi=window._scTipHtml('Listings · 20 pts each',_dt.lstDeals.map(_cnm));
+      const _tCo=window._scTipHtml('Under Contract · 30 pts each',_dt.ctRows.map(x=>_cnm(x.d)));
       // Editable Yes/No cell — current week is in progress, so the advisor logs these here.
       const _mcYN=(lbl,field,val,pts)=>`<div class="bg-gray-50 rounded-xl p-2.5 text-center min-w-0">
         <div class="text-xs font-bold text-gray-400 uppercase tracking-wide leading-none mb-1" style="font-size:.6rem">${lbl}</div>
@@ -32623,8 +32544,8 @@ function viewEOS(sub='rocks'){
       </div>`;
       _mHtml=`<div class="grid gap-2 flex-1 min-w-0" style="grid-template-columns:repeat(auto-fill,minmax(64px,1fr))">
         ${_mc('Q'+_qn+' Goal',_qp+'%',_qp>=10,_pts[0],_tQ)}${_mc('Open Tasks',_ot,_ot===0,_pts[1],_tOd)}
-        ${_mc('Prosp/Calls',_pr.length+_ca.length,(_pr.length+_ca.length)>0,_pts[2],_tPr)}${_mc('LOIs',_lo.length,_lo.length>0,_pts[3],_tLo)}${_mc('Proposals',_po.length,_po.length>0,_pts[4],_tPo)}
-        ${_mc('Listings',_li.length,_li.length>0,_pts[5],_tLi)}${_mc('Contracts',_co.length,_co.length>0,_pts[6],_tCo)}
+        ${_mc('Prosp/Calls',_nPr+_ca.length,(_nPr+_ca.length)>0,_pts[2],_tPr)}${_mc('LOIs',_nLo,_nLo>0,_pts[3],_tLo)}${_mc('Proposals',_nPo,_nPo>0,_pts[4],_tPo)}
+        ${_mc('Listings',_nLi,_nLi>0,_pts[5],_tLi)}${_mc('Contracts',_nCo,_nCo>0,_pts[6],_tCo)}
         ${_mcYN('Net. Event','networkEvent',_ne,_pts[7])}
         ${_mcYN('Prop. Visit','driveProperties',_dp,_pts[8])}
       </div>`;
