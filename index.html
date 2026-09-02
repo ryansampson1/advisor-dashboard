@@ -4351,39 +4351,58 @@ async function _prPA_Putnam(address, parcelId){
 // Source: FDOR NAL (National Assessors List) — refreshed annually.
 // Fields: PARCEL_ID, OWN_NAME, PHY_ADDR1, PHY_CITY, JV (market), Acres, S_LEGAL,
 //         SALE_PRC1, SALE_YR1, TOT_LVG_AR, EFF_YR_BLT, CountyName, LND_VAL
-async function _prPA_FL_Statewide(county, address, parcelId){
+async function _prPA_FL_Statewide(county, address, parcelId, pt){
   try {
     const base = 'https://services5.arcgis.com/GcvM6vDlR2gM4x31/arcgis/rest/services/FL_Parcels/FeatureServer/0/query';
-    const fields = 'PARCEL_ID,OWN_NAME,OWN_ADDR1,OWN_ADDR2,PHY_ADDR1,PHY_CITY,PHY_ZIPCD,JV,LND_VAL,Acres,S_LEGAL,SALE_PRC1,SALE_YR1,SALE_PRC2,SALE_YR2,TOT_LVG_AR,EFF_YR_BLT,ACT_YR_BLT,DOR_UC,CountyName,NBRHD,MUN';
+    // NBRHD and MUN are NOT fields on this layer. Asking for them made ArcGIS
+    // reject EVERY request with HTTP 400 ("'outFields' parameter is invalid"),
+    // so this statewide fallback — the path for 57 of Florida's 67 counties —
+    // had never once returned a record. Verified field list, 2026-09-02.
+    const fields = 'PARCEL_ID,OWN_NAME,OWN_ADDR1,OWN_ADDR2,OWN_CITY,OWN_STATE,OWN_ZIPCD,PHY_ADDR1,PHY_CITY,PHY_ZIPCD,JV,AV_NSD,LND_VAL,Acres,S_LEGAL,SALE_PRC1,SALE_YR1,SALE_MO1,SALE_PRC2,SALE_YR2,SALE_MO2,TOT_LVG_AR,NO_BULDNG,EFF_YR_BLT,ACT_YR_BLT,DOR_UC,LU,CountyName,ASMNT_YR,TWN,RNG,SEC,Wetlands,SourceDate,Latitude,Longitude';
 
-    let where;
-    if(parcelId){
-      where = `PARCEL_ID='${parcelId.replace(/'/g,"''")}' AND CountyName='${county}'`;
+    let url;
+    if(pt && pt.lat!=null && pt.lon!=null){
+      // POINT-IN-POLYGON. A map pin is the most precise key we will ever have,
+      // so ask the layer which parcel polygon contains it rather than guessing
+      // at an address string. Address text matching is the fallback, not the plan.
+      // DO NOT add resultRecordCount to a spatial query on this service — it makes
+      // the request hang until timeout. Take features[0] instead. (Verified 2026-09-02.)
+      const g = encodeURIComponent(JSON.stringify({x:pt.lon, y:pt.lat, spatialReference:{wkid:4326}}));
+      url = `${base}?geometry=${g}&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=${encodeURIComponent(fields)}&returnGeometry=false&f=json`;
     } else {
-      // Parse address into number + street for better matching
-      const addrM = (address||'').trim().match(/^(\d+)\s+(.+)/);
-      if(addrM) {
-        const num = addrM[1];
-        // Take first 2 meaningful words of street to avoid direction/type mismatches
-        const streetParts = addrM[2].trim().split(/\s+/).slice(0,2).join(' ').replace(/'/g,"''");
-        where = `CountyName='${county}' AND PHY_ADDR1 LIKE '${num} %${streetParts}%'`;
+      let where;
+      if(parcelId){
+        where = `PARCEL_ID='${parcelId.replace(/'/g,"''")}' AND CountyName='${county}'`;
       } else {
-        where = `CountyName='${county}' AND PHY_ADDR1 LIKE '%${(address||'').replace(/'/g,"''")}%'`;
+        // Parse address into number + street for better matching
+        const addrM = (address||'').trim().match(/^(\d+)\s+(.+)/);
+        if(addrM) {
+          const num = addrM[1];
+          // Take first 2 meaningful words of street to avoid direction/type mismatches
+          const streetParts = addrM[2].trim().split(/\s+/).slice(0,2).join(' ').replace(/'/g,"''");
+          where = `CountyName='${county}' AND PHY_ADDR1 LIKE '${num} %${streetParts}%'`;
+        } else {
+          where = `CountyName='${county}' AND PHY_ADDR1 LIKE '%${(address||'').replace(/'/g,"''")}%'`;
+        }
       }
+      url = `${base}?where=${encodeURIComponent(where)}&outFields=${encodeURIComponent(fields)}&returnGeometry=false&resultRecordCount=1&f=json`;
     }
-
-    const url = `${base}?where=${encodeURIComponent(where)}&outFields=${encodeURIComponent(fields)}&resultRecordCount=1&f=json`;
     const r = await fetch(url, {headers:{'Accept':'application/json'}});
-    if(!r.ok) return null;
+    if(!r.ok){ console.warn('[_prPA_FL_Statewide] HTTP '+r.status); return null; }
     const d = await r.json();
+    // ArcGIS returns 200 with an error body for bad fields — never swallow this,
+    // it is exactly how the NBRHD/MUN bug stayed invisible.
+    if(d.error){ console.warn('[_prPA_FL_Statewide] ArcGIS error', d.error); return null; }
     const feat = (d.features||[])[0];
     if(!feat) return null;
     const a = feat.attributes;
 
-    const mailingStr = [a.OWN_ADDR1, a.OWN_ADDR2].filter(Boolean).join(', ');
+    // OWN_ADDR2 is often whitespace rather than null, which left "545 LUCERNE AVE, "
+    const mailingStr = [a.OWN_ADDR1, a.OWN_ADDR2, a.OWN_CITY, a.OWN_STATE]
+      .map(v => (v==null?'':String(v).trim())).filter(v => v!=='').join(', ');
 
-    // Municipality from MUN field
-    const mun = a.MUN ? _titleCase((a.MUN||'').trim()) : null;
+    // This layer has no municipality field — derive it from the physical-address city.
+    const mun = a.PHY_CITY ? _titleCase((a.PHY_CITY||'').trim()) : null;
     const muniResolved = mun && mun.length > 1
       ? (mun.toLowerCase().includes('uninc') || mun === county ? county+' (Unincorporated)' : 'City of '+mun)
       : null;
@@ -4392,7 +4411,7 @@ async function _prPA_FL_Statewide(county, address, parcelId){
     if(a.SALE_YR1 && a.SALE_PRC1) salesHistory.push({date: a.SALE_YR1, price:'$'+Number(a.SALE_PRC1).toLocaleString(), grantor:'—', grantee:'—'});
     if(a.SALE_YR2 && a.SALE_PRC2) salesHistory.push({date: a.SALE_YR2, price:'$'+Number(a.SALE_PRC2).toLocaleString(), grantor:'—', grantee:'—'});
 
-    const hasBldg = a.TOT_LVG_AR || a.EFF_YR_BLT || a.ACT_YR_BLT;
+    const hasBldg = a.TOT_LVG_AR || a.EFF_YR_BLT || a.ACT_YR_BLT || a.NO_BULDNG;
     const structures = hasBldg
       ? `${a.TOT_LVG_AR ? a.TOT_LVG_AR+' sq ft living area' : ''} ${a.ACT_YR_BLT||a.EFF_YR_BLT ? '(built '+(a.ACT_YR_BLT||a.EFF_YR_BLT)+')' : ''}`.trim()
       : 'No structures / vacant land';
@@ -4407,14 +4426,22 @@ async function _prPA_FL_Statewide(county, address, parcelId){
       siteAddress: a.PHY_ADDR1 ? [a.PHY_ADDR1, a.PHY_CITY, 'FL', a.PHY_ZIPCD].filter(Boolean).join(', ') : null,
       mailingAddress: mailingStr||null,
       acreage: a.Acres ? Number(a.Acres).toFixed(2)+' acres' : null,
-      landUse: a.DOR_UC ? 'DOR Code '+a.DOR_UC : null,
+      landUse: a.LU || (a.DOR_UC ? 'DOR Code '+a.DOR_UC : null),
+      dorCode: a.DOR_UC||null,
       legalDescription: a.S_LEGAL||null,
       marketValue: a.JV ? '$'+Number(a.JV).toLocaleString() : null,
-      assessedValue: null,
+      assessedValue: a.AV_NSD ? '$'+Number(a.AV_NSD).toLocaleString() : null,
+      landValue: a.LND_VAL ? '$'+Number(a.LND_VAL).toLocaleString() : null,
       taxDistrict: mun,
       structures,
       salesHistory,
-      taxYear: null,
+      taxYear: a.ASMNT_YR ? String(a.ASMNT_YR) : null,
+      sectionTownshipRange: [a.SEC,a.TWN,a.RNG].filter(Boolean).join('-')||null,
+      wetlandsFlag: a.Wetlands||null,
+      rollDate: a.SourceDate||null,
+      lat: a.Latitude!=null?Number(a.Latitude):null,
+      lon: a.Longitude!=null?Number(a.Longitude):null,
+      _county: a.CountyName||county,
     };
   } catch(e){ console.warn('[_prPA_FL_Statewide]',e); return null; }
 }
@@ -4508,7 +4535,32 @@ const _FL_STATEWIDE_COUNTY_MAP = {
 
 // Entry point: fetch PA data for the given county.
 // Tries the native API first; falls back to FL statewide ArcGIS layer for unregistered counties.
-async function _fetchCountyPA(county, address, parcelId){
+async function _fetchCountyPA(county, address, parcelId, pt){
+  // A map pin outranks every other key. Resolve the parcel by point-in-polygon
+  // first, then use the parcel ID we just learned to ask the county's own API
+  // for richer data. Address text matching is the last resort, not the first.
+  if(pt && pt.lat!=null && pt.lon!=null){
+    const byPoint = await _prPA_FL_Statewide(county, address, parcelId, pt);
+    if(byPoint){
+      const nativeFn = _PA_FETCHERS[byPoint._county || county];
+      if(nativeFn && byPoint.parcelId){
+        try{
+          const rich = await nativeFn(null, byPoint.parcelId);
+          if(rich){
+            // Merge, but never let a null from the county API erase a value the
+            // point query already confirmed.
+            const merged = {...byPoint};
+            for(const k in rich){ if(rich[k]!=null && rich[k]!=='') merged[k]=rich[k]; }
+            merged._source = (rich._source||'COUNTY_PA')+' + point-in-polygon';
+            merged._pointConfirmed = true;
+            return merged;
+          }
+        }catch(e){ console.warn('[PA] native enrich failed', e); }
+      }
+      byPoint._pointConfirmed = true;
+      return byPoint;
+    }
+  }
   const nativeFn = _PA_FETCHERS[county];
   if(nativeFn){
     const result = await nativeFn(address, parcelId);
@@ -4521,32 +4573,298 @@ async function _fetchCountyPA(county, address, parcelId){
   return _prPA_FL_Statewide(arcgisCounty, address, parcelId);
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+   SITE RESEARCH — CONFIRMED PUBLIC RECORDS
+   Every value produced here comes from a point-in-polygon query against a
+   published government service. Nothing in this path is AI-derived. When a
+   service returns nothing we render "Not confirmed" plus the link to go check
+   by hand — we never let a language model fill the gap with a plausible guess,
+   because a plausible guess about a flood zone is worse than a blank.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+function _vcEsc(v){ return String(v==null?'':v).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+function _vcChip(txt, kind){
+  const c = kind==='warn' ? ['#92400e','#fef3c7'] : kind==='muted' ? ['#4b5563','#e5e7eb'] : ['#065f46','#d1fae5'];
+  return `<span style="display:inline-block;font-size:.6rem;font-weight:700;padding:.08rem .32rem;border-radius:4px;color:${c[0]};background:${c[1]};margin-left:.4rem;white-space:nowrap">${_vcEsc(txt)}</span>`;
+}
+
+// One fact, one source. If there is no value there is no confident-looking row.
+function _vcRow(label, value, srcLabel, fallbackHtml){
+  const has = value!=null && String(value).trim()!=='';
+  return `<div style="display:flex;justify-content:space-between;gap:.6rem;padding:.28rem 0;border-bottom:1px solid #f1f5f9;font-size:.78rem;align-items:flex-start">
+    <div style="color:#6b7280;flex:0 0 40%">${_vcEsc(label)}</div>
+    <div style="flex:1;text-align:right;font-weight:600;color:${has?'#111827':'#92400e'}">${has?_vcEsc(value):(fallbackHtml||'Not confirmed')}${has?_vcChip(srcLabel):_vcChip('unconfirmed','warn')}</div>
+  </div>`;
+}
+
+function _vcCard(emoji, title, rowsHtml, footHtml){
+  return `<div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:10px;padding:.7rem .8rem;margin-bottom:.65rem">
+    <div style="font-size:.8rem;font-weight:800;color:#111827;margin-bottom:.3rem">${emoji} ${_vcEsc(title)}</div>
+    ${rowsHtml}
+    ${footHtml?`<div style="font-size:.65rem;color:#9ca3af;margin-top:.45rem;line-height:1.4">${footHtml}</div>`:''}
+  </div>`;
+}
+
+// Fan out every point service at one coordinate. Each helper already swallows its
+// own failures and returns null, so one dead service never sinks the whole run.
+async function _valConfirmedAtPoint(lat, lon){
+  // County comes from the census boundary layer, NOT from the parcel record — a pin
+  // in a lake, a road right-of-way, or a gap in the state roll still resolves a
+  // county, and therefore still gets zoning.
+  const [parcel, countyRec] = await Promise.all([
+    _prPA_FL_Statewide(null, null, null, {lat, lon}),
+    _prCountyAtPoint(lat, lon),
+  ]);
+  const countyName = (countyRec && countyRec.name)
+                  || (parcel && parcel._county ? String(parcel._county).trim() : null);
+  const fips = (countyRec && countyRec.fips) || (countyName ? _FL_COUNTY_FIPS[countyName] : null);
+
+  const [fema, firm, nwi, oz, qct, soils, elevation, zoning] = await Promise.all([
+    _prFEMA(lat,lon), _prFIRMPanel(lat,lon), _prNWI(lat,lon), _prOZ(lat,lon),
+    _prQCT(lat,lon), _prSoils(lat,lon), _prElevation(lat,lon),
+    fips ? _prCountyZoning(lat,lon,fips) : Promise.resolve(null),
+  ]);
+
+  return {lat, lon, parcel, county:countyName, fips, fema, firm, nwi, oz, qct, soils, elevation, zoning, at:new Date()};
+}
+
+function _valRenderConfirmed(d){
+  const p = d.parcel, z = d.zoning;
+  const money = v => v==null||v===''?null:v;
+
+  // ── Parcel ────────────────────────────────────────────────────────────────
+  const parcelRows = p ? [
+    _vcRow('Owner', p.owner, 'FDOR roll'),
+    _vcRow('Parcel ID', p.parcelId, 'FDOR roll'),
+    _vcRow('Site address', p.siteAddress, 'FDOR roll', 'No address on roll (typical for vacant land)'),
+    _vcRow('Owner mailing', p.mailingAddress, 'FDOR roll'),
+    _vcRow('Acreage', p.acreage, 'FDOR roll'),
+    _vcRow('Land use', p.landUse, 'DOR code'),
+    _vcRow('Just / market value', money(p.marketValue), 'FDOR roll'),
+    _vcRow('Assessed (non-school)', money(p.assessedValue), 'FDOR roll'),
+    _vcRow('Land value', money(p.landValue), 'FDOR roll'),
+    _vcRow('Roll year', p.taxYear, 'FDOR roll'),
+    _vcRow('Sec–Twn–Rng', p.sectionTownshipRange, 'FDOR roll'),
+    _vcRow('Structures', p.structures, 'FDOR roll'),
+    _vcRow('Short legal', p.legalDescription, 'FDOR roll'),
+  ].join('') : `<div style="font-size:.78rem;color:#92400e;padding:.3rem 0">No parcel polygon contains this point. It may sit in a road right-of-way, water, or a gap in the state roll — nudge the pin onto the property.</div>`;
+
+  const parcelFoot = p
+    ? `Source: Florida DOR statewide parcel roll${p.rollDate?', data as of '+_vcEsc(p.rollDate):''}. This is the annual state rollup, not live county data — confirm current values on the property appraiser site before relying on them.`
+    : '';
+
+  // ── Zoning & future land use ──────────────────────────────────────────────
+  let zoningRows;
+  if(z){
+    zoningRows = [
+      _vcRow('Zoning', z.code, 'county GIS',
+        z._inMunicipality ? (z.jurisdiction && !/uninc/i.test(z.jurisdiction)
+            ? 'Inside '+_vcEsc(_titleCase(z.jurisdiction))+' — the city’s code governs, not the county’s'
+            : 'Inside a municipality — the city’s code governs, not the county’s')
+        : z._noZoningLayer ? 'County publishes no zoning layer — check the LDC'
+        : 'Point falls outside a county zoning district'),
+      _vcRow('Zoning description', z.description, 'county GIS'),
+      _vcRow('Future land use', z.flu, 'county GIS'),
+      _vcRow('FLU description', z.fluDescription, 'county GIS'),
+      _vcRow('Overlay', z.overlay, 'county GIS', '—'),
+      _vcRow('Jurisdiction', z.jurisdiction, 'county GIS'),
+    ].join('');
+  } else if(d.fips){
+    zoningRows = `<div style="font-size:.78rem;color:#92400e;padding:.3rem 0">County zoning service did not answer for this point.</div>`;
+  } else {
+    zoningRows = `<div style="font-size:.78rem;color:#92400e;padding:.3rem 0">No zoning service registered for ${_vcEsc(d.county||'this county')} yet. Add its layer to <code>_FL_ZONING_LAYERS</code> and it works everywhere at once.</div>`;
+  }
+  const zoningFoot = (z && (z._inMunicipality || (z.jurisdiction && /^city/i.test(z.jurisdiction))))
+    ? 'This point is inside a municipality, so the city code governs. The county layer deliberately reports no district here — look the zoning up in that city&rsquo;s land development code.'
+    : 'County layers cover unincorporated land; inside a city limit the municipal code governs.';
+
+  // ── Flood ─────────────────────────────────────────────────────────────────
+  const zones = (d.fema||[]);
+  const zoneStr = zones.length ? [...new Set(zones.map(z2=>`Zone ${z2.FLD_ZONE}${z2.ZONE_SUBTY?' — '+z2.ZONE_SUBTY:''}`))].join('; ') : null;
+  const sfha = zones.length ? (zones.some(z2=>z2.SFHA_TF==='T') ? 'Yes — in a Special Flood Hazard Area' : 'No') : null;
+  const firmStr = d.firm ? `${d.firm.FIRM_PAN}${d.firm.EFF_DATE?', effective '+new Date(d.firm.EFF_DATE).toLocaleDateString():''}` : null;
+  const floodRows = [
+    _vcRow('FEMA flood zone', zoneStr, 'FEMA NFHL'),
+    _vcRow('In SFHA', sfha, 'FEMA NFHL'),
+    _vcRow('FIRM panel', firmStr, 'FEMA NFHL'),
+  ].join('');
+
+  // ── Wetlands ──────────────────────────────────────────────────────────────
+  const w = d.nwi;
+  const wStr = w==null ? null
+    : (w.length===0 ? 'None mapped within 1,000 m'
+      : `${w.length} feature(s) within 1,000 m: ` + [...new Set(w.map(x=>x.WETLAND_TYPE||x.ATTRIBUTE))].slice(0,4).join('; '));
+  const wetRows = [
+    _vcRow('NWI wetlands', wStr, 'USFWS NWI'),
+    _vcRow('Roll wetlands flag', p&&p.wetlandsFlag, 'FDOR roll'),
+  ].join('');
+
+  // ── Site conditions ───────────────────────────────────────────────────────
+  // Soil Data Access returns one row per COMPONENT, so the same map unit repeats.
+  // Roll them up by map unit and show the dominant components inside it.
+  let soilStr = null;
+  if(d.soils && d.soils.length){
+    const byUnit = new Map();
+    for(const x of d.soils){
+      const k = x.muname || x.compname || '—';
+      if(!byUnit.has(k)) byUnit.set(k, []);
+      if(x.compname) byUnit.get(k).push(`${x.compname}${x.comppct_r?' '+x.comppct_r+'%':''}`);
+    }
+    soilStr = [...byUnit.entries()].slice(0,3)
+      .map(([unit,comps]) => unit + (comps.length?` — ${comps.slice(0,3).join(', ')}`:'')).join('; ');
+  }
+  const farmland = (d.soils&&d.soils.length) ? (d.soils[0].farmlndcl||null) : null;
+  const siteRows = [
+    _vcRow('Ground elevation', d.elevation!=null?d.elevation.toFixed(1)+' ft':null, 'USGS EPQS'),
+    _vcRow('Soil map units', soilStr, 'USDA SDA'),
+    _vcRow('Farmland class', farmland, 'USDA SDA'),
+  ].join('');
+
+  // ── Incentives ────────────────────────────────────────────────────────────
+  const incRows = [
+    _vcRow('Opportunity Zone', d.oz?`Yes — census tract ${d.oz.geoid10||''}${d.oz.rural==='Y'?' (rural)':''}`:'No', 'CDFI Fund'),
+    _vcRow('Qualified Census Tract', d.qct?'Yes':'No', 'HUD 2026'),
+  ].join('');
+
+  return `
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:.5rem;margin-bottom:.6rem;flex-wrap:wrap">
+      <div style="font-size:.82rem;font-weight:800;color:#065f46">✅ Confirmed public records${d.county?' — '+_vcEsc(d.county)+' County':''}</div>
+      <div style="font-size:.68rem;color:#9ca3af">${d.lat.toFixed(5)}, ${d.lon.toFixed(5)} · ${d.at.toLocaleTimeString()}</div>
+    </div>
+    <div style="font-size:.68rem;color:#6b7280;margin-bottom:.7rem;line-height:1.45">
+      Every value below was read directly from a government service at this exact coordinate. Nothing here is AI-generated. Anything marked <b style="color:#92400e">unconfirmed</b> was not returned by the source — go look, don't assume.
+    </div>
+    ${_vcCard('🏛','Parcel',parcelRows,parcelFoot)}
+    ${_vcCard('📐','Zoning & Future Land Use',zoningRows,zoningFoot)}
+    ${_vcCard('🌊','Flood',floodRows,'Source: FEMA National Flood Hazard Layer. Pull a FIRMette at msc.fema.gov for anything going in a file.')}
+    ${_vcCard('🐸','Wetlands',wetRows,'NWI is a desktop screen only — it is not a jurisdictional determination. A formal delineation is still required.')}
+    ${_vcCard('🗻','Site Conditions',siteRows,'')}
+    ${_vcCard('🎯','Incentives',incRows,'')}`;
+}
+
+// Guard against a fast second click landing after a slow first lookup.
+let _valPointSeq = 0;
+
+async function _valLookupPoint(lat, lon){
+  const seq = ++_valPointSeq;
+  const el = document.getElementById('val-results');
+  if(el) el.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:center;height:200px">
+      <div style="text-align:center;color:#6b7280">
+        <div style="font-size:1.6rem;margin-bottom:.5rem;animation:spin 1.2s linear infinite;display:inline-block">⏳</div>
+        <div style="font-size:.86rem;font-weight:600">Reading public records at this point…</div>
+        <div style="font-size:.74rem;margin-top:.25rem;color:#9ca3af">Parcel roll · zoning · FEMA · wetlands · soils · elevation</div>
+      </div>
+    </div>`;
+  let d=null;
+  try{ d = await _valConfirmedAtPoint(lat, lon); }
+  catch(e){ console.error('[SiteResearch] point lookup failed', e); }
+  if(seq !== _valPointSeq) return null;   // a newer click won
+
+  if(!d){
+    if(el) el.innerHTML = `<div style="padding:1rem;font-size:.82rem;color:#92400e">Couldn't reach the public-records services. Check the console, then try again.</div>`;
+    return null;
+  }
+
+  // Feed the form from the record itself — the parcel roll beats a reverse geocode.
+  const p = d.parcel;
+  if(p){
+    const cEl=document.getElementById('val-county');
+    if(cEl && d.county){
+      const opt=Array.from(cEl.options).find(o=>o.value===d.county);
+      if(opt) cEl.value=d.county;
+    }
+    const pEl=document.getElementById('val-parcel');
+    if(pEl && p.parcelId) pEl.value=p.parcelId;
+    const aEl=document.getElementById('val-address');
+    if(aEl && p.siteAddress) aEl.value=p.siteAddress;
+  }
+
+  if(el) el.innerHTML = _valRenderConfirmed(d);
+  window._valConfirmed = d;   // _valRun reads this so the AI can only narrate facts
+  return d;
+}
+window._valLookupPoint = _valLookupPoint;
+window._valConfirmedAtPoint = _valConfirmedAtPoint;
+
 async function _prFEMA(lat,lon){
+  // hazards.fema.gov is genuinely flaky — it times out under load. It also returns
+  // HTTP 200 with an error body, which the old code turned into an empty array,
+  // i.e. "no flood zone found". Telling a broker a parcel is dry because a server
+  // hiccuped is the worst failure this page can have, so: retry, and on failure
+  // return null (renders "unconfirmed") rather than an empty result.
+  // Three tries with backoff: the service has data at points where a single
+  // attempt intermittently times out, and flood zone is the costliest field on
+  // this page to get wrong or to silently drop.
+  for(let attempt=0; attempt<3; attempt++){
+    if(attempt) await new Promise(res=>setTimeout(res, 600*attempt));
+    try{
+      const r=await fetch(`https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer/28/query?geometry=${lon},${lat}&geometryType=esriGeometryPoint&spatialRel=esriSpatialRelIntersects&outFields=FLD_ZONE,ZONE_SUBTY,SFHA_TF&returnGeometry=false&f=json&distance=100&units=esriSRUnit_Meter&inSR=4326`,
+        {signal:AbortSignal.timeout(15000)});
+      if(!r.ok) continue;
+      const d=await r.json();
+      if(d.error){ console.warn('[_prFEMA]',d.error); continue; }
+      return (d.features||[]).map(f=>f.attributes);
+    }catch(e){ /* transient — retry */ }
+  }
+  console.warn('[_prFEMA] no answer after 3 attempts at',lat,lon);
+  return null;
+}
+
+// County name + FIPS straight from a coordinate. Independent of the parcel roll,
+// so a pin in a lake, a right-of-way, or a gap in the roll still knows where it is.
+async function _prCountyAtPoint(lat,lon){
   try{
-    const r=await fetch(`https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer/28/query?geometry=${lon},${lat}&geometryType=esriGeometryPoint&spatialRel=esriSpatialRelIntersects&outFields=FLD_ZONE,ZONE_SUBTY,SFHA_TF&f=json&distance=100&units=esriSRUnit_Meter&inSR=4326`);
+    const g=encodeURIComponent(JSON.stringify({x:lon,y:lat,spatialReference:{wkid:4326}}));
+    const r=await fetch(`https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/State_County/MapServer/13/query?geometry=${g}&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=BASENAME,GEOID,STATE&returnGeometry=false&f=json`,
+      {signal:AbortSignal.timeout(10000)});
+    if(!r.ok) return null;
     const d=await r.json();
-    return (d.features||[]).map(f=>f.attributes);
-  }catch(e){return null;}
+    if(d.error) return null;
+    const a=(d.features||[])[0]?.attributes; if(!a) return null;
+    return {name:a.BASENAME||null, fips:a.GEOID||null, stateFips:a.STATE||null};
+  }catch(e){ return null; }
 }
 async function _prNWI(lat,lon){
+  // fwsprimary.wim.usgs.gov/.../Wetlands/MapServer/0 was retired — that service now
+  // reports an empty layer list and every query 500s. Live host is fwspublicservices,
+  // where the layer is a JOIN, so outFields must be qualified with "Wetlands.".
+  // Verified 2026-09-02.
   try{
-    const r=await fetch(`https://fwsprimary.wim.usgs.gov/server/rest/services/Wetlands/MapServer/0/query?geometry=${lon},${lat}&geometryType=esriGeometryPoint&spatialRel=esriSpatialRelIntersects&outFields=ATTRIBUTE,WETLAND_TYPE,ACRES&f=json&distance=1000&units=esriSRUnit_Meter&inSR=4326`);
+    const r=await fetch(`https://fwspublicservices.wim.usgs.gov/wetlandsmapservice/rest/services/Wetlands/MapServer/0/query?geometry=${lon},${lat}&geometryType=esriGeometryPoint&spatialRel=esriSpatialRelIntersects&outFields=Wetlands.ATTRIBUTE,Wetlands.WETLAND_TYPE,Wetlands.ACRES&returnGeometry=false&f=json&distance=1000&units=esriSRUnit_Meter&inSR=4326`,{signal:AbortSignal.timeout(12000)});
+    if(!r.ok) return null;
     const d=await r.json();
-    return (d.features||[]).map(f=>f.attributes);
+    if(d.error){ console.warn('[_prNWI]',d.error); return null; }
+    // Strip the table prefix so callers keep reading ATTRIBUTE / WETLAND_TYPE / ACRES.
+    return (d.features||[]).map(f=>{
+      const o={}; for(const k in f.attributes) o[k.replace(/^Wetlands\./,'')]=f.attributes[k];
+      return o;
+    });
   }catch(e){return null;}
 }
 async function _prOZ(lat,lon){
+  // The layer id is 13, not 0 — layer 0 does not exist on this service and returns
+  // {"code":400,"message":"Invalid URL"}. Fields are upper-case GEOID10/STATE/COUNTY,
+  // not the lower-case names this used to ask for. Verified 2026-09-02.
   try{
     const g=encodeURIComponent(JSON.stringify({x:lon,y:lat,spatialReference:{wkid:4326}}));
-    const r=await fetch(`https://services.arcgis.com/VTyQ9soqVukalItT/arcgis/rest/services/Opportunity_Zones/FeatureServer/0/query?geometry=${g}&geometryType=esriGeometryPoint&spatialRel=esriSpatialRelIntersects&outFields=geoid10,State,County&f=json&inSR=4326`);
+    const r=await fetch(`https://services.arcgis.com/VTyQ9soqVukalItT/arcgis/rest/services/Opportunity_Zones/FeatureServer/13/query?geometry=${g}&geometryType=esriGeometryPoint&spatialRel=esriSpatialRelIntersects&outFields=GEOID10,STATE,COUNTY,TRACT,Rural&returnGeometry=false&f=json&inSR=4326`,{signal:AbortSignal.timeout(10000)});
+    if(!r.ok) return null;
     const d=await r.json();
-    return (d.features||[]).length>0?d.features[0].attributes:null;
+    if(d.error){ console.warn('[_prOZ]',d.error); return null; }
+    const a=(d.features||[])[0]?.attributes; if(!a) return null;
+    // COUNTY here is a 3-digit FIPS, never a county name — don't print it as one.
+    return {geoid10:a.GEOID10, tract:a.TRACT, countyFips:a.COUNTY, stateFips:a.STATE, rural:a.Rural};
   }catch(e){return null;}
 }
 async function _prQCT(lat,lon){
   try{
-    const r=await fetch(`https://services.arcgis.com/VTyQ9soqVukalItT/arcgis/rest/services/QUALIFIED_CENSUS_TRACTS_2026/FeatureServer/0/query?geometry=${lon},${lat}&geometryType=esriGeometryPoint&spatialRel=esriSpatialRelIntersects&outFields=*&f=json&inSR=4326&distance=100&units=esriSRUnit_Meter`);
+    const r=await fetch(`https://services.arcgis.com/VTyQ9soqVukalItT/arcgis/rest/services/QUALIFIED_CENSUS_TRACTS_2026/FeatureServer/0/query?geometry=${lon},${lat}&geometryType=esriGeometryPoint&spatialRel=esriSpatialRelIntersects&outFields=*&returnGeometry=false&f=json&inSR=4326&distance=100&units=esriSRUnit_Meter`,
+      {signal:AbortSignal.timeout(10000)});
+    if(!r.ok) return null;
     const d=await r.json();
+    if(d.error) return null;
     return (d.features||[]).length>0?d.features[0].attributes:null;
   }catch(e){return null;}
 }
@@ -4572,29 +4890,147 @@ async function _prElevation(lat,lon){
 }
 async function _prFIRMPanel(lat,lon){
   try{
-    const r=await fetch(`https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer/3/query?geometry=${lon},${lat}&geometryType=esriGeometryPoint&spatialRel=esriSpatialRelIntersects&outFields=FIRM_PAN,EFF_DATE,SCALE&f=json&distance=100&units=esriSRUnit_Meter&inSR=4326`);
+    const r=await fetch(`https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer/3/query?geometry=${lon},${lat}&geometryType=esriGeometryPoint&spatialRel=esriSpatialRelIntersects&outFields=FIRM_PAN,EFF_DATE,SCALE&returnGeometry=false&f=json&distance=100&units=esriSRUnit_Meter&inSR=4326`,
+      {signal:AbortSignal.timeout(12000)});
+    if(!r.ok) return null;
     const d=await r.json();
+    if(d.error) return null;
     const f=(d.features||[])[0];
     return f?f.attributes:null;
   }catch(e){return null;}
 }
+// ─── Florida county zoning / future-land-use point services ──────────────────
+// VERIFIED LIVE 2026-09-02. The table this replaces had ALL SIX of its endpoints
+// dead (404 / host gone), AND had the FIPS codes for Pasco, Pinellas and Polk
+// scrambled — so a Pinellas pin was querying Pasco's server and vice versa.
+// Correct codes: Pasco=12101, Pinellas=12103, Polk=12105.
+//
+// TO ADD A COUNTY: fetch `https://<county gis host>/arcgis/rest/services?f=json`,
+// find the Planning/Zoning service, read `<layer url>?f=json` for its field names,
+// and add a row here. No code change needed — this table is the whole recipe.
+// Field names go in _prZoningPick below if they aren't already listed there.
+const _FL_ZONING_LAYERS = {
+  '12017':{name:'Citrus',
+    zoning:['https://services7.arcgis.com/G6NDVglwRcrz6l7N/arcgis/rest/services/ZONING/FeatureServer/0','ZONING,DESCRIPT'],
+    flu:['https://services7.arcgis.com/G6NDVglwRcrz6l7N/arcgis/rest/services/LANDUSE/FeatureServer/0','LANDUSE,DESCRIPT']},
+  '12053':{name:'Hernando',
+    zoning:['https://services2.arcgis.com/x5zvhhxfUuRDntRe/arcgis/rest/services/Zoning_Flu/FeatureServer/75','ZONING,ZONE_USE'],
+    flu:['https://services2.arcgis.com/x5zvhhxfUuRDntRe/arcgis/rest/services/Zoning_Flu/FeatureServer/0','FLU,LABEL']},
+  '12057':{name:'Hillsborough',
+    // County zoning layer covers UNINCORPORATED land only — inside Tampa, Plant City
+    // or Temple Terrace it returns zero features. The FLU layer does cover cities.
+    zoning:['https://maps.hillsboroughcounty.org/arcgis/rest/services/DSD_Viewer_Services/DSD_Viewer_Zoning_Regulatory/MapServer/0','NZONE,NZONE_DESC,CATEGORY,OVERLAY'],
+    flu:['https://maps.hillsboroughcounty.org/arcgis/rest/services/DSD_Viewer_Services/DSD_Viewer_Planning/MapServer/1','FLUE,FLU_DESC,JURISDICTI']},
+  '12071':{name:'Lee',
+    zoning:['https://services2.arcgis.com/LvWGAAhHwbCJ2GMP/arcgis/rest/services/Zoning/FeatureServer/0','ZONING,GeneralZoning'],
+    flu:['https://services2.arcgis.com/LvWGAAhHwbCJ2GMP/arcgis/rest/services/FutureLandUse/FeatureServer/0','LANDUSE,TYPE']},
+  '12081':{name:'Manatee',
+    zoning:['https://services1.arcgis.com/t03WDvnSR7gSDOB2/arcgis/rest/services/ZONEOFFICIAL/FeatureServer/0','ZONELABEL,SPECIAL_DE'],
+    flu:['https://services1.arcgis.com/t03WDvnSR7gSDOB2/arcgis/rest/services/FLUOFFICIAL/FeatureServer/0','FLULABEL,FLUTYPE']},
+  '12095':{name:'Orange',
+    zoning:['https://ocgis4.ocfl.net/arcgis/rest/services/AGOL_Open_Data/MapServer/51','ZONING,ZONETYPE,JURISDICTION'],
+    flu:['https://ocgis4.ocfl.net/arcgis/rest/services/AGOL_Open_Data/MapServer/21','LAND_USE,LABEL']},
+  '12097':{name:'Osceola',
+    zoning:['https://services6.arcgis.com/9zKHLCgIwu2HFA5O/arcgis/rest/services/Zoning/FeatureServer/13','PRIM_ZON,SEC_ZON,Zoning_Dis'],
+    flu:['https://services6.arcgis.com/9zKHLCgIwu2HFA5O/arcgis/rest/services/Future_Land_Use/FeatureServer/12','FLU,CA_FLU,Jurisdiction']},
+  '12101':{name:'Pasco',
+    zoning:['https://services6.arcgis.com/Mo4MddfRHpFwT7UF/arcgis/rest/services/Zoning_Areas/FeatureServer/9','ZN_TYPE,ZN_STR'],
+    flu:['https://services6.arcgis.com/Mo4MddfRHpFwT7UF/arcgis/rest/services/Future_Landuse_2025/FeatureServer/7','FLU_CODE,DESCRIPTION']},
+  '12103':{name:'Pinellas',
+    zoning:['https://services.arcgis.com/f5HgUpxURgEzTccH/arcgis/rest/services/Pinellas_Zoning2019_view/FeatureServer/0','ZONEDESC,ZONECLASS'],
+    flu:['https://services.arcgis.com/f5HgUpxURgEzTccH/arcgis/rest/services/Pinellas_Countywide_Plan_Map_Categories_view/FeatureServer/0','PLAN_MAP_CATEGORY,PLAN_MAP_SYMBOL']},
+  '12105':{name:'Polk',
+    // Polk publishes no standalone zoning layer. Its Land Development Code district
+    // rides in FLU_LDC on the FLU 2030 layer, so that is where the zoning code comes from.
+    zoning:null,
+    flu:['https://services1.arcgis.com/YMN4aIYxPejzDjo2/arcgis/rest/services/Map_Land_Use_and_Zoning___FLU_2030/FeatureServer/0','FLU_LDC,FLU_CP,FLUNAME,CITY_NAME']},
+  '12115':{name:'Sarasota',
+    zoning:['https://ags3.scgov.net/server/rest/services/Hosted/CountyZoning/FeatureServer/0','zoningcode,zoningdesignation,municipality'],
+    flu:['https://ags3.scgov.net/server/rest/services/Hosted/FutureLandUse/FeatureServer/0','flucode,fludesignation']},
+  '12117':{name:'Seminole',
+    // Seminole's own GIS hostnames no longer resolve; this ArcGIS Online proxy to
+    // their federated server is the only public route.
+    zoning:['https://utility.arcgis.com/usrsvcs/servers/90f53592ff0e4e72864703c562682c69/rest/services/LandUse/MapServer/1','Zoning,PDName'],
+    flu:['https://utility.arcgis.com/usrsvcs/servers/90f53592ff0e4e72864703c562682c69/rest/services/LandUse/MapServer/0','FutureLandUse']},
+};
+
+// County name → FIPS, so a parcel record alone is enough to pick the right layer.
+const _FL_COUNTY_FIPS = {Citrus:'12017',Hernando:'12053',Hillsborough:'12057',Lee:'12071',
+  Manatee:'12081',Orange:'12095',Osceola:'12097',Pasco:'12101',Pinellas:'12103',
+  Polk:'12105',Sarasota:'12115',Seminole:'12117'};
+
+// Generic point-in-polygon query against any public ArcGIS layer.
+async function _prQueryPointLayer(url, fields, lat, lon, ms){
+  const g=encodeURIComponent(JSON.stringify({x:lon,y:lat,spatialReference:{wkid:4326}}));
+  const q=`${url}/query?geometry=${g}&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=${encodeURIComponent(fields)}&returnGeometry=false&f=json`;
+  // County GIS hosts drop a request now and then. One retry turns an intermittent
+  // "unconfirmed" into a real answer; after that we give up honestly rather than
+  // letting the AI paper over the gap.
+  for(let attempt=0; attempt<2; attempt++){
+    if(attempt) await new Promise(res=>setTimeout(res,500));
+    try{
+      const r=await fetch(q,{signal:AbortSignal.timeout(ms||9000)});
+      if(!r.ok) continue;
+      const d=await r.json();
+      if(d.error){ console.warn('[pointLayer]',url,d.error); return null; }
+      return (d.features||[])[0]?.attributes || null;
+    }catch(e){ /* transient — retry */ }
+  }
+  return null;
+}
+
+// Different counties name the same concept differently. First non-empty wins.
+function _prZoningPick(o,keys){
+  if(!o) return null;
+  for(const k of keys){
+    const v=o[k];
+    if(v!=null && String(v).trim()!=='' && String(v).trim().toLowerCase()!=='null') return String(v).trim();
+  }
+  return null;
+}
+
 async function _prCountyZoning(lat,lon,countyFips){
-  // Florida county-specific ArcGIS zoning layers (most common ELC counties)
-  const endpoints={
-    '12057':['https://maps.hillsboroughcounty.org/arcgis/rest/services/Planning_Zoning/HillsboroughCountyZoning/MapServer/0','ZONING_CODE,ZONING_DESC'],
-    '12081':['https://www.manateegis.com/arcgis/rest/services/Planning/ManateeZoning/MapServer/0','ZONING,DESCRIPTION'],
-    '12105':['https://gis.pascogov.com/arcgis/rest/services/Planning/PascoZoning/MapServer/0','ZONING'],
-    '12103':['https://maps.co.pasco.fl.us/arcgis/rest/services/Planning/Zoning/MapServer/0','ZONE_CODE'],
-    '12101':['https://egis.pinellas.gov/arcgis/rest/services/Pinellas_GIS/ZoningData/MapServer/0','ZONING'],
-    '12071':['https://gis.leegov.com/arcgis/rest/services/Planning/LeeCountyZoning/MapServer/0','ZONING'],
+  const cfg=_FL_ZONING_LAYERS[countyFips];
+  if(!cfg) return null;
+  const [z,f]=await Promise.all([
+    cfg.zoning?_prQueryPointLayer(cfg.zoning[0],cfg.zoning[1],lat,lon):Promise.resolve(null),
+    cfg.flu   ?_prQueryPointLayer(cfg.flu[0],   cfg.flu[1],   lat,lon):Promise.resolve(null),
+  ]);
+  if(!z && !f) return null;
+  let code = _prZoningPick(z,['NZONE','ZONING','ZONEDESC','ZN_TYPE','ZONELABEL','PRIM_ZON','zoningcode','Zoning'])
+          || _prZoningPick(f,['FLU_LDC']);
+  let flu  = _prZoningPick(f,['FLUE','FLU_CODE','FLULABEL','flucode','FutureLandUse','LAND_USE','PLAN_MAP_SYMBOL','FLU','CA_FLU','FLU_CP','LANDUSE','TYPE']);
+  let fluDescription = _prZoningPick(f,['FLU_DESC','DESCRIPTION','fludesignation','FLUNAME','PLAN_MAP_CATEGORY','DESCRIPT','LABEL','FLUTYPE']);
+
+  // Several counties encode "this parcel is inside a city, go read the city's code"
+  // as the literal value CITY. That is a jurisdiction marker, not a zoning district —
+  // showing it as one would read like a real code and send a broker to the wrong book.
+  const CITY_SENTINEL=/^(city|cities|municipal(ity)?|incorporated|in city|see city)$/i;
+  const jurisdictionRaw = _prZoningPick(z,['JURISDICTION','municipality']) || _prZoningPick(f,['JURISDICTI','Jurisdiction','CITY_NAME']);
+  // Two ways to learn we're inside a city: the layer says the literal "CITY", or it
+  // returned no zoning district while naming a real municipality as the jurisdiction.
+  const namedCity = !!jurisdictionRaw && !/uninc/i.test(jurisdictionRaw) && !CITY_SENTINEL.test(jurisdictionRaw);
+  const inMunicipality = CITY_SENTINEL.test(code||'') || CITY_SENTINEL.test(flu||'') || (!code && namedCity);
+  if(inMunicipality){
+    if(CITY_SENTINEL.test(code||'')) code=null;
+    if(CITY_SENTINEL.test(flu||'')){ flu=null; if(CITY_SENTINEL.test(fluDescription||'')) fluDescription=null; }
+  }
+
+  return {
+    code,
+    _inMunicipality: inMunicipality,
+    description:  _prZoningPick(z,['NZONE_DESC','DESCRIPT','ZONECLASS','ZN_STR','SPECIAL_DE','Zoning_Dis','zoningdesignation','GeneralZoning','ZONETYPE','ZONE_USE','PDName','SEC_ZON']),
+    flu,
+    fluDescription,
+    overlay:      _prZoningPick(z,['OVERLAY','CATEGORY']),
+    jurisdiction: jurisdictionRaw,
+    county: cfg.name,
+    zoningSource: cfg.zoning?cfg.zoning[0]:null,
+    fluSource:    cfg.flu?cfg.flu[0]:null,
+    // True when the county has no zoning layer at all (Polk), so the UI can say so
+    // instead of implying the point simply fell outside a zoning district.
+    _noZoningLayer: !cfg.zoning,
   };
-  const ep=endpoints[countyFips];
-  if(!ep) return null;
-  try{
-    const r=await fetch(`${ep[0]}/query?geometry=${lon},${lat}&geometryType=esriGeometryPoint&spatialRel=esriSpatialRelIntersects&outFields=${ep[1]}&f=json&distance=50&units=esriSRUnit_Meter&inSR=4326`,{signal:AbortSignal.timeout(4000)});
-    const d=await r.json();
-    return (d.features||[])[0]?.attributes||null;
-  }catch(e){return null;}
 }
 
 
@@ -4751,13 +5187,17 @@ async function handleProposalTodoAutomation(deal){
       // Step 3: Compile research data string
       const femaZones=(fema||[]).map(z=>`Zone ${z.FLD_ZONE}${z.ZONE_SUBTY?' — '+z.ZONE_SUBTY:''} (SFHA: ${z.SFHA_TF==='T'?'YES':'NO'})`).join('; ');
       const nwiSummary=(nwi||[]).length===0?'No NWI-mapped wetlands within 1,000m':`${nwi.length} wetland feature(s) within 1,000m: `+(nwi||[]).slice(0,4).map(w=>`${w.WETLAND_TYPE||w.ATTRIBUTE}${w.ACRES?' ('+parseFloat(w.ACRES).toFixed(1)+' ac)':''}`).join('; ');
-      const ozStatus=oz?`YES — Opportunity Zone tract ${oz.geoid10||''}, ${oz.County||''} County`:'Not in a designated Opportunity Zone (per CDFI Fund)';
+      const ozStatus=oz?`YES — Opportunity Zone, census tract ${oz.geoid10||''}${oz.rural==='Y'?' (rural)':''}`:'Not in a designated Opportunity Zone (per CDFI Fund)';
       const qctStatus=qct?`YES — Qualified Census Tract (2026 HUD designation, GEOID ${qct.GEOID||geoid})`:'Not confirmed as 2026 QCT via spatial query — verify via HUD locator with census tract '+geoid;
       const soilSummary=(soils||[]).length>0?soils.slice(0,4).map(s=>`${s.muname||s.compname} (${s.comppct_r||'?'}%, farmland: ${s.farmlndcl||'n/a'})`).join('; '):'Soil data unavailable — verify via USDA Web Soil Survey';
       const geoNote=lat?`Geocoded coordinates: ${lat.toFixed(5)}, ${lon.toFixed(5)} | Census Tract: ${censusTract} (GEOID ${geoid}) | Census County: ${censusCounty}`:'Geocoding failed — coordinates unavailable';
       const elevNote=elevation!=null?`${elevation.toFixed(1)} ft NAVD88 (USGS EPQS)`:'NOT CONFIRMED — verify via USGS topographic map or LIDAR';
       const firmNote=firmPanel?`FIRM Panel ${firmPanel.FIRM_PAN}, effective ${new Date(firmPanel.EFF_DATE).toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'})}, scale 1:${firmPanel.SCALE}`:'FIRM panel not confirmed — pull FIRMette at msc.fema.gov';
-      const zoningNote=zoningData?'CONFIRMED: '+Object.values(zoningData).filter(Boolean).join(' — '):'NOT CONFIRMED — zoning API not available for this county; must verify at county GIS/zoning portal';
+      const zoningNote=zoningData?('CONFIRMED — Zoning: '+(zoningData.code||(zoningData._noZoningLayer?'county publishes no zoning layer':'not mapped at this point'))
+      +(zoningData.description?' ('+zoningData.description+')':'')
+      +(zoningData.flu?'; Future Land Use: '+zoningData.flu+(zoningData.fluDescription?' ('+zoningData.fluDescription+')':''):'')
+      +(zoningData.jurisdiction?'; Jurisdiction: '+zoningData.jurisdiction:''))
+      :'NOT CONFIRMED — no zoning API registered for this county; verify at the county GIS/zoning portal';
       // Municode URL based on municipality
       const citySlug=(county||'').toLowerCase().replace(/\s+/g,'-');
       const municodeUrl=`https://library.municode.com/fl/${citySlug}`;
@@ -13697,6 +14137,76 @@ async function _valCallAI(userText, systemPrompt, useSearch=true){
 }
 window._valCallAI = _valCallAI;
 
+// Parcel-specific property-appraiser deep links, keyed by county. Kept at module
+// scope because _valRun and the post-lookup refresh both need it — one of them
+// used to hardcode the Hillsborough URL for every county in Florida.
+const _PA_DEEP_LINK = {
+  'Pasco':        p=>`https://pascopa.com/PropertySearch/SearchResults?SearchValue=${p}`,
+  'Hillsborough': p=>`https://www.hcpafl.org/Search/Default.aspx?SearchValue=${p}&SearchType=PARCEL`,
+  'Pinellas':     p=>`https://www.pcpao.gov/general-info-parcel.php?parcel=${p}`,
+  'Polk':         p=>`https://www.polkpa.org/CamaDisplay.aspx?OutputMode=Display&SearchType=ParcelNumber&ParcelNumber=${p}`,
+  'Orange':       p=>`https://www.ocpafl.org/searches/parcelsearch.aspx?pid=${p}`,
+  'Sarasota':     p=>`https://www.sc-pa.com/propertysearch/index?ParcelNumber=${p}`,
+  'Lee':          p=>`https://www.leepa.org/Search/UnifiedSearch.aspx?d=null&q=${p}`,
+  'Collier':      p=>`https://www.collierappraiser.com/main_search/RecordDetail.aspx?SearchType=folio&FolioID=${p}`,
+  'Manatee':      p=>`https://www.manateepao.com/parcel/?parcelid=${p}`,
+  'Charlotte':    p=>`https://www.ccappraiser.com/detail.aspx?ID=${p}`,
+  'Brevard':      p=>`https://www.bcpao.us/PropertySearch/#id=${p}`,
+  'Volusia':      p=>`https://vcpa.vcgov.org/search.php?SearchBy=parcelid&parcel=${p}`,
+  'Seminole':     p=>`https://www.scpafl.org/Property/${p}`,
+  'Duval':        p=>`https://paopropertysearch.coj.net/Basic/Detail.aspx?RE=${p}`,
+  'Palm Beach':   p=>`https://www.pbcgov.com/papa/Propsearch.aspx?parcel=${p}`,
+  'Broward':      p=>`https://www.bcpa.net/RecInfo.asp?URL_Parcel=${p}`,
+  'Miami-Dade':   p=>`https://www.miamidade.gov/Apps/PA/propertysearch/#/`,
+};
+
+// Render the confirmed point-service results as plain text for the AI prompt.
+// The model gets facts it must not contradict — not a research assignment.
+function _valFactsForPrompt(c){
+  if(!c) return '(No coordinate resolved — no ground truth available. Return null for any field you cannot actually verify.)';
+  const L=[];
+  L.push(`Coordinates: ${c.lat.toFixed(6)}, ${c.lon.toFixed(6)}`);
+  if(c.county) L.push(`County: ${c.county}`);
+  const p=c.parcel;
+  if(p){
+    L.push('PARCEL (Florida DOR statewide roll'+(p.rollDate?', as of '+p.rollDate:'')+'):');
+    [['Parcel ID',p.parcelId],['Owner',p.owner],['Owner mailing',p.mailingAddress],
+     ['Site address',p.siteAddress],['Acreage',p.acreage],['Land use',p.landUse],
+     ['Just/market value',p.marketValue],['Assessed (non-school)',p.assessedValue],
+     ['Land value',p.landValue],['Roll year',p.taxYear],['Sec-Twn-Rng',p.sectionTownshipRange],
+     ['Short legal',p.legalDescription],['Structures',p.structures]
+    ].forEach(([k,v])=>{ if(v) L.push(`  ${k}: ${v}`); });
+  } else {
+    L.push('PARCEL: no polygon contains this point (right-of-way, water, or a gap in the state roll).');
+  }
+  if(c.zoning){
+    L.push('ZONING / FUTURE LAND USE (county GIS, point-in-polygon):');
+    [['Zoning code',c.zoning.code],['Zoning description',c.zoning.description],
+     ['Future land use',c.zoning.flu],['FLU description',c.zoning.fluDescription],
+     ['Overlay',c.zoning.overlay],['Jurisdiction',c.zoning.jurisdiction]
+    ].forEach(([k,v])=>{ if(v) L.push(`  ${k}: ${v}`); });
+    if(c.zoning._noZoningLayer) L.push('  NOTE: this county publishes no standalone zoning layer.');
+    if(c.zoning._inMunicipality) L.push('  NOTE: this point is INSIDE A MUNICIPALITY — the county layer reports no district because the city code governs. Do not invent a county zoning code; say the city code applies and name the city if you know it.');
+  } else {
+    L.push('ZONING: not confirmed — no county service answered. Say so; do not guess a code.');
+  }
+  if(c.fema){
+    L.push('FLOOD (FEMA NFHL): ' + (c.fema.length
+      ? [...new Set(c.fema.map(z=>`Zone ${z.FLD_ZONE}${z.ZONE_SUBTY?' ('+z.ZONE_SUBTY+')':''}`))].join('; ')
+        + (c.fema.some(z=>z.SFHA_TF==='T')?' — IN a Special Flood Hazard Area':' — not in an SFHA')
+      : 'no NFHL polygon at this point'));
+  }
+  if(c.firm) L.push(`  FIRM panel: ${c.firm.FIRM_PAN}${c.firm.EFF_DATE?', effective '+new Date(c.firm.EFF_DATE).toLocaleDateString():''}`);
+  if(c.nwi) L.push('WETLANDS (USFWS NWI, 1,000 m): ' + (c.nwi.length
+      ? `${c.nwi.length} feature(s) — `+[...new Set(c.nwi.map(w=>w.WETLAND_TYPE||w.ATTRIBUTE))].slice(0,5).join('; ')
+      : 'none mapped'));
+  if(c.elevation!=null) L.push(`ELEVATION (USGS EPQS): ${c.elevation.toFixed(1)} ft`);
+  if(c.soils&&c.soils.length) L.push('SOILS (USDA SDA): '+c.soils.slice(0,3).map(x=>`${x.muname||x.compname}${x.comppct_r?' ('+x.comppct_r+'%)':''}`).join('; ')+`; farmland class: ${c.soils[0].farmlndcl||'n/a'}`);
+  L.push(`OPPORTUNITY ZONE (CDFI Fund): ${c.oz?'YES — census tract '+(c.oz.geoid10||''):'No'}`);
+  L.push(`QUALIFIED CENSUS TRACT (HUD 2026): ${c.qct?'Yes':'No'}`);
+  return L.join('\n');
+}
+
 async function _valRun(){
   const county = (document.getElementById('val-county')||{}).value||'';
   const parcel  = ((document.getElementById('val-parcel')||{}).value||'').trim();
@@ -13734,26 +14244,7 @@ async function _valRun(){
   const paDeepLink = (()=>{
     if(parcel){
       const p = parcel.replace(/[^0-9A-Za-z]/g,'');
-      const urls = {
-        'Pasco':        `https://pascopa.com/PropertySearch/SearchResults?SearchValue=${p}`,
-        'Hillsborough': `https://www.hcpafl.org/Search/Default.aspx?SearchValue=${p}&SearchType=PARCEL`,
-        'Pinellas':     `https://www.pcpao.gov/general-info-parcel.php?parcel=${p}`,
-        'Polk':         `https://www.polkpa.org/CamaDisplay.aspx?OutputMode=Display&SearchType=ParcelNumber&ParcelNumber=${p}`,
-        'Orange':       `https://www.ocpafl.org/searches/parcelsearch.aspx?pid=${p}`,
-        'Sarasota':     `https://www.sc-pa.com/propertysearch/index?ParcelNumber=${p}`,
-        'Lee':          `https://www.leepa.org/Search/UnifiedSearch.aspx?d=null&q=${p}`,
-        'Collier':      `https://www.collierappraiser.com/main_search/RecordDetail.aspx?SearchType=folio&FolioID=${p}`,
-        'Manatee':      `https://www.manateepao.com/parcel/?parcelid=${p}`,
-        'Charlotte':    `https://www.ccappraiser.com/detail.aspx?ID=${p}`,
-        'Brevard':      `https://www.bcpao.us/PropertySearch/#id=${p}`,
-        'Volusia':      `https://vcpa.vcgov.org/search.php?SearchBy=parcelid&parcel=${p}`,
-        'Seminole':     `https://www.scpafl.org/Property/${p}`,
-        'Duval':        `https://paopropertysearch.coj.net/Basic/Detail.aspx?RE=${p}`,
-        'Palm Beach':   `https://www.pbcgov.com/papa/Propsearch.aspx?parcel=${p}`,
-        'Broward':      `https://www.bcpa.net/RecInfo.asp?URL_Parcel=${p}`,
-        'Miami-Dade':   `https://www.miamidade.gov/Apps/PA/propertysearch/#/`,
-      };
-      return urls[county] || pa.search;
+      return _PA_DEEP_LINK[county] ? _PA_DEEP_LINK[county](p) : pa.search;
     }
     return pa.search;
   })();
@@ -13805,14 +14296,36 @@ async function _valRun(){
   // Update map
   _valUpdateMap(address || (parcel+' '+county+' County Florida'));
 
-  // ── Direct PA API call (runs in parallel with map geocoding) ──────────────
-  const paApiData = await _fetchCountyPA(county, address, parcel);
+  // ── Confirmed public records FIRST, AI second ────────────────────────────
+  // Resolve a coordinate before anything else — the pin if the user dropped one,
+  // otherwise geocode what they typed. Every point service keys off this, and a
+  // coordinate is a far better lookup key than an address string.
+  let _pt = null;
+  if(_valMarker){ const q=_valMarker.getLatLng(); _pt={lat:q.lat, lon:q.lng}; }
+  if(!_pt){
+    try{
+      const g = await _prGeocode((address || (parcel+' '+county+' County')) + ', FL');
+      if(g && g.lat!=null) _pt = {lat:g.lat, lon:g.lon};
+    }catch(e){ console.warn('[SiteResearch] geocode failed', e); }
+  }
+
+  let confirmed = null;
+  if(_pt){
+    try{ confirmed = await _valConfirmedAtPoint(_pt.lat, _pt.lon); }
+    catch(e){ console.warn('[SiteResearch] confirmed fan-out failed', e); }
+  }
+  window._valConfirmed = confirmed;
+
+  const paApiData = (confirmed && confirmed.parcel) ? confirmed.parcel
+                  : await _fetchCountyPA(county, address, parcel, _pt);
   if(paApiData) {
     // Municipality from PA record → update deep link if we now have parcel ID
     if(paApiData.parcelId && !parcel){
       // Refresh paDeepLink with real parcel ID
-      const cleanFolio = (paApiData.parcelId||'').replace(/[^0-9]/g,'');
-      const paDeepLinkUpdated = `https://www.hcpafl.org/Search/Default.aspx?SearchValue=${cleanFolio}&SearchType=PARCEL`;
+      // This used to hardcode the Hillsborough PA URL no matter which county the
+      // parcel was in, so every non-Hillsborough deep link pointed at the wrong site.
+      const cleanFolio = (paApiData.parcelId||'').replace(/[^0-9A-Za-z]/g,'');
+      const paDeepLinkUpdated = (_PA_DEEP_LINK[county] ? _PA_DEEP_LINK[county](cleanFolio) : pa.search);
       window._valCtx = window._valCtx || {};
       window._valCtx.paDeepLink = paDeepLinkUpdated;
     }
@@ -13965,7 +14478,15 @@ CRITICAL RULES:
 - NEVER guess or generalize. If a field is not found after searching, set it to "Not found via web search — verify at [specific URL]".
 - NEVER say "typical for this county/region" for flood zone or wetlands — look up this specific parcel.
 
-DO NOT generate values for municodeUrl, fdepOculusUrl, permitSearchUrl, femaUrl, nwiUrl, or topoUrl — those are overridden. Current year: ${new Date().getFullYear()}.`;
+DO NOT generate values for municodeUrl, fdepOculusUrl, permitSearchUrl, femaUrl, nwiUrl, or topoUrl — those are overridden. Current year: ${new Date().getFullYear()}.
+
+=== GROUND TRUTH (read directly from government point services at this parcel's coordinates) ===
+${_valFactsForPrompt(confirmed)}
+=== END GROUND TRUTH ===
+
+These ground-truth values are CORRECT and already verified. Do not contradict them, do not soften them into "approximately" or "likely", and do not re-derive them. Your job around them is context and interpretation, never sourcing.
+
+For anything NOT in the ground-truth block: if you did not actually retrieve it from a source, return null. A null is a correct answer that tells the broker to go look. An invented or county-generalized value is a defect that can cost a deal. Never substitute "typical for this county/region" for a parcel-specific fact.`;
 
   try {
     const raw = await _valCallAI(userMsg, sys);
@@ -14014,9 +14535,53 @@ DO NOT generate values for municodeUrl, fdepOculusUrl, permitSearchUrl, femaUrl,
       }
     }
 
+    // ── Confirmed point data overrides the AI on EVERY field it covers ──────
+    // The model is a narrator here. Where a government service answered, its
+    // answer wins outright.
+    if(confirmed){
+      const c = confirmed;
+      if(c.zoning){
+        data.zoning = data.zoning || {};
+        if(c.zoning.code)           data.zoning.code = c.zoning.code;
+        if(c.zoning.description)    data.zoning.description = c.zoning.description;
+        if(c.zoning.jurisdiction)   data.zoning.source = c.zoning.jurisdiction;
+        if(c.zoning.flu){
+          data.property = data.property || {};
+          data.property.futureYearLandUse = c.zoning.flu + (c.zoning.fluDescription? ' — '+c.zoning.fluDescription : '');
+        }
+      }
+      if(c.fema && c.fema.length){
+        const zs=[...new Set(c.fema.map(z=>`Zone ${z.FLD_ZONE}${z.ZONE_SUBTY?' — '+z.ZONE_SUBTY:''}`))].join('; ');
+        const sfha=c.fema.some(z=>z.SFHA_TF==='T');
+        data.flood = data.flood || {};
+        data.flood.generalRisk = zs + (sfha?' — IN a Special Flood Hazard Area':' — not in an SFHA')
+          + (c.firm?` (FIRM panel ${c.firm.FIRM_PAN}${c.firm.EFF_DATE?', effective '+new Date(c.firm.EFF_DATE).toLocaleDateString():''})`:'');
+      }
+      if(c.nwi){
+        data.wetlands = data.wetlands || {};
+        data.wetlands.presence = c.nwi.length ? 'Confirmed present' : 'Confirmed none mapped';
+        data.wetlands.wetlandTypes = c.nwi.length ? [...new Set(c.nwi.map(w=>w.WETLAND_TYPE||w.ATTRIBUTE))].slice(0,5).join('; ') : null;
+      }
+      if(c.elevation!=null){
+        data.topo = data.topo || {};
+        data.topo.elevationRange = c.elevation.toFixed(1)+' ft at the pin (USGS EPQS)';
+      }
+      data.specialDesignations = data.specialDesignations || {};
+      data.specialDesignations.opportunityZone = data.specialDesignations.opportunityZone || {};
+      data.specialDesignations.opportunityZone.status = c.oz ? 'Yes' : 'No';
+      if(c.oz) data.specialDesignations.opportunityZone.tractId = c.oz.geoid10 || null;
+    }
+
     // Stash URL vars so _valRenderResults (separate scope) can access them
     window._valCtx = { parcel, address, county, pa, paDeepLink, fdepUrl, swfwmdUrl, femaUrl, municodeUrl, addrEncoded, inSwfwmd };
     _valRenderResults(data, pa, inSwfwmd);
+    // Sourced facts go ABOVE the narrative, so the reader sees what is confirmed
+    // before they see what is merely summarized.
+    if(confirmed && resultsEl){
+      const head=document.createElement('div');
+      head.innerHTML=_valRenderConfirmed(confirmed);
+      resultsEl.insertBefore(head, resultsEl.firstChild);
+    }
     // Init FEMA flood mini-map after HTML is in the DOM
     setTimeout(_valInitFloodMinimap, 150);
     // After AI returns, geocoding has had time to complete — rebuild coordinate-sensitive quick links
@@ -14067,9 +14632,12 @@ function _valInitMap(){
       maxZoom:20, opacity:0.85
     }).addTo(_valMap);
 
-    // Click to drop pin
+    // Click to drop pin AND immediately resolve the parcel underneath it.
+    // A click used to only reverse-geocode into the address box, throwing away
+    // the one precise key we had.
     _valMap.on('click', async (e) => {
-      _valPlacePin(e.latlng.lat, e.latlng.lng, true);
+      await _valPlacePin(e.latlng.lat, e.latlng.lng, false);
+      _valLookupPoint(e.latlng.lat, e.latlng.lng);
     });
 
     _valMapReady = true;
@@ -14104,7 +14672,8 @@ async function _valPlacePin(lat, lng, reverseGeocode=false){
   // Draggable pin updates on dragend
   _valMarker.off('dragend').on('dragend', async (ev) => {
     const p = ev.target.getLatLng();
-    await _valPlacePin(p.lat, p.lng, true);
+    await _valPlacePin(p.lat, p.lng, false);
+    _valLookupPoint(p.lat, p.lng);
   });
 
   if(reverseGeocode){
