@@ -1739,6 +1739,37 @@ html.dark input[readonly], html.dark textarea[readonly]{
 html.dark .theme-seg button[aria-checked="true"] { background:#3A414D; color:#fff; }
 @media (pointer:coarse){ .theme-seg button { padding:.62rem .7rem; font-size:.8rem; } }
 
+/* — deal quick-search (DEALSEARCH-DARK-20260903) — real classes, not inline styles, so JS writes
+   (box.style.display / row highlight) can't re-serialize the style attr and defeat the html.dark
+   [style*=...] overrides — that's what left the box light with light-mode-inverted text. — */
+#deal-search-input{
+  font-size:.85rem; padding:.45rem .7rem; width:220px; outline:none;
+  border:1px solid #d1d5db; border-radius:.5rem; background:#fff; color:#111;
+}
+#deal-search-input::placeholder{ color:#9ca3af; }
+#deal-search-input:focus{ border-color:#9ca3af; }
+#deal-search-results{
+  position:absolute; top:calc(100% + 4px); left:0; width:320px; max-height:340px; overflow-y:auto;
+  background:#fff; border:1px solid #e5e7eb; border-radius:.6rem;
+  box-shadow:0 12px 32px rgba(0,0,0,.14); z-index:60;
+}
+.deal-search-row{ padding:.5rem .8rem; cursor:pointer; border-bottom:1px solid #f3f4f6; }
+.deal-search-row:last-child{ border-bottom:0; }
+.deal-search-row.is-active{ background:#eef2ff; }
+.deal-search-title{ font-size:.85rem; font-weight:600; color:#111; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.deal-search-sub{ font-size:.74rem; color:#6b7280; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.deal-search-empty{ padding:.6rem .8rem; font-size:.82rem; color:#6b7280; }
+
+html.dark #deal-search-input{ background:#1B1F26 !important; color:#EDEEF1 !important; border-color:#414957 !important; -webkit-text-fill-color:#EDEEF1; }
+html.dark #deal-search-input::placeholder{ color:#7F8794 !important; }
+html.dark #deal-search-input:focus{ border-color:#5A6473 !important; }
+html.dark #deal-search-results{ background:#1B1F26 !important; border-color:#2E333C !important; box-shadow:0 12px 32px rgba(0,0,0,.6) !important; }
+html.dark .deal-search-row{ border-bottom-color:#2A2F38 !important; }
+html.dark .deal-search-row.is-active{ background:#262B34 !important; }
+html.dark .deal-search-title{ color:#EDEEF1 !important; }
+html.dark .deal-search-sub{ color:#A6ADBA !important; }
+html.dark .deal-search-empty{ color:#A6ADBA !important; }
+
 </style>
 <link rel="manifest" href="/advisor-dashboard/manifest.json">
 <meta name="theme-color" content="#DA291C">
@@ -16455,8 +16486,8 @@ function viewBoard(){
         <div id="deal-search-wrap" style="position:relative">
           <input id="deal-search-input" type="text" autocomplete="off" placeholder="Search deals…"
             oninput="_dealSearch(this.value)" onfocus="_dealSearch(this.value)" onkeydown="_dealSearchKey(event)"
-            style="font-size:.85rem;padding:.45rem .7rem;border:1px solid #d1d5db;border-radius:.5rem;background:#fff;color:#111;outline:none;width:220px"/>
-          <div id="deal-search-results" style="display:none;position:absolute;top:calc(100% + 4px);left:0;width:320px;max-height:340px;overflow-y:auto;background:#fff;border:1px solid #e5e7eb;border-radius:.6rem;box-shadow:0 12px 32px rgba(0,0,0,.14);z-index:60"></div>
+            />
+          <div id="deal-search-results" style="display:none"></div>
         </div>
         ${_advisorFilterDropdown}
         <button onclick="window.openDealMap()" class="ghost-btn" title="See every deal pinned on a map"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:inline;vertical-align:-2px;margin-right:.35rem"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z"/><circle cx="12" cy="10" r="3"/></svg>Map</button>
@@ -20219,17 +20250,16 @@ window._dealSearch = (q) => {
   window._dealSearchActive = top.length ? 0 : -1;
   const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   if(!top.length){
-    box.innerHTML = '<div style="padding:.6rem .8rem;color:#9ca3af;font-size:.82rem">No matching deals</div>';
+    box.innerHTML = '<div class="deal-search-empty">No matching deals</div>';
     box.style.display='block'; return;
   }
   box.innerHTML = top.map((d,i)=>{
     const title = esc(d.projectName||d.propertyAddress||'Unnamed');
     const sub = [d.stage, d.buyer||d.loiBuyer||d.boBuyerName, d.advisorName].filter(Boolean).map(esc).join(' · ');
-    return `<div class="deal-search-row" data-i="${i}" data-id="${d.id}"
-        onclick="_dealSearchGoTo('${d.id}')" onmouseenter="_dealSearchSetActive(${i})"
-        style="padding:.5rem .8rem;cursor:pointer;border-bottom:1px solid #f3f4f6;${i===0?'background:#eef2ff':''}">
-      <div style="font-size:.85rem;font-weight:600;color:#111;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${title}</div>
-      ${sub?`<div style="font-size:.74rem;color:#6b7280;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${sub}</div>`:''}
+    return `<div class="deal-search-row${i===0?' is-active':''}" data-i="${i}" data-id="${d.id}"
+        onclick="_dealSearchGoTo('${d.id}')" onmouseenter="_dealSearchSetActive(${i})">
+      <div class="deal-search-title">${title}</div>
+      ${sub?`<div class="deal-search-sub">${sub}</div>`:''}
     </div>`;
   }).join('');
   box.style.display='block';
@@ -20239,7 +20269,7 @@ window._dealSearchSetActive = (i) => {
   const box = document.getElementById('deal-search-results');
   if(!box) return;
   [...box.querySelectorAll('.deal-search-row')].forEach(r => {
-    r.style.background = (+r.dataset.i === i) ? '#eef2ff' : '';
+    r.classList.toggle('is-active', +r.dataset.i === i);
   });
 };
 window._closeDealSearch = () => {
@@ -26171,8 +26201,8 @@ window._execManualMergeContacts = async () => {
 };
 
 // ── CRM Outreach Imports (updated nightly by daily-crm-outreach-sync task) ──
-const _CRM_OUTREACH_SYNC_DATE = '2026-09-02';
-const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-09-01_0","emailDate":"2026-09-01","emailSubject":"Re: Self Storage Project","attachmentNames":["Kenton CC-MPUD Draft Concept M 2026-01-28.pdf","OM Kenton Commercial.pdf"],"recipientEmail":"mstevenson@arcomurraycc.com","recipientName":"Matt Stevenson","recipientFirstName":"Matt","recipientLastName":"Stevenson","companyName":"Arcomurraycc","propertyHint":"Kenton","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-09-01_1","emailDate":"2026-09-01","emailSubject":"Deltona Blvd Spring Hill Land","attachmentNames":["OM Forest Oaks Spring Hill (compressed).pdf"],"recipientEmail":"allanbalgley@gmail.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"","propertyHint":"Forest Oaks Spring Hill","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-09-01_2","emailDate":"2026-09-01","emailSubject":"Brandon Apt B&F","attachmentNames":["5416_Robert_Tolle_Buyer_Comparison_3.pdf"],"recipientEmail":"fabbrit@richmancapital.com","recipientName":"Todd Fabbri","recipientFirstName":"Todd","recipientLastName":"Fabbri","companyName":"Richmancapital","propertyHint":"Robert Tolle","matchedDealId":null,"imported":false,"skipped":false}];
+const _CRM_OUTREACH_SYNC_DATE = '2026-09-03';
+const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-09-02_0","emailDate":"2026-09-02","emailSubject":"Fwd: mahtog BS updated.","attachmentNames":["Rocwell Mathog - Balance Sheet - 09.01.26.pdf"],"recipientEmail":"rwhite@purvisgray.com","recipientName":"Robert E. White","recipientFirstName":"Robert","recipientLastName":"White","companyName":"Purvis Gray","propertyHint":"Mathog","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-09-02_1","emailDate":"2026-09-02","emailSubject":"Re: mahtog BS updated.","attachmentNames":["Rocwell Mathog - Balance Sheet - 09.01.26.pdf","Fremont, Westben Seller - Membership Interest Purchase and Assignment Agreement.docx","RI and Gray Ivey Sellers - RW Mathog Membership Interest Purchase and Assignment.docx"],"recipientEmail":"rg@rocwelldev.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Rocwelldev","propertyHint":"Mathog Fremont","matchedDealId":null,"imported":false,"skipped":false}];
 
 // ── Gmail Sync ───────────────────────────────────────────────────────
 let _GMAIL_SYNC_DATE;  // set at runtime by crmGmailSync; blank = never synced this session
