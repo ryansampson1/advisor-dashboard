@@ -9418,8 +9418,11 @@ function isStaffView(){
 window.toggleStaffView = () => {
   staffViewMode = !staffViewMode;
   if(staffViewMode) adminViewAsAdvisor = false; // staff view overrides advisor view
-  const staffTabs = ['board','tasks','eos','comps','officeOverview','leaderboard','dashboard'];
+  const staffTabs = ['board','tasks','eos','comps','officeOverview','leaderboard','dashboard','exportContacts'];
+  // Tabs that exist ONLY inside staff view — leaving staff view must bounce off them
+  const staffOnlyTabs = ['exportContacts'];
   if(staffViewMode && !staffTabs.includes(currentView)) currentView='board';
+  if(!staffViewMode && staffOnlyTabs.includes(currentView)) currentView='board';
   renderShell();
   renderCurrentView();
 };
@@ -10822,8 +10825,10 @@ function renderShell(){
     {id:'activityLog',   label:'🕵️ Activity Log',   admin:true},
     {id:'earthnotes',    label:'🌎 EarthNotes',     always:true},
     {id:'valuation',     label:'🔍 Site Research',  advisor:true, admin:true, manager:true, staff:true},
+    {id:'exportContacts',label:'📤 Export',        staffOnly:true},
   ].filter(n=>{
     if(sv){ // staff view: always tabs + staff-flagged tabs + manager tabs (for office managers) + CRM if enabled
+      if(n.staffOnly) return true;   // tabs that exist ONLY inside staff view
       if(n.always) return true;
       if(n.staff) return true;
       if(n.manager && currentUser.isOfficeManager) return true;
@@ -11521,7 +11526,7 @@ window.agCommSync = agCommSync;
 
 function renderCurrentView(){
   window._elcScoreCache?.clear();   // elc-v443: week scores are memoised per paint
-  const map={board:viewBoard,tasks:viewTasks,calendar:viewCalendar,dashboard:viewDashboard,itr:viewITR,projection:viewProjection,
+  const map={exportContacts:viewExportContacts,board:viewBoard,tasks:viewTasks,calendar:viewCalendar,dashboard:viewDashboard,itr:viewITR,projection:viewProjection,
     commissions:viewMyCommissions,
     splits:viewSplits,automations:viewAutomations,users:viewUsers,leaderboard:viewLeaderboard,
     manageStages:viewManageStages,officeManagers:viewOfficeManagers,approvedUsers:viewApprovedUsers,officeOverview:viewOfficeOverview,
@@ -24507,6 +24512,144 @@ function viewCRM(){
 }
 // Expose on window so inline onclick handlers (outside module scope) can call it
 window.viewCRM = viewCRM;
+
+/* =======================================================
+   VIEW: EXPORT  (staff view only)
+   Name-tag / e-vite export. Staff pick ONE CRM group and download a CSV of
+   First Name / Last Name / Company / Email for every member of that group.
+   Contacts with no email are INCLUDED with a blank email cell, so a printed
+   name-tag run never silently drops a guest.
+   Nothing else leaves the CRM here — no phone, notes, address or deal history.
+   Read-only: this view never writes to Firestore.
+   Gated by isStaffView() in renderShell()'s nav filter AND re-checked below,
+   so reaching the view any other way still shows nothing.
+   ======================================================= */
+window._exportGroupId = window._exportGroupId || '';
+
+const _expEsc = s => String(s==null?'':s)
+  .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+
+// Members of one group, ordered the way a name-tag sheet reads (by last name).
+function _exportGroupMembers(gid){
+  if(!gid) return [];
+  const key = c => String(c.lastName||c.firstName||c.company||c.email||'').toLowerCase();
+  return allContacts.filter(c => (c.groups||[]).includes(gid))
+                    .sort((a,b)=> key(a).localeCompare(key(b)));
+}
+
+window.exportGroupCSV = () => {
+  const gid = window._exportGroupId;
+  const g   = allCRMGroups.find(x=>x.id===gid);
+  if(!g){ showToast('Pick a group first','error'); return; }
+  const rows = _exportGroupMembers(gid);
+  if(rows.length===0){ showToast('That group has no contacts','error'); return; }
+  const esc = v => '"' + String(v==null?'':v).replace(/"/g,'""') + '"';
+  const csv = [
+    ['First Name','Last Name','Company','Email'].join(','),
+    ...rows.map(c => [c.firstName||'', c.lastName||'', c.company||'', (c.email||'').trim()].map(esc).join(','))
+  ].join('\r\n');
+  // Leading BOM so Excel reads accented names (José, Muñoz) instead of mojibake
+  const blob = new Blob(['﻿'+csv], {type:'text/csv;charset=utf-8'});
+  const safe = String(g.name||'group').replace(/[^\w\s-]/g,'').trim().replace(/\s+/g,'_').slice(0,60) || 'group';
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = safe + '_' + new Date().toISOString().slice(0,10) + '.csv';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url), 1000);
+  showToast('Exported ' + rows.length + ' contact' + (rows.length!==1?'s':'') + ' from ' + g.name, 'success');
+};
+
+function viewExportContacts(){
+  bootCRM();   // Export may be the first CRM-backed screen a staff user opens
+  if(!isStaffView()){
+    setContent(`
+      <div class="text-center py-16 text-gray-400">
+        <div class="text-5xl mb-3">\U0001f512</div>
+        <div class="font-medium text-gray-500">The Export tab is only available in Staff view.</div>
+      </div>`);
+    return;
+  }
+  const groups = allCRMGroups.filter(_isGroupVisible)
+                             .sort((a,b)=>String(a.name||'').localeCompare(String(b.name||'')));
+  if(window._exportGroupId && !groups.some(x=>x.id===window._exportGroupId)) window._exportGroupId='';
+  const gid     = window._exportGroupId;
+  const g       = groups.find(x=>x.id===gid) || null;
+  const rows    = _exportGroupMembers(gid);
+  const noEmail = rows.filter(c=>!String(c.email||'').trim()).length;
+  const PREVIEW = 50;
+  const ready   = !!g && rows.length>0;
+
+  setContent(`
+    <div class="flex items-center justify-between mb-6 flex-wrap gap-3">
+      <div>
+        <h2 class="text-xl font-bold text-gray-800">\U0001f4e4 Export</h2>
+        <p class="text-sm text-gray-500 mt-0.5">Name tags &amp; e-vites — pick a group, download name, company and email.</p>
+      </div>
+    </div>
+
+    <div class="bg-white rounded-2xl border p-4 mb-4">
+      <div class="flex flex-wrap gap-3 items-end">
+        <label class="flex flex-col gap-1">
+          <span class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Group</span>
+          <select id="export-group" onchange="window._exportGroupId=this.value;window.viewExportContacts()"
+            class="border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-200 min-w-48"
+            style="min-height:44px">
+            <option value="">Select a group…</option>
+            ${groups.map(x=>`<option value="${_expEsc(x.id)}" ${x.id===gid?'selected':''}>${_expEsc(x.name||'Untitled group')}</option>`).join('')}
+          </select>
+        </label>
+        <button type="button" onclick="window.exportGroupCSV()" ${ready?'':'disabled'}
+          class="brand-btn px-4 py-2 rounded-lg text-sm font-semibold ${ready?'':'opacity-40 cursor-not-allowed'}"
+          style="min-height:44px">⬇ Download CSV</button>
+      </div>
+      <div class="text-xs text-gray-400 mt-3">
+        Four columns only — First Name, Last Name, Company, Email. Phone numbers, addresses, notes and deal history stay in the CRM.
+      </div>
+    </div>
+
+    ${!g ? `
+      <div class="text-center py-16 text-gray-400">
+        <div class="text-5xl mb-3">\U0001f4e4</div>
+        <div class="font-medium text-gray-500">Pick a group above to see who is on the list.</div>
+        <div class="text-xs mt-1">${groups.length} group${groups.length!==1?'s':''} available.</div>
+      </div>` : rows.length===0 ? `
+      <div class="text-center py-16 text-gray-400">
+        <div class="text-5xl mb-3">\U0001f464</div>
+        <div class="font-medium text-gray-500">No contacts in ${_expEsc(g.name)} yet.</div>
+        <div class="text-xs mt-1">Add people to this group from the CRM tab.</div>
+      </div>` : `
+      <div class="text-xs text-gray-400 mb-3">
+        ${rows.length} contact${rows.length!==1?'s':''} in
+        <span class="font-semibold text-gray-600">${_expEsc(g.name)}</span>${noEmail?` · <span class="text-amber-600 font-semibold">${noEmail} with no email address</span> (exported with a blank email cell)`:''}
+      </div>
+      <div class="bg-white rounded-2xl border overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="border-b bg-gray-50 text-left text-xs text-gray-500 uppercase tracking-wide">
+              <th class="px-4 py-3 font-semibold">First Name</th>
+              <th class="px-4 py-3 font-semibold">Last Name</th>
+              <th class="px-4 py-3 font-semibold">Company</th>
+              <th class="px-4 py-3 font-semibold">Email</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-gray-100">
+            ${rows.slice(0,PREVIEW).map(c=>`
+              <tr class="export-row hover:bg-gray-50">
+                <td class="px-4 py-3 text-gray-800">${_expEsc(c.firstName)}</td>
+                <td class="px-4 py-3 text-gray-800">${_expEsc(c.lastName)}</td>
+                <td class="px-4 py-3 text-gray-600">${_expEsc(c.company)}</td>
+                <td class="px-4 py-3 ${String(c.email||'').trim()?'text-gray-600':'text-amber-600 italic'}">${String(c.email||'').trim()?_expEsc(c.email):'no email'}</td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+      ${rows.length>PREVIEW?`<div class="text-xs text-gray-400 mt-2">Showing the first ${PREVIEW} — all ${rows.length} are in the download.</div>`:''}
+    `}
+  `);
+}
+// Expose on window so inline onclick/onchange handlers (outside module scope) can call it
+window.viewExportContacts = viewExportContacts;
 
 // ── Backfill: ensure all existing deal contacts exist in CRM ───────
 // Runs once per session when CRM is first opened.
