@@ -10798,6 +10798,7 @@ function renderShell(){
     {id:'tasks',         label:'✅ Tasks',          always:true},
     {id:'calendar',      label:'📅 Calendar',       advisor:true},
     {id:'dashboard',     label:'📊 Financials',    admin:true, manager:true},
+    {id:'itr',           label:'📈 ITR',           admin:true},
     {id:'commissions',   label:'💰 My Pay',         advisor:true},
     {id:'users',         label:'👤 Users',           admin:true},
     {id:'splits',        label:'⚖️ Splits',         admin:true},
@@ -11520,7 +11521,7 @@ window.agCommSync = agCommSync;
 
 function renderCurrentView(){
   window._elcScoreCache?.clear();   // elc-v443: week scores are memoised per paint
-  const map={board:viewBoard,tasks:viewTasks,calendar:viewCalendar,dashboard:viewDashboard,projection:viewProjection,
+  const map={board:viewBoard,tasks:viewTasks,calendar:viewCalendar,dashboard:viewDashboard,itr:viewITR,projection:viewProjection,
     commissions:viewMyCommissions,
     splits:viewSplits,automations:viewAutomations,users:viewUsers,leaderboard:viewLeaderboard,
     manageStages:viewManageStages,officeManagers:viewOfficeManagers,approvedUsers:viewApprovedUsers,officeOverview:viewOfficeOverview,
@@ -20805,6 +20806,374 @@ function filterAdvisorsByOffice(advisors){
   return advisors.filter(a=>(allProfiles[a.uid]?.office||'')===adminOfficeFilter);
 }
 
+
+/* =======================================================
+   ITR METRICS  (Institute for Trend Research style)
+   Rate-of-change view over a trailing 24 months.
+     3MMT   = 3-month moving total
+     3/3    = current 3MMT / the 3MMT ending 3 months earlier - 1
+              (sequential, non-overlapping quarter-over-quarter)
+     3/12   = current 3MMT / the same 3MMT one year earlier - 1
+              (year-over-year)
+   Two series: Closed Volume and New Under Contract Volume.
+   Volume basis = contracted sale price (purchasePrice || contractPrice),
+   the same basis the Financials page uses for "vol".
+   Admin-only nav item. elc-v484
+   ======================================================= */
+
+// Absolute month number so month arithmetic never has to wrap a year by hand.
+const _itrMonthIdx = ms => { const d = new Date(ms); return d.getFullYear()*12 + d.getMonth(); };
+const _itrIdxLabel = idx => {
+  const y = Math.floor(idx/12), m = idx - y*12;
+  return new Date(y, m, 1).toLocaleDateString('en-US',{month:'short'}) + " '" + String(y).slice(2);
+};
+// 'YYYY-MM-DD' -> local ms at midnight, or null.
+const _itrParseDay = s => {
+  if(!s) return null;
+  const t = new Date(String(s).slice(0,10)+'T00:00:00').getTime();
+  return isNaN(t) ? null : t;
+};
+const _itrVol = d => (d.purchasePrice || d.contractPrice || 0);
+
+// Has this card ever actually reached a contract (or closed) stage?
+// Guards the under-contract series against prospects that merely carry an
+// effectiveDate.
+function _itrEverContract(d){
+  if(d.contractEnteredAt) return true;
+  if(isContractActiveStage(d.stage||'') || isWonStage(d.stage||'')) return true;
+  return (d.stageHistory||[]).some(h => isContractActiveStage(h.stage||'') || isWonStage(h.stage||''));
+}
+
+// When it went under contract. Manual effectiveDate wins (same rule the
+// quarterly goals use), then the auto stamp, then the earliest stage-history
+// entry into a contract or won stage.
+function _itrContractTs(d){
+  if(!_itrEverContract(d)) return null;
+  const eff = _itrParseDay(d.effectiveDate);
+  if(eff !== null) return eff;
+  if(d.contractEnteredAt) return d.contractEnteredAt;
+  const hits = (d.stageHistory||[])
+    .filter(h => (h.enteredAt||0) > 0 && (isContractActiveStage(h.stage||'') || isWonStage(h.stage||'')))
+    .map(h => h.enteredAt);
+  return hits.length ? Math.min.apply(null, hits) : null;
+}
+
+// When it closed. Dated by closeDate only - effectiveDate is a contract date,
+// not a closing date, so it is deliberately NOT used here.
+function _itrClosedTs(d){
+  if(!isWonStage(d.stage||'')) return null;
+  return _itrParseDay(d.closeDate);
+}
+
+// Monthly totals + 3MMT / 12MMT + 3/3 and 3/12 rates.
+// endIdx = absolute month index of the LAST month in the returned series.
+// months = how many months to return.
+function _itrBuildSeries(deals, tsFn, endIdx, months){
+  const need     = months + 14;              // +12 for the 3/12 lookback, +2 for the 3MMT tail
+  const startIdx = endIdx - need + 1;
+  const monthly  = new Array(need).fill(0);
+  const counts   = new Array(need).fill(0);
+  const bucket   = {};
+  let dated = 0, undated = 0, undatedVol = 0;
+
+  (deals||[]).forEach(d => {
+    const ts = tsFn(d);
+    if(ts === null || ts === undefined){ undated++; undatedVol += _itrVol(d); return; }
+    dated++;
+    const i = _itrMonthIdx(ts) - startIdx;
+    if(i < 0 || i >= need) return;           // outside the window we care about
+    monthly[i] += _itrVol(d);
+    counts[i]  += 1;
+    (bucket[i] = bucket[i] || []).push(d);
+  });
+
+  const mmt = (i, n) => {
+    if(i - n + 1 < 0 || i >= need) return null;
+    let s = 0;
+    for(let k = i - n + 1; k <= i; k++) s += monthly[k];
+    return s;
+  };
+  const roc = (cur, prior) =>
+    (cur === null || prior === null || prior === 0) ? null : (cur / prior - 1);
+
+  const rows = [];
+  for(let i = need - months; i < need; i++){
+    const m3 = mmt(i, 3);
+    rows.push({
+      idx:   startIdx + i,
+      label: _itrIdxLabel(startIdx + i),
+      vol:   monthly[i],
+      count: counts[i],
+      mmt3:  m3,
+      mmt12: mmt(i, 12),
+      r33:   roc(m3, mmt(i - 3,  3)),   // months i-5..i-3 : no overlap with i-2..i
+      r312:  roc(m3, mmt(i - 12, 3)),   // months i-14..i-12 : exactly one year back
+      deals: bucket[i] || [],
+    });
+  }
+  return { rows, dated, undated, undatedVol };
+}
+
+window._itrMonthIdx    = _itrMonthIdx;
+window._itrBuildSeries = _itrBuildSeries;
+window._itrContractTs  = _itrContractTs;
+window._itrClosedTs    = _itrClosedTs;
+window._itrEverContract= _itrEverContract;
+
+/* ── ITR presentation helpers ───────────────────────────────────── */
+const _itrPct = v => {
+  if(v === null || v === undefined) return '—';
+  const p = v * 100;
+  const dp = Math.abs(p) >= 100 ? 0 : 1;
+  return (p >= 0 ? '+' : '') + p.toFixed(dp) + '%';
+};
+const _itrPctClass = v =>
+  (v === null || v === undefined) ? 'text-gray-400'
+  : v > 0.0005  ? 'text-green-700'
+  : v < -0.0005 ? 'text-red-700'
+  : 'text-gray-600';
+const _itrDark = () => document.documentElement.classList.contains('dark');
+const _itrPctColor = v => {
+  const dk = _itrDark();
+  if(v === null || v === undefined) return dk ? '#9AA2AF' : '#6b7280';
+  return v >= 0 ? (dk ? '#34d399' : '#059669') : (dk ? '#f87171' : 'var(--brand-red)');
+};
+
+// Rate-of-change direction: is the 3/12 itself rising or falling?
+function _itrDirection(rows, key){
+  const n = rows.length;
+  const cur = rows[n-1] ? rows[n-1][key] : null;
+  const prv = rows[n-2] ? rows[n-2][key] : null;
+  if(cur === null || prv === null) return null;
+  const d = cur - prv;
+  if(Math.abs(d) < 0.002) return {ico:'→', txt:'flat',    cls:'text-gray-600'};
+  return d > 0 ? {ico:'↑', txt:'rising',  cls:'text-green-700'}
+               : {ico:'↓', txt:'falling', cls:'text-red-700'};
+}
+
+window._itrTogglePartial = () => {
+  window._itrIncludePartial = !window._itrIncludePartial;
+  try{ localStorage.setItem('elcItrPartial', window._itrIncludePartial ? '1' : '0'); }catch(e){}
+  viewITR();
+};
+
+window._itrExportCsv = which => {
+  const s = (window._itrLast||{})[which];
+  if(!s){ showToast('Nothing to export yet','warning'); return; }
+  const head = ['Month','Monthly Volume','Deals','3-Mo Moving Total','12-Mo Moving Total','3/3','3/12'];
+  const lines = [head.join(',')].concat(s.rows.map(r => [
+    r.label.replace(/,/g,''),
+    Math.round(r.vol),
+    r.count,
+    r.mmt3  === null ? '' : Math.round(r.mmt3),
+    r.mmt12 === null ? '' : Math.round(r.mmt12),
+    r.r33   === null ? '' : (r.r33*100).toFixed(2),
+    r.r312  === null ? '' : (r.r312*100).toFixed(2),
+  ].join(',')));
+  const blob = new Blob([lines.join('\n')], {type:'text/csv;charset=utf-8'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'ITR_' + which + '_' + new Date().toISOString().slice(0,10) + '.csv';
+  document.body.appendChild(a); a.click();
+  setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 500);
+  showToast('CSV downloaded','success');
+};
+
+function viewITR(){
+  if(activeChart){ try{ activeChart.destroy(); }catch(e){} activeChart = null; }
+  (window._itrCharts||[]).forEach(c=>{ try{ c.destroy(); }catch(e){} });
+  window._itrCharts = [];
+
+  if(typeof window._itrIncludePartial === 'undefined'){
+    try{ window._itrIncludePartial = localStorage.getItem('elcItrPartial') === '1'; }
+    catch(e){ window._itrIncludePartial = false; }
+  }
+  const MONTHS   = 24;
+  const partial  = !!window._itrIncludePartial;
+  const now      = new Date();
+  const curIdx   = now.getFullYear()*12 + now.getMonth();
+  const endIdx   = partial ? curIdx : curIdx - 1;
+
+  const deals       = filterDealsByOffice(visibleDeals());
+  const officeLabel = adminOfficeFilter !== 'both' ? ' — ' + adminOfficeFilter + ' Office' : '';
+
+  const closed = _itrBuildSeries(deals.filter(d => isWonStage(d.stage||'')), _itrClosedTs,   endIdx, MONTHS);
+  const uc     = _itrBuildSeries(deals.filter(_itrEverContract),             _itrContractTs, endIdx, MONTHS);
+  window._itrLast = {closed, uc};
+
+  const lastLabel = _itrIdxLabel(endIdx);
+  const curLabel  = _itrIdxLabel(curIdx);
+
+  const panel = (key, emoji, title, sub, series, accent, dateNote) => {
+    const rows = series.rows;
+    const last = rows[rows.length-1] || {};
+    const dir  = _itrDirection(rows, 'r312');
+    const dir33= _itrDirection(rows, 'r33');
+    const stat = (label, val, valColor, note, title) => `
+      <div class="bg-white rounded-2xl border p-4">
+        <div class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">${label}</div>
+        <div class="text-xl md:text-2xl font-bold whitespace-nowrap"${title?' title="'+title+'"':''} style="color:${valColor}">${val}</div>
+        <div class="text-xs text-gray-500 mt-1">${note}</div>
+      </div>`;
+    return `
+    <section class="mb-10">
+      <div class="flex items-baseline gap-2 flex-wrap mb-1">
+        <h3 class="text-lg font-bold" style="color:var(--text-1)">${emoji} ${title}</h3>
+        <span class="text-xs text-gray-500">${sub}</span>
+      </div>
+      <p class="text-xs text-gray-500 mb-4">${dateNote}</p>
+
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-5">
+        ${stat('3/3 Rate', _itrPct(last.r33), _itrPctColor(last.r33),
+          'vs. the 3 months before' + (dir33 ? ' · <span class="'+dir33.cls+'">'+dir33.ico+' '+dir33.txt+'</span>' : ''))}
+        ${stat('3/12 Rate', _itrPct(last.r312), _itrPctColor(last.r312),
+          'vs. same 3 months last year' + (dir ? ' · <span class="'+dir.cls+'">'+dir.ico+' '+dir.txt+'</span>' : ''))}
+        ${stat('3-Mo Moving Total', last.mmt3 === null ? '—' : fmtM$(last.mmt3), 'var(--text-1)',
+          'through ' + (last.label||'—'), last.mmt3 === null ? '' : fmt$(last.mmt3))}
+        ${stat('12-Mo Moving Total', last.mmt12 === null ? '—' : fmtM$(last.mmt12), 'var(--text-1)',
+          'trailing twelve months', last.mmt12 === null ? '' : fmt$(last.mmt12))}
+      </div>
+
+      <div class="bg-white rounded-2xl border p-5 mb-3">
+        <div class="flex items-center justify-between gap-3 mb-3 flex-wrap">
+          <h4 class="font-semibold text-gray-700 text-sm">24-Month Rate of Change</h4>
+          <button onclick="window._itrExportCsv('${key}')" class="ghost-btn">⬇ CSV</button>
+        </div>
+        <div style="position:relative;height:clamp(300px,32vw,440px)">
+          <canvas id="itr-chart-${key}"></canvas>
+        </div>
+      </div>
+
+      <details class="bg-white rounded-2xl border overflow-hidden">
+        <summary class="px-5 py-3 text-sm font-semibold text-gray-700 cursor-pointer select-none">Monthly detail</summary>
+        <div class="overflow-x-auto border-t">
+          <table class="w-full text-sm">
+            <thead class="bg-gray-50 text-xs uppercase tracking-wide text-gray-500">
+              <tr>
+                <th class="text-left  py-2 px-4">Month</th>
+                <th class="text-right py-2 px-4">Volume</th>
+                <th class="text-right py-2 px-4">Deals</th>
+                <th class="text-right py-2 px-4">3MMT</th>
+                <th class="text-right py-2 px-4">12MMT</th>
+                <th class="text-right py-2 px-4">3/3</th>
+                <th class="text-right py-2 px-4">3/12</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y">
+              ${rows.slice().reverse().map(r=>`
+                <tr class="hover:bg-gray-50">
+                  <td class="py-2 px-4 font-semibold text-gray-800">${r.label}</td>
+                  <td class="py-2 px-4 text-right text-gray-700">${r.vol ? fmt$(r.vol) : '<span class="text-gray-400">—</span>'}</td>
+                  <td class="py-2 px-4 text-right text-gray-600">${r.count || '<span class="text-gray-400">—</span>'}</td>
+                  <td class="py-2 px-4 text-right text-gray-700">${r.mmt3  === null ? '<span class="text-gray-400">—</span>' : fmt$(r.mmt3)}</td>
+                  <td class="py-2 px-4 text-right text-gray-600">${r.mmt12 === null ? '<span class="text-gray-400">—</span>' : fmt$(r.mmt12)}</td>
+                  <td class="py-2 px-4 text-right font-semibold ${_itrPctClass(r.r33)}">${_itrPct(r.r33)}</td>
+                  <td class="py-2 px-4 text-right font-semibold ${_itrPctClass(r.r312)}">${_itrPct(r.r312)}</td>
+                </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </details>
+
+      ${series.undated ? `<p class="text-xs text-amber-600 mt-2">⚠️ ${series.undated} deal${series.undated!==1?'s':''} (${fmt$(series.undatedVol)}) excluded — no usable date on the card.</p>` : ''}
+    </section>`;
+  };
+
+  setContent(`
+    ${officeFilterBar()}
+    <div class="flex items-center justify-between gap-3 flex-wrap mb-1">
+      <h2 style="font-size:1.35rem;font-weight:700;color:var(--text-1);letter-spacing:-.01em">📈 ITR Metrics${officeLabel}</h2>
+      <button onclick="window._itrTogglePartial()" class="ghost-btn"
+        style="${partial?'background:var(--brand-red);border-color:var(--brand-red);color:#fff':''}"
+        aria-pressed="${partial}"
+        title="${curLabel} is not over yet, so including it drags the 3-month total down">
+        ${partial ? '✓ Including ' + curLabel + ' (partial)' : 'Include ' + curLabel + ' (partial)'}
+      </button>
+    </div>
+    <p class="text-sm text-gray-600 mb-6" style="max-width:60rem">
+      Rate of change on a 3-month moving total (3MMT), trailing 24 months through <strong>${lastLabel}</strong>.
+      <strong>3/3</strong> compares the latest 3 months to the 3 months immediately before them — a sequential,
+      non-overlapping read that turns first. <strong>3/12</strong> compares those same 3 months to the same 3 months
+      a year earlier, so seasonality cancels out. Positive means growing; a positive number that is
+      <em>shrinking</em> month over month means growth is decelerating.
+    </p>
+
+    ${panel('closed','💰','Closed Deal Volume','sale price of closed deals', closed, '#059669',
+      'Dated by the deal&rsquo;s <strong>close date</strong>. Won-stage cards only.')}
+
+    ${panel('uc','📝','New Under Contract Volume','sale price of deals going under contract', uc, '#4F46E5',
+      'Dated by the month the card first went under contract — your manual <strong>effective date</strong> if set, otherwise the auto stamp, otherwise stage history. Counts the contract in the month it was signed even if it later closed or fell out.')}
+
+    <p class="text-xs text-gray-500 mt-2">
+      Volume = purchase price (contract price where no purchase price is set). ${adminOfficeFilter!=='both'
+        ? 'Filtered to the ' + adminOfficeFilter + ' office by the advisor on the card.'
+        : 'All offices.'}
+    </p>
+  `);
+
+  const dk   = document.documentElement.classList.contains('dark');
+  const tick = dk ? '#B3BAC5' : '#4b5563';
+  const c33  = dk ? '#818CF8' : '#4F46E5';
+  const c312 = dk ? '#F87171' : '#DA291C';
+  const grid = dk ? 'rgba(255,255,255,.08)' : 'rgba(0,0,0,.06)';
+
+  const drawChart = (key, series, barColor) => {
+    const el = document.getElementById('itr-chart-' + key);
+    if(!el || typeof Chart === 'undefined') return;
+    const rows = series.rows;
+    const c = new Chart(el, {
+      type:'bar',
+      data:{
+        labels: rows.map(r=>r.label),
+        datasets:[
+          { type:'bar', label:'3-Mo Moving Total', yAxisID:'y1', order:4,
+            data: rows.map(r=>r.mmt3), backgroundColor: barColor, borderRadius:3, barPercentage:.8 },
+          { type:'line', label:'3/3', yAxisID:'y', order:2,
+            data: rows.map(r=> r.r33  === null ? null : r.r33*100),
+            borderColor:c33, backgroundColor:c33,
+            borderWidth:2, tension:.25, pointRadius:2, pointHoverRadius:5, spanGaps:false },
+          { type:'line', label:'3/12', yAxisID:'y', order:1,
+            data: rows.map(r=> r.r312 === null ? null : r.r312*100),
+            borderColor:c312, backgroundColor:c312,
+            borderWidth:2.5, tension:.25, pointRadius:2, pointHoverRadius:5, spanGaps:false },
+          { type:'line', label:'', yAxisID:'y', order:5,
+            data: rows.map(()=>0), borderColor: dk ? 'rgba(255,255,255,.35)' : 'rgba(0,0,0,.35)',
+            borderWidth:1, borderDash:[4,4], pointRadius:0, pointHoverRadius:0 },
+        ]
+      },
+      options:{
+        responsive:true,
+        maintainAspectRatio:false,
+        interaction:{mode:'index', intersect:false},
+        plugins:{
+          legend:{ position:'top', labels:{ color:tick, boxWidth:12, filter:i=>!!i.text } },
+          tooltip:{ callbacks:{ label: c2 => {
+            if(c2.raw === null || c2.raw === undefined) return null;
+            if(!c2.dataset.label) return null;
+            return c2.dataset.yAxisID === 'y1'
+              ? c2.dataset.label + ': ' + fmt$(c2.raw)
+              : c2.dataset.label + ': ' + (c2.raw >= 0 ? '+' : '') + c2.raw.toFixed(1) + '%';
+          } } }
+        },
+        scales:{
+          x:{ ticks:{ color:tick, maxRotation:0, autoSkip:true, maxTicksLimit:12 }, grid:{ display:false } },
+          y:{ position:'left',  ticks:{ color:tick, callback:v=>v+'%' }, grid:{ color:grid },
+              title:{ display:true, text:'Rate of change', color:tick, font:{size:11} } },
+          y1:{ position:'right', ticks:{ color:tick, callback:v=>fmtM$(v) }, grid:{ drawOnChartArea:false },
+              beginAtZero:true,
+              title:{ display:true, text:'3-mo moving total', color:tick, font:{size:11} } },
+        }
+      }
+    });
+    window._itrCharts.push(c);
+  };
+
+  drawChart('closed', closed, dk ? 'rgba(5,150,105,.30)'  : 'rgba(5,150,105,.20)');
+  drawChart('uc',     uc,     dk ? 'rgba(79,70,229,.30)'  : 'rgba(79,70,229,.20)');
+}
+window.viewITR = viewITR;
+
+
 function viewDashboard(){
   if(activeChart){ activeChart.destroy(); activeChart=null; }
   const allVisibleDeals = visibleDeals();
@@ -26201,8 +26570,8 @@ window._execManualMergeContacts = async () => {
 };
 
 // ── CRM Outreach Imports (updated nightly by daily-crm-outreach-sync task) ──
-const _CRM_OUTREACH_SYNC_DATE = '2026-09-03';
-const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-09-02_0","emailDate":"2026-09-02","emailSubject":"Fwd: mahtog BS updated.","attachmentNames":["Rocwell Mathog - Balance Sheet - 09.01.26.pdf"],"recipientEmail":"rwhite@purvisgray.com","recipientName":"Robert E. White","recipientFirstName":"Robert","recipientLastName":"White","companyName":"Purvis Gray","propertyHint":"Mathog","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-09-02_1","emailDate":"2026-09-02","emailSubject":"Re: mahtog BS updated.","attachmentNames":["Rocwell Mathog - Balance Sheet - 09.01.26.pdf","Fremont, Westben Seller - Membership Interest Purchase and Assignment Agreement.docx","RI and Gray Ivey Sellers - RW Mathog Membership Interest Purchase and Assignment.docx"],"recipientEmail":"rg@rocwelldev.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Rocwelldev","propertyHint":"Mathog Fremont","matchedDealId":null,"imported":false,"skipped":false}];
+const _CRM_OUTREACH_SYNC_DATE = '2026-09-09';
+const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-09-08_0","emailDate":"2026-09-08","emailSubject":"DRB Offer","attachmentNames":["2026.09.04 - Granite Peaks LOI - DRB Homes.pdf"],"recipientEmail":"s.sebring.sierra@gmail.com","recipientName":"Sebring Sierra","recipientFirstName":"Sebring","recipientLastName":"Sierra","companyName":"","propertyHint":"Granite Peaks","matchedDealId":null,"imported":false,"skipped":false}];
 
 // ── Gmail Sync ───────────────────────────────────────────────────────
 let _GMAIL_SYNC_DATE;  // set at runtime by crmGmailSync; blank = never synced this session
