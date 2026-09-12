@@ -2747,17 +2747,11 @@ function buildPayoutBreakdown(deal){
   const primaryName = deal.advisorName || deal.advisorEmail || 'Primary Advisor';
   const lines = [];
 
-  // Primary advisor payout (using their tier schedule with correct YTD).
-  // Use the SAME close-date book the My Pay / Splits view uses — won AND
-  // contract-active deals — and always include THIS deal. Otherwise the tier
-  // is wrong: this task is built before the deal flips to a won stage, so a
-  // won-only filter drops it, resets YTD to 0, and pays the entry tier (e.g.
-  // 60%) instead of the advisor's true cumulative tier (e.g. 70%).
-  const primaryWonDeals = allDeals.filter(d => d.advisorUid===primaryUid && (isWonStage(d.stage) || isContractActiveStage(d.stage)));
-  if(!primaryWonDeals.some(d => d.id===deal.id)) primaryWonDeals.push(deal);
-  const primaryPayouts  = projectAdvisorPayouts(primaryWonDeals, primaryUid);
-  const thisPayoutEntry = primaryPayouts.find(p => p.dealId===deal.id);
-  const primaryPayout   = thisPayoutEntry?.payout || payoutForGross(gross, 0, getProfile(primaryUid));
+  // Primary advisor payout, off the canonical ladder (PAYLADDER-20260912).
+  // fresh:true because this task is built from the deal object as it is being
+  // flipped to Sold, before that stage write lands in allDeals — the ladder
+  // has to see it as CLOSED to price it off closed-only YTD.
+  const primaryPayout   = _dealPayout(deal, primaryUid, {fresh:true});
   const primaryProfile  = getProfile(primaryUid);
   lines.push(primaryName+': '+fmt(primaryPayout)+' (gross commission: '+fmt(gross)+', schedule: '+(primaryProfile.behavior||'tiered')+')');
 
@@ -2765,11 +2759,7 @@ function buildPayoutBreakdown(deal){
   const coAdvisors = deal.coAdvisors || [];
   coAdvisors.forEach(ca => {
     const caGross    = ca.split>0 ? gross*(ca.split/100) : gross*0.5;
-    const caWon      = allDeals.filter(d => d.advisorUid===ca.uid && (isWonStage(d.stage) || isContractActiveStage(d.stage)));
-    if(!caWon.some(d => d.id===deal.id)) caWon.push(deal);
-    const caPayouts  = projectAdvisorPayouts(caWon, ca.uid);
-    const caEntry    = caPayouts.find(p => p.dealId===deal.id);
-    const caPayout   = caEntry?.payout || payoutForGross(caGross, 0, getProfile(ca.uid));
+    const caPayout   = _dealPayout(deal, ca.uid, {fresh:true});
     const caProfile  = getProfile(ca.uid);
     lines.push((ca.name||ca.email||'Co-Advisor')+': '+fmt(caPayout)+' ('+( ca.split||50)+'% of deal, gross share: '+fmt(caGross)+', schedule: '+(caProfile.behavior||'tiered')+')');
   });
@@ -2778,7 +2768,7 @@ function buildPayoutBreakdown(deal){
   if(coAdvisors.length===0 && (deal.coAdvisorSplit||0)>0 && deal.coAdvisorUid){
     const caGross   = gross*(deal.coAdvisorSplit/100);
     const caProfile = getProfile(deal.coAdvisorUid);
-    const caPayout  = payoutForGross(caGross, 0, caProfile);
+    const caPayout  = _dealPayout(deal, deal.coAdvisorUid, {fresh:true});
     const caName    = allProfiles[deal.coAdvisorUid]?.name || deal.coAdvisorEmail || deal.coAdvisorUid;
     lines.push(caName+': '+fmt(caPayout)+' ('+deal.coAdvisorSplit+'% split, gross share: '+fmt(caGross)+', schedule: '+(caProfile.behavior||'tiered')+')');
   }
@@ -2790,9 +2780,9 @@ function buildPayoutBreakdown(deal){
       if(mUid===advisorUid) return;
       const ms = (mProfile.mentorships||[]).find(m=>m.menteeUid===advisorUid && (!m.expiresDate||m.expiresDate>=new Date().toISOString().slice(0,10)));
       if(!ms) return;
-      // Mentor earns rate% of the mentee's payout
-      const menteeEntry = advisorUid===primaryUid ? thisPayoutEntry : null;
-      const menteePayout = menteeEntry?.payout || payoutForGross(advisorUid===primaryUid?gross:gross*((coAdvisors.find(c=>c.uid===advisorUid)?.split||50)/100), 0, getProfile(advisorUid));
+      // Mentor earns rate% of the mentee's payout — same ladder number the
+      // mentee's own line above quotes, never a re-derived entry-tier guess.
+      const menteePayout = _dealPayout(deal, advisorUid, {fresh:true});
       const mentorShare  = menteePayout * (ms.rate/100);
       const menteeName   = advisorUid===primaryUid ? primaryName : (allProfiles[advisorUid]?.name||advisorUid);
       lines.push((mProfile.name||mUid)+' (Mentor of '+menteeName+'): '+fmt(mentorShare)+' ('+ms.rate+'% of mentee payout '+fmt(menteePayout)+')');
@@ -9519,21 +9509,98 @@ function getAdvisorShare(deal, uid){
   return full*0.5; // fallback: assume 50/50
 }
 
+/* ═══════════════════════════════════════════════════════════════════════
+   PAY LADDER — marker: PAYLADDER-20260912  (elc-v486)
+
+   A CLOSED deal's split tier is set by CLOSED deals only.
+
+   The payout book deliberately holds won AND contract-active deals in one
+   close-date-ordered ladder, so the pipeline forecast shows the marginal
+   rate each projected deal would really earn. But that ladder must never
+   price a deal that has already funded. Before this change an unclosed
+   deal sharing (or preceding) a closed deal's close date stacked into YTD
+   ahead of it and could push it over a tier line it had not reached:
+
+     Lewis Landfill, closed 2026-08-31, advisor tiers 60% → $400K → 70%.
+     Abbey Crossing — same close date, stage "Closing", NOT sold, advisor
+     share $192,000 — sorted first and lifted YTD from $339,635 to
+     $531,635, so the whole deal paid 70% ($48,682) instead of the blended
+     $60,365 @ 60% + $9,180 @ 70% = $42,645.32.
+
+   So the walk carries TWO accumulators:
+     ytdClosed — advanced by won deals only; prices won deals.
+     ytdAll    — advanced by every deal; prices open deals, which still
+                 stack on everything ahead of them so forecasts are right.
+   A won deal advances both, so ytdAll >= ytdClosed always and an open deal
+   can never lower a later projection's rate. Money already in the bank is
+   the only thing that can change what a funded deal paid.
+
+   The sort is fully ordered now, too. The old comparator returned -1 or 1
+   and never 0, so deals sharing a close date landed in arbitrary order and
+   the tier between them was a coin flip. Ties now break won-before-open,
+   then by deal id, so the same book produces the same numbers on every
+   render and every machine.
+   ═══════════════════════════════════════════════════════════════════════ */
+function _payLadderKey(d){
+  return (d.closeDate||'9999-99-99') + '\u0000' + (isWonStage(d.stage)?'0':'1') + '\u0000' + String(d.id||'');
+}
 function projectAdvisorPayouts(deals, uid){
   const profile=getProfile(uid);
-  const sorted=[...deals].sort((a,b)=>(a.closeDate||'9999')<(b.closeDate||'9999')?-1:1);
-  let ytd=0, ytdYear=new Date().getFullYear();
+  const sorted=[...deals].sort((a,b)=>{
+    const ka=_payLadderKey(a), kb=_payLadderKey(b);
+    return ka<kb?-1:ka>kb?1:0;
+  });
+  const thisYear=new Date().getFullYear();
+  let ytdClosed=0, ytdAll=0, ytdYear=thisYear;
   const results=[];
   for(const d of sorted){
     const gross = getAdvisorShare(d, uid); // advisor's share of gross (respects co-advisor splits)
     if(gross<=0) continue;
-    const cYear=d.closeDate?new Date(d.closeDate+'T00:00:00').getFullYear():new Date().getFullYear();
-    if(cYear!==ytdYear){ ytd=0; ytdYear=cYear; }
-    const payout=payoutForGross(gross,ytd,profile);
-    results.push({dealId:d.id,address:d.propertyAddress,gross,payout,ytdBefore:ytd,closeDate:d.closeDate,stage:d.stage});
-    ytd+=gross;
+    const cYear=d.closeDate?new Date(d.closeDate+'T00:00:00').getFullYear():thisYear;
+    if(cYear!==ytdYear){ ytdClosed=0; ytdAll=0; ytdYear=cYear; }
+    const closed=isWonStage(d.stage);
+    const ytdBefore=closed?ytdClosed:ytdAll;
+    const payout=payoutForGross(gross,ytdBefore,profile);
+    results.push({dealId:d.id,address:d.propertyAddress,gross,payout,ytdBefore,closed,
+                  ytdClosedBefore:ytdClosed,ytdAllBefore:ytdAll,closeDate:d.closeDate,stage:d.stage});
+    if(closed) ytdClosed+=gross;
+    ytdAll+=gross;
   }
   return results;
+}
+
+/* One canonical ladder per advisor, memoized for the current synchronous
+   render pass only (a microtask clears it), so a view that prices hundreds
+   of deals doesn't rebuild the same book hundreds of times and no stale
+   book can survive a Firestore update. */
+let _payBookCache=null;
+function _advisorPayBook(uid){
+  if(!_payBookCache){ _payBookCache=new Map(); Promise.resolve().then(()=>{ _payBookCache=null; }); }
+  let m=_payBookCache.get(uid);
+  if(m) return m;
+  const book=(typeof allDeals!=='undefined'?allDeals:[]).filter(d=>isDealAdvisor(d,uid)&&(isWonStage(d.stage)||isContractActiveStage(d.stage)));
+  m=new Map(projectAdvisorPayouts(book,uid).map(p=>[p.dealId,p]));
+  _payBookCache.set(uid,m);
+  return m;
+}
+
+/* This advisor's payout on ONE deal, always read off the canonical ladder so
+   every surface — My Pay, the admin forecast, the Sold pay task, company net
+   revenue — quotes the same number for the same deal.
+   fresh:true rebuilds the ladder around the `deal` object passed in, for
+   callers holding a newer copy than allDeals has (the drag-to-Sold flow
+   builds the pay task before the stage write lands). */
+function _dealPayout(deal, uid, opts){
+  if(!deal||!uid) return 0;
+  if(!(opts&&opts.fresh)){
+    const cached=_advisorPayBook(uid).get(deal.id);
+    if(cached) return cached.payout;
+  }
+  const book=(typeof allDeals!=='undefined'?allDeals:[])
+    .filter(d=>d.id!==deal.id && isDealAdvisor(d,uid) && (isWonStage(d.stage)||isContractActiveStage(d.stage)));
+  book.push(deal);
+  const entry=projectAdvisorPayouts(book,uid).find(p=>p.dealId===deal.id);
+  return entry?entry.payout:0;
 }
 
 // Returns the net revenue to the company for a deal (gross minus all advisor payouts)
@@ -9543,27 +9610,19 @@ function getDealNetToCompany(deal){
   const primaryUid = deal.advisorUid;
   const coAdvisors = deal.coAdvisors||[];
   const todayStr   = new Date().toISOString().slice(0,10);
-  const thisYear   = new Date().getFullYear();
   let totalPayout  = 0;
-  // Helper: advisor YTD gross from closed deals this year
-  const advisorYTD = uid => allDeals
-    .filter(d=>isWonStage(d.stage)&&d.advisorUid===uid&&d.closeDate&&new Date(d.closeDate+'T00:00:00').getFullYear()===thisYear)
-    .reduce((s,d)=>s+getAdvisorShare(d,uid),0);
+  // PAYLADDER-20260912: every advisor's payout on this deal is read off the
+  // one canonical ladder. The old local advisorYTD() summed ALL of the
+  // advisor's closed deals for the year — including THIS one when it was
+  // already sold, so a deal helped set its own tier — and ignored close-date
+  // order entirely, so a deal closing in December priced one closing in March.
   // Primary advisor
-  if(primaryUid){
-    const share = getAdvisorShare(deal,primaryUid);
-    totalPayout += payoutForGross(share, advisorYTD(primaryUid), getProfile(primaryUid));
-  }
+  if(primaryUid) totalPayout += _dealPayout(deal, primaryUid);
   // Co-advisors (new format)
-  coAdvisors.forEach(ca=>{
-    if(!ca.uid) return;
-    const share = getAdvisorShare(deal,ca.uid);
-    totalPayout += payoutForGross(share, advisorYTD(ca.uid), getProfile(ca.uid));
-  });
+  coAdvisors.forEach(ca=>{ if(ca.uid) totalPayout += _dealPayout(deal, ca.uid); });
   // Legacy single co-advisor
   if(coAdvisors.length===0 && deal.coAdvisorUid && (deal.coAdvisorSplit||0)>0){
-    const share = getAdvisorShare(deal,deal.coAdvisorUid);
-    totalPayout += payoutForGross(share, advisorYTD(deal.coAdvisorUid), getProfile(deal.coAdvisorUid));
+    totalPayout += _dealPayout(deal, deal.coAdvisorUid);
   }
   // Mentor overrides
   const allAdvisorUids=[primaryUid,...coAdvisors.map(c=>c.uid)].filter(Boolean);
@@ -9572,8 +9631,7 @@ function getDealNetToCompany(deal){
       if(mUid===advisorUid) return;
       const ms=(mProfile.mentorships||[]).find(m=>m.menteeUid===advisorUid&&(!m.expiresDate||m.expiresDate>=todayStr));
       if(!ms) return;
-      const menteePayout=payoutForGross(getAdvisorShare(deal,advisorUid),advisorYTD(advisorUid),getProfile(advisorUid));
-      totalPayout += menteePayout*(ms.rate/100);
+      totalPayout += _dealPayout(deal, advisorUid)*(ms.rate/100);
     });
   });
   return Math.max(0, gross-totalPayout);
@@ -26713,8 +26771,8 @@ window._execManualMergeContacts = async () => {
 };
 
 // ── CRM Outreach Imports (updated nightly by daily-crm-outreach-sync task) ──
-const _CRM_OUTREACH_SYNC_DATE = '2026-09-09';
-const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-09-08_0","emailDate":"2026-09-08","emailSubject":"DRB Offer","attachmentNames":["2026.09.04 - Granite Peaks LOI - DRB Homes.pdf"],"recipientEmail":"s.sebring.sierra@gmail.com","recipientName":"Sebring Sierra","recipientFirstName":"Sebring","recipientLastName":"Sierra","companyName":"","propertyHint":"Granite Peaks","matchedDealId":null,"imported":false,"skipped":false}];
+const _CRM_OUTREACH_SYNC_DATE = '2026-09-10';
+const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-09-10_0","emailDate":"2026-09-10","emailSubject":"Granite Peaks Water","attachmentNames":["Pokorny Annexation Packet - San Antonio.pdf","Ordinance 07-2021 Signed.pdf"],"recipientEmail":"jrossi@mihomes.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Mihomes","propertyHint":"Granite Peaks","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-09-10_1","emailDate":"2026-09-10","emailSubject":"Fwd: Griffin/Weightman LOI","attachmentNames":["2026.09.07 Weightman LOI.pdf"],"recipientEmail":"seth.weightman@yahoo.com","recipientName":"Seth Weightman","recipientFirstName":"Seth","recipientLastName":"Weightman","companyName":"","propertyHint":"Weightman","matchedDealId":null,"imported":false,"skipped":false}];
 
 // ── Gmail Sync ───────────────────────────────────────────────────────
 let _GMAIL_SYNC_DATE;  // set at runtime by crmGmailSync; blank = never synced this session
