@@ -8716,15 +8716,18 @@ const FB = {
             const _fellOutStale = _taFellOutNeedsFix(_ta);   // elc-v426
             const _filingStale  = _taFilingNeedsFix(_ta);    // elc-v440
             const _richStale    = _taRichOwnedNeedsFix(_ta); // elc-v441
+            const _pipeStale    = _taPipelineNeedsFix(_ta);  // elc-v487
             TASK_AUTOMATIONS = _mergeTaskAutomations(_ta);
             try{ localStorage.setItem(K('taskAutomations'), JSON.stringify(TASK_AUTOMATIONS)); }catch(e){}
             // One-time repair: a set saved with the same activity listed twice
             // created duplicate tasks (e.g. "Cancel any pre set emails" ×2).
             // The merge above already collapsed them locally — push the cleaned
             // config back once so every teammate's copy is fixed too (elc-v423).
-            if((_hadDupes || _fellOutStale || _filingStale || _richStale) && currentUser?.isAdmin && !window._taDupeRepairDone){
+            if((_hadDupes || _fellOutStale || _filingStale || _richStale || _pipeStale) && currentUser?.isAdmin && !window._taDupeRepairDone){
               window._taDupeRepairDone = true;
-              const _msg = _richStale
+              const _msg = _pipeStale
+                ? '⚡ Dropped the "add to / move back in the pipeline" steps — the stage move already does that'
+                : _richStale
                 ? '⚡ Sold checklist cleaned — the wire, payout, approve, thank-you, gift, sign and press-release steps come from their own automations now, not twice'
                 : _filingStale && !_hadDupes && !_fellOutStale
                 ? '⚡ Dropped the manual "File LOI in Google Drive" step — the LOI files itself to the Offers folder'
@@ -8793,6 +8796,9 @@ const FB = {
       if(isAdmin && !window._taDupeSweepDone){
         window._taDupeSweepDone = true;
         setTimeout(()=>{ try{ window._taCleanupDuplicateTasks && window._taCleanupDuplicateTasks(); }catch(e){ console.warn('[taDupeSweep]',e); } }, 6000);
+        // Same idea for the retired pipeline rows — clear the ones already on the
+        // board, staggered so the two undo toasts don't collide (elc-v487).
+        setTimeout(()=>{ try{ window._taCleanupPipelineTasks && window._taCleanupPipelineTasks(); }catch(e){ console.warn('[taPipelineSweep]',e); } }, 20000);
       }
     }));
     if(!isAdmin){
@@ -26771,8 +26777,8 @@ window._execManualMergeContacts = async () => {
 };
 
 // ── CRM Outreach Imports (updated nightly by daily-crm-outreach-sync task) ──
-const _CRM_OUTREACH_SYNC_DATE = '2026-09-10';
-const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-09-10_0","emailDate":"2026-09-10","emailSubject":"Granite Peaks Water","attachmentNames":["Pokorny Annexation Packet - San Antonio.pdf","Ordinance 07-2021 Signed.pdf"],"recipientEmail":"jrossi@mihomes.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Mihomes","propertyHint":"Granite Peaks","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-09-10_1","emailDate":"2026-09-10","emailSubject":"Fwd: Griffin/Weightman LOI","attachmentNames":["2026.09.07 Weightman LOI.pdf"],"recipientEmail":"seth.weightman@yahoo.com","recipientName":"Seth Weightman","recipientFirstName":"Seth","recipientLastName":"Weightman","companyName":"","propertyHint":"Weightman","matchedDealId":null,"imported":false,"skipped":false}];
+const _CRM_OUTREACH_SYNC_DATE = '2026-09-13';
+const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-09-12_0","emailDate":"2026-09-12","emailSubject":"Granite Peak Updated offers","attachmentNames":["2026.09.11 Darby Rd SFD LOI.pdf","2026.09.11 DRB Homes - Granite Peaks Revised LOI.pdf","Granite Peaks - LOI Summary - 2026.09.12.pdf","Granite Peaks - Pulte LOI v2.docx.pdf","Psh - LOI - Granite Peaks.pdf"],"recipientEmail":"s.sebring.sierra@gmail.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"","propertyHint":"Granite Peaks","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-09-12_1","emailDate":"2026-09-12","emailSubject":"Fwd: Completed: Complete with Docusign: RWD Mathog Distribution and Assignment Agreement and RWD Mathog Distrib...","attachmentNames":["RWD Mathog Distribution and Assignment Agreement and RWD Mathog Distribution and Assignment Agreemen.pdf","Fremont, Westben Seller -Membership Interest Purchase and Assignment Agreement and RW Fremont, Westb.pdf","RI and Gray Ivey Sellers - RW Mathog Membership Interest Purchase and Assignment and RI and Gray Ive.pdf","Fremont Distribution and Assignment Agreement.docx.pdf"],"recipientEmail":"jillian@rocwellinvestments.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Rocwellinvestments","propertyHint":"Mathog","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-09-12_2","emailDate":"2026-09-12","emailSubject":"Fwd: Completed: Complete with Docusign: RWD Mathog Distribution and Assignment Agreement and RWD Mathog Distrib...","attachmentNames":["RWD Mathog Distribution and Assignment Agreement and RWD Mathog Distribution and Assignment Agreemen.pdf","Fremont, Westben Seller -Membership Interest Purchase and Assignment Agreement and RW Fremont, Westb.pdf","RI and Gray Ivey Sellers - RW Mathog Membership Interest Purchase and Assignment and RI and Gray Ive.pdf","Fremont Distribution and Assignment Agreement.docx.pdf"],"recipientEmail":"justin@rocwell.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Rocwell","propertyHint":"Fremont","matchedDealId":null,"imported":false,"skipped":false}];
 
 // ── Gmail Sync ───────────────────────────────────────────────────────
 let _GMAIL_SYNC_DATE;  // set at runtime by crmGmailSync; blank = never synced this session
@@ -28672,7 +28678,6 @@ const TASK_AUTOMATIONS_DEFAULT = {
     ['🏢 Make ACTIVE again on Buildout', _TA.NICK, 1],
     ['🗂️ Set the Daylite project back to active listing', _TA.NICK, 1],
     ['📰 Mark as ACTIVE again on the Eshenbaugh Report', _TA.KRISSY, 2],
-    ['📈 Move back to active listing in the pipeline', _TA.KELLIE, 1],
     ['📉 Remove from Excel projected revenue', _TA.MICHAEL, 1],
     ['📣 Begin remarketing', _TA.MKTG, 3],
     ['📋 Create protection list', _TA.ADV, 3],
@@ -28769,7 +28774,6 @@ const TASK_AUTOMATIONS_DEFAULT = {
     ['Create list of critical dates', _TA.KELLIE, 2],
     ['Ask broker for a copy of the contract', _TA.KELLIE, 2],
     ['Remind advisor to confirm title was ordered / delivered', _TA.KELLIE, 2],
-    ['Add to pipeline as under contract', _TA.KELLIE, 2],
     ['Mark "In Progress" in Daylite', _TA.NICK, 2],
     ['Add critical dates to calendar', _TA.KELLIE, 2],
     ['Add to Excel projected revenue sheet', _TA.MICHAEL, 3],
@@ -28788,7 +28792,6 @@ const TASK_AUTOMATIONS_DEFAULT = {
     ['Mark as "In Progress" in Daylite project', _TA.NICK, 1],
     ['Add to Excel projected revenue', _TA.MICHAEL, 1],
     ['Check LoopNet & confirm not a Premium; switch if needed', _TA.KRISSY, 1],
-    ['Add to pipeline as under contract', _TA.KELLIE, 1],
     ['Put copy of contract & critical dates on Box.com', _TA.KELLIE, 2],
     ['Mark as under contract on Eshenbaugh Report', _TA.KRISSY, 2],
   ]},
@@ -28835,6 +28838,11 @@ function _mergeTaskAutomations(stored){
   for(const k of Object.keys(base)){
     if(Array.isArray(base[k].tasks)) base[k].tasks = _taFixFilingRows(base[k].tasks).rows;
   }
+  // This board IS the pipeline — no set asks anyone to add a deal to it or take
+  // one back off (PIPEROW-20260914, elc-v487).
+  for(const k of Object.keys(base)){
+    if(Array.isArray(base[k].tasks)) base[k].tasks = _taFixPipelineRows(base[k].tasks).rows;
+  }
   // Never list an activity a RICH coded rule already creates — that is what put
   // two of every closing task on Michael's board (DUPEFIX-20260828, elc-v441).
   for(const k of Object.keys(base)){
@@ -28861,7 +28869,6 @@ const _TA_FELLOUT_REACTIVATE = [
   { test:/buildout/i,             row:['🏢 Make ACTIVE again on Buildout', _TA.NICK, 1] },
   { test:/daylite/i,              row:['🗂️ Set the Daylite project back to active listing', _TA.NICK, 1] },
   { test:/eshenbaugh\s*report/i,  row:['📰 Mark as ACTIVE again on the Eshenbaugh Report', _TA.KRISSY, 2] },
-  { test:/pipeline/i,             row:['📈 Move back to active listing in the pipeline', _TA.KELLIE, 1] },
   { test:/projected\s*revenue/i,  row:['📉 Remove from Excel projected revenue', _TA.MICHAEL, 1] },
 ];
 function _taFixFellOutRows(rows){
@@ -28904,6 +28911,28 @@ function _taFixFilingRows(rows){
 function _taFilingNeedsFix(stored){
   if(!stored || typeof stored !== 'object') return false;
   return Object.keys(stored).some(k => _taFixFilingRows(stored[k] && stored[k].tasks).changed);
+}
+/* ── "Add it to / take it off the pipeline" rows (PIPEROW-20260914, elc-v487) ─
+   The dashboard IS the pipeline: a stage move already puts the deal where it
+   belongs, so a task telling Nick to "add to pipeline as under contract" or to
+   "move back to active listing in the pipeline" is asking a person to redo what
+   the drag just did. Ryan called these out on the Cooper Road Tract fall-out.
+   Stripped from EVERY set, default or admin-saved, in both directions (add and
+   remove) — and the fell-out back-fill list no longer carries a pipeline row, so
+   deleting one in the Automations editor now sticks instead of being re-added on
+   the next merge, which is why the earlier deletions kept coming back.
+   Scoped to add/remove/move wording so a future "Review pipeline forecast" or
+   "Pipeline report" row is left alone. */
+const _TA_PIPELINE_ROW_RE = /\b(?:add|added|adding|put|place|post|enter|log|list|move|moved|remove|removed|removal|take|taken|delete|drop|pull|update|updated|mark|change|set)\b[^\n]{0,60}\bpipelines?\b|\bpipelines?\b[^\n]{0,60}\b(?:add|added|adding|entry|remove|removed|removal|update|updated|move|moved|delete|drop)\b/i;
+function _taFixPipelineRows(rows){
+  if(!Array.isArray(rows)) return {rows: rows, changed:false};
+  const out = rows.filter(r => !_TA_PIPELINE_ROW_RE.test(String((r && r[0]) || '')));
+  return {rows: out, changed: out.length !== rows.length};
+}
+// True when a stored config still carries a pipeline add/remove row.
+function _taPipelineNeedsFix(stored){
+  if(!stored || typeof stored !== 'object') return false;
+  return Object.keys(stored).some(k => _taFixPipelineRows(stored[k] && stored[k].tasks).changed);
 }
 /* ── Rows a RICH coded rule already owns (DUPEFIX-20260828, elc-v441) ───
    The ⚡ set and the coded rules BOTH fire on a stage move, and neither could
@@ -29243,6 +29272,41 @@ window._taCleanupDuplicateTasks = async function(opts={}){
     showToast('Duplicate tasks restored','info',3000);
   }, 12000);
   return dupes.length;
+};
+
+/* ── Sweep open "add to / move back in the pipeline" tasks (PIPEROW-20260914,
+   elc-v487) ────────────────────────────────────────────────────────────────────
+   Dropping the rows from the config stops NEW ones; the copies already sitting
+   on Nick's board (Cooper Road Tract and every earlier fall-out / under-contract
+   move) have to be cleared too. Only automation-created tasks are touched — a
+   task someone typed by hand is left alone even if it says the same thing — and
+   the whole sweep is undoable from the toast. */
+window._taCleanupPipelineTasks = async function(opts={}){
+  const tasks = (typeof allTasks!=='undefined' ? allTasks : []);
+  const isOpen = t => t && t.status!=='complete' && t.status!=='completed' && t.status!=='cancelled';
+  const hits = tasks.filter(t =>
+    isOpen(t) && (t.auto === true || !!t.autoKey) &&
+    _TA_PIPELINE_ROW_RE.test(String(t.taskBase || t.title || '')));
+  if(!hits.length){ if(opts.verbose) showToast('No pipeline tasks left to clear','info',3000); return 0; }
+  const snapshot = hits.map(t=>({id:t.id, status:t.status||'pending'}));
+  for(const t of hits){
+    try{
+      await Store.updateTask(t.id, {status:'cancelled', cancelledAt:Date.now(), cancelledReason:'Pipeline step retired', updatedAt:Date.now()});
+      const l = tasks.find(x=>x.id===t.id); if(l){ l.status='cancelled'; l.cancelledAt=Date.now(); }
+    }catch(e){ console.warn('[taCleanupPipelineTasks]',e); }
+  }
+  try{ if(typeof viewTasks==='function' && document.getElementById('tasks-view')) viewTasks(); }catch(e){}
+  showUndoToast(`🧹 Cleared ${hits.length} pipeline task${hits.length===1?'':'s'} — the stage move already does that`, async ()=>{
+    for(const s of snapshot){
+      try{
+        await Store.updateTask(s.id, {status:s.status, cancelledAt:null, cancelledReason:null, updatedAt:Date.now()});
+        const l = tasks.find(x=>x.id===s.id); if(l){ l.status=s.status; l.cancelledAt=null; }
+      }catch(e){ console.warn('[taCleanupPipelineTasks undo]',e); }
+    }
+    try{ if(typeof viewTasks==='function' && document.getElementById('tasks-view')) viewTasks(); }catch(e){}
+    showToast('Pipeline tasks restored','info',3000);
+  }, 12000);
+  return hits.length;
 };
 
 // Called from the "Task Automation…" dropdown in the deal edit modal header.
