@@ -2809,10 +2809,14 @@ window.approveCommissionPayment = async function(dealId){
 // Admin bulk utility: mark ALL closed-won deals that are still "Pending" as paid
 window.markAllCommissionsPaid = async function(){
   const pending = allDeals.filter(d => isWonStage(d.stage) && !d.commissionPaid);
-  if(pending.length === 0){ showToast('No pending commissions found — all already paid!','info'); return; }
+  // OTHERREV-20260915: logged non-deal payments carry the same pending/paid
+  // badge, so "Mark All Pending → Paid" has to clear them too — otherwise the
+  // button's label is a lie the moment an advisor logs a BOV fee.
+  const pendingMisc = ((typeof allOtherRevenue!=='undefined'?allOtherRevenue:[])||[]).filter(r=>r && !r.commissionPaid);
+  if(pending.length === 0 && pendingMisc.length === 0){ showToast('No pending commissions found — all already paid!','info'); return; }
   const now = Date.now();
   const byUid = currentUser?.uid || 'admin-bulk';
-  showToast(`Marking ${pending.length} deal(s) as paid…`, 'info', 10000);
+  showToast(`Marking ${pending.length + pendingMisc.length} payout(s) as paid…`, 'info', 10000);
   let done = 0, errs = 0;
   for(const deal of pending){
     try{
@@ -2822,6 +2826,18 @@ window.markAllCommissionsPaid = async function(){
       done++;
     } catch(e){
       console.error('[markAllCommissionsPaid] failed on', deal.id, e);
+      errs++;
+    }
+  }
+  for(const row of pendingMisc){
+    try{
+      const {doc:_d, updateDoc:_u} = _fbFns || {};
+      if(!_u) throw new Error('offline');
+      await _u(_d(_fbDb,'otherRevenue',row.id), {commissionPaid:true, paidAt:now, commissionPaidBy:byUid});
+      row.commissionPaid = true;
+      done++;
+    } catch(e){
+      console.error('[markAllCommissionsPaid] failed on otherRevenue', row.id, e);
       errs++;
     }
   }
@@ -6214,6 +6230,14 @@ let allTasks = [];
 let allHeadlines = [];   // [{id,title,body,createdAt,createdBy,pinned}]         // [{id, title, description, assignedTo, assignedToName, dueDate, status, dealId, dealAddress, createdBy, createdAt}]
 let allHrDocs = [];      // HR knowledge documents uploaded by admins: [{id,name,text,chars,createdAt,createdByName}]
 let allDocuments = [];     // [{id, type, office, url, name, uploadedAt}]
+/* OTHERREV-20260915 — non-deal payments received (BOV fee, consulting fee, a
+   forfeited deposit kept by the firm, a referral fee in). Revenue an advisor
+   generated that never had a deal card, logged from My Pay and priced on the
+   same tiered split ladder as commissions.
+   [{id, advisorUid, advisorName, amount, category, description, dateReceived,
+     splitPctOverride, propertyAddress, fileUrl, fileName, storagePath,
+     commissionPaid, createdAt, createdBy, createdByName}] */
+let allOtherRevenue = [];
 let allProposals = [];     // Video Proposals: [{id, projectName, acreage, advisorUid, coAdvisorUids, segments, status, ...}]
 let _vpLibrary = [];       // Shared video library: [{id, title, description, url, source, storagePath, types[], autoTypes[], createdByUid, createdByName, created, updated}]
 let _vpIntroSettings = null; // Company intro override: {introTitle, introUrl} from proposals/__introSettings (public-readable so the client viewer can use it)
@@ -8673,6 +8697,19 @@ const FB = {
       allDocuments = snap.docs.map(d=>({...d.data(),id:d.id}));
       onUpdate('documents');
     }));
+    // OTHERREV-20260915 — manually logged non-deal payments. Admins/office
+    // managers read the whole book (company rollups need it); an advisor reads
+    // only their own rows, mirroring how the deals query is scoped. A rules
+    // denial leaves the list empty rather than breaking the pay views.
+    {
+      const _orQ = isAdmin
+        ? collection(_fbDb,'otherRevenue')
+        : query(collection(_fbDb,'otherRevenue'), where('advisorUid','==',uid));
+      _fbUnsubs.push(onSnapshot(_orQ,
+        snap=>{ allOtherRevenue = snap.docs.map(d=>({...d.data(),id:d.id})); onUpdate('otherRevenue'); },
+        err=>{ console.warn('[otherRevenue] read denied — non-deal payments hidden', err); allOtherRevenue=[]; }
+      ));
+    }
     // EOS real-time sync (also handles app settings: stages, officeManagers, pendingProfiles)
     _fbUnsubs.push(onSnapshot(collection(_fbDb,'eos'), snap=>{
       snap.docs.forEach(d=>{
@@ -9224,6 +9261,12 @@ function computeAdvisorKPIs(advisorUid){
 
   // Include deals where this advisor is primary OR listed as co-advisor
   const advDeals  = allDeals.filter(d => isDealAdvisor(d, advisorUid));
+  // OTHERREV-20260915: logged non-deal payments (BOV, consulting, forfeited
+  // deposit) count as revenue this advisor generated, so they belong in the
+  // closed-commission and net-pay numbers on the leaderboard. They are kept
+  // OUT of advDeals on purpose — deal counts, LOI counts, listing volume,
+  // proposal win rate and the quarterly volume goal are about deals.
+  const advMisc   = _miscRevItems(advisorUid);
 
   // Revenue share for this advisor on a deal (prorated — respects co-advisor splits
   // for BOTH the primary and co-advisors, so a 50/50 deal gives each broker 50% of gross)
@@ -9280,9 +9323,11 @@ function computeAdvisorKPIs(advisorUid){
   const qVol  = qDeals.reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||0), 0);
   const qPct  = Math.min(Math.round(qVol/Q_GOAL*100),100);
 
-  // 6. Closed Won this year + next year
+  // 6. Closed Won this year + next year (+ logged non-deal payments)
   const closedCYNY = advDeals.filter(d=>isWonStage(d.stage) && inCYNY(d));
-  const closedComm = closedCYNY.reduce((s,d)=>s+advRevShare(d), 0);
+  const miscCYNY   = advMisc.filter(d=>inCYNY(d));
+  const miscComm   = miscCYNY.reduce((s,d)=>s+advRevShare(d), 0);
+  const closedComm = closedCYNY.reduce((s,d)=>s+advRevShare(d), 0) + miscComm;
 
   // 7. Projected revenue = UC commissions (CY+NY) — what will close
   const projectedRevenue = ucComm;
@@ -9302,16 +9347,18 @@ function computeAdvisorKPIs(advisorUid){
     return total;
   };
   // CY net pay = realized net pay on deals already closed/won this calendar year
-  const cyNetPay   = netPayForDeals(advDeals.filter(d=>isWonStage(d.stage) && dealYear(d)===thisYear));
+  const cyNetPay   = netPayForDeals([...advDeals.filter(d=>isWonStage(d.stage) && dealYear(d)===thisYear),
+                                     ...advMisc.filter(d=>dealYear(d)===thisYear)]);
   // Projected CY net pay = net pay on the full current-year book (closed this year + under-contract
   // pipeline expected this year), with tiers stacked across both
-  const projNetPay = netPayForDeals(advDeals.filter(d=>!isLostStage(d.stage||'')
-      && (isWonStage(d.stage)||isUCStage(d.stage)) && dealYear(d)===thisYear));
+  const projNetPay = netPayForDeals([...advDeals.filter(d=>!isLostStage(d.stage||'')
+      && (isWonStage(d.stage)||isUCStage(d.stage)) && dealYear(d)===thisYear),
+      ...advMisc.filter(d=>dealYear(d)===thisYear)]);
 
   return { ucComm, activeLOI, listingVol, winPct, proposalWon, proposalLost,
            lostListingCount, lostProposalCount, contractCancelledCount,
            qPct, qVol, qLabel:'Q'+qNum+' '+thisYear, closedComm, projectedRevenue,
-           cyNetPay, projNetPay };
+           cyNetPay, projNetPay, miscComm, miscCount:miscCYNY.length };
 }
 
 function getDistinctAdvisors(){
@@ -9566,13 +9613,110 @@ function projectAdvisorPayouts(deals, uid){
     if(cYear!==ytdYear){ ytdClosed=0; ytdAll=0; ytdYear=cYear; }
     const closed=isWonStage(d.stage);
     const ytdBefore=closed?ytdClosed:ytdAll;
-    const payout=payoutForGross(gross,ytdBefore,profile);
+    // OTHERREV-20260915: a logged non-deal payment may carry a per-entry split
+    // override (a BOV fee agreed 50/50, say). An override changes only how THAT
+    // entry is priced — it still advances both accumulators, because it is
+    // revenue the advisor generated and it moves them toward the next tier.
+    const _ovr = (d._payoutOverridePct===0||d._payoutOverridePct) ? Number(d._payoutOverridePct) : null;
+    const payout=(_ovr!=null&&isFinite(_ovr)) ? gross*_ovr/100 : payoutForGross(gross,ytdBefore,profile);
     results.push({dealId:d.id,address:d.propertyAddress,gross,payout,ytdBefore,closed,
-                  ytdClosedBefore:ytdClosed,ytdAllBefore:ytdAll,closeDate:d.closeDate,stage:d.stage});
+                  ytdClosedBefore:ytdClosed,ytdAllBefore:ytdAll,closeDate:d.closeDate,stage:d.stage,
+                  misc:d._misc||null, overridePct:_ovr});
     if(closed) ytdClosed+=gross;
     ytdAll+=gross;
   }
   return results;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   OTHER REVENUE — marker: OTHERREV-20260915
+
+   Money an advisor brought in that never had a deal card: a BOV fee, a
+   consulting engagement, a deposit the buyer forfeited, a referral fee paid
+   to the firm. Logged by hand from the My Pay tab.
+
+   These are NOT written into `deals` — that would put them on the Kanban
+   board, into deal counts, proposal win rates and EOS scoring, none of which
+   they belong in. Instead each row is projected into a deal-SHAPED object
+   only where pay is computed, so it rides the one canonical ladder with
+   everything else: it lands on its date-received, stacks on the advisor's
+   cumulative gross for that year, and is priced at the tier it falls in
+   (unless the entry carries its own split %).
+
+   The synthetic id is 'misc:<docId>' so a payout entry can always be traced
+   back to the row that produced it, and can never collide with a deal id.
+   ═══════════════════════════════════════════════════════════════════════ */
+const OTHER_REV_CATEGORIES = [
+  'BOV / Valuation Fee',
+  'Consulting Fee',
+  'Forfeited Deposit',
+  'Referral Fee Received',
+  'Marketing / Expense Reimbursement',
+  'Other',
+];
+
+/* One advisor's logged payments, shaped like won deals for the ladder.
+   getEffectiveRevenue() falls through to commissionAmount (no price, no %),
+   and getAdvisorShare() returns it whole (no co-advisors), so the gross the
+   ladder sees is exactly the amount received. */
+function _miscRevItems(uid){
+  if(!uid) return [];
+  const rows = (typeof allOtherRevenue!=='undefined' ? allOtherRevenue : []) || [];
+  return rows
+    .filter(r => r && r.advisorUid===uid && (Number(r.amount)||0) > 0)
+    .map(r => ({
+      id:'misc:'+r.id,
+      _misc:r,
+      _payoutOverridePct:(r.splitPctOverride===0||r.splitPctOverride)?Number(r.splitPctOverride):null,
+      advisorUid:uid,
+      propertyAddress:(r.category||'Other')+(r.description?' \u2014 '+r.description:''),
+      commissionAmount:Number(r.amount)||0,
+      stage:'Sold',                 // received money is always closed money
+      closeDate:r.dateReceived||'',
+      commissionPaid:!!r.commissionPaid,
+    }));
+}
+
+/* Every logged payment across the firm, shaped for the ladder — used by the
+   company-wide rollups. */
+function _allMiscRevItems(){
+  const rows = (typeof allOtherRevenue!=='undefined' ? allOtherRevenue : []) || [];
+  const uids = [...new Set(rows.map(r=>r && r.advisorUid).filter(Boolean))];
+  return uids.flatMap(u=>_miscRevItems(u));
+}
+
+/* Net to the company on one logged payment: what came in, less the advisor's
+   cut priced off the canonical ladder. */
+function miscNetToCompany(r){
+  const gross = Number(r && r.amount)||0;
+  if(gross<=0 || !r.advisorUid) return 0;
+  const entry = _advisorPayBook(r.advisorUid).get('misc:'+r.id);
+  return Math.max(0, gross - (entry ? entry.payout : 0));
+}
+
+/* Office scoping for the admin Tampa/Orlando filter — a payment belongs to
+   the office on the advisor's profile. */
+function filterMiscByOffice(rows){
+  if(typeof adminOfficeFilter==='undefined' || adminOfficeFilter==='both') return rows;
+  return rows.filter(r => ((allProfiles||{})[r.advisorUid]?.office||'') === adminOfficeFilter);
+}
+
+/* What one payment of `amount` on `dateReceived` would pay this advisor —
+   used for the live preview in the log-payment dialog, before anything is
+   saved. Runs the real ladder, so the preview is the number they'll get. */
+function previewMiscPayout(uid, amount, dateReceived, overridePct){
+  const amt = Number(amount)||0;
+  if(amt<=0 || !uid) return 0;
+  if(overridePct!=null && overridePct!=='' && isFinite(Number(overridePct))) return amt*Number(overridePct)/100;
+  const tmp = { id:'misc:__preview__', advisorUid:uid, commissionAmount:amt, stage:'Sold',
+                closeDate:dateReceived || new Date().toISOString().slice(0,10) };
+  const book = [
+    ...(typeof allDeals!=='undefined'?allDeals:[]).filter(d=>isDealAdvisor(d,uid)&&(isWonStage(d.stage)||isContractActiveStage(d.stage))),
+    ..._miscRevItems(uid),
+    tmp,
+  ];
+  const e = projectAdvisorPayouts(book, uid).find(p=>p.dealId===tmp.id);
+  return e ? e.payout : 0;
 }
 
 /* One canonical ladder per advisor, memoized for the current synchronous
@@ -9585,6 +9729,9 @@ function _advisorPayBook(uid){
   let m=_payBookCache.get(uid);
   if(m) return m;
   const book=(typeof allDeals!=='undefined'?allDeals:[]).filter(d=>isDealAdvisor(d,uid)&&(isWonStage(d.stage)||isContractActiveStage(d.stage)));
+  // OTHERREV-20260915: logged non-deal payments sit in the SAME book, so they
+  // raise the advisor's cumulative gross and can lift a later deal's tier.
+  book.push(..._miscRevItems(uid));
   m=new Map(projectAdvisorPayouts(book,uid).map(p=>[p.dealId,p]));
   _payBookCache.set(uid,m);
   return m;
@@ -9604,6 +9751,7 @@ function _dealPayout(deal, uid, opts){
   }
   const book=(typeof allDeals!=='undefined'?allDeals:[])
     .filter(d=>d.id!==deal.id && isDealAdvisor(d,uid) && (isWonStage(d.stage)||isContractActiveStage(d.stage)));
+  book.push(..._miscRevItems(uid).filter(m=>m.id!==deal.id));  // OTHERREV-20260915
   book.push(deal);
   const entry=projectAdvisorPayouts(book,uid).find(p=>p.dealId===deal.id);
   return entry?entry.payout:0;
@@ -9661,6 +9809,14 @@ function buildYearlyOutlookNet(deals){
     if(isWonStage(deal.stage)){ y.closed+=net; y.closedVol+=dealVol; }
     else { y.remaining+=net; y.remainingVol+=dealVol; }
   }
+  // OTHERREV-20260915: logged non-deal payments are received money — they land
+  // in the year they were received, on the "closed" side, net of the advisor's cut.
+  filterMiscByOffice((typeof allOtherRevenue!=='undefined'?allOtherRevenue:[])||[]).forEach(r=>{
+    if(!r || !r.dateReceived) return;
+    const y=years.find(y=>y.yr===new Date(r.dateReceived+'T00:00:00').getFullYear());
+    if(!y) return;
+    y.closed += miscNetToCompany(r);
+  });
   years.forEach(y=>{ y.projected=y.closed+y.remaining; y.vol=y.closedVol+y.remainingVol; });
   return years;
 }
@@ -21258,7 +21414,12 @@ function viewDashboard(){
 
   // ── Gross revenue KPIs ───────────────────────────────────────
   const cyClosedDeals = deals.filter(d=>isWonStage(d.stage)&&d.closeDate&&new Date(d.closeDate+'T00:00:00').getFullYear()===thisYear);
-  const cyClosedComm  = cyClosedDeals.reduce((s,d)=>s+getEffectiveRevenue(d),0);
+  // OTHERREV-20260915: non-deal payments received this year add to gross, but
+  // they are not deals — the deal count and volume below stay deal-only.
+  const cyMiscRows    = filterMiscByOffice((typeof allOtherRevenue!=='undefined'?allOtherRevenue:[])||[])
+    .filter(r=>r && r.dateReceived && new Date(r.dateReceived+'T00:00:00').getFullYear()===thisYear);
+  const cyMiscComm    = cyMiscRows.reduce((s,r)=>s+(Number(r.amount)||0),0);
+  const cyClosedComm  = cyClosedDeals.reduce((s,d)=>s+getEffectiveRevenue(d),0) + cyMiscComm;
   const cyClosedVol   = cyClosedDeals.reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||0),0);
 
   const cyOpenDeals   = deals.filter(d=>isContractActiveStage(d.stage)&&d.closeDate&&d.closeDate>=todayStr&&new Date(d.closeDate+'T00:00:00').getFullYear()===thisYear);
@@ -21337,7 +21498,7 @@ function viewDashboard(){
     <!-- ① GROSS REVENUE SNAPSHOT ─────────────────────────── -->
     <p class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">Gross Revenue</p>
     <div class="grid grid-cols-2 md:grid-cols-5 gap-4 mb-8">
-      ${kpiCard(`${thisYear} Closed`,    fmt$(cyClosedComm), `${cyClosedDeals.length} deals · ${fmt$(cyClosedVol)} vol`,         '#059669',          ico.check)}
+      ${kpiCard(`${thisYear} Closed`,    fmt$(cyClosedComm), `${cyClosedDeals.length} deals · ${fmt$(cyClosedVol)} vol${cyMiscComm>0?` · +${fmt$(cyMiscComm)} other`:''}`,         '#059669',          ico.check)}
       ${kpiCard(`${thisYear} Remaining`, fmt$(cyOpenComm),   `${cyOpenDeals.length} deal${cyOpenDeals.length!==1?'s':''} closing before year-end`, '#4F46E5', ico.cal)}
       ${kpiCard(`${thisYear} Total`,     fmt$(totalCYComm),  'Closed + remaining pipeline',                                       'var(--brand-red)', ico.pulse)}
       ${kpiCard(`${nextYear} Projected`, fmt$(nyComm),       `${nyDeals.length} deal${nyDeals.length!==1?'s':''} closing in ${nextYear}`,           'var(--brand-teal)', ico.bar)}
@@ -21688,7 +21849,13 @@ function viewMyCommissions(){
   // together) and then slice it for display. Do NOT re-run
   // projectAdvisorPayouts on a sub-array — that resets the YTD tier accumulator
   // and makes the same deal pay out differently across the two views.
-  const bookDeals   = myDeals.filter(d => isWonStage(d.stage) || isContractActiveStage(d.stage));
+  // OTHERREV-20260915: manually logged non-deal payments (BOV fee, consulting
+  // fee, forfeited deposit, referral in) ride the SAME ladder. They land on
+  // their date-received as closed money, so they raise this advisor's
+  // cumulative gross and can lift a later deal into the next tier — which is
+  // the point: it is revenue they generated.
+  const miscItems   = _miscRevItems(uid);
+  const bookDeals   = [...myDeals.filter(d => isWonStage(d.stage) || isContractActiveStage(d.stage)), ...miscItems];
   const bookPayouts = projectAdvisorPayouts(bookDeals, uid);
   const _payoutById = new Map(bookPayouts.map(p=>[p.dealId, p]));
   const _slice      = list => list.map(d => _payoutById.get(d.id)).filter(Boolean);
@@ -21699,13 +21866,20 @@ function viewMyCommissions(){
 
   // ── Section 1: Closed / Sold ──────────────────────────────────────────────
   const closedDeals   = myDeals.filter(d=>isWonStage(d.stage));
-  const closedPayouts = _slice(closedDeals);
-  const closedTotal   = closedPayouts.reduce((s,p)=>s+p.payout, 0);
-  const closedGross   = closedDeals.reduce((s,d)=>s+getAdvisorShare(d,uid), 0);
-  const ytdClosed     = closedDeals.filter(d=>d.closeDate&&new Date(d.closeDate+'T00:00:00').getFullYear()===thisYear);
-  const ytdPayouts    = _slice(ytdClosed);
+  const closedPayouts = _slice(closedDeals);                    // table = deals only
+  const _inYear       = d => d.closeDate && new Date(d.closeDate+'T00:00:00').getFullYear()===thisYear;
+  // Money totals count deals AND logged non-deal payments; the deal COUNTS
+  // below stay deals-only so "3 deals closed" never means "2 deals and a BOV".
+  const closedItems   = [...closedDeals, ...miscItems];
+  const closedTotal   = _slice(closedItems).reduce((s,p)=>s+p.payout, 0);
+  const closedGross   = closedItems.reduce((s,d)=>s+getAdvisorShare(d,uid), 0);
+  const ytdClosed     = closedDeals.filter(_inYear);             // deal count
+  const ytdMiscItems  = miscItems.filter(_inYear);
+  const ytdPayouts    = _slice([...ytdClosed, ...ytdMiscItems]);
   const ytdPayout     = ytdPayouts.reduce((s,p)=>s+p.payout, 0);
-  const ytdGross      = ytdClosed.reduce((s,d)=>s+getAdvisorShare(d,uid), 0);
+  const ytdGross      = [...ytdClosed, ...ytdMiscItems].reduce((s,d)=>s+getAdvisorShare(d,uid), 0);
+  const ytdMiscPayout = _slice(ytdMiscItems).reduce((s,p)=>s+p.payout, 0);
+  const ytdMiscGross  = ytdMiscItems.reduce((s,d)=>s+getAdvisorShare(d,uid), 0);
 
   // ── Section 2: Pipeline / Projected — Under Contract, Rezoning/Permitting, Closing only ──
   const pipelineDeals   = myDeals.filter(d=>isContractActiveStage(d.stage));
@@ -21829,10 +22003,17 @@ function viewMyCommissions(){
     </div>` : ''}
     <div class="flex items-center justify-between mb-1 flex-wrap gap-2">
       <h2 class="text-xl font-bold text-gray-800">${viewingOther ? (payViewAdvisorName||profile.name||'Advisor')+' — Pay' : 'My Pay'}</h2>
-      ${(currentUser.isAdmin && !viewingOther) ? `<button onclick="markAllCommissionsPaid()"
-        class="text-xs font-semibold px-3 py-1.5 rounded-lg border border-green-300 bg-green-50 text-green-700 hover:bg-green-100 transition-colors">
-        ✅ Mark All Pending → Paid
-      </button>` : ''}
+      <div class="flex items-center gap-2 flex-wrap">
+        ${(currentUser.isAdmin && !viewingOther) ? `<button onclick="markAllCommissionsPaid()"
+          class="text-xs font-semibold px-3 py-1.5 rounded-lg border border-green-300 bg-green-50 text-green-700 hover:bg-green-100 transition-colors">
+          ✅ Mark All Pending → Paid
+        </button>` : ''}
+        <button onclick="openOtherRevenueModal('${uid}')" title="Log a payment received that isn't tied to a deal — BOV fee, consulting fee, forfeited deposit"
+          class="text-xs font-semibold px-3 py-2 rounded-lg text-white transition-colors hover:opacity-90"
+          style="background:var(--brand-red);min-height:36px">
+          ＋ Log Payment Received
+        </button>
+      </div>
     </div>
     <p class="text-sm text-gray-500 mb-5">Commission summary based on ${viewingOther ? 'their' : 'your'} split schedule.</p>
 
@@ -21842,8 +22023,8 @@ function viewMyCommissions(){
       <div class="rounded-2xl p-5 text-white" style="background:var(--brand-black)">
         <div class="text-xs font-bold uppercase tracking-widest mb-2 opacity-70">YTD ${thisYear} — Paid</div>
         <div class="text-3xl font-bold mb-1">${fmt$(ytdPayout)}</div>
-        <div class="text-sm opacity-70">${ytdClosed.length} deal${ytdClosed.length!==1?'s':''} closed &nbsp;·&nbsp; ${fmt$(ytdGross)} gross</div>
-        <div class="mt-3 pt-3 border-t border-white/20 text-xs opacity-60">Commission earned on closed/sold deals this year</div>
+        <div class="text-sm opacity-70">${ytdClosed.length} deal${ytdClosed.length!==1?'s':''} closed${ytdMiscItems.length?` &nbsp;+&nbsp; ${ytdMiscItems.length} other payment${ytdMiscItems.length!==1?'s':''}`:''} &nbsp;·&nbsp; ${fmt$(ytdGross)} gross</div>
+        <div class="mt-3 pt-3 border-t border-white/20 text-xs opacity-60">Earned on closed/sold deals this year${ytdMiscItems.length?` — includes ${fmt$(ytdMiscPayout)} from ${fmt$(ytdMiscGross)} of logged payments`:''}</div>
       </div>
       <!-- CY Total Projected -->
       <div class="rounded-2xl p-5" style="background:var(--brand-red);color:#fff">
@@ -21898,6 +22079,9 @@ function viewMyCommissions(){
       <h4 class="font-semibold text-gray-700 mb-4">Closed Deal Detail</h4>
       ${tableWrap(dealRows(closedPayouts), false)}
     </div>
+
+    <!-- ═══════ OTHER REVENUE — NON-DEAL PAYMENTS (OTHERREV-20260915) ═══════ -->
+    ${_otherRevenueSectionHtml(uid, _slice(miscItems), viewingOther)}
 
     <!-- ═══════ SECTION 2: PROJECTED FUTURE REVENUE ═══════ -->
     <div class="flex items-center gap-3 mb-4">
@@ -21955,6 +22139,342 @@ function viewMyCommissions(){
     </div>
   `);
 }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   LOG PAYMENT RECEIVED — marker: OTHERREV-20260915
+
+   Not every dollar the firm earns arrives through a deal card. A BOV fee, a
+   consulting engagement, a deposit the buyer walked away from, a referral fee
+   paid in — an advisor generated that revenue and is owed a split on it, but
+   there is nothing on the pipeline to hang it off.
+
+   The ＋ Log Payment Received button on My Pay records one of those. The row
+   is priced on the advisor's real split schedule (see _miscRevItems above),
+   counts toward their cumulative gross for the year, and rolls into company
+   net revenue and the Top Producers leaderboard — everything a commission
+   does, minus the deal card.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+const _orEsc = v => String(v==null?'':v)
+  .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+
+/* Who may edit or delete a logged payment: an admin, the advisor it belongs
+   to, or whoever entered it. */
+function _orCanEdit(r){
+  if(!r) return false;
+  return !!(currentUser && (currentUser.isAdmin || r.advisorUid===currentUser.uid || r.createdBy===currentUser.uid));
+}
+
+/* The "Other Revenue" card on My Pay. `payouts` are ladder entries (each with
+   its source row on .misc), so the payout shown here is the same number every
+   other view quotes. */
+function _otherRevenueSectionHtml(uid, payouts, viewingOther){
+  const rows = (payouts||[]).filter(p=>p && p.misc)
+    .sort((a,b)=>String(b.closeDate||'').localeCompare(String(a.closeDate||'')));
+  const grossTotal  = rows.reduce((s,p)=>s+p.gross,0);
+  const payoutTotal = rows.reduce((s,p)=>s+p.payout,0);
+  const who = viewingOther ? 'This advisor has' : 'You have';
+
+  const body = rows.length ? rows.map(p=>{
+    const r = p.misc;
+    const rate = p.gross>0 ? Math.round(p.payout/p.gross*1000)/10 : 0;
+    const rateLbl = p.overridePct!=null
+      ? `<span class="text-amber-600" title="Custom split entered on this payment">${p.overridePct}% override</span>`
+      : `<span class="text-gray-400" title="From your split schedule">${rate}%</span>`;
+    const doc = r.fileUrl
+      ? `<a href="${_orEsc(r.fileUrl)}" target="_blank" rel="noopener" class="text-sky-600 hover:underline" title="${_orEsc(r.fileName||'Attachment')}">📎 View</a>`
+      : `<span class="text-gray-300">—</span>`;
+    const paid = r.commissionPaid
+      ? `<span class="text-xs font-semibold px-1.5 py-0.5 rounded-full bg-green-100 text-green-700">✓ Paid</span>`
+      : `<span class="text-xs font-semibold px-1.5 py-0.5 rounded-full bg-yellow-50 text-yellow-600">Pending</span>`;
+    const actions = _orCanEdit(r) ? `
+      ${currentUser.isAdmin ? `<button onclick="toggleOtherRevenuePaid('${r.id}',this)" title="${r.commissionPaid?'Mark as not yet paid':'Mark this payout as paid'}"
+        class="text-gray-300 hover:text-green-600 px-1">${r.commissionPaid?'↩':'✓'}</button>` : ''}
+      <button onclick="deleteOtherRevenue('${r.id}',this)" title="Delete this payment"
+        class="text-gray-300 hover:text-red-600 px-1">✕</button>` : '';
+    return `<tr class="hover:bg-gray-50 align-top">
+      <td class="py-2.5 whitespace-nowrap text-gray-500 text-xs">${fmtDate(r.dateReceived)}</td>
+      <td class="py-2.5 whitespace-nowrap"><span class="text-xs font-semibold px-2 py-0.5 rounded-full bg-purple-50 text-purple-700">${_orEsc(r.category||'Other')}</span></td>
+      <td class="py-2.5 pr-3">
+        <div class="text-gray-800">${_orEsc(r.description||'')}</div>
+        ${r.propertyAddress?`<div class="text-xs text-gray-400">${_orEsc(r.propertyAddress)}</div>`:''}
+        <div class="text-xs text-gray-400">Logged by ${_orEsc(r.createdByName||r.advisorName||'—')}</div>
+      </td>
+      <td class="py-2.5 text-center">${doc}</td>
+      <td class="py-2.5 text-right text-gray-600 whitespace-nowrap">${fmt$(p.gross)}</td>
+      <td class="py-2.5 text-right whitespace-nowrap"><span class="font-bold text-green-700">${fmt$(p.payout)}</span> <span class="text-xs">${rateLbl}</span></td>
+      <td class="py-2.5 text-center whitespace-nowrap">${paid}</td>
+      <td class="py-2.5 text-right whitespace-nowrap">${actions}</td>
+    </tr>`;
+  }).join('') : `<tr><td colspan="8" class="py-6 text-center text-sm text-gray-400">
+      ${who} no non-deal payments logged yet. Use <span class="font-semibold">＋ Log Payment Received</span> above for a BOV fee, consulting fee, forfeited deposit or referral fee in.
+    </td></tr>`;
+
+  return `
+    <div class="flex items-center gap-3 mb-4">
+      <div class="w-1 h-7 rounded-full bg-purple-400 shrink-0"></div>
+      <div>
+        <h3 class="text-base font-bold text-gray-800">Other Revenue — Non-Deal Payments</h3>
+        <p class="text-xs text-gray-400">BOVs, consulting, forfeited deposits, referral fees in. Counts toward ${viewingOther?'their':'your'} gross and split tier.</p>
+      </div>
+    </div>
+    <div class="bg-white rounded-2xl border p-5 mb-8">
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm" style="min-width:640px">
+          <thead><tr class="border-b text-left text-xs text-gray-500 uppercase tracking-wide">
+            <th class="pb-2 font-semibold">Date</th>
+            <th class="pb-2 font-semibold">Type</th>
+            <th class="pb-2 font-semibold">What it was for</th>
+            <th class="pb-2 font-semibold text-center">Doc</th>
+            <th class="pb-2 font-semibold text-right">Received</th>
+            <th class="pb-2 font-semibold text-right">${viewingOther?'Their':'My'} Payout</th>
+            <th class="pb-2 font-semibold text-center">Status</th>
+            <th class="pb-2"></th>
+          </tr></thead>
+          <tbody class="divide-y divide-gray-50">${body}</tbody>
+          ${rows.length?`<tfoot><tr class="border-t bg-gray-50 font-semibold">
+            <td class="py-2.5 pl-1" colspan="4">${rows.length} payment${rows.length!==1?'s':''} logged</td>
+            <td class="py-2.5 text-right">${fmt$(grossTotal)}</td>
+            <td class="py-2.5 text-right text-green-700">${fmt$(payoutTotal)}</td>
+            <td colspan="2"></td>
+          </tr></tfoot>`:''}
+        </table>
+      </div>
+    </div>`;
+}
+
+/* ── The dialog ─────────────────────────────────────────────────────── */
+function openOtherRevenueModal(presetUid){
+  document.getElementById('other-rev-modal')?.remove();
+  const canPickAdvisor = !!(currentUser && (currentUser.isAdmin || currentUser.isStaff || currentUser.isOfficeManager));
+  const defUid = presetUid || currentUser.uid;
+  const today  = new Date().toISOString().slice(0,10);
+
+  let advisorField = `<input type="hidden" id="or-advisor" value="${_orEsc(defUid)}"/>`;
+  if(canPickAdvisor){
+    const advisors = (typeof getDistinctAdvisors==='function' ? getDistinctAdvisors() : [])
+      .slice().sort((a,b)=>String(a.name||'').localeCompare(String(b.name||'')));
+    const opts = advisors.map(a=>`<option value="${_orEsc(a.uid)}" ${a.uid===defUid?'selected':''}>${_orEsc(a.name||a.email||a.uid)}</option>`).join('');
+    advisorField = `<div>
+      <label class="block text-xs font-semibold text-gray-600 mb-1" for="or-advisor">Advisor who earned it</label>
+      <select id="or-advisor" onchange="window._orUpdatePreview()"
+        class="w-full border rounded-lg px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-red-200">${opts}</select>
+    </div>`;
+  }
+
+  const catOpts = OTHER_REV_CATEGORIES.map(c=>`<option value="${_orEsc(c)}">${_orEsc(c)}</option>`).join('');
+  const wrap = document.createElement('div');
+  wrap.id = 'other-rev-modal';
+  wrap.className = 'fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4';
+  wrap.innerHTML = `<div class="bg-white rounded-xl shadow-2xl w-full overflow-y-auto" style="max-width:540px;max-height:92vh">
+    <div class="px-5 py-3 rounded-t-xl flex justify-between items-center text-white" style="background:var(--brand-black)">
+      <span class="font-bold">＋ Log Payment Received</span>
+      <button onclick="document.getElementById('other-rev-modal').remove()" aria-label="Close" class="text-gray-300 hover:text-white text-lg leading-none px-1">✕</button>
+    </div>
+    <div class="px-5 py-4 space-y-3">
+      <p class="text-xs text-gray-500">A payment that isn't tied to a deal card — a BOV fee, a consulting fee, a deposit the buyer forfeited, a referral fee paid in. It counts as revenue the advisor generated and pays out on their split schedule.</p>
+      ${advisorField}
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1" for="or-amount">Amount received *</label>
+          <div class="relative">
+            <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">$</span>
+            <input id="or-amount" type="number" min="0" step="0.01" inputmode="decimal" placeholder="0.00"
+              oninput="window._orUpdatePreview()"
+              class="w-full border rounded-lg pl-6 pr-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-red-200"/>
+          </div>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1" for="or-date">Date received *</label>
+          <input id="or-date" type="date" value="${today}" onchange="window._orUpdatePreview()"
+            class="w-full border rounded-lg px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-red-200"/>
+        </div>
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1" for="or-category">Type of payment *</label>
+        <select id="or-category" class="w-full border rounded-lg px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-red-200">${catOpts}</select>
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1" for="or-desc">What was it for? *</label>
+        <textarea id="or-desc" rows="2" placeholder="e.g. BOV for Tampa Electric on the Gibsonton parcel"
+          class="w-full border rounded-lg px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-red-200"></textarea>
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1" for="or-property">Related property / client <span class="font-normal text-gray-400">(optional)</span></label>
+        <input id="or-property" placeholder="Address or client name"
+          class="w-full border rounded-lg px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-red-200"/>
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1" for="or-file">Invoice or photo <span class="font-normal text-gray-400">(optional)</span></label>
+        <input id="or-file" type="file" accept=".pdf,.doc,.docx,.png,.jpg,.jpeg,.webp,.heic,image/*"
+          onchange="window._orFilePicked(this)"
+          class="w-full text-sm text-gray-600 file:mr-3 file:py-2 file:px-3 file:rounded-lg file:border file:border-gray-300 file:bg-gray-50 file:text-sm file:font-semibold file:text-gray-700 hover:file:bg-gray-100"/>
+        <p id="or-file-note" class="text-xs text-gray-400 mt-1">PDF, Word or a photo of the invoice — up to 15 MB.</p>
+      </div>
+      <details class="rounded-lg border bg-gray-50 px-3 py-2">
+        <summary class="text-xs font-semibold text-gray-600 cursor-pointer">Override the split for this payment</summary>
+        <div class="mt-2">
+          <label class="block text-xs text-gray-500 mb-1" for="or-override">Advisor's share (%) — leave blank to use their split schedule</label>
+          <input id="or-override" type="number" min="0" max="100" step="0.1" placeholder="Auto — from split schedule"
+            oninput="window._orUpdatePreview()"
+            class="w-full border rounded-lg px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-red-200"/>
+        </div>
+      </details>
+      <div id="or-preview" class="rounded-xl border border-green-200 bg-green-50 px-4 py-3">
+        <div class="text-xs font-semibold text-green-700 uppercase tracking-wide mb-1">Pay due to advisor</div>
+        <div class="text-2xl font-bold text-green-800" id="or-preview-amt">$0</div>
+        <div class="text-xs text-green-700 mt-1" id="or-preview-note">Enter an amount to see the split.</div>
+      </div>
+    </div>
+    <div class="px-5 pb-5 flex gap-2">
+      <button id="or-save" onclick="window.saveOtherRevenue(this)"
+        class="flex-1 text-white rounded-lg py-3 text-sm font-semibold hover:opacity-90" style="background:var(--brand-red)">Log payment</button>
+      <button onclick="document.getElementById('other-rev-modal').remove()"
+        class="px-4 border rounded-lg py-3 text-sm text-gray-600 hover:bg-gray-50">Cancel</button>
+    </div>
+  </div>`;
+  document.body.appendChild(wrap);
+  wrap.addEventListener('mousedown', e=>{ if(e.target===wrap) wrap.remove(); });
+  setTimeout(()=>document.getElementById('or-amount')?.focus(), 50);
+  window._orUpdatePreview();
+}
+window.openOtherRevenueModal = openOtherRevenueModal;
+
+/* Live "here's what you'd be paid" — runs the real ladder, so what the dialog
+   shows is what the row will show once it's saved. */
+window._orUpdatePreview = function(){
+  const amtEl = document.getElementById('or-amount'); if(!amtEl) return;
+  const uid   = document.getElementById('or-advisor')?.value || currentUser.uid;
+  const amt   = Number(amtEl.value)||0;
+  const date  = document.getElementById('or-date')?.value || '';
+  const ovRaw = (document.getElementById('or-override')?.value ?? '').trim();
+  const ov    = ovRaw==='' ? null : Number(ovRaw);
+  const payout = previewMiscPayout(uid, amt, date, ov);
+  const amtOut = document.getElementById('or-preview-amt');
+  const note   = document.getElementById('or-preview-note');
+  if(amtOut) amtOut.textContent = fmt$(payout);
+  if(note){
+    if(amt<=0) note.textContent = 'Enter an amount to see the split.';
+    else if(ov!=null && isFinite(ov)) note.textContent = `Custom split of ${ov}% on ${fmt$(amt)} received.`;
+    else {
+      const rate = amt>0 ? Math.round(payout/amt*1000)/10 : 0;
+      note.textContent = `${rate}% effective — from their split schedule at this point in ${new Date((date||new Date().toISOString().slice(0,10))+'T00:00:00').getFullYear()}. Company keeps ${fmt$(Math.max(0,amt-payout))}.`;
+    }
+  }
+};
+
+window._orFilePicked = function(inp){
+  const note = document.getElementById('or-file-note');
+  const f = inp && inp.files && inp.files[0];
+  if(!note) return;
+  if(!f){ note.textContent = 'PDF, Word or a photo of the invoice — up to 15 MB.'; note.className='text-xs text-gray-400 mt-1'; return; }
+  if(f.size > 15*1024*1024){
+    note.textContent = `${f.name} is ${(f.size/1048576).toFixed(1)} MB — too large. Pick a file under 15 MB.`;
+    note.className='text-xs text-red-600 mt-1';
+    inp.value=''; return;
+  }
+  note.textContent = `${f.name} · ${(f.size/1024).toFixed(0)} KB`;
+  note.className='text-xs text-green-700 mt-1';
+};
+
+window.saveOtherRevenue = async function(btn){
+  const uid  = document.getElementById('or-advisor')?.value || currentUser.uid;
+  const amt  = Number(document.getElementById('or-amount')?.value)||0;
+  const date = (document.getElementById('or-date')?.value||'').trim();
+  const cat  = document.getElementById('or-category')?.value || 'Other';
+  const desc = (document.getElementById('or-desc')?.value||'').trim();
+  const prop = (document.getElementById('or-property')?.value||'').trim();
+  const ovRaw= (document.getElementById('or-override')?.value ?? '').trim();
+  const file = document.getElementById('or-file')?.files?.[0] || null;
+
+  if(amt<=0){ showToast('Enter the amount received','warning'); document.getElementById('or-amount')?.focus(); return; }
+  if(!date){ showToast('Enter the date the payment was received','warning'); document.getElementById('or-date')?.focus(); return; }
+  if(!desc){ showToast('Add a brief description of what the payment was for','warning'); document.getElementById('or-desc')?.focus(); return; }
+  if(ovRaw!=='' && (!isFinite(Number(ovRaw)) || Number(ovRaw)<0 || Number(ovRaw)>100)){
+    showToast('Split override must be between 0 and 100','warning'); return;
+  }
+  if(!_fbDb || !_fbFns){ showToast('Offline — can\'t save this payment right now','error'); return; }
+
+  const restore = elcBusy(btn, file ? 'Uploading…' : 'Saving…');
+  try {
+    let fileUrl='', fileName='', storagePath='';
+    if(file){
+      let waited=0;
+      while(!_fbStorage && waited<6000){ await new Promise(r=>setTimeout(r,200)); waited+=200; }
+      if(!_fbStorage) throw new Error('File storage not ready — try again in a moment');
+      const {ref:fbRef, uploadBytes, getDownloadURL} = _fbFns;
+      const safe = file.name.replace(/[^\w.\-]+/g,'_').slice(-80);
+      storagePath = 'other-revenue/'+uid+'-'+Date.now()+'-'+safe;
+      const snap = await uploadBytes(fbRef(_fbStorage, storagePath), file);
+      fileUrl  = await getDownloadURL(snap.ref);
+      fileName = file.name;
+    }
+    const prof = (typeof allProfiles!=='undefined' ? allProfiles[uid] : null) || {};
+    const advDeal = (allDeals||[]).find(d=>d.advisorUid===uid);
+    const payload = {
+      advisorUid:  uid,
+      advisorName: prof.name || advDeal?.advisorName || '',
+      advisorEmail:prof.email || advDeal?.advisorEmail || '',
+      amount:      Math.round(amt*100)/100,
+      category:    cat,
+      description: desc,
+      dateReceived:date,
+      propertyAddress: prop,
+      splitPctOverride: ovRaw==='' ? null : Number(ovRaw),
+      fileUrl, fileName, storagePath,
+      commissionPaid: false,
+      createdAt:   Date.now(),
+      createdBy:   currentUser.uid,
+      createdByName: currentUser.name || currentUser.email || '',
+    };
+    const {collection, addDoc} = _fbFns;
+    await addDoc(collection(_fbDb,'otherRevenue'), payload);
+    document.getElementById('other-rev-modal')?.remove();
+    const payout = previewMiscPayout(uid, amt, date, ovRaw===''?null:Number(ovRaw));
+    showToast(`✅ ${fmt$(amt)} logged — ${fmt$(payout)} due to the advisor`, 'success', 6000);
+  } catch(e){
+    console.error('[otherRevenue] save failed', e);
+    showToast('Could not save the payment: '+(e.message||e), 'error', 7000);
+  } finally { restore(); }
+};
+
+window.deleteOtherRevenue = async function(id, btn){
+  const row = (allOtherRevenue||[]).find(r=>r.id===id);
+  if(!row){ showToast('That payment is no longer here','warning'); return; }
+  if(!_orCanEdit(row)){ showToast('Only an admin or the advisor it belongs to can delete this','warning'); return; }
+  const ok = await elcConfirm(
+    `Delete the ${fmt$(row.amount)} ${row.category||'payment'} logged for ${fmtDate(row.dateReceived)}? It will come back out of their gross and payout.`,
+    {title:'Delete this payment?', okLabel:'Delete', danger:true});
+  if(!ok) return;
+  const restore = elcBusy(btn, '');
+  try {
+    const snapshot = {...row};
+    const {doc:fbDocF, deleteDoc} = _fbFns;
+    await deleteDoc(fbDocF(_fbDb,'otherRevenue',id));
+    if(_elcCanRestore()){
+      showUndoToast(`Deleted ${fmt$(row.amount)} — ${row.category||'payment'}`, async ()=>{
+        try { await _elcRestoreDoc(['otherRevenue', id], snapshot); showToast('Payment restored','success'); }
+        catch(e){ showToast('Could not restore: '+(e.message||e),'error'); }
+      });
+    } else showToast('Payment deleted','success');
+  } catch(e){
+    console.error('[otherRevenue] delete failed', e);
+    showToast('Could not delete: '+(e.message||e),'error');
+  } finally { restore(); }
+};
+
+window.toggleOtherRevenuePaid = async function(id, btn){
+  const row = (allOtherRevenue||[]).find(r=>r.id===id);
+  if(!row) return;
+  if(!currentUser.isAdmin){ showToast('Only an admin can mark a payout paid','warning'); return; }
+  const restore = elcBusy(btn, '');
+  try {
+    const {doc:fbDocF, updateDoc} = _fbFns;
+    await updateDoc(fbDocF(_fbDb,'otherRevenue',id), {commissionPaid: !row.commissionPaid, paidAt: Date.now()});
+    showToast(row.commissionPaid ? 'Marked as pending' : '✅ Marked as paid', 'success');
+  } catch(e){ showToast('Could not update: '+(e.message||e),'error'); }
+  finally { restore(); }
+};
 
 /* =======================================================
    VIEW: COMMISSION FORECAST (admin, all advisors)
@@ -26777,8 +27297,8 @@ window._execManualMergeContacts = async () => {
 };
 
 // ── CRM Outreach Imports (updated nightly by daily-crm-outreach-sync task) ──
-const _CRM_OUTREACH_SYNC_DATE = '2026-09-13';
-const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-09-12_0","emailDate":"2026-09-12","emailSubject":"Granite Peak Updated offers","attachmentNames":["2026.09.11 Darby Rd SFD LOI.pdf","2026.09.11 DRB Homes - Granite Peaks Revised LOI.pdf","Granite Peaks - LOI Summary - 2026.09.12.pdf","Granite Peaks - Pulte LOI v2.docx.pdf","Psh - LOI - Granite Peaks.pdf"],"recipientEmail":"s.sebring.sierra@gmail.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"","propertyHint":"Granite Peaks","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-09-12_1","emailDate":"2026-09-12","emailSubject":"Fwd: Completed: Complete with Docusign: RWD Mathog Distribution and Assignment Agreement and RWD Mathog Distrib...","attachmentNames":["RWD Mathog Distribution and Assignment Agreement and RWD Mathog Distribution and Assignment Agreemen.pdf","Fremont, Westben Seller -Membership Interest Purchase and Assignment Agreement and RW Fremont, Westb.pdf","RI and Gray Ivey Sellers - RW Mathog Membership Interest Purchase and Assignment and RI and Gray Ive.pdf","Fremont Distribution and Assignment Agreement.docx.pdf"],"recipientEmail":"jillian@rocwellinvestments.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Rocwellinvestments","propertyHint":"Mathog","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-09-12_2","emailDate":"2026-09-12","emailSubject":"Fwd: Completed: Complete with Docusign: RWD Mathog Distribution and Assignment Agreement and RWD Mathog Distrib...","attachmentNames":["RWD Mathog Distribution and Assignment Agreement and RWD Mathog Distribution and Assignment Agreemen.pdf","Fremont, Westben Seller -Membership Interest Purchase and Assignment Agreement and RW Fremont, Westb.pdf","RI and Gray Ivey Sellers - RW Mathog Membership Interest Purchase and Assignment and RI and Gray Ive.pdf","Fremont Distribution and Assignment Agreement.docx.pdf"],"recipientEmail":"justin@rocwell.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Rocwell","propertyHint":"Fremont","matchedDealId":null,"imported":false,"skipped":false}];
+const _CRM_OUTREACH_SYNC_DATE = '2026-09-15';
+const _CRM_OUTREACH_IMPORTS = [{"id":"oi_2026-09-14_0","emailDate":"2026-09-14","emailSubject":"Offer on 2121 14th St","attachmentNames":["LOI - 2121 TAMIAMI TRL, BRADENTON, FL, 34205.pdf"],"recipientEmail":"vincent.crisci@gmail.com","recipientName":"Vincent Crisci","recipientFirstName":"Vincent","recipientLastName":"Crisci","companyName":"","propertyHint":"2121 Tamiami Trl","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-09-14_1","emailDate":"2026-09-14","emailSubject":"Pasco Off Market MF Site- Planned for 261 apartments","attachmentNames":["J0314-D0105_Master Plan_01-26-26.pdf","Master Plan -SP_012226_SEI.pdf"],"recipientEmail":"donovan.dean@greystar.com","recipientName":"Donovan Dean","recipientFirstName":"Donovan","recipientLastName":"Dean","companyName":"Greystar","propertyHint":"Pasco MF Site","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-09-14_2","emailDate":"2026-09-14","emailSubject":"Pasco Off Market MF Site- Planned for 261 apartments","attachmentNames":["J0314-D0105_Master Plan_01-26-26.pdf","Master Plan -SP_012226_SEI.pdf"],"recipientEmail":"david.king@greystar.com","recipientName":"David King","recipientFirstName":"David","recipientLastName":"King","companyName":"Greystar","propertyHint":"Pasco MF Site","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-09-14_3","emailDate":"2026-09-14","emailSubject":"Pasco Off Market MF Site- Planned for 261 apartments","attachmentNames":["Master Plan -SP_012226_SEI.pdf","J0314-D0105_Master Plan_01-26-26.pdf"],"recipientEmail":"rob.paulsen@jpi.com","recipientName":"Rob Paulsen","recipientFirstName":"Rob","recipientLastName":"Paulsen","companyName":"Jpi","propertyHint":"Pasco MF Site","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-09-14_4","emailDate":"2026-09-14","emailSubject":"Pasco Off Market MF Site- Planned for 261 apartments","attachmentNames":["J0314-D0105_Master Plan_01-26-26.pdf","Master Plan -SP_012226_SEI.pdf"],"recipientEmail":"evang@morgangroup.com","recipientName":"Evan G","recipientFirstName":"Evan","recipientLastName":"","companyName":"Morgangroup","propertyHint":"Pasco MF Site","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-09-14_5","emailDate":"2026-09-14","emailSubject":"Pasco Off Market MF Site- Planned for 261 apartments","attachmentNames":["Master Plan -SP_012226_SEI.pdf","J0314-D0105_Master Plan_01-26-26.pdf"],"recipientEmail":"mtlogue@drhorton.com","recipientName":"","recipientFirstName":"","recipientLastName":"Logue","companyName":"Drhorton","propertyHint":"Pasco MF Site","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-09-14_6","emailDate":"2026-09-14","emailSubject":"Pasco Off Market MF Site- Planned for 261 apartments","attachmentNames":["J0314-D0105_Master Plan_01-26-26.pdf","Master Plan -SP_012226_SEI.pdf"],"recipientEmail":"davidh@catalystdp.com","recipientName":"David H","recipientFirstName":"David","recipientLastName":"","companyName":"Catalystdp","propertyHint":"Pasco MF Site","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-09-14_7","emailDate":"2026-09-14","emailSubject":"Pasco Off Market MF Site- Planned for 261 apartments","attachmentNames":["Master Plan -SP_012226_SEI.pdf","J0314-D0105_Master Plan_01-26-26.pdf"],"recipientEmail":"lgoebel@hanoverco.com","recipientName":"","recipientFirstName":"","recipientLastName":"Goebel","companyName":"Hanoverco","propertyHint":"Pasco MF Site","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-09-14_8","emailDate":"2026-09-14","emailSubject":"Pasco Off Market MF Site- Planned for 261 apartments","attachmentNames":["J0314-D0105_Master Plan_01-26-26.pdf","Master Plan -SP_012226_SEI.pdf"],"recipientEmail":"cbradshaw@trinsicres.com","recipientName":"","recipientFirstName":"","recipientLastName":"Bradshaw","companyName":"Trinsicres","propertyHint":"Pasco MF Site","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-09-14_9","emailDate":"2026-09-14","emailSubject":"Pasco Off Market MF Site- Planned for 261 apartments","attachmentNames":["J0314-D0105_Master Plan_01-26-26.pdf","Master Plan -SP_012226_SEI.pdf"],"recipientEmail":"eric@dobbinsgroup.net","recipientName":"Eric","recipientFirstName":"Eric","recipientLastName":"","companyName":"Dobbinsgroup","propertyHint":"Pasco MF Site","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-09-14_10","emailDate":"2026-09-14","emailSubject":"Pasco County MF Site - 261 apartments","attachmentNames":["J0314-D0105_EXHIBIT_20260106-24x36.pdf","J0314-D0105_EXHIBIT_20260106-24x36 (2).pdf"],"recipientEmail":"hassan@tayara.me","recipientName":"Hassan","recipientFirstName":"Hassan","recipientLastName":"","companyName":"Tayara","propertyHint":"Pasco MF Site","matchedDealId":null,"imported":false,"skipped":false},{"id":"oi_2026-09-14_11","emailDate":"2026-09-14","emailSubject":"Re: bypass 1010 S Adams St and S Adams St","attachmentNames":["PJM-Gray Ivy First Addendum.pdf"],"recipientEmail":"closers@palmaceiatitle.com","recipientName":"","recipientFirstName":"","recipientLastName":"","companyName":"Palmaceiatitle","propertyHint":"1010 S Adams St","matchedDealId":null,"imported":false,"skipped":false}];
 
 // ── Gmail Sync ───────────────────────────────────────────────────────
 let _GMAIL_SYNC_DATE;  // set at runtime by crmGmailSync; blank = never synced this session
