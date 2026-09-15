@@ -161,9 +161,21 @@ body {
   .mobile-topbar {
     display: flex; align-items: center; justify-content: space-between;
     background: var(--brand-black); border-bottom: 2px solid var(--brand-red);
-    padding: .6rem 1rem; position: sticky; top: 0; z-index: 100;
+    padding: .6rem .9rem; gap: .5rem; position: sticky; top: 0; z-index: 100;
   }
+  .mtopbar-name { max-width: 84px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 }
+/* The role chip needs the room the name was using on a phone. */
+@media (max-width: 430px) { .mtopbar-name { display: none; } }
+@media (max-width: 349px) { .tvc-label { display: none; } }
+/* Mobile role chip — opens the view switcher (MOBVIEW-20260915) */
+.terra-view-chip {
+  display: inline-flex; align-items: center; gap: .25rem;
+  font-size: .68rem; font-weight: 800; letter-spacing: .04em; text-transform: uppercase;
+  background: rgba(255,255,255,.08); border: 1px solid currentColor; border-radius: 999px;
+  padding: .3rem .6rem; line-height: 1.1; white-space: nowrap; cursor: pointer; flex-shrink: 0;
+}
+.terra-view-chip:hover { background: rgba(255,255,255,.16); }
 
 /* ── Buttons ────────────────────────────────────── */
 .brand-btn {
@@ -1063,7 +1075,8 @@ button:disabled, button[disabled], [aria-busy="true"] {
 
 /* ── 4. Touch targets + no iOS zoom-on-focus (mobile-first) ─────── */
 @media (pointer: coarse) {
-  .tab-btn, #mobile-tab-bar .mtab, .brand-btn, .ghost-btn, .pv-seg, .l10-seg, .elc-cbtn {
+  .tab-btn, #mobile-tab-bar .mtab, .brand-btn, .ghost-btn, .pv-seg, .l10-seg, .elc-cbtn,
+  .terra-view-chip {
     min-height: 44px;
   }
   .brand-btn, .ghost-btn, .elc-cbtn {
@@ -9560,6 +9573,97 @@ window.toggleAdminView = () => {
   renderCurrentView();
 };
 
+/* ── View switching, shared by the desktop sidebar and the mobile chip ──
+   MOBVIEW-20260915. The sidebar buttons TOGGLE; terraSetViewMode() SETS. ── */
+
+// The view options this user may switch between. Fewer than 2 = no switcher shown.
+function terraViewOptions(){
+  if(!currentUser) return [];
+  const office = currentUser.officeManagerOffice || '';
+  const advisorOpt = {key:'advisor', icon:'👤', short:'Advisor', label:'Advisor View',
+                      desc:'Only the deals you are the advisor on', color:'#fbbf24'};
+  const staffOpt   = {key:'staff',   icon:'👷', short:'Staff',   label:'Staff View',
+                      desc:'Support view — every deal, read-only', color:'#38bdf8'};
+  if(currentUser.isAdmin) return [
+    {key:'admin', icon:'🛡', short:'Admin', label:'Admin View',
+     desc:'All deals, all advisors, every admin tool', color:'#DA291C'},
+    staffOpt, advisorOpt];
+  if(currentUser.isOfficeManager) return [
+    {key:'staff', icon:'🏢', short:'Manager', label:'Manager View' + (office ? ' · ' + office : ''),
+     desc:'Every deal in your office', color:'#5bbccc'},
+    advisorOpt];
+  if(currentUser.isDualRole) return [staffOpt, advisorOpt];
+  return [];
+}
+
+// Which option is active right now.
+function terraCurrentViewKey(){
+  if(!currentUser) return 'advisor';
+  if(currentUser.isAdmin) return staffViewMode ? 'staff' : (adminViewAsAdvisor ? 'advisor' : 'admin');
+  return isStaffView() ? 'staff' : 'advisor';
+}
+
+// Set the view mode explicitly and bounce off any tab the new view can't see.
+window.terraSetViewMode = (key) => {
+  if(!terraViewOptions().some(o => o.key === key)) return;
+  staffViewMode      = (key === 'staff');
+  adminViewAsAdvisor = (key === 'advisor' && !!currentUser.isAdmin);
+  adminPreviewOffice = null;
+  if(!buildNavItems().some(n => n.id === currentView)) currentView = 'board';
+  renderShell();
+  renderCurrentView();
+  updateTabs();
+  const opt = terraViewOptions().find(o => o.key === key);
+  if(opt && typeof showToast === 'function') showToast(opt.icon + ' ' + opt.label, 'info', 1800);
+};
+
+// Mobile: bottom sheet launched by the role chip in the top bar.
+window.mobileViewMenu = function(){
+  const existing = document.getElementById('mobile-view-sheet');
+  if(existing){ existing.remove(); return; }
+  document.getElementById('mobile-more-sheet')?.remove();
+  const opts = terraViewOptions();
+  if(opts.length < 2) return;
+  const cur = terraCurrentViewKey();
+  const sheet = document.createElement('div');
+  sheet.id = 'mobile-view-sheet';
+  sheet.setAttribute('role','dialog');
+  sheet.setAttribute('aria-label','Switch view');
+  sheet.style.cssText = 'position:fixed;bottom:60px;left:0;right:0;background:var(--brand-black,#111);border-top:1px solid rgba(255,255,255,.15);z-index:300;padding:1rem;display:flex;flex-direction:column;gap:.5rem;max-height:70vh;overflow:auto';
+  sheet.innerHTML =
+    '<div style="color:rgba(255,255,255,.55);font-size:.68rem;font-weight:800;letter-spacing:.12em;text-transform:uppercase;padding:0 .2rem .1rem">Switch view</div>' +
+    opts.map(o => `
+      <button onclick="terraSetViewMode('${o.key}');document.getElementById('mobile-view-sheet')?.remove()"
+        aria-current="${o.key===cur?'true':'false'}"
+        style="display:flex;align-items:center;gap:.7rem;text-align:left;min-height:56px;cursor:pointer;color:#fff;border-radius:12px;padding:.7rem .85rem;
+               border:1px solid ${o.key===cur?o.color:'rgba(255,255,255,.12)'};background:${o.key===cur?'rgba(255,255,255,.12)':'rgba(255,255,255,.05)'}">
+        <span style="font-size:1.15rem">${o.icon}</span>
+        <span style="flex:1;min-width:0">
+          <span style="display:block;font-size:.86rem;font-weight:700">${o.label}</span>
+          <span style="display:block;font-size:.72rem;color:rgba(255,255,255,.6);margin-top:.12rem">${o.desc}</span>
+        </span>
+        ${o.key===cur?`<span style="color:${o.color};font-weight:800">✓</span>`:''}
+      </button>`).join('') +
+    '<button onclick="this.parentElement.remove()" style="background:rgba(255,255,255,.04);color:rgba(255,255,255,.55);border:none;border-radius:10px;padding:.75rem;min-height:44px;font-size:.8rem;cursor:pointer">✕ Close</button>';
+  document.body.appendChild(sheet);
+  setTimeout(() => document.addEventListener('click', function h(e){
+    if(!sheet.contains(e.target) && !(e.target.closest && e.target.closest('.terra-view-chip'))){
+      sheet.remove(); document.removeEventListener('click', h);
+    }
+  }), 100);
+};
+
+// Mobile: hide bottom-bar tabs the current view can't open, and mark the active one.
+window.syncMobileTabs = function(){
+  let ids = [];
+  try { ids = buildNavItems().map(n => n.id); } catch(e){ return; }
+  document.querySelectorAll('#mobile-tab-bar .mtab').forEach(t => {
+    const id = (t.id || '').replace('mtab-','');
+    if(id && id !== 'more') t.style.display = ids.includes(id) ? '' : 'none';
+    t.classList.toggle('active', id === currentView);
+  });
+};
+
 // Detect office manager role for a given email
 function detectOfficeManager(email){
   const e=(email||'').toLowerCase();
@@ -11092,72 +11196,88 @@ document.addEventListener('keydown', async (e) => {
    ======================================================= */
 function setContent(html){ const el=document.getElementById('main-content'); if(el) el.innerHTML=html; }
 
+// Role-filtered nav list. Used by the desktop sidebar AND the mobile bottom bar /
+// "More" sheet so every device shows the same tabs for the current view. MOBVIEW-20260915
+function buildNavItems(){
+  if(!currentUser) return [];
+  const isAdmin=currentUser.isAdmin;
+    // When admin has toggled "view as advisor", only show advisor-facing tabs
+    const effectiveAdmin = isAdmin && !adminViewAsAdvisor && !staffViewMode;
+    const sv = isStaffView();
+    return [
+      {id:'board',         label:'📋 Deals',         always:true},
+      {id:'tasks',         label:'✅ Tasks',          always:true},
+      {id:'calendar',      label:'📅 Calendar',       advisor:true},
+      {id:'dashboard',     label:'📊 Financials',    admin:true, manager:true},
+      {id:'itr',           label:'📈 ITR',           admin:true},
+      {id:'commissions',   label:'💰 My Pay',         advisor:true},
+      {id:'users',         label:'👤 Users',           admin:true},
+      {id:'splits',        label:'⚖️ Splits',         admin:true},
+      {id:'automations',   label:'⚡ Automations',    admin:true},
+      {id:'leaderboard',   label:'🏆 Leaderboard',    admin:true, manager:true},
+      {id:'officeOverview',label:'🏢 My Office',      manager:true},
+      {id:'manageStages',  label:'🗂 Stages',         admin:true},
+      {id:'officeManagers',label:'🏢 Offices',        admin:true},
+      {id:'approvedUsers', label:'🔐 Access',          admin:true},
+      {id:'eos',           label:'🧭 EOS',            always:true},
+      {id:'comps',         label:'🗺 Comps',          advisor:true, staff:true},
+      {id:'drive',         label:'📁 Drive',          always:true},
+      {id:'documents',     label:'📄 Documents',      admin:true},
+      {id:'hr',            label:'👥 HR',             always:true},
+      {id:'crm',           label:'🤝 CRM',            crm:true},
+      {id:'leads',         label:'🎯 Leads',          advisor:true, admin:true, manager:true},
+      {id:'inbox',         label:'✉️ E-mail',         advisor:true, admin:true, manager:true},
+      {id:'buyers',        label:'🏡 Buyers',         advisor:true, admin:true, manager:true},
+      {id:'videoProposals',label:'🎬 Video Proposals',advisor:true, admin:true, manager:true, staff:true},
+      {id:'agreements',    label:'📝 Agreements',      advisor:true, admin:true, manager:true, staff:true},
+      {id:'activityLog',   label:'🕵️ Activity Log',   admin:true},
+      {id:'earthnotes',    label:'🌎 EarthNotes',     always:true},
+      {id:'valuation',     label:'🔍 Site Research',  advisor:true, admin:true, manager:true, staff:true},
+      {id:'exportContacts',label:'📤 Export',        staffOnly:true},
+    ].filter(n=>{
+      if(sv){ // staff view: always tabs + staff-flagged tabs + manager tabs (for office managers) + CRM if enabled
+        if(n.staffOnly) return true;   // tabs that exist ONLY inside staff view
+        if(n.always) return true;
+        if(n.staff) return true;
+        if(n.manager && currentUser.isOfficeManager) return true;
+        if(n.crm){ const cfg=APP_CONFIG.crm||{}; return cfg.enabled||((cfg.betaEmails||[]).includes(currentUser?.email)); }
+        return false;
+      }
+      if(n.always) return true;
+      if(n.advisor && (!effectiveAdmin || adminViewAsAdvisor)) return true;
+      if(n.admin && effectiveAdmin) return true;
+      if(n.manager && currentUser.isOfficeManager && !adminViewAsAdvisor) return true;
+      // CRM: visible to everyone if crmEnabled, or to beta list if not
+      if(n.crm){
+        const cfg = APP_CONFIG.crm||{};
+        if(cfg.enabled) return true;
+        if((cfg.betaEmails||[]).includes(currentUser?.email)) return true;
+      }
+      return false;
+    });
+}
+window.buildNavItems = buildNavItems;
+
 function renderShell(){
   const isAdmin=currentUser.isAdmin;
-  // When admin has toggled "view as advisor", only show advisor-facing tabs
-  const effectiveAdmin = isAdmin && !adminViewAsAdvisor && !staffViewMode;
-  const sv = isStaffView();
-  const navItems=[
-    {id:'board',         label:'📋 Deals',         always:true},
-    {id:'tasks',         label:'✅ Tasks',          always:true},
-    {id:'calendar',      label:'📅 Calendar',       advisor:true},
-    {id:'dashboard',     label:'📊 Financials',    admin:true, manager:true},
-    {id:'itr',           label:'📈 ITR',           admin:true},
-    {id:'commissions',   label:'💰 My Pay',         advisor:true},
-    {id:'users',         label:'👤 Users',           admin:true},
-    {id:'splits',        label:'⚖️ Splits',         admin:true},
-    {id:'automations',   label:'⚡ Automations',    admin:true},
-    {id:'leaderboard',   label:'🏆 Leaderboard',    admin:true, manager:true},
-    {id:'officeOverview',label:'🏢 My Office',      manager:true},
-    {id:'manageStages',  label:'🗂 Stages',         admin:true},
-    {id:'officeManagers',label:'🏢 Offices',        admin:true},
-    {id:'approvedUsers', label:'🔐 Access',          admin:true},
-    {id:'eos',           label:'🧭 EOS',            always:true},
-    {id:'comps',         label:'🗺 Comps',          advisor:true, staff:true},
-    {id:'drive',         label:'📁 Drive',          always:true},
-    {id:'documents',     label:'📄 Documents',      admin:true},
-    {id:'hr',            label:'👥 HR',             always:true},
-    {id:'crm',           label:'🤝 CRM',            crm:true},
-    {id:'leads',         label:'🎯 Leads',          advisor:true, admin:true, manager:true},
-    {id:'inbox',         label:'✉️ E-mail',         advisor:true, admin:true, manager:true},
-    {id:'buyers',        label:'🏡 Buyers',         advisor:true, admin:true, manager:true},
-    {id:'videoProposals',label:'🎬 Video Proposals',advisor:true, admin:true, manager:true, staff:true},
-    {id:'agreements',    label:'📝 Agreements',      advisor:true, admin:true, manager:true, staff:true},
-    {id:'activityLog',   label:'🕵️ Activity Log',   admin:true},
-    {id:'earthnotes',    label:'🌎 EarthNotes',     always:true},
-    {id:'valuation',     label:'🔍 Site Research',  advisor:true, admin:true, manager:true, staff:true},
-    {id:'exportContacts',label:'📤 Export',        staffOnly:true},
-  ].filter(n=>{
-    if(sv){ // staff view: always tabs + staff-flagged tabs + manager tabs (for office managers) + CRM if enabled
-      if(n.staffOnly) return true;   // tabs that exist ONLY inside staff view
-      if(n.always) return true;
-      if(n.staff) return true;
-      if(n.manager && currentUser.isOfficeManager) return true;
-      if(n.crm){ const cfg=APP_CONFIG.crm||{}; return cfg.enabled||((cfg.betaEmails||[]).includes(currentUser?.email)); }
-      return false;
-    }
-    if(n.always) return true;
-    if(n.advisor && (!effectiveAdmin || adminViewAsAdvisor)) return true;
-    if(n.admin && effectiveAdmin) return true;
-    if(n.manager && currentUser.isOfficeManager && !adminViewAsAdvisor) return true;
-    // CRM: visible to everyone if crmEnabled, or to beta list if not
-    if(n.crm){
-      const cfg = APP_CONFIG.crm||{};
-      if(cfg.enabled) return true;
-      if((cfg.betaEmails||[]).includes(currentUser?.email)) return true;
-    }
-    return false;
-  });
+  const navItems = buildNavItems();
 
   document.getElementById('app').innerHTML=`
     <!-- APP LAYOUT: LEFT SIDEBAR -->
     <div class="app-shell-row">
     <!-- Mobile top bar (sign out / user) — hidden on desktop -->
     <header class="mobile-topbar">
-      <span style="font-size:1rem;font-weight:800;color:#fff;letter-spacing:.06em">TERRA</span>
+      <span style="display:flex;align-items:center;gap:.5rem;min-width:0">
+        <span style="font-size:1rem;font-weight:800;color:#fff;letter-spacing:.06em">TERRA</span>
+        ${(()=>{ const _o=terraViewOptions(); if(_o.length<2) return '';
+                 const _c=_o.find(x=>x.key===terraCurrentViewKey())||_o[0];
+                 return `<button class="terra-view-chip" onclick="mobileViewMenu()" aria-haspopup="dialog"
+                   aria-label="Switch view — currently ${_c.label}"
+                   style="border-color:${_c.color};color:${_c.color}">${_c.icon} <span class="tvc-label">${_c.short}</span> ▾</button>`; })()}
+      </span>
       <span style="display:flex;align-items:center;gap:.6rem">
         ${_themeSwitchHTML()}
-        <span class="text-xs text-gray-300">${currentUser.name||''}</span>
+        <span class="text-xs text-gray-300 mtopbar-name">${currentUser.name||''}</span>
         <button onclick="handleSignOut()" class="text-xs text-gray-400 hover:text-white border border-gray-600 rounded px-2 py-1">Sign out</button>
       </span>
     </header>
@@ -11216,6 +11336,7 @@ function renderShell(){
     </div><!-- /app-main-col -->
     </div><!-- /app-shell-row -->
   `;
+  if(typeof window.syncMobileTabs === 'function') window.syncMobileTabs();
 }
 
 // ── Admin utility: save Anthropic key to Firestore ──
@@ -11295,6 +11416,7 @@ window.switchView = id => {
 };
 window.setOfficeFilter = v => { adminOfficeFilter=v; renderCurrentView(); };
 function updateTabs(){
+  if(typeof window.syncMobileTabs === 'function') window.syncMobileTabs();
   document.querySelectorAll('.tab-btn').forEach(b=>{
     b.classList.toggle('active', b.textContent.trim()===document.querySelector(`.tab-btn[onclick="switchView('${currentView}')"]`)?.textContent.trim());
   });
@@ -43069,6 +43191,7 @@ window._siAddSenderToCrm = async function(){
 // ── Mobile tab switching ─────────────────────────────────────────────────────
 
 window.mobileTab = function(id){
+  document.getElementById('mobile-view-sheet')?.remove();
   document.querySelectorAll('.mtab').forEach(t => t.classList.remove('active'));
   const el = document.getElementById('mtab-' + id);
   if(el) el.classList.add('active');
@@ -43078,16 +43201,20 @@ window.mobileTab = function(id){
 window.mobileMoreMenu = function(){
   const existing = document.getElementById('mobile-more-sheet');
   if(existing){ existing.remove(); return; }
+  document.getElementById('mobile-view-sheet')?.remove();
   const sheet = document.createElement('div');
   sheet.id = 'mobile-more-sheet';
-  sheet.style.cssText = 'position:fixed;bottom:60px;left:0;right:0;background:var(--brand-black);border-top:1px solid rgba(255,255,255,.15);z-index:300;padding:1rem;display:grid;grid-template-columns:1fr 1fr;gap:.5rem;';
-  const items = [
-    {id:'dashboard',label:'📊 Financials'},
-    {id:'splits',label:'⚖️ Splits'},{id:'users',label:'👤 Users'},
-    {id:'automations',label:'⚡ Automations'},{id:'leaderboard',label:'🏆 Leaderboard'},
-    {id:'eos',label:'🧭 EOS'},{id:'drive',label:'📁 Drive'},
-    {id:'leads',label:'🎯 Leads'},
-  ];
+  sheet.style.cssText = 'position:fixed;bottom:60px;left:0;right:0;background:var(--brand-black);border-top:1px solid rgba(255,255,255,.15);z-index:300;padding:1rem;display:grid;grid-template-columns:1fr 1fr;gap:.5rem;max-height:62vh;overflow:auto;';
+  // Built from the SAME role-filtered list the desktop sidebar uses, minus the tabs
+  // that already have their own button in the bottom bar (MOBVIEW-20260915).
+  const inBar = ['board','tasks','crm'];
+  let items = [];
+  try {
+    items = (window.buildNavItems ? window.buildNavItems() : [])
+              .filter(n => !inBar.includes(n.id))
+              .map(n => ({id:n.id, label:n.label}));
+  } catch(e){ console.warn('[mobile] nav build failed', e); }
+  if(!items.length) items = [{id:'eos',label:'🧭 EOS'},{id:'drive',label:'📁 Drive'}];
   sheet.innerHTML = items.map(i =>
     `<button onclick="mobileTab('${i.id}');document.getElementById('mobile-more-sheet')?.remove()"
       style="background:rgba(255,255,255,.08);color:#fff;border:none;border-radius:10px;padding:.75rem;font-size:.8rem;font-weight:600;cursor:pointer;text-align:left">
