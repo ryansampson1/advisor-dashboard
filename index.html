@@ -2867,8 +2867,14 @@ window.handleSoldConfirmation = function(id, deal, onConfirmed){
   const pctKey   = isLease ? 'leaseCommissionPct' : 'elcCommissionPct';
   const priceLbl = isLease ? 'Gross Lease Value'  : 'Sale Price';
   const refPct   = (deal.referralDue==='yes' && (deal.referralPct||0)>0) ? deal.referralPct : 0;
-  // Live values, kept in sync by _sccRecalc()
+  // Gross before the referral haircut — the basis the override field asks for.
+  const grossPre = refPct>0 && gross>0 ? Math.round(gross/(1-refPct/100)) : gross;
+  // Live values, kept in sync by _sccRecalc().
+  // _liveGrossPre = commission to ELC before the referral haircut (this is
+  // what the manual override field holds); _liveGross = after it, which is
+  // the basis getEffectiveRevenue() returns and every pay screen uses.
   let _livePrice = price, _livePct = commPct, _liveGross = gross;
+  let _liveGrossPre = 0, _liveOverride = 0;
 
   const overlay = document.createElement('div');
   overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;display:flex;align-items:center;justify-content:center;padding:1rem;overflow-y:auto';
@@ -2931,12 +2937,21 @@ window.handleSoldConfirmation = function(id, deal, onConfirmed){
         <input type="checkbox" id="scc-comm-confirmed" style="width:1rem;height:1rem;accent-color:#16a34a" onchange="_sccToggleOverride()"/>
         <span style="font-size:.85rem;font-weight:600;color:#166534">Commission confirmed — matches closing statement</span>
       </label>
-      <div id="scc-override-row" style="display:flex;align-items:center;gap:.5rem">
-        <label style="font-size:.8rem;color:#374151;white-space:nowrap;flex-shrink:0">Actual gross commission ($):</label>
-        <div style="display:flex;align-items:center;border:1px solid #d1d5db;border-radius:8px;overflow:hidden;flex:1">
-          <span style="padding:.38rem .5rem;background:#f9fafb;color:#6b7280;font-size:.85rem;border-right:1px solid #d1d5db">$</span>
-          <input id="scc-comm-override" type="number" min="0" step="100" placeholder="${gross>0?gross:''}" style="flex:1;padding:.38rem .6rem;font-size:.85rem;border:none;outline:none"/>
+      <div id="scc-override-row">
+        <div style="display:flex;align-items:center;gap:.5rem">
+          <label for="scc-comm-override" style="font-size:.8rem;color:#374151;white-space:nowrap;flex-shrink:0">Actual gross commission to ELC ($):</label>
+          <div style="display:flex;align-items:center;border:1px solid #d1d5db;border-radius:8px;overflow:hidden;flex:1">
+            <span style="padding:.38rem .5rem;background:#f9fafb;color:#6b7280;font-size:.85rem;border-right:1px solid #d1d5db">$</span>
+            <input id="scc-comm-override" type="number" min="0" step="100" inputmode="decimal"
+              placeholder="${grossPre>0?grossPre:''}" aria-describedby="scc-override-note"
+              oninput="_sccRecalc()"
+              style="flex:1;padding:.38rem .6rem;font-size:1rem;border:none;outline:none"/>
+          </div>
         </div>
+        <p style="font-size:.72rem;color:#4b5563;margin:.4rem 0 0;line-height:1.4">
+          The full commission to ELC on the closing statement${refPct>0?`, <strong>before</strong> the ${refPct}% referral`:''} — what you enter here replaces the calculated figure everywhere: My&nbsp;Pay, advisor payouts, EOS revenue and the forecasts.
+        </p>
+        <div id="scc-override-note" role="status" style="display:none;font-size:.75rem;color:#1e40af;background:#eff6ff;border:1px solid #bfdbfe;border-radius:7px;padding:.4rem .55rem;margin-top:.45rem;line-height:1.4"></div>
       </div>
     </div>
 
@@ -3021,16 +3036,35 @@ window.handleSoldConfirmation = function(id, deal, onConfirmed){
     if(!pEl || !cEl) return;
     _livePrice = parseFloat(String(pEl.value).replace(/[^0-9.]/g,''))||0;
     _livePct   = parseFloat(cEl.value)||0;
-    let g = 0;
-    if(_livePrice>0 && _livePct>0 && _livePct<=100) g = Math.round(_livePrice*_livePct/100);
-    else if((deal.commissionAmount||0)>0) g = deal.commissionAmount;
-    else if((deal.expectedRevenue||0)>0) g = deal.expectedRevenue;
-    if(refPct>0 && g>0) g = Math.round(g*(1-refPct/100));
-    _liveGross = g;
+    // The calculated chain, before the referral haircut — mirrors getEffectiveRevenue().
+    let calcPre = 0;
+    if(_livePrice>0 && _livePct>0 && _livePct<=100) calcPre = Math.round(_livePrice*_livePct/100);
+    else if((deal.commissionAmount||0)>0) calcPre = deal.commissionAmount;
+    else if((deal.expectedRevenue||0)>0) calcPre = deal.expectedRevenue;
+    // COMMOVERRIDE-20260915 — a hand-typed figure REPLACES the calculated one.
+    // Ticking "Commission confirmed" means the calculation is right, so it
+    // clears any override rather than leaving two competing numbers.
+    const confEl = card.querySelector('#scc-comm-confirmed');
+    const ov     = card.querySelector('#scc-comm-override');
+    _liveOverride = (confEl && confEl.checked) ? 0 : Math.round(parseFloat(ov?.value)||0);
+    _liveGrossPre = _liveOverride>0 ? _liveOverride : calcPre;
+    _liveGross    = (refPct>0 && _liveGrossPre>0)
+      ? Math.round(_liveGrossPre*(1-refPct/100))
+      : _liveGrossPre;
     const gEl = card.querySelector('#scc-gross');
-    if(gEl) gEl.textContent = g>0 ? fmt(g) : '—';
-    const ov = card.querySelector('#scc-comm-override');
-    if(ov) ov.placeholder = g>0 ? String(g) : '';
+    if(gEl) gEl.textContent = _liveGross>0 ? fmt(_liveGross) : '—';
+    if(ov) ov.placeholder = calcPre>0 ? String(calcPre) : '';
+    // Say plainly which number is winning and what it nets to.
+    const ovNote = card.querySelector('#scc-override-note');
+    if(ovNote){
+      if(_liveOverride>0){
+        ovNote.innerHTML = '↻ Using <strong>'+fmt(_liveOverride)+'</strong> instead of the calculated '
+          +(calcPre>0?fmt(calcPre):'—')+'.'
+          +(refPct>0 ? ' Less the '+refPct+'% referral, <strong>'+fmt(_liveGross)+'</strong> to ELC.' : '')
+          +' This is the figure pay is calculated from.';
+        ovNote.style.display='block';
+      } else ovNote.style.display='none';
+    }
     const bits = [];
     if(_livePrice!==price)  bits.push(`${priceLbl} ${price>0?fmt(price):'—'} → ${_livePrice>0?fmt(_livePrice):'—'}`);
     if(_livePct!==commPct)  bits.push(`Commission ${commPct>0?commPct+'%':'—'} → ${_livePct>0?_livePct+'%':'—'}`);
@@ -3041,7 +3075,8 @@ window.handleSoldConfirmation = function(id, deal, onConfirmed){
   };
   window._sccToggleOverride = () => {
     const checked = card.querySelector('#scc-comm-confirmed').checked;
-    card.querySelector('#scc-override-row').style.display = checked ? 'none' : 'flex';
+    card.querySelector('#scc-override-row').style.display = checked ? 'none' : 'block';
+    window._sccRecalc();   // ticking the box drops the override — reflect it live
   };
   window._sccPayoutToggle = val => {
     _payoutVisible = val==='yes';
@@ -3105,12 +3140,15 @@ window.handleSoldConfirmation = function(id, deal, onConfirmed){
       card.querySelector('#scc-pct').focus();
       return;
     }
-    if(commConfirmed && _liveGross<=0){
+    if(_liveGross<=0){
       showToast('Enter the sale price and commission % from the closing statement — or uncheck the box and enter the actual gross','warning',5000);
-      card.querySelector('#scc-price').focus();
+      card.querySelector(commConfirmed ? '#scc-price' : '#scc-comm-override').focus();
       return;
     }
-    const confirmedGross = commConfirmed ? _liveGross : overrideVal;
+    // COMMOVERRIDE-20260915 — _liveGross already reflects the override when one
+    // was typed (and the referral haircut either way), so it is the one gross
+    // the task, the activity log and every pay screen quote.
+    const confirmedGross = _liveGross;
 
     // 3. Collect payout rows (if Yes was selected)
     const payouts = [];
@@ -3140,11 +3178,23 @@ window.handleSoldConfirmation = function(id, deal, onConfirmed){
       confirmedGrossCommission:  confirmedGross,
       commissionConfirmedBy:     currentUser?.uid||'advisor',
       soldPayouts:               payouts,
+      // COMMOVERRIDE-20260915 — the hand-typed gross, read by
+      // getEffectiveRevenue() and therefore by every pay and revenue view.
+      // Written as 0 on the confirmed path so ticking the box clears an
+      // override left over from an earlier pass at this modal.
+      commissionOverrideGross:   commConfirmed ? 0 : Math.round(overrideVal),
+      commissionOverrideAt:      commConfirmed ? 0 : Date.now(),
+      commissionOverrideBy:      commConfirmed ? '' : (currentUser?.uid||'advisor'),
     };
     // elc-v435 (SOLDEDIT-20260823): persist corrections to the closing numbers so
     // the deal card, pay views, EOS revenue and the advisor payout breakdown all
     // use the real figures — not the pre-closing estimate.
     const _numChanges = [];
+    if(!commConfirmed && overrideVal>0){
+      _numChanges.push('Gross commission entered by hand '+fmt(Math.round(overrideVal))
+        +(refPct>0 ? ' before the '+refPct+'% referral' : '')
+        +' (calculated was '+(gross>0?fmt(gross):'—')+')');
+    }
     if(_livePrice>0 && _livePrice!==price){
       saveData[priceKey] = _livePrice;
       _numChanges.push(`${priceLbl} ${price>0?fmt(price):'—'} → ${fmt(_livePrice)}`);
@@ -8326,6 +8376,14 @@ function renderStageFields(stage, data={}){
           ${sel('sf-client-gift','Send Client Gift?',[{v:'no',l:'No'},{v:'yes',l:'Yes'}],data.clientGift||'no')}
           ${sel('sf-remove-sign','Remove Sign?',[{v:'no',l:'No'},{v:'yes',l:'Yes'}],data.removeSign||'no')}
         </div>
+        <!-- COMMOVERRIDE-20260915 — the hand-entered gross from Confirm Closing,
+             surfaced here so it is never an invisible number driving pay. -->
+        <div>
+          ${inp('sf-commission-override','Gross Commission Override ($)','money','Blank — calculated from price × commission %',data.commissionOverrideGross||'')}
+          <p class="text-xs text-gray-500 mt-1 leading-relaxed">
+            Set when the commission was entered by hand on the Confirm Closing pop-up. It <strong>replaces</strong> price × commission&nbsp;% everywhere pay is calculated — My&nbsp;Pay, advisor payouts, EOS revenue and the forecasts. Enter the full commission to ELC <strong>before</strong> any referral; clear the field to go back to the calculated figure.
+          </p>
+        </div>
         <div>
           <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Closing Notes <span class="normal-case font-normal text-gray-400 tracking-normal">— same field as “Notes” near the top of this form</span></label>
           <textarea id="sf-sold-notes" rows="2" placeholder="Any additional notes for closing…"
@@ -9096,8 +9154,31 @@ window._landedBackward = _landedBackward;
 // If the deal has a referral fee (referralDue==='yes'), it is deducted from the gross to give net ELC revenue.
 function getEffectiveRevenue(deal){
   let gross = 0;
+  /* ── COMMOVERRIDE-20260915 ──────────────────────────────────────────────
+     A gross commission typed by hand on the Confirm Closing modal is the
+     closing statement's real number, so it REPLACES the computed chain
+     below instead of sitting beside it. It is the commission to ELC
+     BEFORE any referral — exactly what a price × % result is — so the
+     referral haircut at the bottom of this function still applies to it.
+
+     Every screen that shows money reads this function (My Pay, the payout
+     ladder via getAdvisorShare, EOS revenue, Financials, the forecasts,
+     the deal card), so overriding here overrides everywhere, with no
+     per-view work and nothing left quoting the pre-closing estimate.
+
+     The older `confirmedGrossCommission` field is deliberately NOT read
+     here. On deals closed before this change it sometimes holds the full
+     fee before co-broke/referral payouts (1220 Arya Way: 128,000 with
+     ELC's real share 71,680) and sometimes the net, so honouring it would
+     silently inflate those deals. It stays an audit record of what was
+     confirmed; `commissionOverrideGross` is the only figure that overrides.
+     ──────────────────────────────────────────────────────────────────── */
+  const _ovrGross = Number(deal.commissionOverrideGross)||0;
+  if(_ovrGross > 0){
+    gross = _ovrGross;
+  }
   // ── Lease deals: commission = gross rent × commission % ────────────────
-  if(deal.dealType === 'lease'){
+  else if(deal.dealType === 'lease'){
     const leaseGross = deal.grossLeaseValue || deal.purchasePrice || 0;
     const leasePct   = deal.leaseCommissionPct || deal.elcCommissionPct || deal.commissionPct || 0;
     if(leaseGross > 0 && leasePct > 0 && leasePct <= 100) gross = Math.round(leaseGross * leasePct / 100);
@@ -20311,6 +20392,11 @@ window.openStaffDealView = function(dealId){
     row('Price', price>0 ? fmt$(price) : ''),
     row('Commission Rate', commPct>0 ? commPct+'%' : ''),
     row('Gross Commission', gross>0 ? fmt$(gross) : ''),
+    // COMMOVERRIDE-20260915 — say so when the gross above came from a hand
+    // entry rather than price × commission %, and what it replaced.
+    row('Commission Source', (Number(deal.commissionOverrideGross)||0) > 0
+        ? 'Entered at closing'+(deal.dealType!=='lease'&&price>0&&commPct>0
+            ? ' (calculated: '+fmt$(Math.round(price*commPct/100))+')' : '') : ''),
     row('Earnest Money', deal.earnestMoney>0 ? fmt$(deal.earnestMoney) : ''),
     row('Referral Fee', (deal.referralDue==='yes' && deal.referralPct>0)
         ? deal.referralPct+'%'+(deal.referralTo?' → '+esc(deal.referralTo):'') : ''),
@@ -36033,6 +36119,11 @@ function collectStageFields(){
     earnestMoney:          gf('sf-earnest-money'),
     cobroke:               gf('sf-cobroke'),
     // Sold
+    // COMMOVERRIDE-20260915 — only collected when the field is actually on
+    // screen, so a save from a form that never rendered it can't silently
+    // wipe an override and drop the deal back to the calculated gross.
+    ...(document.getElementById('sf-commission-override')
+        ? {commissionOverrideGross: gf('sf-commission-override')} : {}),
     buyerUse:      g('sf-buyer-use'),
     pressRelease:  g('sf-press-release'),
     clientGift:    g('sf-client-gift'),
