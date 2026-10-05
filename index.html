@@ -2567,6 +2567,17 @@ const DUAL_ROLE_EMAILS  = ['pat@thedirtdog.com','andrew@thedirtdog.com'];
 
 function isStaffOnlyEmail(email){ return STAFF_ONLY_EMAILS.map(e=>e.toLowerCase()).includes((email||'').toLowerCase()); }
 function isDualRoleEmail(email){  return DUAL_ROLE_EMAILS.map(e=>e.toLowerCase()).includes((email||'').toLowerCase()); }
+// SCEXCL-20261005: people who close the odd deal but are really staff — kept OFF every
+// advisor scorecard roster (EOS Advisor Scorecard, Report Card, Office Overview
+// scorecard, L-10 Scorecard Review, score-history sweep). Their deals, pay and
+// leaderboard rows are untouched; past frozen weeks are left as they are.
+const SCORECARD_EXCLUDE_EMAILS = ['pat@thedirtdog.com'];
+function _elcScorecardExcluded(uid, email){
+  const em = String((allProfiles[uid]||{}).email || email || '').toLowerCase();
+  return SCORECARD_EXCLUDE_EMAILS.includes(em);
+}
+function _elcScorecardAdvisors(list){ return (list||[]).filter(a=>!_elcScorecardExcluded(a.uid, a.email)); }
+window._elcScorecardAdvisors = _elcScorecardAdvisors;
 
 /* =======================================================
    SEED DATA
@@ -20109,7 +20120,8 @@ window._elcSweepScoreHistory = async () => {
     const staffOnly = new Set(STAFF_ONLY_EMAILS.map(e=>e.toLowerCase()));
     const advisors  = getDistinctAdvisors()
       .filter(a=>!allProfiles[a.uid]?.removed)
-      .filter(a=>!staffOnly.has(String(allProfiles[a.uid]?.email||'').toLowerCase()));
+      .filter(a=>!staffOnly.has(String(allProfiles[a.uid]?.email||'').toLowerCase()))
+      .filter(a=>!_elcScorecardExcluded(a.uid, a.email));   // SCEXCL-20261005
 
     // Sweep the trailing 12 weeks — the same window the history screen shows.
     const anchor = new Date(); anchor.setDate(anchor.getDate()-7);
@@ -33014,7 +33026,7 @@ function viewOfficeOverview(){
      and listings at 10 while the EOS scorecard scored them 10 and 20, and it
      read LOIs from the CURRENT week. An advisor could be a B here and a C on
      their own scorecard for the very same week. One formula now. */
-  const scRowsSorted = allAdvs.map(adv => {
+  const scRowsSorted = _elcScorecardAdvisors(allAdvs).map(adv => {   // SCEXCL-20261005
     const _vacOv = window._elcOnVacation(adv.uid, pwS, pwE);   // elc-v437 (VACMODE-20260824)
     const S      = window._elcWeekScore(adv.uid, pwS, pwE, weekKey);
     const qGoal  = allProfiles[adv.uid]?.quarterlyUCGoal || 10000000;
@@ -33989,7 +34001,7 @@ function viewEOS(sub='rocks'){
 
     const effectiveAdmin = isAdmin && !adminViewAsAdvisor && !staffViewMode;
     const advisors = effectiveAdmin
-      ? getDistinctAdvisors()
+      ? _elcScorecardAdvisors(getDistinctAdvisors())   // SCEXCL-20261005
       : [{uid, name: currentUser.name||currentUser.email}];
 
     /* Sort key. elc-v443: this used to be a FOURTH hand-copy of the formula —
@@ -34460,9 +34472,9 @@ function viewEOS(sub='rocks'){
       const _sv2        = _scoreHist2.__ver||1;
       const SCORECARD_VER2 = window._ELC_SCORECARD_VER;
       const advisorList2 = effectiveAdmin
-        ? getDistinctAdvisors()
+        ? _elcScorecardAdvisors(getDistinctAdvisors())   // SCEXCL-20261005
         : (currentUser.isOfficeManager && !adminViewAsAdvisor && !staffViewMode)
-          ? getDistinctAdvisors().filter(a=>(allProfiles[a.uid]?.office||'')===currentUser.officeManagerOffice)
+          ? _elcScorecardAdvisors(getDistinctAdvisors()).filter(a=>(allProfiles[a.uid]?.office||'')===currentUser.officeManagerOffice)
           : [{uid, name:currentUser.name||currentUser.email}];
 
       const fmtQD = d=>d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
@@ -34981,7 +34993,7 @@ function viewEOS(sub='rocks'){
         ${section('📊','Scorecard Review','5',`
           <p class="text-xs font-bold text-gray-400 uppercase tracking-wide mb-3">Prior Week: ${weekLabel2}</p>
           ${(()=>{
-            const advs = (roleFilter==='staff') ? [] : l10Advisors();
+            const advs = (roleFilter==='staff') ? [] : _elcScorecardAdvisors(l10Advisors());   // SCEXCL-20261005
             const now2 = new Date();
             const qNum2 = Math.floor(now2.getMonth()/3)+1;
             const qStart2 = new Date(now2.getFullYear(),(qNum2-1)*3,1).getTime();
