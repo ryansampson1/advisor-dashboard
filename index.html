@@ -9501,7 +9501,7 @@ function computeAdvisorKPIs(advisorUid){
     const ts = getEffectiveDealTs(d);
     return ts>=qStart && ts<=qEnd;
   });
-  const qVol  = qDeals.reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||0), 0);
+  const qVol  = qDeals.reduce((s,d)=>s+_elcQGoalCredit(d), 0);   // QGOALSPLIT-20261005
   const qPct  = Math.min(Math.round(qVol/Q_GOAL*100),100);
 
   // 6. Closed Won this year + next year (+ logged non-deal payments)
@@ -10190,6 +10190,27 @@ function getEffectiveDealTs(deal){
   }
   return deal.contractEnteredAt||deal.createdAt||0;
 }
+// QGOALSPLIT-20261005 — quarterly UC-goal credit is split evenly across every
+// advisor on the deal (primary + co-advisors): a $10M deal with 3 advisors
+// credits $3,333,333 to each advisor's quarterly goal. Applies going forward
+// only — deals whose effective (UC) date is before ELC_QGOAL_SPLIT_FROM keep
+// full-price credit, so closed quarters and locked scorecard weeks don't move.
+// Firm-wide totals (admin firm view, company scorecard) still count each deal once.
+const ELC_QGOAL_SPLIT_FROM = new Date(2026, 9, 1).getTime();   // Q4 2026 start (Oct 1, 2026)
+function _elcDealAdvisorCount(deal){
+  const s = new Set();
+  if(deal.advisorUid) s.add(deal.advisorUid);
+  (deal.coAdvisorUids||[]).forEach(u=>{ if(u) s.add(u); });
+  (deal.coAdvisors||[]).forEach(ca=>{ if(ca&&ca.uid) s.add(ca.uid); });
+  return Math.max(s.size, 1);
+}
+function _elcQGoalCredit(deal){
+  const price = deal.purchasePrice||deal.contractPrice||0;
+  if(!price) return 0;
+  return getEffectiveDealTs(deal) >= ELC_QGOAL_SPLIT_FROM ? price/_elcDealAdvisorCount(deal) : price;
+}
+window._elcQGoalCredit = _elcQGoalCredit;
+window._elcDealAdvisorCount = _elcDealAdvisorCount;
 // Count deals for an advisor that entered a specific stage in a given quarter
 function countStageEntries(deals, stageKey, year, q){
   // stageKey = 'listingEnteredAt' | 'contractEnteredAt'
@@ -17375,7 +17396,7 @@ function viewBoard(){
       const effectiveTs = getEffectiveDealTs(d);
       return effectiveTs >= qStart.getTime() && effectiveTs <= qEnd.getTime();
     });
-    const qVol  = qDeals.reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||0), 0);
+    const qVol  = qDeals.reduce((s,d)=>s+(isFirmView ? (d.purchasePrice||d.contractPrice||0) : _elcQGoalCredit(d)), 0);   // QGOALSPLIT-20261005 — firm view counts each deal once
     const qPct  = Math.min(Math.round(qVol/Q_GOAL*100), 100);
     const qLabel= 'Q'+(Math.floor(now.getMonth()/3)+1)+' '+now.getFullYear();
 
@@ -20014,7 +20035,7 @@ window._elcWeekScoreRaw = (uid, wS, wE, wKey) => {
     if(!isContractActiveStage(d.stage)&&!isWonStage(d.stage||'')) return false;
     const ts=getEffectiveDealTs(d); return ts>=wQStart&&ts<=wE;
   });
-  const wQVol = wQDeals.reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||0),0);
+  const wQVol = wQDeals.reduce((s,d)=>s+_elcQGoalCredit(d),0);   // QGOALSPLIT-20261005
   const wQPct = Math.min(Math.round(wQVol/Q_GOAL*100),100);
 
   // Tasks — overdue penalty + counts, reconstructed as of the week's end so a
@@ -32221,7 +32242,7 @@ function viewLeaderboard(){
     // Active UC pipeline: all deals in contract/DD/closing stages (not just Q2 entries)
     const ucActive=ad.filter(d=> !isLostStage(d.stage||'') && !isWonStage(d.stage||'')
       && /under.?contract|due.?diligence|rezoning|permitting|closing|in.?contract/i.test(d.stage||''));
-    const cqUCVal=ucActive.reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||0),0);
+    const cqUCVal=ucActive.reduce((s,d)=>s+_elcQGoalCredit(d),0);   // QGOALSPLIT-20261005
 
     // ── Rolling 30-day pipeline activity ──────────────────────────
     const _30dAgo = Date.now() - 30*24*60*60*1000;
@@ -32255,7 +32276,7 @@ function viewLeaderboard(){
   setContent(`
     ${officeFilterBar()}
     <h2 class="text-xl font-bold text-gray-800 mb-2">Advisor Leaderboard${officeLabel}</h2>
-    <p class="text-xs text-gray-400 mb-5">UC Goal = quarterly Under Contract volume target per advisor (set in Splits). 🔴 = below · 🟢 = at or above goal</p>
+    <p class="text-xs text-gray-400 mb-5">UC Goal = quarterly Under Contract volume target per advisor (set in Splits). Deals with more than one advisor credit each an equal share (Q4 2026 on). 🔴 = below · 🟢 = at or above goal</p>
 
     <!-- ── Trailing 4 Quarters: Goal % Achieved ── -->
     <div class="bg-white rounded-2xl border overflow-hidden mb-6">
@@ -32286,7 +32307,7 @@ function viewLeaderboard(){
                   : (d.contractEnteredAt||0);
                 return ts>0 && inQ(ts,year,q);
               });
-              const vol=ucDeals.reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||0),0);
+              const vol=ucDeals.reduce((s,d)=>s+_elcQGoalCredit(d),0);   // QGOALSPLIT-20261005
               const pct=r.goal>0?Math.min(Math.round(vol/r.goal*100),999):0;
               const hit=pct>=100;
               const barW=Math.min(pct,100);
@@ -32957,7 +32978,7 @@ function viewOfficeOverview(){
     const ad = allDeals.filter(d=>isDealAdvisor(d,adv.uid));
     const goal = allProfiles[adv.uid]?.quarterlyUCGoal || 10000000;
     const cqUCDeals = ad.filter(d=>!isLostStage(d.stage||'')&&(isContractActiveStage(d.stage)||isWonStage(d.stage||''))&&getEffectiveDealTs(d)>=qStart&&getEffectiveDealTs(d)<=qEnd);
-    const cqVol  = cqUCDeals.reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||0),0);
+    const cqVol  = cqUCDeals.reduce((s,d)=>s+_elcQGoalCredit(d),0);   // QGOALSPLIT-20261005
     const cqPct  = goal>0 ? Math.min(Math.round(cqVol/goal*100),999) : 0;
     const active = ad.filter(d=>!isLostStage(d.stage||'')&&!isWonStage(d.stage||'')).length;
     const loiR   = ad.reduce((n,d)=>n+_loiCountInWindow(d, _30dAgo, Date.now()), 0);
@@ -33030,7 +33051,7 @@ function viewOfficeOverview(){
     const _vacOv = window._elcOnVacation(adv.uid, pwS, pwE);   // elc-v437 (VACMODE-20260824)
     const S      = window._elcWeekScore(adv.uid, pwS, pwE, weekKey);
     const qGoal  = allProfiles[adv.uid]?.quarterlyUCGoal || 10000000;
-    const qVolA  = S.det.qDeals.reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||0),0);
+    const qVolA  = S.det.qDeals.reduce((s,d)=>s+_elcQGoalCredit(d),0);   // QGOALSPLIT-20261005
     return {adv, score:_vacOv?-1:S.score, qPct:S.wQPct, qVolA, qGoal,
             overdue:S.det.overdueTasks.length,
             wi:{networkEvent:S.netEv, driveProperties:S.drPr},
@@ -33842,7 +33863,8 @@ function viewEOS(sub='rocks'){
       const _nm  = d => window._scEsc(d.projectName||d.propertyAddress||'Unnamed');
       const _suf = txt => " <span style='opacity:.6'>· "+window._scEsc(txt)+"</span>";
       const qTip        = window._scTipHtml('Q'+qNum+' Goal volume',
-                            det.qDeals.map(d=>_nm(d)+_suf(fmt$(d.purchasePrice||d.contractPrice||0))));
+                            det.qDeals.map(d=>{ const _p=d.purchasePrice||d.contractPrice||0, _c=_elcQGoalCredit(d);   // QGOALSPLIT-20261005
+                              return _nm(d)+_suf(_c<_p ? fmt$(_c)+' (1/'+_elcDealAdvisorCount(d)+' of '+fmt$(_p)+')' : fmt$(_p)); }));
       const overdueTip  = window._scTipHtml('Overdue tasks · −2 pts each',
                             det.overdueTasks.map(t=>window._scEsc(t.title||'Untitled')+_suf('due '+t.dueDate)));
       const prospectTip = window._scTipHtml('Prospects & Calls · 5 pts each',
@@ -34681,7 +34703,11 @@ function viewEOS(sub='rocks'){
     // ── issues ───────────────────────────────────────────────────────────
     const allIssues = eosGet('issues',[]);
     // Each issue only appears in the L-10 it was explicitly submitted for
-    const filterIssues = roleFilter => allIssues.filter(i => (i.role||'advisor') === roleFilter && _l10IssueIn(i.advisorUid));
+    // L10ISSUEADD-20261005: an issue added live in a scoped meeting carries that office,
+    // so it always shows in the meeting it was raised in.
+    window._l10CurOffice = l10Office;
+    const filterIssues = roleFilter => allIssues.filter(i => (i.role||'advisor') === roleFilter
+      && (i.office ? (l10Office==='both' || i.office===l10Office) : _l10IssueIn(i.advisorUid)));
 
     // ── deal headlines ───────────────────────────────────────────────────
     // Match headline-worthy moves against the CURRENT pipeline stage names
@@ -34936,7 +34962,7 @@ function viewEOS(sub='rocks'){
         + section('🪨','Company Rocks','5', rocksBlock,'#059669')
         + section('📣','Headlines','5', headlineBlock,'#7c3aed')
         + section('✅','To-Do Review — Last Week','5', reviewBlock,'#D97706')
-        + section('🔥','IDS — Issues List','60', idsIssues.length===0?'<p class="text-sm text-gray-500 italic">No issues submitted for the Admin L-10.</p>':issueList(idsIssues),'#DA291C')
+        + section('🔥','IDS — Issues List','60', (idsIssues.length===0?'<p class="text-sm text-gray-500 italic">No issues submitted for the Admin L-10.</p>':issueList(idsIssues)) + _l10IssueAddRow('admin'),'#DA291C')
         + section('📝','New To-Dos — Due by Next Week','5', newBlock,'#374151');
     };
 
@@ -35195,7 +35221,7 @@ function viewEOS(sub='rocks'){
           const _advs = l10Advisors();
           const _qRows = _advs.map(a=>{
             const qVol = allDeals.filter(d=>isDealAdvisor(d,a.uid)&&!isLostStage(d.stage||'')&&(isContractActiveStage(d.stage)||isWonStage(d.stage||''))&&getEffectiveDealTs(d)>=_pqStart&&getEffectiveDealTs(d)<=_pqEnd)
-              .reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||0),0);
+              .reduce((s,d)=>s+_elcQGoalCredit(d),0);   // QGOALSPLIT-20261005
             const qGoal = allProfiles[a.uid]?.quarterlyUCGoal||10000000;
             const qPct  = Math.min(Math.round(qVol/qGoal*100),100);
             const col   = qPct>=100?'#059669':qPct>=60?'#D97706':'#DA291C';
@@ -35221,7 +35247,7 @@ function viewEOS(sub='rocks'){
           checklistHtml(todoKey,'l10AddItem','l10ToggleItem','l10DeleteItem','Add a to-do item…',true),
         '#D97706') : ''}
 
-        ${section('🔥','IDS — Issues List','60', idsIssues.length===0?emptyMsg:issueList(idsIssues),'#DA291C')}
+        ${section('🔥','IDS — Issues List','60', (idsIssues.length===0?emptyMsg:issueList(idsIssues)) + _l10IssueAddRow(roleFilter),'#DA291C')}
 
         ${isAdminTab ? section('💰','Company Financials','5',(()=>{
           const _now=new Date();
@@ -36587,6 +36613,37 @@ window.al10DeleteTodo = (id) => {
     if(!cur.some(i=>i.id===snap.id)){ cur.splice(Math.min(idx, cur.length), 0, snap); eosSave(_AL10_TODO_KEY, cur); }
     window._eosRerender('l10');
   });
+};
+
+// ── L-10 live "+ Add issue" in the IDS section · L10ISSUEADD-20261005 ─────
+// Lets the room add an issue mid-meeting without leaving the agenda. Saved to
+// eos/issues exactly like the Issues tab form (role = this meeting), so it shows
+// on the Issues tab too and can be resolved with ✓ as usual.
+function _l10IssueAddRow(role){
+  const cid = 'l10iss-' + role;
+  return '<div class="flex gap-2 flex-wrap mt-3 pt-3 border-t border-gray-100">'
+    + '<input id="inp-'+cid+'" type="text" placeholder="Add an issue to discuss…" aria-label="New issue for this meeting"'
+    + ' onkeydown="if(event.key===\'Enter\')l10AddIssue(\''+role+'\')"'
+    + ' class="flex-1 border rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-500" style="min-width:180px"/>'
+    + '<button type="button" onclick="l10AddIssue(\''+role+'\')" class="px-4 py-2 rounded-lg text-sm font-semibold text-white" style="background:var(--brand-red)">+ Add Issue</button>'
+    + '</div>';
+}
+window.l10AddIssue = (role) => {
+  const cid = 'l10iss-' + role;
+  const inp = document.getElementById('inp-'+cid);
+  const text = (inp?.value||'').trim();
+  if(!text){ inp?.focus(); showToast('Type the issue first','error'); return; }
+  const issue = { id:'iss-'+Date.now(), advisorUid:currentUser.uid, advisorName:currentUser.name||currentUser.email,
+                  role, type:'issue', text, createdAt:Date.now(), addedInMeeting:true };
+  const off = window._l10CurOffice;
+  if(off && off!=='both') issue.office = off;
+  const list = eosGet('issues',[]);
+  list.push(issue);                       // bottom of the list = discussed after the ones already queued
+  eosSave('issues', list);
+  if(inp) inp.value = '';
+  showToast('Issue added','success',1800);
+  window._eosRerender('l10');
+  setTimeout(()=>document.getElementById('inp-'+cid)?.focus(), 60);
 };
 
 // ── L-10 interactive handlers ───────────────────────────────────────────
