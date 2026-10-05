@@ -33196,12 +33196,12 @@ function viewOfficeOverview(){
         ${allAdvs.length===0
           ? '<p class="text-sm text-gray-400">No advisors found for this office.</p>'
           : allAdvs.map(adv=>{
-              const rocks = officeRocks[adv.uid]||[];
+              const rocks = _rockEntriesOpen(officeRocks[adv.uid]);
               return `<div class="border rounded-xl p-4">
                 <div class="text-xs font-bold text-gray-500 uppercase tracking-wide mb-2.5">${adv.name}</div>
                 ${rocks.length===0
                   ? '<p class="text-xs text-gray-400 italic">No rocks set.</p>'
-                  : rocks.map((r,i)=>`
+                  : rocks.map(({r,i})=>`
                     <div class="flex items-start gap-2 p-2 rounded-lg ${r.status==='complete'?'bg-green-50':'bg-gray-50'} mb-1.5">
                       <input type="checkbox" ${r.status==='complete'?'checked':''}
                         onchange="mgrToggleRock('${adv.uid}',${i},this.checked)" class="mt-0.5 accent-green-600 rounded"/>
@@ -33384,6 +33384,8 @@ function viewEOS(sub='rocks'){
     const compRocks = eosGet('compRocks',[]);
     const myRocks   = (eosGet('myRocks',{})[uid]||[]);
     const allRocks  = eosGet('myRocks',{});
+    const compOpen  = _rockEntriesOpen(compRocks);   // ROCKHIST-20261005
+    const myOpen    = _rockEntriesOpen(myRocks);
 
     body=`
       <div class="flex justify-end mb-3">
@@ -33399,8 +33401,8 @@ function viewEOS(sub='rocks'){
             ${effectiveAdminGlobal?`<button onclick="addCompRock()" class="brand-btn text-xs px-3 py-1.5 rounded-lg font-semibold">+ Rock</button>`:''}
           </div>
           <div class="space-y-2" id="comp-rocks-list">
-            ${compRocks.length===0?'<p class="text-sm text-gray-400">No company rocks set yet.</p>':
-              compRocks.map((r,i)=>`
+            ${compOpen.length===0?'<p class="text-sm text-gray-400">No company rocks set for this quarter yet.</p>':
+              compOpen.map(({r,i})=>`
               <div class="flex items-start gap-3 p-3 rounded-lg ${r.status==='complete'?'bg-green-50':'bg-gray-50'}">
                 ${effectiveAdminGlobal?`<input type="checkbox" ${r.status==='complete'?'checked':''}
                   onchange="toggleCompRock(${i},this.checked)" class="mt-0.5 accent-green-600 rounded"/>`:
@@ -33421,8 +33423,8 @@ function viewEOS(sub='rocks'){
             <button onclick="addMyRock()" class="brand-btn text-xs px-3 py-1.5 rounded-lg font-semibold">+ Rock</button>
           </div>
           <div class="space-y-2" id="my-rocks-list">
-            ${myRocks.length===0?'<p class="text-sm text-gray-400">No rocks yet — add your 90-day goals.</p>':
-              myRocks.map((r,i)=>`
+            ${myOpen.length===0?'<p class="text-sm text-gray-400">No rocks yet for this quarter — add your 90-day goals.</p>':
+              myOpen.map(({r,i})=>`
               <div class="flex items-start gap-3 p-3 rounded-lg ${r.status==='complete'?'bg-green-50':'bg-gray-50'}">
                 <input type="checkbox" ${r.status==='complete'?'checked':''}
                   onchange="toggleMyRock(${i},this.checked)" class="mt-0.5 accent-green-600 rounded"/>
@@ -33435,13 +33437,13 @@ function viewEOS(sub='rocks'){
               </div>`).join('')}
           </div>
         </div>
-        ${effectiveAdminGlobal && Object.keys(allRocks).length>0?`
+        ${effectiveAdminGlobal && Object.values(allRocks).some(l=>_rockEntriesOpen(l).length)?`
         <!-- All Advisor Rocks (admin) -->
         <div class="bg-white rounded-2xl border p-5 md:col-span-2">
           <h3 class="font-semibold text-gray-800 mb-4">👥 All Advisor Rocks</h3>
           <div class="space-y-4">
             ${getDistinctAdvisors().map(adv=>{
-              const ar=allRocks[adv.uid]||[];
+              const ar=_rockEntriesOpen(allRocks[adv.uid]).map(x=>x.r);
               if(!ar.length) return '';
               return `<div>
                 <div class="text-xs font-bold text-gray-500 uppercase mb-2">${adv.name}</div>
@@ -33454,6 +33456,7 @@ function viewEOS(sub='rocks'){
             }).filter(Boolean).join('')}
           </div>
         </div>`:''}
+        ${_rockHistoryHtml(compRocks, allRocks, uid, effectiveAdminGlobal)}
       </div>`;
   }
 
@@ -33923,7 +33926,7 @@ function viewEOS(sub='rocks'){
         const overdueTasks = sTasks.filter(t=>t.status==='pending' && t.dueDate && t.dueDate < sTodayStr).length;
 
         // Rocks
-        const rocks     = allRocks[sUid]||[];
+        const rocks     = _rocksNow(allRocks[sUid]);
         const onTrack   = rocks.filter(r=>r.status==='complete'||r.status==='inprocess').length;
         const totalR    = rocks.length;
         const rockPct   = totalR>0 ? Math.round(onTrack/totalR*100) : 100;
@@ -34093,7 +34096,7 @@ function viewEOS(sub='rocks'){
       const myTasks = allTasks.filter(t => t.assignedTo===uid);
       const Q_GOAL  = (allProfiles[uid]?.quarterlyUCGoal) || 10000000;
       const allRocks = eosGet('myRocks',{});
-      const myRocks  = allRocks[uid]||[];
+      const myRocks  = _rocksNow(allRocks[uid]);
       const onTrackR = myRocks.filter(r=>r.status==='complete'||r.status==='inprocess').length;
       const totalR   = myRocks.length;
       const rockPct  = totalR>0 ? Math.round(onTrackR/totalR*100) : 100;
@@ -34519,6 +34522,20 @@ function viewEOS(sub='rocks'){
       || (d.coAdvisors||[]).some(ca=>_officeOf(ca.uid)===l10Office);
     const l10Deals    = l10Office==='both' ? allDeals : allDeals.filter(_l10DealIn);
     const l10Advisors = () => getDistinctAdvisors().filter(a=>_l10InOffice(a.uid));
+    // Staff L-10 attendees — one fixed roster used by Segue AND Rock Review
+    // (ROCKHIST-20261005). uid resolves to the real profile uid so rocks match.
+    const L10_STAFF = [
+      {email:'pat@thedirtdog.com',    name:'Pat'},
+      {email:'ryan@thedirtdog.com',   name:'Ryan'},
+      {email:'krissy@thedirtdog.com', name:'Krissy'},
+      {email:'nick@thedirtdog.com',   name:'Nick'},
+    ];
+    const l10StaffRoster = () => L10_STAFF.map(s=>{
+      const hit = Object.entries(allProfiles).find(([,p])=>!p.removed && (p.email||'').toLowerCase()===s.email);
+      return {uid: hit ? hit[0] : s.email, name: (hit && hit[1].name) || s.name};
+    });
+    // Advisor L-10 attendees — advisors in scope, minus staff-only people
+    const l10AdvisorRoster = () => l10Advisors().filter(a=>!STAFF_ONLY_EMAILS.includes(((allProfiles[a.uid]||{}).email||a.email||'').toLowerCase()));
 
     // ── helpers ──────────────────────────────────────────────────────────
     const l10Key = k => 'l10-'+k+'-'+l10Sub;
@@ -34583,19 +34600,21 @@ function viewEOS(sub='rocks'){
 
     // ── editable checklist (todos / cascades) ────────────────────────────
     // showAssign=true adds a person picker and wires into the Tasks system
+    let _clSeq = 0;   // L10TODOFIX-20261005: unique ids per rendered instance
     const checklistHtml = (storeKey, fnAdd, fnCheck, fnDelete, placeholder, showAssign=false) => {
       const items = eosGet(storeKey, []);
+      const cid = storeKey + '-' + (++_clSeq);
       const allUsers = Object.entries(allProfiles)
         .map(([uid,p])=>({uid, name:p.name||p.email||uid}))
         .filter(u=>u.name && u.name.length<60)
         .sort((a,b)=>a.name.localeCompare(b.name));
       const assignSel = showAssign ? `
-        <select id="sel-${storeKey}" class="border rounded-lg px-2 py-1.5 text-sm outline-none focus:border-gray-400 bg-white" style="min-width:130px">
+        <select id="sel-${cid}" aria-label="Assign to" class="border rounded-lg px-2 py-1.5 text-sm outline-none focus:border-gray-400 bg-white" style="min-width:130px">
           <option value="">Assign to…</option>
           ${allUsers.map(u=>`<option value="${u.uid}" data-name="${u.name}">${u.name}</option>`).join('')}
         </select>` : '';
       return `
-        <div class="space-y-1.5 mb-3" id="cl-${storeKey}">
+        <div class="space-y-1.5 mb-3" id="cl-${cid}">
           ${items.length===0 ? `<p class="text-sm text-gray-400 italic">Nothing yet — add below.</p>` :
             items.map(it=>`
               <div class="flex items-start gap-2 group">
@@ -34614,11 +34633,11 @@ function viewEOS(sub='rocks'){
               </div>`).join('')}
         </div>
         <div class="flex gap-2 flex-wrap">
-          <input id="inp-${storeKey}" type="text" placeholder="${placeholder}"
+          <input id="inp-${cid}" type="text" placeholder="${placeholder}" aria-label="${placeholder}"
             class="flex-1 border rounded-lg px-3 py-1.5 text-sm outline-none focus:border-gray-400" style="min-width:160px"
-            onkeydown="if(event.key==='Enter')${fnAdd}('${storeKey}')"/>
+            onkeydown="if(event.key==='Enter')${fnAdd}('${storeKey}','${cid}')"/>
           ${assignSel}
-          <button onclick="${fnAdd}('${storeKey}')"
+          <button type="button" onclick="${fnAdd}('${storeKey}','${cid}')"
             class="px-3 py-1.5 rounded-lg text-sm font-semibold text-white transition"
             style="background:var(--brand-black)">+ Add</button>
         </div>`;
@@ -34662,19 +34681,7 @@ function viewEOS(sub='rocks'){
           <p class="text-sm text-gray-500 mb-3">Each person shares one piece of personal or professional good news.</p>
           <div class="grid grid-cols-2 gap-2">
             ${(()=>{
-              if(roleFilter==='staff'){
-                // Fixed Segue roster — staff meeting attendees only (no admin roles)
-                const SEGUE_STAFF=[
-                  {email:'pat@thedirtdog.com',    name:'Pat'},
-                  {email:'ryan@thedirtdog.com',   name:'Ryan'},
-                  {email:'krissy@thedirtdog.com', name:'Krissy'},
-                  {email:'nick@thedirtdog.com',   name:'Nick'},
-                ];
-                return SEGUE_STAFF.map(s=>{
-                  const _p=Object.values(allProfiles).find(p=>(p.email||'').toLowerCase()===s.email);
-                  return {uid:s.email, name:(_p&&_p.name)||s.name};
-                });
-              }
+              if(roleFilter==='staff') return l10StaffRoster(); // fixed staff meeting roster
               return l10Advisors();
             })().map(a=>`
               <div class="flex items-center gap-2 p-2 bg-gray-50 rounded-lg">
@@ -34741,11 +34748,10 @@ function viewEOS(sub='rocks'){
 
         ${!isAdminTab ? section('🪨','Rock Review','5',`
           ${(()=>{
-            const compRocks = eosGet('compRocks',[]);
+            const compRocks = _rocksNow(eosGet('compRocks',[]));   // current quarter only
             const allMyRocks = eosGet('myRocks',{});
-            const rockMembers = roleFilter==='staff'
-              ? Object.entries(allProfiles).filter(([,p])=>(p.roles||[]).some(r=>r==='staff')||STAFF_ONLY_EMAILS.includes((p.email||'').toLowerCase())).map(([uid,p])=>({uid,name:p.name||p.email||uid})).filter(m=>m.name&&m.name.length<60)
-              : l10Advisors();
+            // Only the people in THIS meeting: staff L-10 → staff roster, advisor L-10 → advisors
+            const rockMembers = roleFilter==='staff' ? l10StaffRoster() : l10AdvisorRoster();
             const rockLabel = roleFilter==='staff' ? 'Staff Rocks' : 'Advisor Rocks';
             const compHtml = compRocks.length===0
               ? '<p class="text-sm text-gray-400 italic mb-3">No company rocks set.</p>'
@@ -34760,20 +34766,22 @@ function viewEOS(sub='rocks'){
                   }).join('')
                 +'</div></div>';
             const advHtml = rockMembers.length===0 ? '' :
-              '<div><p class="text-xs font-bold text-gray-400 uppercase tracking-wide mb-2">'+rockLabel+'</p><div class="space-y-1.5">'
+              '<div><p class="text-xs font-bold text-gray-400 uppercase tracking-wide mb-2">'+rockLabel+' · '+_rockQLabel(_rockQKey())+' <span class="normal-case font-normal">— hover a name to see their rocks</span></p><div class="space-y-1.5">'
               + rockMembers.map(a=>{
-                  const rocks = allMyRocks[a.uid]||[];
+                  const rocks = _rocksNow(allMyRocks[a.uid]);
+                  const _tip = _rockTip(a.name, rocks);
+                  const _nm = '<span class="text-sm font-semibold text-gray-700" style="min-width:85px;cursor:help;text-decoration:underline dotted #9ca3af;text-underline-offset:3px" tabindex="0" data-sctip="'+_tip+'">'+a.name+'</span>';
                   if(rocks.length===0) return '<div class="flex items-center gap-2">'
-                    +'<span class="text-sm font-semibold text-gray-700" style="min-width:85px">'+a.name+'</span>'
+                    +_nm
                     +'<span class="text-xs text-gray-400 italic">No rocks set</span></div>';
                   const onT = rocks.filter(r=>r.status==='complete'||r.status==='inprocess').length;
                   const tot = rocks.length;
                   const pct = Math.round(onT/tot*100);
                   const col = pct>=80?'#059669':pct>=50?'#D97706':'#DA291C';
                   return '<div class="flex items-center gap-2">'
-                    +'<span class="text-sm font-semibold text-gray-700" style="min-width:85px">'+a.name+'</span>'
-                    +'<div class="flex gap-1 flex-wrap">'
-                    + rocks.map(r=>'<span title="'+(r.text||'')+'" style="display:inline-block;width:13px;height:13px;border-radius:50%;background:'+(r.status==='complete'?'#059669':r.status==='inprocess'?'#D97706':'#e5e7eb')+'" class="cursor-help"></span>').join('')
+                    +_nm
+                    +'<div class="flex gap-1 flex-wrap" style="cursor:help" data-sctip="'+_tip+'">'
+                    + rocks.map(r=>'<span style="display:inline-block;width:13px;height:13px;border-radius:50%;background:'+(r.status==='complete'?'#059669':r.status==='inprocess'?'#D97706':'#e5e7eb')+'" class="cursor-help"></span>').join('')
                     +'</div>'
                     +'<span class="text-xs font-bold ml-1" style="color:'+col+'">'+onT+'/'+tot+'</span>'
                     +'</div>';
@@ -35220,7 +35228,7 @@ function viewEOS(sub='rocks'){
       const _pt=_dt+_pp;
       const _stTodayStr=new Date().toISOString().slice(0,10);
       const _stOd=_st.filter(t=>t.status==='pending'&&t.dueDate&&t.dueDate<_stTodayStr).length;
-      const _ar=eosGet('myRocks',{}); const _rk=_ar[uid]||[];
+      const _ar=eosGet('myRocks',{}); const _rk=_rocksNow(_ar[uid]);
       const _on=_rk.filter(r=>r.status==='complete'||r.status==='inprocess').length;
       const _tr=_rk.length; const _rp=_tr>0?Math.round(_on/_tr*100):100;
       _sc=Math.round(_rp*0.33)+(_pt===0?33:Math.round(_dt/_pt*33))+(_stOd===0?34:0);
@@ -35325,12 +35333,12 @@ window.printRocks = () => {
 
   // Build advisor rock sections
   let advisorSections = '';
-  const advWithRocks = advisors.filter(a=>(allRocks[a.uid]||[]).length>0);
+  const advWithRocks = advisors.filter(a=>_rocksNow(allRocks[a.uid]).length>0);
   if(advWithRocks.length){
     const cols = advWithRocks.map(a=>`
       <div>
         <div class="rock-group-hdr">${a.name}</div>
-        ${rockList(allRocks[a.uid]||[])}
+        ${rockList(_rocksNow(allRocks[a.uid]))}
       </div>`).join('');
     advisorSections = `
       <div class="section">
@@ -35354,7 +35362,7 @@ window.printRocks = () => {
     </div>
     <div class="section">
       <div class="section-label">Company Rocks</div>
-      <div style="margin-top:8px">${rockList(compRocks)}</div>
+      <div style="margin-top:8px">${rockList(_rocksNow(compRocks))}</div>
     </div>
     ${advisorSections}
     <div class="footer">
@@ -35523,8 +35531,84 @@ function _rockQOf(r){
   if(!r) return '';
   if(/^\d{4}-Q[1-4]$/.test(r.quarter||'')) return r.quarter;
   if(/^\d{4}-\d{2}-\d{2}/.test(r.dueDate||'')) return _rockQKey(new Date(r.dueDate.slice(0,10) + 'T00:00:00'));
+  // ROCKHIST-20261005: no quarter and no date → the quarter it was created in (id = 'mr-'/'cr-' + ms)
+  const m = /^(?:mr|cr)-(\d{12,})$/.exec(r.id||'');
+  if(m) return _rockQKey(new Date(+m[1]));
   return '';
 }
+/* ── ROCKHIST-20261005 — quarter history + lock ─────────────────────────
+   A rock belongs to one quarter. Once that quarter's last day has passed the
+   rock is LOCKED: nobody can check/uncheck, edit or delete it, and it moves
+   off the live lists into 📜 Rock History, where it shows as Completed or
+   Not completed for good. Scorecards, the L-10 and the print handout count
+   only the CURRENT quarter's rocks, so last quarter's misses don't drag on. */
+function _rockTodayYmd(){ const d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+function _rockLocked(r){ const k=_rockQOf(r); return !!k && _rockQEnd(k) < _rockTodayYmd(); }
+function _rocksNow(list){ const cur=_rockQKey(); return (list||[]).filter(r=>{ const k=_rockQOf(r); return !k || k===cur; }); }
+function _rockEntriesOpen(list){ return (list||[]).map((r,i)=>({r,i})).filter(x=>!_rockLocked(x.r)); }
+function _rockLockGuard(r){
+  if(r && _rockLocked(r)){
+    showToast && showToast('🔒 ' + _rockQLabel(_rockQOf(r)) + ' has ended — its rocks are locked for the record', 'error');
+    return true;
+  }
+  return false;
+}
+function _rockEsc(t){ return String(t==null?'':t).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+/* Hover tooltip (data-sctip) listing a person's rocks for this quarter. */
+function _rockTip(name, rocks){
+  if(!window._scTipHtml) return '';
+  const items = (rocks||[]).map(r => (r.status==='complete'?'✅ ':r.status==='inprocess'?'🔄 ':'⬜ ') + _rockEsc(r.text||'Unnamed rock'));
+  return window._scTipHtml((name||'') + ' — ' + _rockQLabel(_rockQKey()) + ' Rocks', items.length ? items : ['<i>No rocks set this quarter</i>']);
+}
+/* 📜 Rock History card for the Rocks tab — ended quarters, read-only. */
+function _rockHistoryHtml(compRocks, allRocks, uid, showAll){
+  const people = showAll ? Object.keys(allRocks||{}) : [uid];
+  const byQ = {};
+  const add = (q, key, r) => { (byQ[q] = byQ[q] || {comp:[], people:{}}); if(key==='comp') byQ[q].comp.push(r); else (byQ[q].people[key] = byQ[q].people[key] || []).push(r); };
+  (compRocks||[]).forEach(r => { if(_rockLocked(r)) add(_rockQOf(r), 'comp', r); });
+  people.forEach(p => ((allRocks||{})[p]||[]).forEach(r => { if(_rockLocked(r)) add(_rockQOf(r), p, r); }));
+  const qs = Object.keys(byQ).sort().reverse();
+  const nameOf = p => (allProfiles[p] && (allProfiles[p].name || allProfiles[p].email)) || (p===uid ? (currentUser.name||'Me') : p);
+  const row = r => {
+    const done = r.status === 'complete';
+    return '<div class="flex items-start gap-2 py-1">'
+      + '<span style="line-height:1.3">' + (done ? '✅' : '❌') + '</span>'
+      + '<span class="text-sm flex-1 ' + (done ? 'text-gray-700' : 'text-gray-500') + '">' + _rockEsc(r.text||'') + '</span>'
+      + '<span class="text-xs font-semibold px-2 py-0.5 rounded-full shrink-0" style="background:' + (done?'#d1fae5':'#fee2e2') + ';color:' + (done?'#065f46':'#991b1b') + '">' + (done?'Completed':'Not completed') + '</span>'
+      + '</div>';
+  };
+  const group = (title, rocks) => {
+    const d = rocks.filter(r=>r.status==='complete').length;
+    return '<div><div class="flex items-center gap-2 mb-1"><span class="text-xs font-bold text-gray-500 uppercase tracking-wide">' + _rockEsc(title) + '</span>'
+      + '<span class="text-xs text-gray-400">' + d + '/' + rocks.length + '</span></div>' + rocks.map(row).join('') + '</div>';
+  };
+  const body = qs.length === 0
+    ? '<p class="text-sm text-gray-400">No past quarters yet — rocks land here, locked, once their quarter ends.</p>'
+    : qs.map((q, idx) => {
+        const g = byQ[q];
+        const all = g.comp.concat(...Object.values(g.people));
+        const d = all.filter(r=>r.status==='complete').length, t = all.length;
+        const pct = t ? Math.round(d/t*100) : 0;
+        const col = pct>=80?'#059669':pct>=50?'#D97706':'#DA291C';
+        const ppl = Object.keys(g.people).sort((a,b)=> a===uid ? -1 : b===uid ? 1 : nameOf(a).localeCompare(nameOf(b)));
+        return '<details class="border rounded-xl"' + (idx===0?' open':'') + '>'
+          + '<summary class="px-4 py-3 cursor-pointer flex items-center gap-2 flex-wrap" style="min-height:44px">'
+          +   '<span class="font-semibold text-gray-800">🔒 ' + _rockQLabel(q) + '</span>'
+          +   '<span class="text-xs text-gray-400">ended ' + fmtDate(_rockQEnd(q)) + '</span>'
+          +   '<span class="ml-auto text-xs font-bold" style="color:' + col + '">' + d + '/' + t + ' completed · ' + pct + '%</span>'
+          + '</summary>'
+          + '<div class="px-4 pb-4 space-y-3">'
+          +   (g.comp.length ? group('🏢 Company Rocks', g.comp) : '')
+          +   ppl.map(p => group((p===uid && !showAll ? '⛏ My Rocks' : nameOf(p)), g.people[p])).join('')
+          + '</div></details>';
+      }).join('');
+  return '<div class="bg-white rounded-2xl border p-5 md:col-span-2">'
+    + '<div class="flex items-center justify-between mb-1"><h3 class="font-semibold text-gray-800">📜 Rock History</h3>'
+    + '<span class="text-xs text-gray-400">Locked at quarter end</span></div>'
+    + '<p class="text-xs text-gray-400 mb-4">What got done and what didn\'t, by quarter. Ended quarters can\'t be changed.</p>'
+    + '<div class="space-y-2">' + body + '</div></div>';
+}
+window._rockLocked=_rockLocked; window._rocksNow=_rocksNow; window._rockEntriesOpen=_rockEntriesOpen; window._rockTip=_rockTip; window._rockHistoryHtml=_rockHistoryHtml;
 function _rockDueText(r){
   if(!r) return '';
   if(/^\d{4}-Q[1-4]$/.test(r.quarter||'')) return _rockQLabel(r.quarter) + ' · due ' + fmtDate(_rockQEnd(r.quarter));
@@ -35543,10 +35627,10 @@ function _rockDialog(opts){
   opts = opts || {};
   const curQ = _rockQKey();
   const selQ = opts.quarter || curQ;
-  // Last quarter (late entries) through four quarters out
-  const base = new Date(); base.setDate(1); base.setMonth(Math.floor(base.getMonth()/3)*3 - 3);
+  // Current quarter through four quarters out (ended quarters are locked)
+  const base = new Date(); base.setDate(1); base.setMonth(Math.floor(base.getMonth()/3)*3);
   const keys = [];
-  for(let i=0;i<6;i++){ keys.push(_rockQKey(new Date(base.getFullYear(), base.getMonth() + i*3, 1))); }
+  for(let i=0;i<5;i++){ keys.push(_rockQKey(new Date(base.getFullYear(), base.getMonth() + i*3, 1))); }
   if(selQ && !keys.includes(selQ)){ keys.push(selQ); keys.sort(); }
   return new Promise(resolve => {
     const prevFocus = document.activeElement;
@@ -35613,11 +35697,12 @@ window.addCompRock = async () => {
 };
 window.toggleCompRock = (i,done) => {
   const list=eosGet('compRocks',[]);
+  if(_rockLockGuard(list[i])){ viewEOS('rocks'); return; }
   if(list[i]) list[i].status=done?'complete':'inprocess';
   eosSave('compRocks',list); viewEOS('rocks');
 };
 window.deleteCompRock = i => {
-  const list=eosGet('compRocks',[]); list.splice(i,1);
+  const list=eosGet('compRocks',[]); if(_rockLockGuard(list[i])) return; list.splice(i,1);
   eosSave('compRocks',list); viewEOS('rocks');
 };
 window.addMyRock = async () => {
@@ -35631,19 +35716,21 @@ window.addMyRock = async () => {
 window.toggleMyRock = (i,done) => {
   const uid=currentUser.uid;
   const all=eosGet('myRocks',{}); const list=all[uid]||[];
+  if(_rockLockGuard(list[i])){ viewEOS('rocks'); return; }
   if(list[i]) list[i].status=done?'complete':'inprocess';
   all[uid]=list; eosSave('myRocks',all); viewEOS('rocks');
 };
 window.deleteMyRock = i => {
   const uid=currentUser.uid;
   const all=eosGet('myRocks',{}); const list=all[uid]||[];
+  if(_rockLockGuard(list[i])) return;
   list.splice(i,1); all[uid]=list; eosSave('myRocks',all); viewEOS('rocks');
 };
 // Edit a rock in place (text + quarter) instead of delete-and-re-add
 window.editMyRock = async i => {
   const uid=currentUser.uid;
   const all=eosGet('myRocks',{}); const list=all[uid]||[];
-  if(!list[i]) return;
+  if(!list[i] || _rockLockGuard(list[i])) return;
   const res = await _rockDialog({ title: 'Edit rock', text: list[i].text||'', quarter: _rockQOf(list[i]) }); if(!res) return;
   const fresh=eosGet('myRocks',{}); const fl=fresh[uid]||[];
   if(!fl[i]) return;
@@ -35651,7 +35738,7 @@ window.editMyRock = async i => {
 };
 window.editCompRock = async i => {
   const list=eosGet('compRocks',[]);
-  if(!list[i]) return;
+  if(!list[i] || _rockLockGuard(list[i])) return;
   const res = await _rockDialog({ title: 'Edit company rock', text: list[i].text||'', quarter: _rockQOf(list[i]) }); if(!res) return;
   const fresh=eosGet('compRocks',[]); if(!fresh[i]) return;
   _applyRock(fresh[i], res); eosSave('compRocks',fresh); viewEOS('rocks');
@@ -35665,13 +35752,14 @@ function _mgrCanEditRock(uid){
 window.mgrToggleRock = (uid,i,done) => {
   if(!_mgrCanEditRock(uid)){ showToast&&showToast('Not allowed for this advisor','error'); return; }
   const all=eosGet('myRocks',{}); const list=all[uid]||[];
+  if(_rockLockGuard(list[i])){ viewOfficeOverview(); return; }
   if(list[i]) list[i].status=done?'complete':'inprocess';
   all[uid]=list; eosSave('myRocks',all); viewOfficeOverview();
 };
 window.mgrEditRock = async (uid,i) => {
   if(!_mgrCanEditRock(uid)){ showToast&&showToast('Not allowed for this advisor','error'); return; }
   const all=eosGet('myRocks',{}); const list=all[uid]||[];
-  if(!list[i]) return;
+  if(!list[i] || _rockLockGuard(list[i])) return;
   const res = await _rockDialog({ title: 'Edit rock', text: list[i].text||'', quarter: _rockQOf(list[i]) }); if(!res) return;
   const fresh=eosGet('myRocks',{}); const fl=fresh[uid]||[];
   if(!fl[i]) return;
@@ -35984,13 +36072,13 @@ window.l10ResetTimer = () => {
   viewEOS('l10');
 };
 
-window.l10AddItem = (storeKey) => {
-  const inp = document.getElementById('inp-'+storeKey);
+window.l10AddItem = (storeKey, cid) => {
+  const inp = document.getElementById('inp-'+(cid||storeKey));
   const text = inp?.value.trim();
-  if(!text) return;
+  if(!text){ if(inp){ inp.focus(); } showToast && showToast('Type the to-do first','error'); return; }
 
   // Assignee
-  const sel = document.getElementById('sel-'+storeKey);
+  const sel = document.getElementById('sel-'+(cid||storeKey));
   const assignedTo     = sel?.value || '';
   const assignedToName = sel?.options[sel.selectedIndex]?.dataset?.name || '';
 
@@ -36035,10 +36123,10 @@ window.l10AddItem = (storeKey) => {
   window._eosRerender('l10');
 };
 
-window.l10AddCascade = (storeKey) => {
-  const inp = document.getElementById('inp-'+storeKey);
+window.l10AddCascade = (storeKey, cid) => {
+  const inp = document.getElementById('inp-'+(cid||storeKey));
   const text = inp?.value.trim();
-  if(!text) return;
+  if(!text){ if(inp){ inp.focus(); } showToast && showToast('Type the message first','error'); return; }
   const list = eosGet(storeKey,[]);
   list.push({id:'cs-'+Date.now(), text, done:false, createdAt:Date.now()});
   eosSave(storeKey, list);
