@@ -34616,7 +34616,14 @@ function viewEOS(sub='rocks'){
     }
     const l10OfficeSel = (window._l10Office==='both'||_l10Offices.includes(window._l10Office))
       ? window._l10Office : 'both';
-    const l10Office = (l10Sub==='staff') ? 'both' : l10OfficeSel;
+    // ADMINL10-20261005: the Admin L-10 keeps the office toggle but remembers its
+    // own choice (default Both), so an advisor-meeting "Tampa" doesn't carry over.
+    if(typeof window._l10OfficeAdmin === 'undefined'){
+      let _sa=''; try{ _sa = localStorage.getItem('elcL10OfficeAdmin')||''; }catch(e){}
+      window._l10OfficeAdmin = (_sa==='both'||_l10Offices.includes(_sa)) ? _sa : 'both';
+    }
+    const l10AdminOfficeSel = _l10Offices.includes(window._l10OfficeAdmin) ? window._l10OfficeAdmin : 'both';
+    const l10Office = (l10Sub==='staff') ? 'both' : (l10Sub==='admin' ? l10AdminOfficeSel : l10OfficeSel);
     const _officeOf = uid => ((allProfiles[uid]||{}).office||'').trim();
     // People: strict match — an advisor with no office set only shows under Both.
     const _l10InOffice = uid => l10Office==='both' || _officeOf(uid)===l10Office;
@@ -34749,8 +34756,181 @@ function viewEOS(sub='rocks'){
         </div>`;
     };
 
+    // ── ADMIN L-10 AGENDA · ADMINL10-20261005 ───────────────────────────
+    // Scorecard → Company Rocks → Headlines → Last week's To-Dos → IDS → New To-Dos.
+    // Company-wide (the office toggle is not offered on this tab).
+    const buildAdminL10 = () => {
+      const tabIssues = filterIssues('admin');
+      const headlines = tabIssues.filter(i=>i.type==='headline');
+      const idsIssues = tabIssues.filter(i=>i.type==='issue');
+      const canEdit   = !!(currentUser.isAdmin || currentUser.isSuperAdmin);
+      const esc       = s => window._scEsc(s);
+
+      // ── 1. Company scorecard ─────────────────────────────────────────
+      // Office toggle scopes the deal-driven rows; goals stay company-wide.
+      const _misc = ((typeof allOtherRevenue!=='undefined'?allOtherRevenue:[])||[])
+        .filter(r=>l10Office==='both' || _officeOf(r.advisorUid)===l10Office);
+      const SC   = _al10Scorecard(l10Deals, _misc, Date.now());
+      const scopeLbl = l10Office==='both' ? 'Both offices' : l10Office+' only';
+      const G    = ADMIN_L10_GOALS;
+      const Q    = SC.quarter;
+      const exp  = _al10ExpMap();
+      const wkHdr = w => {
+        const s = new Date(w.ws), e = new Date(_al10AddDays(w.ws,6));
+        return s.toLocaleDateString('en-US',{month:'short',day:'numeric'})+'–'+e.toLocaleDateString('en-US',{month:'short',day:'numeric'});
+      };
+      const tip = (title, items) => {
+        if(!items || !items.length) return '';
+        return window._scTipHtml(title, items.slice().sort((a,b)=>b.v-a.v).map(i=>esc(i.name)+' — '+fmt$(i.v)));
+      };
+      // Goal cell: green when the goal is met or beaten, red when it isn't.
+      const goalCell = (v, goal, sub, tipHtml) => {
+        const pct = goal>0 ? Math.round(v/goal*100) : 0;
+        const hit = v >= goal;
+        return '<td class="p-1.5 align-top">'
+          + '<div class="rounded-lg border px-2 py-1.5 text-center '+(hit?'bg-green-50 border-green-200':'bg-red-50 border-red-200')+'"'
+          + (tipHtml?' tabindex="0" data-sctip="'+tipHtml+'" style="cursor:help"':'')+'>'
+          + '<div class="text-sm font-bold '+(hit?'text-green-800':'text-red-800')+'" title="'+fmt$(v)+'">'+fmtM$(v)+'</div>'
+          + '<div class="text-xs font-semibold '+(hit?'text-green-700':'text-red-700')+'">'+(hit?'▲ ':'▼ ')+pct+'%</div>'
+          + (sub?'<div class="text-gray-500" style="font-size:10.5px;line-height:1.2">'+sub+'</div>':'')
+          + '</div></td>';
+      };
+      const metricRow = (icon, label, goalLbl, k, goal, qMode) => {
+        const qv   = qMode==='avg' ? (Q.n ? Q[k]/Q.n : 0) : Q[k];
+        const qg   = qMode==='avg' ? goal : goal*Q.n;
+        const qSub = qMode==='avg' ? 'avg / wk · '+fmtM$(Q[k])+' total' : 'total · goal '+fmtM$(qg);
+        return '<tr class="border-t border-gray-100">'
+          + '<th scope="row" class="py-2 pr-2 text-left align-top" style="min-width:132px"><div class="text-sm font-semibold text-gray-800">'+icon+' '+label+'</div>'
+          + '<div class="text-xs text-gray-500">Goal '+goalLbl+'</div></th>'
+          + SC.weeks.map((w,i)=>goalCell(w[k].v, goal, i===0?'prior week':'', tip(label+' · '+wkHdr(w), w[k].items))).join('')
+          + goalCell(qv, qg, qSub, '')
+          + '</tr>';
+      };
+      const expCell = w => {
+        const has = Object.prototype.hasOwnProperty.call(exp, w.key);
+        const val = has ? exp[w.key] : '';
+        return '<td class="p-1.5 align-top">'
+          + (canEdit
+            ? '<input type="text" inputmode="decimal" aria-label="Expenses for week of '+wkHdr(w)+'" placeholder="$ —"'
+              + ' value="'+(has?Number(val).toLocaleString('en-US'):'')+'"'
+              + ' onchange="al10SetExpense(\''+w.key+'\', this.value)" onkeydown="if(event.key===\'Enter\')this.blur()"'
+              + ' class="w-full border rounded-lg px-2 py-1.5 text-sm text-center font-semibold text-gray-800 outline-none focus:border-gray-500 bg-white" style="min-width:84px"/>'
+            : '<div class="rounded-lg border px-2 py-1.5 text-center text-sm font-bold text-gray-800">'+(has?fmtM$(val):'—')+'</div>')
+          + '</td>';
+      };
+      const qExpKeys = Q.keys.filter(k=>Object.prototype.hasOwnProperty.call(exp,k));
+      const qExp = qExpKeys.reduce((s,k)=>s+(Number(exp[k])||0),0);
+      const expRow = '<tr class="border-t border-gray-100">'
+        + '<th scope="row" class="py-2 pr-2 text-left align-top" style="min-width:132px"><div class="text-sm font-semibold text-gray-800">🧾 Expenses</div>'
+        + '<div class="text-xs text-gray-500">Company total · admins only</div>'
+        +'</th>'
+        + SC.weeks.map(expCell).join('')
+        + '<td class="p-1.5 align-top"><div class="rounded-lg border px-2 py-1.5 text-center">'
+        + '<div class="text-sm font-bold text-gray-800" title="'+fmt$(qExp)+'">'+fmtM$(qExp)+'</div>'
+        + '<div class="text-gray-500" style="font-size:10.5px;line-height:1.2">total · '+qExpKeys.length+' of '+Q.n+' wks entered</div>'
+        + '</div></td></tr>';
+      const scorecardHtml =
+        '<p class="text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Prior Week: '+weekLabel2+' · '+scopeLbl+'</p>'
+        + '<div class="overflow-x-auto -mx-1"><table class="w-full" style="min-width:600px">'
+        + '<thead><tr>'
+        + '<th class="pb-1 text-left text-xs font-bold text-gray-500 uppercase">Measurable</th>'
+        + SC.weeks.map((w,i)=>'<th class="pb-1 px-1.5 text-center text-xs font-bold uppercase '+(i===0?'text-gray-800':'text-gray-500')+'">'+wkHdr(w)+'</th>').join('')
+        + '<th class="pb-1 px-1.5 text-center text-xs font-bold text-gray-800 uppercase">'+Q.label+' · '+Q.n+' wk'+(Q.n===1?'':'s')+'</th>'
+        + '</tr></thead><tbody>'
+        + metricRow('🏠','New Listings','$10M / wk','listings',G.listings,'avg')
+        + metricRow('💵','Revenue Received','$250K / wk','revenue',G.revenue,'total')
+        + (canEdit ? expRow : '')   // expenses are admins-only — non-admins never see the row
+        + metricRow('📝','New Under Contract','$14M / wk','contracts',G.contracts,'total')
+        + '</tbody></table></div>'
+        + '<p class="text-xs text-gray-500 mt-2 leading-snug">Green = goal hit or beaten, red = missed; % is of goal'+(l10Office==='both'?'':' (goals are company-wide)')+'. Hover a week for the deals behind it. '
+        + 'Listings: list price, dated by listing effective date (else the day it moved to Listing). '
+        + 'Revenue: gross commission to ELC on Sold deals by close date + logged non-deal payments. '
+        + 'Contracts: purchase/contract price, dated by effective date (else the day it went under contract).</p>';
+
+      // ── 2. Company rocks ─────────────────────────────────────────────
+      const compRocks = _rocksNow(eosGet('compRocks',[]));
+      const rocksDone = compRocks.filter(r=>r.status==='complete').length;
+      const rocksHtml = compRocks.length===0
+        ? '<p class="text-sm text-gray-500 italic">No company rocks set for '+_rockQLabel(_rockQKey())+'.</p>'
+        : '<p class="text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">'+_rockQLabel(_rockQKey())+' · '+rocksDone+' of '+compRocks.length+' complete</p>'
+          + '<div class="space-y-2">' + compRocks.map(r=>{
+              const done=r.status==='complete', ip=r.status==='inprocess';
+              const own=_rockOwnerName(r);
+              return '<div class="flex items-start gap-2">'
+                + '<span style="font-size:.9rem;line-height:1.4">'+(done?'✅':ip?'🔄':'⬜')+'</span>'
+                + '<div class="flex-1 min-w-0 text-sm '+(done?'line-through text-gray-500':'text-gray-800')+'">'+_rockEsc(r.text||'Unnamed Rock')
+                + (own?' <span class="text-xs font-semibold" style="color:#075985">· 👤 '+_rockEsc(own)+'</span>':'')+'</div>'
+                + '<span class="text-xs px-1.5 py-0.5 rounded-full font-semibold shrink-0 '+(done?'bg-green-50 text-green-800':ip?'bg-yellow-50 text-yellow-800':'bg-gray-100 text-gray-700')+'">'+(done?'Complete':ip?'In progress':'Not started')+'</span>'
+                + '</div>';
+            }).join('') + '</div>';
+      const rocksBlock = rocksHtml
+        + '<div class="mt-3 text-right"><button type="button" onclick="viewEOS(\'rocks\')" class="text-xs text-blue-600 hover:underline font-medium">Manage Rocks →</button></div>';
+
+      // ── 3. Headlines (only what admins submitted for this meeting) ───
+      const headlineBlock = (headlines.length ? issueList(headlines)
+        : '<p class="text-sm text-gray-500 italic">No headlines submitted for the Admin L-10.</p>')
+        + '<div class="mt-2 text-right"><button type="button" onclick="viewEOS(\'issues\')" class="text-xs text-blue-600 hover:underline font-medium">＋ Add a headline or issue →</button></div>';
+
+      // ── 4 & 6. To-dos ────────────────────────────────────────────────
+      const thisMonMs = SC.thisMon;
+      const todos     = eosGet(_AL10_TODO_KEY, []) || [];
+      // Review: everything from last week's meeting, plus older ones still open.
+      const review = todos.filter(t=>(t.createdAt||0) < thisMonMs && ((t.createdAt||0) >= SC.pw || !_al10TodoDone(t)));
+      const fresh  = todos.filter(t=>(t.createdAt||0) >= thisMonMs);
+      const todoRow = (t, showStatus) => {
+        const done = _al10TodoDone(t);
+        const carried = (t.createdAt||0) < SC.pw;
+        const fmtD = ms => new Date(ms).toLocaleDateString('en-US',{month:'short',day:'numeric'});
+        return '<div class="flex items-start gap-2 py-1.5 border-b border-gray-50 last:border-0 group">'
+          + '<button type="button" onclick="al10ToggleTodo(\''+t.id+'\')" role="checkbox" aria-checked="'+done+'" aria-label="'+(done?'Mark not done':'Mark done')+': '+esc(t.text)+'"'
+          + ' class="mt-0.5 w-5 h-5 rounded border-2 shrink-0 flex items-center justify-center transition" style="border-color:'+(done?'#059669':'#9ca3af')+';background:'+(done?'#059669':'transparent')+'">'
+          + (done?'<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>':'')+'</button>'
+          + '<div class="flex-1 min-w-0">'
+          + '<span class="text-sm '+(done&&!showStatus?'line-through text-gray-500':'text-gray-800')+'">'+esc(t.text)+'</span>'
+          + (t.assignedToName?' <span class="text-xs font-semibold text-blue-700">→ '+esc(t.assignedToName)+'</span>':'')
+          + (carried?' <span class="text-xs text-gray-500">· carried over from '+fmtD(t.createdAt)+'</span>':'')
+          + (!showStatus&&t.dueDate?' <span class="text-xs text-gray-500">· due '+fmtDate(t.dueDate)+'</span>':'')
+          + '</div>'
+          + (showStatus?'<span class="text-xs px-2 py-0.5 rounded-full font-semibold shrink-0 '+(done?'bg-green-50 text-green-800':'bg-red-50 text-red-800')+'">'+(done?'✅ Done':'❌ Not done')+'</span>':'')
+          + (canEdit?'<button type="button" onclick="al10DeleteTodo(\''+t.id+'\')" aria-label="Remove to-do" title="Remove" class="text-gray-500 hover:text-red-700 text-sm shrink-0 px-1 opacity-60 group-hover:opacity-100 focus:opacity-100">✕</button>':'')
+          + '</div>';
+      };
+      const revDone = review.filter(_al10TodoDone).length;
+      const revPct  = review.length ? Math.round(revDone/review.length*100) : 0;
+      const reviewBlock = review.length===0
+        ? '<p class="text-sm text-gray-500 italic">No to-dos came out of last week\'s meeting.</p>'
+        : '<div class="flex items-center justify-between gap-2 mb-2 flex-wrap">'
+          + '<p class="text-xs font-bold text-gray-500 uppercase tracking-wide">From the week of '+new Date(SC.pw).toLocaleDateString('en-US',{month:'short',day:'numeric'})+'</p>'
+          + '<span class="text-xs font-bold px-2 py-0.5 rounded-full '+(revPct>=90?'bg-green-50 text-green-800':'bg-red-50 text-red-800')+'" title="EOS target: 90% of to-dos done each week">'+revDone+' of '+review.length+' done · '+revPct+'%</span>'
+          + '</div>' + review.map(t=>todoRow(t,true)).join('')
+          + '<p class="text-xs text-gray-500 mt-2">Checking one off here also completes its task. Anything not done carries to next week.</p>';
+      const roster = _al10AdminRoster();
+      const cid = 'al10-new';
+      const newBlock = (fresh.length ? fresh.map(t=>todoRow(t,false)).join('')
+          : '<p class="text-sm text-gray-500 italic mb-1">No new to-dos yet — add them as they come up in IDS.</p>')
+        + (canEdit ? '<div class="flex gap-2 flex-wrap mt-3">'
+          + '<input id="inp-'+cid+'" type="text" placeholder="New to-do…" aria-label="New to-do"'
+          + ' onkeydown="if(event.key===\'Enter\')al10AddTodo(\''+cid+'\')"'
+          + ' class="flex-1 border rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-500" style="min-width:180px"/>'
+          + '<select id="sel-'+cid+'" aria-label="Owner" class="border rounded-lg px-2 py-2 text-sm outline-none focus:border-gray-500 bg-white" style="min-width:140px">'
+          + '<option value="">Owner…</option>'
+          + roster.map(u=>'<option value="'+u.uid+'" data-name="'+esc(u.name)+'">'+esc(u.name)+'</option>').join('')
+          + '</select>'
+          + '<button type="button" onclick="al10AddTodo(\''+cid+'\')" class="px-4 py-2 rounded-lg text-sm font-semibold text-white" style="background:var(--brand-black)">+ Add</button>'
+          + '</div><p class="text-xs text-gray-500 mt-2">Each to-do becomes a task for its owner, due Friday, and shows up for review at next week\'s meeting.</p>' : '');
+
+      return (Date.now() < ADMIN_L10_START ? _al10PreviewBanner(true) : '')
+        + section('📊','Company Scorecard','5', scorecardHtml,'#0891b2')
+        + section('🪨','Company Rocks','5', rocksBlock,'#059669')
+        + section('📣','Headlines','5', headlineBlock,'#7c3aed')
+        + section('✅','To-Do Review — Last Week','5', reviewBlock,'#D97706')
+        + section('🔥','IDS — Issues List','60', idsIssues.length===0?'<p class="text-sm text-gray-500 italic">No issues submitted for the Admin L-10.</p>':issueList(idsIssues),'#DA291C')
+        + section('📝','New To-Dos — Due by Next Week','5', newBlock,'#374151');
+    };
+
     // ── main agenda builder ───────────────────────────────────────────────
     const buildL10 = roleFilter => {
+      if(roleFilter==='admin' && (Date.now() >= ADMIN_L10_START || window._al10Preview)) return buildAdminL10();   // ADMINL10-20261005
       const tabIssues  = filterIssues(roleFilter);
       const headlines  = tabIssues.filter(i=>i.type==='headline');
       const idsIssues  = tabIssues.filter(i=>i.type==='issue');
@@ -34783,6 +34963,7 @@ function viewEOS(sub='rocks'){
       const cascadeKey = l10Key('cascades');
 
       return `
+        ${isAdminTab ? _al10PreviewBanner(false) : ''}
         ${!isAdminTab ? section('👋','Segue — Good News','5',`
           <p class="text-sm text-gray-500 mb-3">Each person shares one piece of personal or professional good news.</p>
           <div class="grid grid-cols-2 gap-2">
@@ -35161,7 +35342,7 @@ function viewEOS(sub='rocks'){
           <h3 class="font-bold text-gray-800 text-base">📋 L-10 Meeting Agenda</h3>
           <p class="text-xs text-gray-400 mt-0.5">${printDate} · 90 min · EOS Format${l10Office!=='both'?' · <span class="font-bold" style="color:var(--brand-red)">'+l10Office+' only</span>':''}</p>
         </div>
-        <div class="flex items-center gap-3 flex-wrap">
+        <div class="flex items-center gap-3 flex-wrap max-w-full min-w-0">
           <!-- Timer -->
           <div class="flex items-center gap-2 bg-gray-900 rounded-xl px-4 py-2">
             <span id="l10-timer" class="text-white font-mono text-lg font-bold tracking-widest">${fmtTime(elapsed)}</span>
@@ -35172,13 +35353,13 @@ function viewEOS(sub='rocks'){
             <button onclick="l10ResetTimer()" class="text-xs text-gray-500 hover:text-gray-300 transition" title="Reset timer">↺</button>
           </div>
           <!-- Sub-tab nav + office filter -->
-          <div class="flex flex-col items-start sm:items-end">
-            <div class="flex gap-2 bg-gray-100 p-1 rounded-xl">${subNav}</div>
+          <div class="flex flex-col items-start sm:items-end max-w-full">
+            <div class="flex gap-2 bg-gray-100 p-1 rounded-xl max-w-full overflow-x-auto">${subNav}</div>
             ${officeBar}
           </div>
         </div>
       </div>
-      <div class="max-w-2xl">
+      <div class="${l10Sub==='admin'?'max-w-4xl':'max-w-2xl'}">
         ${buildL10(l10Sub)}
       </div>`;
 
@@ -36184,6 +36365,218 @@ window.removeVacation = async id => {
   }
 };
 
+/* ── ADMIN L-10 · COMPANY SCORECARD + TO-DO REVIEW · ADMINL10-20261005 ──────
+   The Admin L-10 no longer reuses the advisor agenda. Order (Ryan, 2026-10-05):
+   Scorecard → Company Rocks → Headlines → Last week's To-Dos → IDS → New To-Dos.
+   The scorecard is a COMPANY scorecard (not the advisor grades), company-wide:
+     1. New listing $ added   — goal $10M / week  (quarter = average per week)
+     2. Revenue received      — goal $250K / week (quarter = total vs goal × weeks)
+     3. Expenses              — typed in by an admin, no goal
+     4. New under-contract $  — goal $14M / week  (quarter = total vs goal × weeks)
+   Weeks are Mon–Sun. A week belongs to the quarter its Monday falls in, so the
+   quarter column is always the sum of whole weeks shown the same way.
+   Dating rules match the rest of the app:
+     listings  → listingEffectiveDate, else listingEnteredAt, else first stageHistory
+                 entry into Listing. Volume = list price.
+     contracts → _itrContractTs (effectiveDate → contractEnteredAt → history).
+     revenue   → Sold deals by closeDate × getEffectiveRevenue (= Financials "Closed")
+                 + otherRevenue rows by dateReceived.                              */
+const ADMIN_L10_GOALS = { listings:10000000, revenue:250000, contracts:14000000 };
+function _al10Monday(ms){
+  const d = new Date(ms); const dow = d.getDay();
+  d.setDate(d.getDate() - (dow===0 ? 6 : dow-1)); d.setHours(0,0,0,0);
+  return d.getTime();
+}
+// Calendar-day arithmetic (DST-safe — never add 7*86400000).
+function _al10AddDays(ms, n){ const d = new Date(ms); d.setDate(d.getDate()+n); return d.getTime(); }
+function _al10Key(ms){
+  const d = new Date(ms);
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
+const _al10IsListing = s => /^listing$/i.test(String(s||'').trim());
+function _al10ListingTs(d){
+  const hist = d.stageHistory || [];
+  const ever = !!d.listingEnteredAt || _al10IsListing(d.stage) || hist.some(h=>_al10IsListing(h.stage));
+  if(!ever) return null;
+  const eff = _itrParseDay(d.listingEffectiveDate);
+  if(eff !== null) return eff;
+  if(d.listingEnteredAt) return d.listingEnteredAt;
+  const hits = hist.filter(h=>(h.enteredAt||0)>0 && _al10IsListing(h.stage)).map(h=>h.enteredAt);
+  if(hits.length) return Math.min.apply(null, hits);
+  return _al10IsListing(d.stage) ? (d.stageEnteredAt||d.createdAt||null) : null;
+}
+const _al10ListVol = d => Number(d.listedPrice||d.listPrice||d.askingPrice||d.purchasePrice||d.contractPrice||0) || 0;
+const _al10Name = d => d.projectName || d.propertyAddress || 'Unnamed';
+
+// One Mon–Sun week of company numbers. ws = Monday 00:00 local (ms).
+function _al10Week(ws, deals, misc){
+  const we = _al10AddDays(ws, 7);
+  const inW = t => t!==null && t!==undefined && t>=ws && t<we;
+  const out = { ws, we, key:_al10Key(ws),
+    listings:{v:0, items:[]}, contracts:{v:0, items:[]}, revenue:{v:0, items:[]} };
+  (deals||[]).forEach(d=>{
+    if(!d) return;
+    if(inW(_al10ListingTs(d))){ const v=_al10ListVol(d); out.listings.v+=v; out.listings.items.push({name:_al10Name(d), v}); }
+    if(inW(_itrContractTs(d))){ const v=_itrVol(d); out.contracts.v+=v; out.contracts.items.push({name:_al10Name(d), v}); }
+    if(inW(_itrClosedTs(d))){ const v=getEffectiveRevenue(d)||0; out.revenue.v+=v; out.revenue.items.push({name:_al10Name(d), v}); }
+  });
+  (misc||[]).forEach(r=>{
+    if(!r || !inW(_itrParseDay(r.dateReceived))) return;
+    const v = Number(r.amount)||0;
+    out.revenue.v += v;
+    out.revenue.items.push({name:(r.category||'Other payment')+(r.advisorName?' · '+r.advisorName:''), v});
+  });
+  return out;
+}
+
+// Trailing 4 weeks (index 0 = prior week) + the quarter the prior week sits in.
+function _al10Scorecard(deals, misc, nowMs){
+  const thisMon = _al10Monday(nowMs||Date.now());
+  const pw = _al10AddDays(thisMon, -7);
+  const weeks = [0,1,2,3].map(i=>_al10Week(_al10AddDays(pw, -7*i), deals, misc));
+  const pd = new Date(pw);
+  const qIdx = Math.floor(pd.getMonth()/3);
+  const qStart = new Date(pd.getFullYear(), qIdx*3, 1).getTime();
+  const qWeeks = [];
+  for(let ws=pw; ws>=qStart; ws=_al10AddDays(ws,-7)){
+    const have = weeks.find(w=>w.ws===ws);
+    qWeeks.push(have || _al10Week(ws, deals, misc));
+  }
+  const sum = k => qWeeks.reduce((s,w)=>s+w[k].v, 0);
+  return { thisMon, pw, weeks,
+    quarter:{ label:'Q'+(qIdx+1)+' '+pd.getFullYear(), n:qWeeks.length, keys:qWeeks.map(w=>w.key),
+      listings:sum('listings'), contracts:sum('contracts'), revenue:sum('revenue') } };
+}
+window._al10Monday = _al10Monday; window._al10Week = _al10Week;
+window._al10Scorecard = _al10Scorecard; window._al10ListingTs = _al10ListingTs;
+
+// Admins who can own an Admin L-10 to-do ("one of us").
+function _al10AdminRoster(){
+  const seen = new Set(), out = [];
+  Object.entries(allProfiles||{}).forEach(([uid,p])=>{
+    if(!p || p.removed || String(uid).startsWith('pending_')) return;
+    const em = String(p.email||'').toLowerCase();
+    const roles = p.roles||[];
+    if(!(isAdminEmail(em) || roles.includes('admin') || roles.includes('superAdmin'))) return;
+    if(em && !em.endsWith('@thedirtdog.com')) return;   // firm people only (no outside test/IT logins)
+    const key = em || uid;
+    if(seen.has(key)) return; seen.add(key);
+    out.push({uid, name:p.name||p.email||uid});
+  });
+  return out.sort((a,b)=>a.name.localeCompare(b.name));
+}
+window._al10AdminRoster = _al10AdminRoster;
+
+const _AL10_TODO_KEY = 'l10-todos-admin';
+const _AL10_EXP_KEY  = 'adminL10Expenses';   // eos/adminL10Expenses — shown to admins only (no extra Firestore rule needed)
+// The new Admin L-10 agenda starts with the Mon Oct 12, 2026 meeting. Before that
+// the admin tab keeps the existing agenda (with a Preview button).
+const ADMIN_L10_START = new Date(2026, 9, 12).getTime();
+const _al10IsAdminUser = () => !!(currentUser && (currentUser.isAdmin || currentUser.isSuperAdmin));
+function _al10ExpMap(){
+  if(!_al10IsAdminUser()) return {};
+  return eosGet(_AL10_EXP_KEY, {}) || {};
+}
+window._al10ExpMap = _al10ExpMap;
+window.al10TogglePreview = () => { window._al10Preview = !window._al10Preview; window._eosRerender('l10'); };
+function _al10PreviewBanner(previewing){
+  const d = new Date(ADMIN_L10_START).toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'});
+  return '<div class="rounded-xl border px-4 py-3 mb-4 flex items-center justify-between gap-3 flex-wrap bg-yellow-50 border-yellow-200">'
+    + '<span class="text-sm text-yellow-800">'+(previewing
+        ? '👀 <strong>Preview</strong> — this agenda goes live at the '+d+' meeting.'
+        : '🗓 The new Admin L-10 agenda (company scorecard, to-do review) starts at the '+d+' meeting.')+'</span>'
+    + '<button type="button" onclick="al10TogglePreview()" class="text-xs font-semibold px-3 py-1.5 rounded-lg border bg-white text-gray-800 hover:border-gray-500">'
+    + (previewing ? '← Back to current agenda' : 'Preview new agenda →')+'</button></div>';
+}
+const _al10TaskOf = it => (it && it.taskId) ? (allTasks||[]).find(t=>t.id===it.taskId) : null;
+// Done if checked here OR its linked task was completed on the Tasks tab.
+function _al10TodoDone(it){
+  const t = _al10TaskOf(it);
+  return !!it.done || !!(t && (t.status==='complete' || t.status==='completed'));
+}
+window._al10TodoDone = _al10TodoDone;
+
+window.al10SetExpense = async (weekKey, raw) => {
+  if(!_al10IsAdminUser()){ showToast('Only admins can enter expenses','error'); return; }
+  const s = String(raw==null?'':raw).replace(/[$,\s]/g,'');
+  let n = null;
+  if(s!==''){
+    n = Number(s);
+    if(!isFinite(n) || n<0){ showToast('Enter a dollar amount, e.g. 42,500','error'); return; }
+    n = Math.round(n*100)/100;
+  }
+  const map = {...(eosGet(_AL10_EXP_KEY, {})||{})};
+  if(n===null) delete map[weekKey]; else map[weekKey] = n;
+  eosSave(_AL10_EXP_KEY, map);   // eos/* — admins can write; the row only renders for admins
+  showToast(n===null ? 'Expense cleared' : 'Expenses saved · '+fmt$(n), 'success', 2000);
+  window._eosRerender('l10');
+};
+
+window.al10AddTodo = (cid) => {
+  const inp = document.getElementById('inp-'+cid);
+  const sel = document.getElementById('sel-'+cid);
+  const text = (inp?.value||'').trim();
+  if(!text){ inp?.focus(); showToast('Type the to-do first','error'); return; }
+  const assignedTo = sel?.value || '';
+  if(!assignedTo){ sel?.focus(); showToast('Pick who owns this to-do','error'); return; }
+  const assignedToName = sel.options[sel.selectedIndex]?.dataset?.name || '';
+  // Due before next week's meeting: this Friday (if today is Fri–Sun, next Friday).
+  const now = new Date(), dow = now.getDay();
+  const fri = new Date(now); fri.setDate(now.getDate() + (dow>=5||dow===0 ? (dow===0?5:12-dow) : 5-dow)); fri.setHours(12,0,0,0);
+  const dueDate = _al10Key(fri.getTime());
+  const id = 'td-'+Date.now();
+  const list = [...eosGet(_AL10_TODO_KEY, [])];
+  list.push({id, text, done:false, assignedTo, assignedToName, dueDate,
+             weekOf:_al10Key(_al10Monday(Date.now())), createdAt:Date.now()});
+  eosSave(_AL10_TODO_KEY, list);
+  if(inp) inp.value='';
+  if(sel) sel.value='';
+  const taskData = { title:text, description:'Admin L-10 To-Do', assignedTo, assignedToName,
+    dueDate, status:'pending', createdBy:currentUser.uid, createdByName:currentUser.name||currentUser.email,
+    createdAt:Date.now(), source:'l10', l10Todo:id };
+  Store.createTask(taskData).then(taskId=>{
+    allTasks.push({...taskData, id:taskId});
+    // Link the task so completing it on the Tasks tab shows ✅ at next week's review.
+    eosSave(_AL10_TODO_KEY, eosGet(_AL10_TODO_KEY, []).map(i=>i.id===id ? {...i, taskId} : i));
+    showToast('✅ To-do assigned to '+assignedToName+' — due '+fri.toLocaleDateString('en-US',{month:'short',day:'numeric'}),'success');
+  }).catch(()=>showToast('To-do saved, but the task could not be created','warning'));
+  window._eosRerender('l10');
+  setTimeout(()=>document.getElementById('inp-'+cid)?.focus(), 60);
+};
+
+window.al10ToggleTodo = async (id) => {
+  const list = eosGet(_AL10_TODO_KEY, []);
+  const it = list.find(i=>i.id===id); if(!it) return;
+  const next = !_al10TodoDone(it);
+  eosSave(_AL10_TODO_KEY, list.map(i=>i.id===id ? {...i, done:next, doneAt: next?Date.now():null} : i));
+  const t = _al10TaskOf(it);
+  if(t){
+    const stamp = next
+      ? {completedAt:Date.now(), completedBy:currentUser?.uid||'', completedByName:currentUser?.name||currentUser?.email||''}
+      : {completedAt:null, completedBy:'', completedByName:''};
+    const status = next ? 'complete' : 'pending';
+    Object.assign(t, {status, updatedAt:Date.now(), ...stamp});
+    window._eosRerender('l10');
+    try{ await Store.updateTask(t.id, {status, updatedAt:Date.now(), ...stamp}); }
+    catch(e){ console.warn('[admin L-10] task sync failed', e); showToast('Checked here, but the linked task did not update','warning'); }
+  } else {
+    window._eosRerender('l10');
+  }
+};
+
+window.al10DeleteTodo = (id) => {
+  const list = eosGet(_AL10_TODO_KEY, []);
+  const idx = list.findIndex(i=>i.id===id); if(idx<0) return;
+  const snap = list[idx];
+  eosSave(_AL10_TODO_KEY, list.filter(i=>i.id!==id));
+  window._eosRerender('l10');
+  showUndoToast('To-do removed', ()=>{
+    const cur = [...eosGet(_AL10_TODO_KEY, [])];
+    if(!cur.some(i=>i.id===snap.id)){ cur.splice(Math.min(idx, cur.length), 0, snap); eosSave(_AL10_TODO_KEY, cur); }
+    window._eosRerender('l10');
+  });
+};
+
 // ── L-10 interactive handlers ───────────────────────────────────────────
 const _l10Sub = () => window._l10Sub||'advisor';
 const _l10MtgKey = () => 'l10-meeting-'+_l10Sub();
@@ -36292,6 +36685,14 @@ window.l10DeleteItem = (storeKey, id) => {
 // Office scope for the L-10 agenda — Tampa / Orlando / Both (elc-v436).
 // Remembered per device so the weekly single-market meeting opens ready to go.
 window.setL10Office = v => {
+  if((window._l10Sub||'advisor') === 'admin'){            // ADMINL10-20261005: admin tab has its own choice
+    if(window._l10OfficeAdmin === v) return;
+    window._l10OfficeAdmin = v;
+    try{ localStorage.setItem('elcL10OfficeAdmin', v); }catch(e){}
+    window._eosRerender('l10');
+    showToast(v==='both' ? 'Showing both offices' : 'Showing '+v+' only','info',2000);
+    return;
+  }
   if(window._l10Office === v) return;
   window._l10Office = v;
   try{ localStorage.setItem('elcL10Office', v); }catch(e){}
