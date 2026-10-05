@@ -35207,11 +35207,13 @@ function viewEOS(sub='rocks'){
   const companyDeals = (allDealsCompany && allDealsCompany.length) ? allDealsCompany : allDeals;
   const y2026s = new Date(2026,0,1).getTime();
   const y2026e = new Date(2026,11,31,23,59,59,999).getTime();
-  const wonDeals2026 = companyDeals.filter(d => {
-    if(!isWonStage(d.stage||'')) return false;
-    const ts = getEffectiveDealTs(d);
-    return ts >= y2026s && ts <= y2026e;
-  });
+  // EOSSALES-20261005: Land Sales = deals in a won stage (Sold) whose CLOSE date is in 2026 —
+  // the exact rule the Financials "Closed" card uses. Previously this bucketed by contract
+  // effective date (falling back to card createdAt), which dropped 2026 closings that went
+  // under contract in 2024/25 and pulled in a 2025 closing whose card was created in 2026.
+  const wonDeals2026 = companyDeals.filter(d =>
+    isWonStage(d.stage||'') && d.closeDate &&
+    new Date(d.closeDate+'T00:00:00').getFullYear() === 2026);
   const landSales2026  = wonDeals2026.reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||0),0);
   // Under Contract pipeline: all deals in UC / Rezoning / Permitting / Closing across all advisors
   const ucPipelineValue = companyDeals
