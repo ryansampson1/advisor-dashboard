@@ -3672,7 +3672,7 @@ async function handleDDAutomation(deal){
           +'ESCROW AGENT:\n'+(escrowSec||'See contract for escrow agent details.')+'\n\n'
           +'Action: Confirm the buyer has wired / delivered the deposit to the escrow agent by end of day.',
         assignedTo:deal.advisorUid,assignedToName:deal.advisorName||deal.advisorEmail,
-        dealId:deal.id,dealAddress:deal.propertyAddress,dueDate:depDate,status:'pending',
+        dealId:deal.id,dealAddress:deal.propertyAddress,dueDate:depDate,dueRoll:'back',status:'pending',
         createdBy:currentUser?.uid||'system',createdByName:'Automation',createdAt:Date.now(),
       }).catch(e=>console.error('[DD-deposit-due]',e));
       // Follow-up: confirm deposit received the next business day
@@ -6197,7 +6197,7 @@ function checkListingRenewalReminders(){
       assignedTo:deal.advisorUid||null, assignedToName:deal.advisorName||deal.advisorEmail||'Advisor',
       assignedToEmail:deal.advisorEmail||'',
       dealId:deal.id, dealAddress:deal.propertyAddress,
-      dueDate:deal.listingExpiration, status:'pending',
+      dueDate:deal.listingExpiration, dueRoll:'back', status:'pending',
       createdBy:'system', createdByName:'Automation', createdAt:Date.now(),
     };
     // Generate pre-filled amendment and attach it to the renewal task
@@ -8599,12 +8599,14 @@ const Demo = {
     allTasks = JSON.parse(localStorage.getItem(K('tasks'))||'[]');
   },
   async createTask(data){
+    _elcNormTaskDue(data);
     const id='task_'+Date.now();
     const newTask={...data,id};
     localStorage.setItem(K('tasks'),JSON.stringify([...allTasks,newTask]));
     return id;
   },
   async updateTask(id, data){
+    _elcNormTaskDue(data, allTasks.find(t=>t.id===id));
     const i=allTasks.findIndex(t=>t.id===id);
     if(i>=0){ allTasks[i]={...allTasks[i],...data}; localStorage.setItem(K('tasks'),JSON.stringify(allTasks)); }
   },
@@ -8950,6 +8952,7 @@ const FB = {
     // above, which rebuilds allHrDocs) so they reuse the admin-write eos rules.
   },
   async createTask(data){
+    _elcNormTaskDue(data);
     const {collection, addDoc} = _fbFns;
     const ref = await addDoc(collection(_fbDb,'tasks'), data);
     // Record the task in the linked property's activity history (so every task tied to a
@@ -8978,6 +8981,7 @@ const FB = {
     return ref.id;
   },
   async updateTask(id, data){
+    _elcNormTaskDue(data, (allTasks||[]).find(t=>t.id===id));
     const {doc, updateDoc} = _fbFns;
     await updateDoc(doc(_fbDb,'tasks',id), data);
   },
@@ -9231,13 +9235,58 @@ function getDealPrice(deal){
   return deal.purchasePrice || deal.contractPrice || deal.suggestedPrice || deal.listedPrice || deal.loiPrice || 0;
 }
 
-// ── Next business day (skip weekends) ────────────────────────────────────────
-// If the given date falls on Saturday or Sunday, advance it to the next Monday.
+// ── Business-day due dates (BIZDAY-20261005) ─────────────────────────────────
+// Any task due date that lands on a weekend or office holiday rolls to the NEXT
+// business day. Tasks flagged dueRoll:'back' (hard contract deadlines — deposit
+// due, listing expiration) roll to the PRIOR business day instead, so the
+// reminder lands before the deadline. Enforced in Store.createTask/updateTask,
+// and _elcEffDue() is what every overdue check + the scorecard read, so tasks
+// written before this change are judged by their rolled date too.
+// Office holidays (observed Sat→Fri, Sun→Mon): New Year's, Memorial Day, July 4,
+// Labor Day, Thanksgiving + the Friday after, Christmas. Edit _elcHolidays to change.
+const _elcHolCache = {};
+function _elcYmd(d){ return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+function _elcHolidays(y){
+  if(_elcHolCache[y]) return _elcHolCache[y];
+  const s = new Set();
+  const obs  = (m,d)=>{ const x=new Date(y,m,d,12), w=x.getDay(); if(w===6) x.setDate(d-1); else if(w===0) x.setDate(d+1); s.add(_elcYmd(x)); };
+  const nth  = (m,wd,n)=>{ const x=new Date(y,m,1,12); x.setDate(1+((wd-x.getDay()+7)%7)+(n-1)*7); return x; };
+  const last = (m,wd)=>{ const x=new Date(y,m+1,0,12); x.setDate(x.getDate()-((x.getDay()-wd+7)%7)); return x; };
+  obs(0,1); obs(6,4); obs(11,25);
+  s.add(_elcYmd(last(4,1)));                       // Memorial Day
+  s.add(_elcYmd(nth(8,1,1)));                      // Labor Day
+  const tg = nth(10,4,4); s.add(_elcYmd(tg));      // Thanksgiving
+  const tf = new Date(tg); tf.setDate(tg.getDate()+1); s.add(_elcYmd(tf));
+  if(new Date(y+1,0,1,12).getDay()===6) s.add(y+'-12-31'); // next New Year's observed Dec 31
+  return (_elcHolCache[y] = s);
+}
+function _elcIsBizDay(ymd){
+  const x = new Date(String(ymd).slice(0,10)+'T12:00:00'), w = x.getDay();
+  return w!==0 && w!==6 && !_elcHolidays(x.getFullYear()).has(_elcYmd(x));
+}
+function _elcRollDue(due, dir){
+  if(typeof due!=='string' || !/^\d{4}-\d{2}-\d{2}/.test(due)) return due;
+  const x = new Date(due.slice(0,10)+'T12:00:00'); if(isNaN(x)) return due;
+  const step = dir==='back' ? -1 : 1; let g = 0;
+  while(!_elcIsBizDay(_elcYmd(x)) && g++ < 14) x.setDate(x.getDate()+step);
+  return _elcYmd(x) + due.slice(10);
+}
+function _elcEffDue(t){ return (t && t.dueDate) ? _elcRollDue(t.dueDate, t.dueRoll) : (t ? t.dueDate : undefined); }
+function _elcNormTaskDue(data, prev){
+  if(data && typeof data.dueDate==='string' && data.dueDate){
+    const r = _elcRollDue(data.dueDate, data.dueRoll || (prev && prev.dueRoll));
+    if(r !== data.dueDate){ data.dueDateRolledFrom = data.dueDate; data.dueDate = r; }
+  }
+  return data;
+}
+window._elcRollDue = _elcRollDue; window._elcEffDue = _elcEffDue; window._elcIsBizDay = _elcIsBizDay;
+
+// ── Next business day (skip weekends + office holidays) ──────────────────────
+// If the given date falls on a weekend or holiday, advance it to the next business day.
 function nextBusinessDay(date) {
   const d = new Date(date);
-  const day = d.getDay(); // 0=Sun, 6=Sat
-  if (day === 6) d.setDate(d.getDate() + 2); // Sat → Mon
-  else if (day === 0) d.setDate(d.getDate() + 1); // Sun → Mon
+  let g = 0;
+  while(!_elcIsBizDay(_elcYmd(d)) && g++ < 14) d.setDate(d.getDate() + 1);
   return d;
 }
 
@@ -19953,7 +20002,7 @@ window._elcWeekScoreRaw = (uid, wS, wE, wKey) => {
      so this can never move a historical score. */
   const _liveWk   = wE > Date.now();
   const _dueCut   = _liveWk ? new Date().toISOString().slice(0,10) : wEndStr;
-  const _isLate   = t => t.dueDate && (_liveWk ? t.dueDate < _dueCut : t.dueDate <= _dueCut);
+  const _isLate   = t => t.dueDate && (_liveWk ? _elcEffDue(t) < _dueCut : _elcEffDue(t) <= _dueCut); // BIZDAY-20261005: weekend/holiday due dates count from the next business day
   const overdueInWk = myTasks.filter(t=>pendingAt(t)&&_isLate(t)).length;
   const doneT = myTasks.filter(t=>t.status==='complete'&&(t.updatedAt||0)>=wS&&(t.updatedAt||0)<=wE).length;
   const openT = myTasks.filter(t=>pendingAt(t)).length;
@@ -20874,7 +20923,7 @@ function viewBoardStaff(){
   // Tasks
   const openTasks    = allTasks.filter(t => t.status==='pending');
   const myOpenTasks  = openTasks.filter(t => t.assignedTo===currentUser.uid);
-  const overdueTasks = openTasks.filter(t => t.dueDate && t.dueDate < new Date().toISOString().slice(0,10));
+  const overdueTasks = openTasks.filter(t => t.dueDate && _elcEffDue(t) < new Date().toISOString().slice(0,10));
 
   // ── % Under Contract ──────────────────────────────────────────────
   const pctUC = (listingDeals.length + ucDeals.length) > 0
@@ -24670,7 +24719,7 @@ function viewTasks(){
       const open= pt.filter(t=>t.status==='pending');
       // Overdue: pending tasks with a dueDate in the past
       const now_ms = Date.now();
-      const overdue = open.filter(t=>t.dueDate&&new Date(t.dueDate+'T23:59:59').getTime()<now_ms).length;
+      const overdue = open.filter(t=>t.dueDate&&new Date(_elcEffDue(t).slice(0,10)+'T23:59:59').getTime()<now_ms).length;
       const pct = pt.length>0 ? Math.round(done.length/pt.length*100) : null;
       // Avg days: completed tasks that have createdAt & updatedAt
       const timed = done.filter(t=>t.createdAt&&t.updatedAt&&t.updatedAt>t.createdAt);
@@ -29881,7 +29930,10 @@ window.saveTask = async () => {
   const sel   = document.getElementById('tm-assignee');
   const assignedTo   = sel?.value;
   const assignedToName = sel?.options[sel.selectedIndex]?.dataset.name || assignedTo;
-  const dueDate  = document.getElementById('tm-due')?.value||null;
+  const _dueRaw  = document.getElementById('tm-due')?.value||null;
+  const _dueEx   = editingTaskId ? (allTasks||[]).find(t=>t.id===editingTaskId) : null;
+  const dueDate  = _dueRaw ? _elcRollDue(_dueRaw, _dueEx && _dueEx.dueRoll) : null;
+  if(_dueRaw && dueDate!==_dueRaw){ try{ showToast('📅 '+_dueRaw+' is a weekend/holiday — due date moved to '+new Date(dueDate+'T12:00:00').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'}),'info'); }catch(_){} }
   const description = document.getElementById('tm-desc')?.value.trim()||'';
   const dealSel  = document.getElementById('tm-deal');
   const dealId   = dealSel?.value || '';
@@ -30789,7 +30841,7 @@ window._taRenderDealTasks = function(dealId){
   const fmt=d=>{ try{ return new Date(d+'T00:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'}); }catch(e){ return d; } };
   el.innerHTML=list.map(t=>{
     const done=_isDone(t);
-    const overdue=!done && t.dueDate && t.dueDate<today;
+    const overdue=!done && t.dueDate && _elcEffDue(t)<today;
     const stamp=done && t.completedAt ? `✓ ${esc(t.completedByName||'done')} · ${new Date(t.completedAt).toLocaleDateString('en-US',{month:'short',day:'numeric'})}` : '';
     return `<div style="display:flex;align-items:flex-start;gap:.5rem;padding:.4rem 0;border-bottom:1px solid #f3f4f6">
       <input type="checkbox" ${done?'checked':''} onchange="window.toggleTask('${t.id}', this.checked?'complete':'pending')" style="margin-top:.15rem;cursor:pointer;flex-shrink:0"/>
@@ -33923,7 +33975,7 @@ function viewEOS(sub='rocks'){
         const pwTotal   = doneTasks + pwPending;
         // Only overdue tasks (past due date) count against the score
         const sTodayStr   = new Date().toISOString().slice(0,10);
-        const overdueTasks = sTasks.filter(t=>t.status==='pending' && t.dueDate && t.dueDate < sTodayStr).length;
+        const overdueTasks = sTasks.filter(t=>t.status==='pending' && t.dueDate && _elcEffDue(t) < sTodayStr).length;
 
         // Rocks
         const rocks     = _rocksNow(allRocks[sUid]);
@@ -35227,7 +35279,7 @@ function viewEOS(sub='rocks'){
       const _pp=_st.filter(t=>t.status==='pending'&&(t.createdAt||0)>=_pwS&&(t.createdAt||0)<=_pwE).length;
       const _pt=_dt+_pp;
       const _stTodayStr=new Date().toISOString().slice(0,10);
-      const _stOd=_st.filter(t=>t.status==='pending'&&t.dueDate&&t.dueDate<_stTodayStr).length;
+      const _stOd=_st.filter(t=>t.status==='pending'&&t.dueDate&&_elcEffDue(t)<_stTodayStr).length;
       const _ar=eosGet('myRocks',{}); const _rk=_rocksNow(_ar[uid]);
       const _on=_rk.filter(r=>r.status==='complete'||r.status==='inprocess').length;
       const _tr=_rk.length; const _rp=_tr>0?Math.round(_on/_tr*100):100;
