@@ -2740,8 +2740,8 @@ async function ensureSoldAutomations(){
     {id:'auto-11', _v:2, stage:'Sold', type:'gift_confirm', active:true, config:{}},
     {id:'auto-12', _v:3, stage:'Sold', type:'assign_task', active:true,
      config:{assignToEmail:'krissy@thedirtdog.com', dueDays:'7', skipForBuyer:true,
-             taskTitle:'Mark as Sold on Eshenbaugh Report + remove from Available Land — {address}',
-             taskDesc:'1. Update the Eshenbaugh Land Report to mark {address} as SOLD.\n2. Remove from the Available Land inventory list.\n3. Add sale details: {price}, {close_date}, {county} County, {acres} acres.'}},
+             taskTitle:'Mark as Sold on Land Listings Report + remove from Available Land — {address}',
+             taskDesc:'1. Update the Land Listings Report to mark {address} as SOLD.\n2. Remove from the Available Land inventory list.\n3. Add sale details: {price}, {close_date}, {county} County, {acres} acres.'}},
     {id:'auto-15', _v:1, stage:'Sold', type:'sold_wire_confirm', active:true, config:{}},
   ];
   // Inject locally first so automations fire for ALL users
@@ -8599,14 +8599,14 @@ const Demo = {
     allTasks = JSON.parse(localStorage.getItem(K('tasks'))||'[]');
   },
   async createTask(data){
-    _elcNormTaskDue(data);
+    _elcNormTaskDue(data); _elcLlrFix(data);
     const id='task_'+Date.now();
     const newTask={...data,id};
     localStorage.setItem(K('tasks'),JSON.stringify([...allTasks,newTask]));
     return id;
   },
   async updateTask(id, data){
-    _elcNormTaskDue(data, allTasks.find(t=>t.id===id));
+    _elcNormTaskDue(data, allTasks.find(t=>t.id===id)); _elcLlrFix(data);
     const i=allTasks.findIndex(t=>t.id===id);
     if(i>=0){ allTasks[i]={...allTasks[i],...data}; localStorage.setItem(K('tasks'),JSON.stringify(allTasks)); }
   },
@@ -8922,6 +8922,8 @@ const FB = {
         // Same idea for the retired pipeline rows — clear the ones already on the
         // board, staggered so the two undo toasts don't collide (elc-v487).
         setTimeout(()=>{ try{ window._taCleanupPipelineTasks && window._taCleanupPipelineTasks(); }catch(e){ console.warn('[taPipelineSweep]',e); } }, 20000);
+        // Rename "Eshenbaugh Report" → "Land Listings Report" on saved tasks + rules (LLREPORT-20261005).
+        setTimeout(()=>{ try{ window._llrSweepTasks && window._llrSweepTasks(); }catch(e){ console.warn('[llrSweep]',e); } }, 9000);
       }
     }));
     if(!isAdmin){
@@ -8952,7 +8954,7 @@ const FB = {
     // above, which rebuilds allHrDocs) so they reuse the admin-write eos rules.
   },
   async createTask(data){
-    _elcNormTaskDue(data);
+    _elcNormTaskDue(data); _elcLlrFix(data);
     const {collection, addDoc} = _fbFns;
     const ref = await addDoc(collection(_fbDb,'tasks'), data);
     // Record the task in the linked property's activity history (so every task tied to a
@@ -8981,7 +8983,7 @@ const FB = {
     return ref.id;
   },
   async updateTask(id, data){
-    _elcNormTaskDue(data, (allTasks||[]).find(t=>t.id===id));
+    _elcNormTaskDue(data, (allTasks||[]).find(t=>t.id===id)); _elcLlrFix(data);
     const {doc, updateDoc} = _fbFns;
     await updateDoc(doc(_fbDb,'tasks',id), data);
   },
@@ -9234,6 +9236,18 @@ function getEffectiveRevenue(deal){
 function getDealPrice(deal){
   return deal.purchasePrice || deal.contractPrice || deal.suggestedPrice || deal.listedPrice || deal.loiPrice || 0;
 }
+
+// ── "Eshenbaugh Report" → "Land Listings Report" (LLREPORT-20261005) ─────────
+// The report was renamed. Applied to every task on save (Store.createTask/
+// updateTask), to the saved ⚡ task-set config on load, and swept across tasks
+// already in Firestore once per admin session (_llrSweepTasks).
+const _ELC_LLR_RE = /\bEsh(?:enbaugh)?\.?\s+(?:Land\s+)?Report\b/gi;
+function _elcLlrRename(s){ return typeof s==='string' ? s.replace(_ELC_LLR_RE,'Land Listings Report') : s; }
+function _elcLlrFix(data){
+  if(data) for(const f of ['title','description','taskBase']) if(typeof data[f]==='string') data[f]=_elcLlrRename(data[f]);
+  return data;
+}
+window._elcLlrRename = _elcLlrRename;
 
 // ── Business-day due dates (BIZDAY-20261005) ─────────────────────────────────
 // Any task due date that lands on a weekend or office holiday rolls to the NEXT
@@ -30018,7 +30032,7 @@ const TASK_AUTOMATIONS_DEFAULT = {
     ['Social Media Post: "Price Reduced"', _TA.NICK, 1],
     ['Email Nick, Pat & KC with the new price', '', 1],
     ['Reduce Price on Buildout / update OM / put on Box', _TA.PAT, 2],
-    ['Reduce Price in Eshenbaugh Report', _TA.KRISSY, 2],
+    ['Reduce Price in Land Listings Report', _TA.KRISSY, 2],
     ['Prepare listing extension & reduction paperwork', _TA.PAT, 1],
     ['Send paperwork to client to sign', '', 1],
     ['Email blast to groups on price adjustment', _TA.NICK, 3],
@@ -30035,7 +30049,7 @@ const TASK_AUTOMATIONS_DEFAULT = {
     ['🌐 Mark as ACTIVE again on MLS', '', 2],
     ['🏢 Make ACTIVE again on Buildout', _TA.NICK, 1],
     ['🗂️ Set the Daylite project back to active listing', _TA.NICK, 1],
-    ['📰 Mark as ACTIVE again on the Eshenbaugh Report', _TA.KRISSY, 2],
+    ['📰 Mark as ACTIVE again on the Land Listings Report', _TA.KRISSY, 2],
     ['📉 Remove from Excel projected revenue', _TA.MICHAEL, 1],
     ['📣 Begin remarketing', _TA.MKTG, 3],
     ['📋 Create protection list', _TA.ADV, 3],
@@ -30057,7 +30071,7 @@ const TASK_AUTOMATIONS_DEFAULT = {
     ['Remove from active listing folder & move to lost listings', _TA.KELLIE, 1],
     ['Confirm all tasks complete, then mark Cancelled on Daylite project', '', 20],
     ['Mark as Off Market on Buildout', _TA.NICK, 1],
-    ['Remove from Esh Report', _TA.KRISSY, 2],
+    ['Remove from Land Listings Report', _TA.KRISSY, 2],
     ['Remove from monthly report group', _TA.KRISSY, 2],
     ['Put on Monday Metrics', _TA.KRISSY, 2],
     ['Remove listing agreement reminder', _TA.KELLIE, 2],
@@ -30125,7 +30139,7 @@ const TASK_AUTOMATIONS_DEFAULT = {
   sold: { label:'Sold Listing', terminal:true, tasks:[
     ['Send closing statement', _TA.KRISSY, 3],
     ['Remove from websites + archive Google Drive', _TA.KRISSY, 7],
-    ['Mark as Sold on Eshenbaugh Report + remove from Available Land', _TA.MKTG, 7],
+    ['Mark as Sold on Land Listings Report + remove from Available Land', _TA.MKTG, 7],
   ]},
   uc_buyer_rep: { label:'Under Contract — Buyer Rep', terminal:false, tasks:[
     ['Remind advisor to verify deposit', _TA.KELLIE, 2],
@@ -30151,7 +30165,7 @@ const TASK_AUTOMATIONS_DEFAULT = {
     ['Add to Excel projected revenue', _TA.MICHAEL, 1],
     ['Check LoopNet & confirm not a Premium; switch if needed', _TA.KRISSY, 1],
     ['Put copy of contract & critical dates on Box.com', _TA.KELLIE, 2],
-    ['Mark as under contract on Eshenbaugh Report', _TA.KRISSY, 2],
+    ['Mark as under contract on Land Listings Report', _TA.KRISSY, 2],
   ]},
   expired_listing: { label:'Expired Listing', terminal:false, tasks:[
     ['Send listing extension to advisor', _TA.KRISSY, 1],
@@ -30206,6 +30220,10 @@ function _mergeTaskAutomations(stored){
   for(const k of Object.keys(base)){
     if(Array.isArray(base[k].tasks)) base[k].tasks = _taFixRichOwnedRows(base[k].tasks, k).rows;
   }
+  // The report was renamed — saved configs still say "Eshenbaugh Report" (LLREPORT-20261005).
+  for(const k of Object.keys(base)){
+    if(Array.isArray(base[k].tasks)) base[k].tasks = base[k].tasks.map(r => Array.isArray(r) ? [String(r[0]||'').replace(/\bEsh(?:enbaugh)?\.?\s+(?:Land\s+)?Report\b/gi,'Land Listings Report'), ...r.slice(1)] : r);
+  }
   return base;
 }
 /* ── Fell-out row repair (elc-v426) ───────────────────────────────────────
@@ -30226,7 +30244,7 @@ const _TA_FELLOUT_REACTIVATE = [
   { test:/\bmls\b/i,              row:['🌐 Mark as ACTIVE again on MLS', '', 2] },
   { test:/buildout/i,             row:['🏢 Make ACTIVE again on Buildout', _TA.NICK, 1] },
   { test:/daylite/i,              row:['🗂️ Set the Daylite project back to active listing', _TA.NICK, 1] },
-  { test:/eshenbaugh\s*report/i,  row:['📰 Mark as ACTIVE again on the Eshenbaugh Report', _TA.KRISSY, 2] },
+  { test:/eshenbaugh\s*report|land\s*listings\s*report/i,  row:['📰 Mark as ACTIVE again on the Land Listings Report', _TA.KRISSY, 2] },
   { test:/projected\s*revenue/i,  row:['📉 Remove from Excel projected revenue', _TA.MICHAEL, 1] },
 ];
 function _taFixFellOutRows(rows){
@@ -30309,7 +30327,7 @@ const _TA_RICH_OWNED = {
   // Sold: sold_wire_confirm (auto-15) → wire / payout / approve;
   // auto-10 thank-you Gmail draft; gift_confirm (auto-11); sign_pickup_confirm
   // (auto-9); press_release (auto-6). The plain closing-statement / websites /
-  // Eshenbaugh Report rows stay — _taIsPlainSkippable already mutes those rules.
+  // Land Listings Report rows stay — _taIsPlainSkippable already mutes those rules.
   sold: [
     /\bwire\b/i,
     /\bpayout\b[\s\S]*\bbreakdown\b|\bbreakdown\b[\s\S]*\bpayout\b/i,
@@ -30630,6 +30648,27 @@ window._taCleanupDuplicateTasks = async function(opts={}){
     showToast('Duplicate tasks restored','info',3000);
   }, 12000);
   return dupes.length;
+};
+
+/* ── Rename "Eshenbaugh Report" on tasks already saved (LLREPORT-20261005) ───
+   Every status, so history reads the same. Also rewrites saved rule configs
+   (automations collection: taskTitle / taskDesc). Idempotent — only touches
+   docs that still carry the old name. Admin session only (rules). */
+window._llrSweepTasks = async function(){
+  const hit = s => typeof s==='string' && new RegExp(_ELC_LLR_RE.source,'i').test(s);
+  const tasks = (typeof allTasks!=='undefined' ? allTasks : []);
+  let n = 0;
+  for(const t of tasks.filter(t => hit(t.title) || hit(t.description) || hit(t.taskBase))){
+    const upd = {}; for(const f of ['title','description','taskBase']) if(hit(t[f])) upd[f] = _elcLlrRename(t[f]);
+    try{ await Store.updateTask(t.id, upd); Object.assign(t, upd); n++; }catch(e){ console.warn('[llrSweep task]', t.id, e); }
+  }
+  let a = 0;
+  for(const r of (typeof allAutomations!=='undefined' ? allAutomations : [])){
+    const c = r && r.config; if(!c || !(hit(c.taskTitle) || hit(c.taskDesc))) continue;
+    try{ await Store.saveAutomation({id:r.id, config:{...c, taskTitle:_elcLlrRename(c.taskTitle), taskDesc:_elcLlrRename(c.taskDesc)}}); a++; }catch(e){ console.warn('[llrSweep rule]', r.id, e); }
+  }
+  if(n || a) console.log('[llrSweep] renamed', n, 'tasks,', a, 'rules → Land Listings Report');
+  return {tasks:n, rules:a};
 };
 
 /* ── Sweep open "add to / move back in the pipeline" tasks (PIPEROW-20260914,
