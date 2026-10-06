@@ -44698,8 +44698,8 @@ window._siAddSenderToCrm = async function(){
    Data lives in:
      deals/{id}.reportRecipients[]      — [{name,email,contactId}]
      deals/{id}.reportAppPropertyId     — app.thedirtdog.com property UUID
-     deals/{id}.reportListingLinks{}    — {loopnet,crexi,costar,…: url}
      deals/{id}.reportSignPhotoUrl      — sign photo (remembered month to month)
+     deals/{id}.reportWebsitePhotoUrl   — Buildout property-website screenshot (remembered month to month)
      deals/{id}/monthlyReports/{YYYY-MM}— per-month inputs + status + pdfUrl
      eos/settings.monthlyReports        — {access, workerUrl, firmAddress, about, emailSubject, emailBody}
      eos/monthlyReportLetters           — {[YYYY-MM]: {body, updatedAt, updatedBy}}
@@ -44708,18 +44708,7 @@ window._siAddSenderToCrm = async function(){
            | 'admins' | 'all'. Flip it from the tab's ⚙ Settings panel.
    ======================================================= */
 const MR_ACTIVE_STAGES = ['Listing','LOI','Signed LOI/Contract Drafting','Due Diligence (Under Contract)','Closing'];
-const MR_SITE_TILES = [
-  {key:'loopnet',          label:'LoopNet',               site:'www.loopnet.com'},
-  {key:'crexi',            label:'Crexi',                 site:'www.crexi.com'},
-  {key:'costar',           label:'CoStar',                site:'www.costar.com', note:'CoStar membership required to view listing'},
-  {key:'commercialpartners',label:'Commercial Partners',  site:'www.commercialpartners.com'},
-  {key:'brevitas',         label:'Brevitas',              site:'brevitas.com'},
-  {key:'commercialedge',   label:'CommercialEdge Network',site:'www.commercialedge.com'},
-  {key:'totalcommercial',  label:'Total Commercial',      site:'www.totalcommercial.com'},
-  {key:'landcom',          label:'Land.com',              site:'www.land.com'},
-  {key:'thedirtdog',       label:'TheDirtDog.com',        site:'www.thedirtdog.com'},
-];
-const MR_DEFAULT_ABOUT = "At Eshenbaugh Land Company, our mission is to be your trusted land consultant, dedicated to shaping the future of our communities through thoughtful land solutions that maximize our clients' interests. Backed by a steadfast commitment to ethics, education, and experience, we empower individuals, businesses, and investors to achieve their goals in every aspect of land. Since 1992, we have closed over $2.2 billion in transactions, including more than $1 billion in sales in just the past five years. With an average of over 20 years of experience per advisor, our seasoned team anticipates challenges, develops innovative strategies, and executes deals with efficiency and precision.";
+const MR_DEFAULT_ABOUT = "At Eshenbaugh Land Company, our mission is to be your trusted land consultant, dedicated to shaping the future of our communities through thoughtful land solutions that maximize our clients' interests. Backed by a steadfast commitment to ethics, education, and experience, we empower individuals, businesses, and investors to achieve their goals in every aspect of land. Since 1992, we have closed over $3 billion in sales, including more than $1.5 billion since 2020 alone. Our seasoned team anticipates challenges, develops innovative strategies, and executes deals with efficiency and precision.";
 const MR_DEFAULT_EMAIL_SUBJECT = '{month} Marketing Report — {property}';
 const MR_DEFAULT_EMAIL_BODY = 'Dear {names},\n\nAttached is the {month} marketing report for {property}. It summarizes our marketing activity, buyer inquiries and web traffic on the property over the past month.\n\nPlease reach out any time if you would like to discuss anything in more detail.\n\n{advisorName}\n{advisorDesignations}\nEshenbaugh Land Company\n{advisorPhone}\n{advisorEmail}';
 const MR_DEFAULT_LETTER = 'As part of our ongoing efforts to keep you fully informed, I wanted to share a brief overview of current market conditions along with a summary of activity specific to your property over the past 30 days.\n\nOur approach remains focused on maximizing exposure while targeting the most qualified and motivated buyers. Enclosed please find a detailed summary of marketing efforts and buyer engagement specific to your property.\n\nWe will continue to actively monitor the market and adjust our strategy as needed to ensure your property is positioned for the best possible outcome. Please don’t hesitate to reach out if you’d like to discuss any of this in more detail or if your goals or timing have evolved.\n\nFrom all of us on our team, thank you again for the opportunity to represent you.';
@@ -45153,7 +45142,7 @@ window._mrOpenSettings=function(){
       </div>
       <div class="mr-sec"><h3>Report branding</h3>
         <div class="mr-grid2">
-          <div><label class="mr-lbl" for="mr-s-addr">Office address (cover page)</label><input id="mr-s-addr" class="mr-input" style="width:100%" value="${_mrEsc(c.firmAddress||'1918 W. Cass Street, Tampa, FL 33606')}"></div>
+          <div><label class="mr-lbl" for="mr-s-addr">Office address (cover page)</label><input id="mr-s-addr" class="mr-input" style="width:100%" value="${_mrEsc(c.firmAddress||'304 S. Willow Ave, Tampa, FL 33606')}"></div>
           <div><label class="mr-lbl" for="mr-s-web">Website (cover page)</label><input id="mr-s-web" class="mr-input" style="width:100%" value="${_mrEsc(c.firmWebsite||'WWW.THEDIRTDOG.COM')}"></div>
         </div>
         <div style="margin-top:.6rem"><label class="mr-lbl" for="mr-s-about">About Eshenbaugh Land Company (last page)</label><textarea id="mr-s-about" class="mr-textarea" style="min-height:140px">${_mrEsc(c.about||MR_DEFAULT_ABOUT)}</textarea></div>
@@ -45235,11 +45224,10 @@ window._mrOpenEditor=async function(dealId){
   const deal=(allDeals||[]).find(d=>d.id===dealId); if(!deal){ showToast('Deal not found','error'); return; }
   const st=window._mrState; const ym=st.month||_mrPrevMonth();
   const rep=(await _mrLoadReport(dealId,ym))||{};
-  st.editor={dealId, deal, ym, rep, traffic:rep.traffic||null, shots:{email:rep.emailScreenshotUrl||'', fb:rep.fbScreenshotUrl||'', li:rep.liScreenshotUrl||''}, signUrl:deal.reportSignPhotoUrl||''};
+  st.editor={dealId, deal, ym, rep, traffic:rep.traffic||null, shots:{email:rep.emailScreenshotUrl||''}, socialPhotos:Array.isArray(rep.socialPhotos)?rep.socialPhotos.slice():[], signUrl:deal.reportSignPhotoUrl||'', webUrl:deal.reportWebsitePhotoUrl||''};
   const cands=_mrRecipientCandidates(deal); const chosen=_mrRecipients(deal);
   const chosenEmails=new Set(chosen.map(r=>r.email));
   const manual=chosen.filter(r=>!cands.some(c=>c.email===r.email));
-  const links=deal.reportListingLinks||{};
   const advs=_mrAdvisorsOf(deal);
   const letter=_mrLetterFor(ym);
   const ov=document.createElement('div'); ov.className='mr-ov fixed inset-0 flex items-center justify-center'; ov.id='mr-editor-ov';
@@ -45277,13 +45265,20 @@ window._mrOpenEditor=async function(dealId){
       </div>
       <div class="mr-sec"><h3>5 · Social media</h3>
         <div class="mr-grid2">
-          <div><span class="mr-lbl">Facebook</span>${_mrRowsTable('mr-fb',MR_FB_COLS,rep.facebook||[],'Add post')}<div class="mr-row" style="margin-top:.4rem"><label class="mr-btn mr-btn-sm" style="cursor:pointer">🖼 Screenshot<input type="file" accept="image/*" style="display:none" onchange="window._mrUploadShot('fb',this)"></label><span id="mr-shot-fb" class="mr-muted">${st.editor.shots.fb?'✓ attached':''}</span></div></div>
-          <div><span class="mr-lbl">LinkedIn</span>${_mrRowsTable('mr-li',MR_LI_COLS,rep.linkedin||[],'Add post')}<div class="mr-row" style="margin-top:.4rem"><label class="mr-btn mr-btn-sm" style="cursor:pointer">🖼 Screenshot<input type="file" accept="image/*" style="display:none" onchange="window._mrUploadShot('li',this)"></label><span id="mr-shot-li" class="mr-muted">${st.editor.shots.li?'✓ attached':''}</span></div></div>
+          <div><span class="mr-lbl">Facebook</span>${_mrRowsTable('mr-fb',MR_FB_COLS,rep.facebook||[],'Add post')}</div>
+          <div><span class="mr-lbl">LinkedIn</span>${_mrRowsTable('mr-li',MR_LI_COLS,rep.linkedin||[],'Add post')}</div>
+        </div>
+        <div style="margin-top:.7rem"><span class="mr-lbl">Post photos (printed on the Social Media page)</span>
+          <div id="mr-social-photos" class="mr-row" style="gap:.5rem">${_mrSocialThumbsHtml()}</div>
+          <label class="mr-btn mr-btn-sm" style="cursor:pointer;margin-top:.4rem">🖼 Add post photo(s)<input type="file" accept="image/*" multiple style="display:none" onchange="window._mrUploadSocial(this)"></label>
+          <span id="mr-social-status" class="mr-muted"></span>
         </div>
       </div>
-      <div class="mr-sec"><h3>6 · Listing sites &amp; signage</h3>
-        <div class="mr-grid3">${MR_SITE_TILES.map(t=>`<div><label class="mr-lbl" for="mr-link-${t.key}">${_mrEsc(t.label)}</label><input id="mr-link-${t.key}" class="mr-input" style="width:100%" value="${_mrEsc(links[t.key]||'')}" placeholder="listing URL"></div>`).join('')}</div>
-        <div class="mr-row" style="margin-top:.7rem"><label class="mr-btn mr-btn-sm" style="cursor:pointer">📷 Sign photo<input type="file" accept="image/*" style="display:none" onchange="window._mrUploadSign(this)"></label><span id="mr-sign-status" class="mr-muted">${deal.reportSignPhotoUrl?'✓ sign photo on file (remembered every month)':'none yet — the Property Signage page is skipped until one is added'}</span></div>
+      <div class="mr-sec"><h3>6 · Sign &amp; website photos (remembered every month)</h3>
+        <div class="mr-grid2">
+          <div><span class="mr-lbl">Property sign</span><div class="mr-row"><span id="mr-sign-thumb">${deal.reportSignPhotoUrl?`<img class="mr-thumb" src="${_mrEsc(deal.reportSignPhotoUrl)}" alt="">`:''}</span><label class="mr-btn mr-btn-sm" style="cursor:pointer">📷 ${deal.reportSignPhotoUrl?'Replace':'Add'} sign photo<input type="file" accept="image/*" style="display:none" onchange="window._mrUploadSign(this)"></label></div><div id="mr-sign-status" class="mr-muted">${deal.reportSignPhotoUrl?'✓ on file':'none yet — the Property Signage page is skipped until one is added'}</div></div>
+          <div><span class="mr-lbl">Property website (Buildout screenshot)</span><div class="mr-row"><span id="mr-web-thumb">${deal.reportWebsitePhotoUrl?`<img class="mr-thumb" src="${_mrEsc(deal.reportWebsitePhotoUrl)}" alt="">`:''}</span><label class="mr-btn mr-btn-sm" style="cursor:pointer">🖼 ${deal.reportWebsitePhotoUrl?'Replace':'Add'} website screenshot<input type="file" accept="image/*" style="display:none" onchange="window._mrUploadWeb(this)"></label></div><div id="mr-web-status" class="mr-muted">${deal.reportWebsitePhotoUrl?'✓ on file':'none yet — printed under Listing Details once added'}</div></div>
+        </div>
       </div>
       <div class="mr-sec"><h3>7 · Leads &amp; website activity</h3>
         <div class="mr-row">
@@ -45317,24 +45312,24 @@ function _mrCollectEditor(){
   const cands=_mrRecipientCandidates(ed.deal);
   const recips=[]; document.querySelectorAll('.mr-recip:checked').forEach(cb=>{ const c=cands[+cb.dataset.i]; if(c) recips.push({name:c.name||'',email:c.email,contactId:c.contactId||''}); });
   _mrReadRows('mr-manual').forEach(r=>{ const e=(r.email||'').toLowerCase(); if(/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e) && !recips.some(x=>x.email===e)) recips.push({name:r.name||'',email:e}); });
-  const links={}; MR_SITE_TILES.forEach(t=>{ const v=(document.getElementById('mr-link-'+t.key)?.value||'').trim(); if(v) links[t.key]=v; });
   const traffic={...(ed.traffic||{})};
   ['siteVisits','uniqueVisitors','docsViewed','casSigned','gaSessions','totalCommercialViews','loopnetViews','crexiViews','totalLeads'].forEach(k=>{ const v=(document.getElementById('mr-t-'+k)?.value||'').trim(); traffic[k]= v===''?null:_mrNum(v); });
   if(!traffic.source) traffic.source='manual';
   return {
-    recips, links,
+    recips,
     appId:(document.getElementById('mr-ed-appid')?.value||'').trim(),
     report:{ preparedFor:(document.getElementById('mr-ed-owner')?.value||'').trim(), advisorNote:(document.getElementById('mr-ed-note')?.value||'').trim(),
       emailBlasts:_mrReadRows('mr-emails'), facebook:_mrReadRows('mr-fb'), linkedin:_mrReadRows('mr-li'),
-      emailScreenshotUrl:ed.shots.email||'', fbScreenshotUrl:ed.shots.fb||'', liScreenshotUrl:ed.shots.li||'', traffic }
+      emailScreenshotUrl:ed.shots.email||'', socialPhotos:ed.socialPhotos.slice(0,12), traffic }
   };
 }
 window._mrSaveEditor=async function(btn){
   const ed=window._mrState.editor; if(!ed) return false;
   const c=_mrCollectEditor(); const done=btn?elcBusy(btn,'Saving…'):()=>{};
   try{
-    const dealPatch={reportRecipients:c.recips, reportListingLinks:c.links, reportAppPropertyId:c.appId, updatedAt:Date.now()};
+    const dealPatch={reportRecipients:c.recips, reportAppPropertyId:c.appId, updatedAt:Date.now()};
     if(ed.signUrl) dealPatch.reportSignPhotoUrl=ed.signUrl;
+    if(ed.webUrl) dealPatch.reportWebsitePhotoUrl=ed.webUrl;
     await Store.updateDeal(ed.dealId, dealPatch); Object.assign(ed.deal, dealPatch);
     const saved=await _mrSaveReport(ed.dealId, ed.ym, {...c.report, status: ed.rep.status==='sent'?'sent':'draft'});
     ed.rep=saved;
@@ -45354,8 +45349,28 @@ window._mrUploadSign=async function(input){
   const ed=window._mrState.editor; const f=input.files&&input.files[0]; if(!ed||!f) return;
   const lbl=document.getElementById('mr-sign-status'); if(lbl) lbl.textContent='Uploading…';
   try{ const blob=await _mrShrinkImage(f,1600,.85); const url=await _mrUploadBlob('dealPhotos/'+ed.dealId+'/report_sign_'+Date.now()+'.jpg', blob,'image/jpeg'); ed.signUrl=url;
-    await Store.updateDeal(ed.dealId,{reportSignPhotoUrl:url}); ed.deal.reportSignPhotoUrl=url; if(lbl) lbl.textContent='✓ sign photo on file (remembered every month)'; }
+    await Store.updateDeal(ed.dealId,{reportSignPhotoUrl:url}); ed.deal.reportSignPhotoUrl=url; if(lbl) lbl.textContent='✓ on file'; const t=document.getElementById('mr-sign-thumb'); if(t) t.innerHTML=`<img class="mr-thumb" src="${_mrEsc(url)}" alt="">`; }
   catch(e){ console.error('[mr] sign',e); if(lbl) lbl.textContent='Upload failed'; showToast('Upload failed: '+e.message,'error'); }
+};
+function _mrSocialThumbsHtml(){
+  const ed=window._mrState.editor; if(!ed) return '';
+  return (ed.socialPhotos||[]).map((u,i)=>`<span style="position:relative;display:inline-block"><img class="mr-thumb" src="${_mrEsc(u)}" alt="Post photo ${i+1}"><button class="mr-x" style="position:absolute;top:-8px;right:-8px;background:var(--surface);border:1px solid var(--border);min-width:28px;min-height:28px;font-size:.8rem;padding:0" aria-label="Remove post photo ${i+1}" onclick="window._mrRemoveSocial(${i})">✕</button></span>`).join('');
+}
+window._mrRemoveSocial=function(i){ const ed=window._mrState.editor; if(!ed) return; ed.socialPhotos.splice(i,1); const box=document.getElementById('mr-social-photos'); if(box) box.innerHTML=_mrSocialThumbsHtml(); };
+window._mrUploadSocial=async function(input){
+  const ed=window._mrState.editor; const files=[...(input.files||[])]; if(!ed||!files.length) return;
+  const lbl=document.getElementById('mr-social-status'); if(lbl) lbl.textContent='Uploading '+files.length+'…';
+  try{ for(const f of files.slice(0,12)){ const blob=await _mrShrinkImage(f,1200,.85); const url=await _mrUploadBlob('dealPhotos/'+ed.dealId+'/report_social_'+ed.ym+'_'+Date.now()+'_'+Math.random().toString(36).slice(2,6)+'.jpg', blob,'image/jpeg'); ed.socialPhotos.push(url); }
+    const box=document.getElementById('mr-social-photos'); if(box) box.innerHTML=_mrSocialThumbsHtml(); if(lbl) lbl.textContent=ed.socialPhotos.length+' photo'+(ed.socialPhotos.length===1?'':'s')+' — save the draft to keep them'; }
+  catch(e){ console.error('[mr] social',e); if(lbl) lbl.textContent='Upload failed'; showToast('Upload failed: '+e.message,'error'); }
+  input.value='';
+};
+window._mrUploadWeb=async function(input){
+  const ed=window._mrState.editor; const f=input.files&&input.files[0]; if(!ed||!f) return;
+  const lbl=document.getElementById('mr-web-status'); if(lbl) lbl.textContent='Uploading…';
+  try{ const blob=await _mrShrinkImage(f,1600,.85); const url=await _mrUploadBlob('dealPhotos/'+ed.dealId+'/report_web_'+Date.now()+'.jpg', blob,'image/jpeg'); ed.webUrl=url;
+    await Store.updateDeal(ed.dealId,{reportWebsitePhotoUrl:url}); ed.deal.reportWebsitePhotoUrl=url; if(lbl) lbl.textContent='✓ on file'; const t=document.getElementById('mr-web-thumb'); if(t) t.innerHTML=`<img class="mr-thumb" src="${_mrEsc(url)}" alt="">`; }
+  catch(e){ console.error('[mr] web',e); if(lbl) lbl.textContent='Upload failed'; showToast('Upload failed: '+e.message,'error'); }
 };
 function _mrApplyTraffic(t, srcLabel){
   const ed=window._mrState.editor; if(!ed) return;
@@ -45464,16 +45479,18 @@ async function _mrAssemble(deal, ym){
   const h=_mrHistoryRows(deal,acts,tasks);
   const cfg=_mrCfg(); const L=_mrLetters()[ym]||{};
   const advisors=_mrAdvisorsOf(deal);
-  const [hero,logo,sign,shotE,shotF,shotL,heads]=await Promise.all([
+  const [hero,logo,sign,web,shotE,social,heads]=await Promise.all([
     _mrImg(deal.primaryPhotoUrl,{cover:612/476,maxPx:1800}),
     _mrImg('proposals/assets/logo-dark.png',{png:true,maxPx:900}),
     _mrImg(deal.reportSignPhotoUrl,{maxPx:1600}),
-    _mrImg(rep.emailScreenshotUrl,{maxPx:1200}), _mrImg(rep.fbScreenshotUrl,{maxPx:1000}), _mrImg(rep.liScreenshotUrl,{maxPx:1000}),
+    _mrImg(deal.reportWebsitePhotoUrl,{maxPx:1600}),
+    _mrImg(rep.emailScreenshotUrl,{maxPx:1200}),
+    Promise.all((Array.isArray(rep.socialPhotos)?rep.socialPhotos.slice(0,12):[]).map(u=>_mrImg(u,{maxPx:1000}))),
     Promise.all(advisors.map(a=>_mrImg(a.headshotUrl,{cover:1,maxPx:400})))
   ]);
   advisors.forEach((a,i)=>a.head=heads[i]);
   return { deal, ym, rep, history:h.history, tasks:h.tasks, letter:L.body||'', signature:L.signature||cfg.letterSignature||'Ryan Sampson, ALC, CCIM — Managing Partner / Broker of Record', about:cfg.about||MR_DEFAULT_ABOUT,
-    firmAddress:cfg.firmAddress||'1918 W. Cass Street, Tampa, FL 33606', firmWebsite:cfg.firmWebsite||'WWW.THEDIRTDOG.COM', advisors, hero, logo, sign, shotE, shotF, shotL,
+    firmAddress:cfg.firmAddress||'304 S. Willow Ave, Tampa, FL 33606', firmWebsite:cfg.firmWebsite||'WWW.THEDIRTDOG.COM', advisors, hero, logo, sign, web, shotE, social:(social||[]).filter(Boolean),
     preparedFor:rep.preparedFor||_mrOwnerLabel(deal), traffic:rep.traffic||{} };
 }
 async function _mrBuildPdf(A){
@@ -45513,14 +45530,43 @@ async function _mrBuildPdf(A){
   y=R.para(intro,R.M,y+4,R.W-2*R.M-40,{size:10.5,lh:1.5})+16;
   const dl=[['Listing Start Date:',d.listingEffectiveDate?_mrFmtDateLong(d.listingEffectiveDate):(d.listingEnteredAt?_mrFmtDateLong(d.listingEnteredAt):'—')],['Listing Expiration Date:',d.listingExpiration?_mrFmtDateLong(d.listingExpiration):'—'],['Asking Price:',_mrFmtMoney(_mrDealPrice(d))||'Call for details']];
   dl.forEach(([k,v])=>{ R.text(k,R.M,y,{size:14,bold:true}); R.text(v,R.M+200,y,{size:14}); y+=22; });
-  y=R.title('Marketing Channels',y+30);
-  const tiles=[['EMAIL BLASTS',MR_TEAL],['SOCIAL MEDIA',MR_RED],['LISTING SERVICES',MR_TEAL],['SIGN INSTALLATIONS',MR_TEAL],['PROPERTY NOTES',MR_RED],['LEADS AND WEB ACTIVITY',MR_TEAL]];
-  const tw=150, th=150, gap=18, x0=R.M+((R.W-2*R.M)-(3*tw+2*gap))/2;
-  tiles.forEach((t,i)=>{ const cx=x0+(i%3)*(tw+gap), cy=y+8+Math.floor(i/3)*(th+gap); R.rect(cx,cy,tw,th,t[1]);
-    doc.setDrawColor(255,255,255); doc.setLineWidth(2); doc.circle(cx+tw/2,cy+58,24,'S');
-    R.text(R.split(t[0],tw-20,11,true),cx+tw/2,cy+108,{size:11,bold:true,color:[255,255,255],align:'center',lh:1.25}); });
-  /* ---- 4 · Email report ---- */
+  /* ---- 3a · Marketing at a glance (info-graphic tiles) ---- */
+  y=R.title('Marketing at a Glance',y+30);
+  const T=A.traffic||{}; const rng=_mrMonthRange(A.ym);
+  const offers=(Array.isArray(d.lois)&&d.lois.length)?d.lois.length:(d.loiBuyer?1:0);
+  const viewsParts=[T.siteVisits,T.totalCommercialViews,T.loopnetViews,T.crexiViews,T.gaSessions].filter(v=>v!=null&&v!=='');
+  const totalViews=T.totalViews!=null?Number(T.totalViews):(viewsParts.length?viewsParts.reduce((a,b)=>a+Number(b),0):null);
   const eb=(A.rep.emailBlasts||[]).filter(r=>r.title||r.date);
+  const emailsSent=eb.length?eb.reduce((a,r)=>a+_mrNum(r.recipients),0):null;
+  const emailOpens=eb.length?eb.reduce((a,r)=>a+_mrNum(r.opens),0):null;
+  const act=T.activity||[];
+  const leads=T.totalLeads!=null?Number(T.totalLeads):(act.length?act.filter(a=>a.email).map(a=>a.email.toLowerCase()).filter((v,i,arr)=>arr.indexOf(v)===i).length:null);
+  const since=_mrListingStart(d); const dom=since?Math.max(0,Math.round((Math.min(rng.end,Date.now())-since)/86400000)):null;
+  const fbReach=(A.rep.facebook||[]).reduce((a,r)=>a+_mrNum(r.reach),0), liImp=(A.rep.linkedin||[]).reduce((a,r)=>a+_mrNum(r.impressions),0);
+  const social=(fbReach||liImp)?fbReach+liImp:null;
+  const monthActs=A.history.filter(r=>r.ts>=rng.start&&r.ts<rng.end).length;
+  const fmtN=v=> v==null?'—':Number(v).toLocaleString('en-US');
+  const tiles=[
+    ['OFFERS RECEIVED', fmtN(offers), 'since listing signed', MR_RED],
+    ['TOTAL WEBSITE VIEWS', fmtN(totalViews), viewsParts.length||T.totalViews!=null?'all listing sites, this month':'traffic not yet entered', MR_TEAL],
+    ['EMAILS SENT', fmtN(emailsSent), emailOpens!=null?fmtN(emailOpens)+' opened':'e-blast recipients this month', MR_TEAL],
+    ['BUYER LEADS', fmtN(leads), 'named inquiries this month', MR_TEAL],
+    ['DAYS ON MARKET', fmtN(dom), since?'listed '+_mrFmtDate(since):'listing start not set', MR_RED],
+    ['SOCIAL REACH', fmtN(social), social!=null?'Facebook + LinkedIn':'no posts logged this month', MR_TEAL],
+    ['DOCS VIEWED', fmtN(T.docsViewed), 'OM / due-diligence downloads', MR_TEAL],
+    ['CAs SIGNED', fmtN(T.casSigned), 'confidentiality agreements', MR_RED],
+    ['TOUCHES LOGGED', fmtN(monthActs), 'calls, emails & notes this month', MR_TEAL],
+  ];
+  const tw=150, th=118, gap=18, x0=R.M+((R.W-2*R.M)-(3*tw+2*gap))/2;
+  tiles.forEach((t,i)=>{ const cx=x0+(i%3)*(tw+gap), cy=y+6+Math.floor(i/3)*(th+gap); R.rect(cx,cy,tw,th,t[3]);
+    R.text(t[0],cx+12,cy+22,{size:8,bold:true,color:[255,255,255]});
+    R.text(t[1],cx+12,cy+68,{size:30,bold:true,color:[255,255,255]});
+    R.text(R.split(t[2],tw-24,8),cx+12,cy+90,{size:8,color:[255,240,240],lh:1.25}); });
+  /* ---- 3b · Property website (Buildout screenshot) ---- */
+  if(A.web){ y=R.newPage(); y=R.title('Property Website',y+30); y=R.para('The Property’s dedicated marketing website, as presented to prospective buyers.',R.M,y+4,R.W-2*R.M,{size:10.5})+12; const maxW=R.W-2*R.M, maxH=R.H-56-y-16; const s=Math.min(maxW/A.web.w,maxH/A.web.h); const w=A.web.w*s,h=A.web.h*s; const x=(R.W-w)/2; doc.setDrawColor(203,213,225); doc.setLineWidth(1); doc.rect(x,y,w,h,'S'); R.img(A.web,x,y,w,h); }
+  /* ---- 3c · Signage ---- */
+  if(A.sign){ y=R.newPage(); y=R.title('Property Signage',y+30); const maxW=R.W-2*R.M-60, maxH=R.H-60-y-50; const s=Math.min(maxW/A.sign.w,maxH/A.sign.h); const w=A.sign.w*s,h=A.sign.h*s; const x=(R.W-w)/2, yy=y+40; doc.setDrawColor(20,20,20); doc.setLineWidth(3); doc.rect(x,yy,w,h,'S'); R.img(A.sign,x,yy,w,h); }
+  /* ---- 4 · Email report ---- */
   if(eb.length||A.shotE){
     y=R.newPage(); y=R.title('Email Report',y+30);
     if(eb.length){ y=R.table({startY:y+6, head:[['Title','Date Sent','Recipients','Opens','Clicks']], body:eb.map(r=>[r.title||'',_mrFmtDate(r.date),r.recipients||'',r.opens||'',r.clicks||'']), columnStyles:{0:{cellWidth:230}}, contHeading:'Email Report (cont.)'})+18; }
@@ -45528,32 +45574,27 @@ async function _mrBuildPdf(A){
   }
   /* ---- 5 · Social media ---- */
   const fb=(A.rep.facebook||[]).filter(r=>r.date||r.reach), li=(A.rep.linkedin||[]).filter(r=>r.date||r.impressions);
-  if(fb.length||li.length||A.shotF||A.shotL){
+  if(fb.length||li.length||A.social.length){
     y=R.newPage(); y=R.title('Social Media Report',y+30);
-    const colW=(R.W-2*R.M-24)/2; const xl=R.M, xr=R.M+colW+24; const top=y+10;
-    R.text('Facebook',xl+colW/2,top+14,{size:20,bold:true,align:'center'}); R.text('LinkedIn',xr+colW/2,top+14,{size:20,bold:true,align:'center'});
-    R.line(xl,top+26,xl+colW,top+26,MR_TEAL,2.2); R.line(xr,top+26,xr+colW,top+26,MR_TEAL,2.2); R.line(R.W/2,top-4,R.W/2,R.H-70,MR_TEAL,2.2);
-    let yl=top+40, yr=top+40;
-    if(fb.length) yl=R.table({startY:yl, margin:{left:xl,right:R.W-(xl+colW)}, tableWidth:colW, head:[['Date','Reach','Interactions','Clicks']], body:fb.map(r=>[_mrFmtDate(r.date),r.reach||'',r.interactions||'',r.clicks||'']), styles:{font,fontSize:9,textColor:MR_INK,cellPadding:4,lineColor:MR_LINE,lineWidth:{bottom:0.8}}})+14;
-    if(li.length) yr=R.table({startY:yr, margin:{left:xr,right:R.M}, tableWidth:colW, head:[['Date','Impressions','Eng. Rate','Clicks']], body:li.map(r=>[_mrFmtDate(r.date),r.impressions||'',r.engRate||'',r.clicks||'']), styles:{font,fontSize:9,textColor:MR_INK,cellPadding:4,lineColor:MR_LINE,lineWidth:{bottom:0.8}}})+14;
-    if(A.shotF) R.fit(A.shotF,xl,yl,colW,R.H-70-yl); if(A.shotL) R.fit(A.shotL,xr,yr,colW,R.H-70-yr);
+    if(fb.length||li.length){
+      const colW=(R.W-2*R.M-24)/2; const xl=R.M, xr=R.M+colW+24; const top=y+10;
+      R.text('Facebook',xl+colW/2,top+14,{size:20,bold:true,align:'center'}); R.text('LinkedIn',xr+colW/2,top+14,{size:20,bold:true,align:'center'});
+      R.line(xl,top+26,xl+colW,top+26,MR_TEAL,2.2); R.line(xr,top+26,xr+colW,top+26,MR_TEAL,2.2);
+      let yl=top+40, yr=top+40;
+      if(fb.length) yl=R.table({startY:yl, margin:{left:xl,right:R.W-(xl+colW)}, tableWidth:colW, head:[['Date','Reach','Interactions','Clicks']], body:fb.map(r=>[_mrFmtDate(r.date),r.reach||'',r.interactions||'',r.clicks||'']), styles:{font,fontSize:9,textColor:MR_INK,cellPadding:4,lineColor:MR_LINE,lineWidth:{bottom:0.8}}})+14;
+      if(li.length) yr=R.table({startY:yr, margin:{left:xr,right:R.M}, tableWidth:colW, head:[['Date','Impressions','Eng. Rate','Clicks']], body:li.map(r=>[_mrFmtDate(r.date),r.impressions||'',r.engRate||'',r.clicks||'']), styles:{font,fontSize:9,textColor:MR_INK,cellPadding:4,lineColor:MR_LINE,lineWidth:{bottom:0.8}}})+14;
+      y=Math.max(yl,yr)+6;
+    }
+    if(A.social.length){
+      const gap=16, colW=(R.W-2*R.M-gap)/2, cellH=250; let col=0;
+      A.social.forEach((im,i)=>{
+        if(y+cellH>R.H-56){ y=R.newPage(); R.text('Social Media Posts (cont.)',R.M,y+10,{size:16,bold:true}); y+=30; col=0; }
+        const x=R.M+col*(colW+gap); const s=Math.min(colW/im.w,cellH/im.h); const w=im.w*s,h=im.h*s;
+        doc.setDrawColor(226,232,240); doc.setLineWidth(1); doc.rect(x+(colW-w)/2,y,w,h,'S'); R.img(im,x+(colW-w)/2,y,w,h);
+        col++; if(col===2){ col=0; y+=cellH+gap; }
+      });
+    }
   }
-  /* ---- 6 · Listing summary ---- */
-  y=R.newPage(); y=R.title('Listing Summary',y+30);
-  const T=A.traffic||{}; const links=d.reportListingLinks||{};
-  const totalViews = T.totalViews!=null ? T.totalViews : [T.siteVisits,T.totalCommercialViews,T.loopnetViews,T.crexiViews,T.gaSessions].filter(v=>v!=null).reduce((a,b)=>a+Number(b),0);
-  const totalLeads = T.totalLeads!=null ? T.totalLeads : ((T.activity||[]).filter(a=>a.email).map(a=>a.email.toLowerCase()).filter((v,i,arr)=>arr.indexOf(v)===i).length||'');
-  const since=_mrListingStart(d);
-  y=R.table({startY:y+6, head:[['On Market Since','Asking Price','Total Views','Total Leads']], body:[[since?_mrFmtDate(since):'—', _mrFmtMoney(_mrDealPrice(d))||'Call for details', (totalViews||totalViews===0)?String(totalViews):'—', totalLeads!==''?String(totalLeads):'—']], styles:{font,fontSize:12,textColor:MR_INK,cellPadding:7,halign:'center',lineWidth:0}, headStyles:{fillColor:MR_RED,textColor:[255,255,255],fontStyle:'bold',fontSize:12,halign:'center'}})+24;
-  const sites=MR_SITE_TILES.filter(t=>links[t.key]||['loopnet','crexi','costar'].includes(t.key));
-  const tW=(R.W-2*R.M-20)/2, tH=92; sites.forEach((t,i)=>{ const cx=R.M+(i%2)*(tW+20), cy=y+Math.floor(i/2)*(tH+14); if(cy+tH>R.H-60) return;
-    doc.setDrawColor(226,232,240); doc.setLineWidth(1); doc.setFillColor(255,255,255); doc.roundedRect(cx,cy,tW,tH,4,4,'FD');
-    R.text(t.label.toUpperCase(),cx+14,cy+58,{size:10,bold:true,color:MR_RED}); R.text(t.site,cx+14,cy+74,{size:9,color:[37,99,235]});
-    if(links[t.key]){ R.rrect(cx+tW-96,cy+14,82,22,2,[59,130,246]); R.text('VIEW LISTING',cx+tW-55,cy+29,{size:8,bold:true,color:[255,255,255],align:'center'}); doc.link(cx+tW-96,cy+14,82,22,{url:links[t.key]}); }
-    else if(t.note){ R.text(R.split(t.note,150,7.5),cx+tW-14,cy+24,{size:7.5,color:MR_GREY,align:'right',lh:1.3}); }
-    else { R.text('Listing URL not provided',cx+tW-14,cy+24,{size:7.5,color:MR_GREY,align:'right'}); } });
-  /* ---- 7 · Signage ---- */
-  if(A.sign){ y=R.newPage(); y=R.title('Property Signage',y+30); const maxW=R.W-2*R.M-60, maxH=R.H-60-y-50; const s=Math.min(maxW/A.sign.w,maxH/A.sign.h); const w=A.sign.w*s,h=A.sign.h*s; const x=(R.W-w)/2, yy=y+40; doc.setDrawColor(20,20,20); doc.setLineWidth(3); doc.rect(x,yy,w,h,'S'); R.img(A.sign,x,yy,w,h); }
   /* ---- 8 · Property notes ---- */
   y=R.newPage(); y=R.title('Property Notes',y+30);
   y=R.para('The following is the activity and history logged on the Property since the listing was signed'+(since?' ('+_mrFmtDateLong(since)+')':'')+', newest first.',R.M,y+4,R.W-2*R.M,{size:10.5})+10;
@@ -45561,7 +45602,6 @@ async function _mrBuildPdf(A){
   else { y=R.para('No history has been logged on this property yet.',R.M,y,R.W-2*R.M,{size:10.5,color:MR_GREY})+18; }
   if(A.tasks.length){ if(y>R.H-160){ y=R.newPage()+30; } R.text('Completed Tasks',R.M,y+6,{size:16,bold:true}); y=R.table({startY:y+16, head:[['Completed','Task','Completed by']], body:A.tasks.map(t=>[t.date,t.title,t.by]), columnStyles:{0:{cellWidth:70},2:{cellWidth:110}}, styles:{font,fontSize:8.5,textColor:MR_INK,cellPadding:4,lineColor:MR_LINE,lineWidth:{bottom:0.8}}, contHeading:'Completed Tasks (cont.)'}); }
   /* ---- 9 · Leads & website activity ---- */
-  const act=T.activity||[];
   const stats=[['TheDirtDog.com visits',T.siteVisits],['Unique visitors',T.uniqueVisitors],['Docs viewed',T.docsViewed],['CAs signed',T.casSigned],['Google sessions',T.gaSessions],['Total Commercial views',T.totalCommercialViews],['LoopNet views',T.loopnetViews],['Crexi views',T.crexiViews]].filter(s=>s[1]!=null&&s[1]!=='');
   if(act.length||stats.length){
     y=R.newPage(); y=R.title('Leads and Website Activity',y+30);
