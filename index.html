@@ -45711,6 +45711,189 @@ window._mrSendSelected=async function(){
 };
 /* ===== MREPORT_BLOCK_END ===== */
 
+/* =======================================================
+   📣 SOCIAL POSTING FOR LISTINGS — marker SOCIAL-20261006
+   "Compose post" on the new-listing social task, on the deal card's
+   Marketing block, and from the Monthly Reports editor. Posts go through
+   elc-social-worker (holds the Facebook Page / LinkedIn org tokens) to the
+   firm's pages. Results land on the deal (socialPosts[]), on its history,
+   and tick the task. The Monthly Report pulls those posts' photos + metrics.
+   Settings: APP_CONFIG.social = {workerUrl, defaultLink} (eos/settings.social)
+   ======================================================= */
+function _spCfg(){ return (APP_CONFIG.social = APP_CONFIG.social || {workerUrl:'https://elc-social-worker.dirtdog.workers.dev', defaultLink:'https://www.thedirtdog.com'}); }
+window._spIsSocialTask=function(t){ return !!(t && t.dealId && t.status!=='complete' && /social\s*media|social\s*post|post .*(facebook|linkedin)/i.test(t.title||'') && !/personal social/i.test(t.title||'')); };
+async function _spWorkerPost(path, body){
+  const base=(_spCfg().workerUrl||'').replace(/\/+$/,''); if(!base) throw new Error('Social worker URL is not set (📬 Monthly Reports → ⚙ Settings).');
+  const tok=await _mrIdToken(); if(!tok) throw new Error('Not signed in.');
+  const r=await fetch(base+path,{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+tok},body:JSON.stringify(body||{})});
+  const data=await r.json().catch(()=>({}));
+  if(!r.ok) throw new Error((data.error&&data.error.message)||('Worker '+r.status));
+  return data;
+}
+window._spStatusCache=null;
+async function _spStatus(force){
+  const c=window._spStatusCache; if(!force && c && Date.now()-c.at<10*60*1000) return c.data;
+  try{ const data=await _spWorkerPost('/status',{}); window._spStatusCache={at:Date.now(),data}; return data; }
+  catch(e){ const data={facebook:{configured:false,error:e.message},linkedin:{configured:false,error:e.message},unreachable:true}; window._spStatusCache={at:Date.now(),data}; return data; }
+}
+function _spLinkFor(deal){
+  try{ if(deal.listingSiteId && deal.listingPublished!==false && typeof _lsShareLink==='function') return _lsShareLink(deal.listingSiteId); }catch(_){}
+  return _spCfg().defaultLink||'https://www.thedirtdog.com';
+}
+function _spPhotoCandidates(deal){
+  const out=[]; const seen=new Set(); const add=(url,label)=>{ if(!url||seen.has(url)) return; seen.add(url); out.push({url,label}); };
+  add(deal.primaryPhotoUrl,'Card photo');
+  (deal.socialPosts||[]).forEach(p=>add(p.imageUrl,'Used before'));
+  (deal.dealAttachments||[]).forEach(a=>{ if(/\.(jpe?g|png|webp)(\?|$)/i.test(a.name||'')||/\.(jpe?g|png|webp)\?/i.test(a.url||'')) add(a.url,a.name||'Attachment'); });
+  add(deal.reportSignPhotoUrl,'Sign photo');
+  return out;
+}
+function _spDefaultCaption(deal){
+  const adv=_mrAdvisorsOf(deal)[0]||{};
+  const bits=[]; if(deal.acreage) bits.push(Number(deal.acreage).toLocaleString('en-US',{maximumFractionDigits:2})+'± acres'); if(deal.county) bits.push(deal.county+' County'); if(deal.zoning) bits.push('zoned '+deal.zoning); if(deal.landType) bits.push(deal.landType);
+  const price=_mrDealPrice(deal);
+  return 'NEW LISTING — '+_mrDealName(deal)+'\n'+_mrDealAddr(deal)+(bits.length?'\n'+bits.join(' · '):'')+(price?'\nAsking '+_mrFmtMoney(price):'')+'\n\nContact '+(adv.name||'Eshenbaugh Land Company')+(adv.phone?' · '+adv.phone:'')+'\n'+_spLinkFor(deal)+'\n\n#LandForSale #FloridaLand #TampaBay #EshenbaughLandCompany';
+}
+async function _spAiCaption(deal){
+  const adv=_mrAdvisorsOf(deal)[0]||{};
+  const sys='You write social media captions for Eshenbaugh Land Company, a Florida land brokerage. Write ONE caption (60-110 words) announcing a new land listing, suitable for both a Facebook Page and a LinkedIn Company Page: a strong first line, 2-3 concrete facts (only facts given), a call to action naming the advisor, then the link on its own line, then 3-5 hashtags on the last line. Plain text, at most 2 emojis, no markdown, no invented numbers.';
+  const user='Property: '+_mrDealName(deal)+'\nAddress: '+_mrDealAddr(deal)+'\nAcreage: '+(deal.acreage||'n/a')+'\nCounty: '+(deal.county||'n/a')+'\nZoning: '+(deal.zoning||'n/a')+'\nLand type: '+(deal.landType||'n/a')+'\nAsking price: '+(_mrFmtMoney(_mrDealPrice(deal))||'call for details')+'\nHighlights / notes: '+String(deal.highlights||deal.description||deal.notes||'').replace(/\s+/g,' ').slice(0,600)+'\nAdvisor: '+(adv.name||'')+(adv.phone?' '+adv.phone:'')+'\nLink: '+_spLinkFor(deal);
+  const txt=await leadAI(sys,user,500); return txt.trim();
+}
+window._spMarketingBlock=function(deal){
+  if(!deal) return '';
+  const posts=(deal.socialPosts||[]).slice().sort((a,b)=>(b.at||0)-(a.at||0));
+  const last=posts[0];
+  return `<div style="display:flex;flex-wrap:wrap;gap:.4rem;align-items:center">
+    <button class="prop-note-btn" onclick="window._spOpen('${deal.id}')" title="Post this listing to the ELC Facebook Page and LinkedIn Company Page">📣 Post to social</button>
+    ${last?`<span style="font-size:.7rem;color:#6E7480">Last post ${_mrFmtDate(last.at)} · ${posts.map(p=>`<a href="${_mrEsc(p.url||'#')}" target="_blank" rel="noopener" style="color:#0A66C2;font-weight:600">${p.platform==='facebook'?'Facebook':'LinkedIn'}</a>`).filter((v,i,a)=>a.indexOf(v)===i).slice(0,2).join(' · ')}</span>`:''}
+  </div>`;
+};
+window._spOpen=async function(dealId, taskId){
+  const deal=(allDeals||[]).find(d=>d.id===dealId); if(!deal){ showToast('Deal not found','error'); return; }
+  _mrInjectStyles();
+  const photos=_spPhotoCandidates(deal); const link=_spLinkFor(deal);
+  window._spState={dealId, deal, taskId:taskId||'', photo:photos[0]?photos[0].url:'', photos, status:null, posting:false};
+  const ov=document.createElement('div'); ov.className='mr-ov fixed inset-0 flex items-center justify-center'; ov.id='sp-ov';
+  ov.innerHTML=`<div class="mr-modal" style="width:min(900px,100%)" role="dialog" aria-label="Post to social media">
+    <div class="mr-modal-h"><div style="min-width:0"><h2>📣 Post to social — ${_mrEsc(_mrDealName(deal))}</h2><div class="mr-muted" id="sp-status">Checking which pages are connected…</div></div><span style="flex:1"></span><button class="mr-x" aria-label="Close" onclick="window._spClose()">✕</button></div>
+    <div class="mr-modal-b">
+      <div class="mr-grid2" style="align-items:start">
+        <div style="display:grid;gap:.9rem">
+          <div class="mr-sec"><h3>Where</h3>
+            <label class="mr-row" style="gap:.5rem;cursor:pointer"><input type="checkbox" class="mr-check" id="sp-fb" checked onchange="window._spPreview()"> <span>Facebook Page <span class="mr-muted" id="sp-fb-note"></span></span></label>
+            <label class="mr-row" style="gap:.5rem;cursor:pointer;margin-top:.35rem"><input type="checkbox" class="mr-check" id="sp-li" checked onchange="window._spPreview()"> <span>LinkedIn Company Page <span class="mr-muted" id="sp-li-note"></span></span></label>
+          </div>
+          <div class="mr-sec"><h3>Photo</h3>
+            <div class="mr-row" id="sp-photos" style="gap:.5rem">${photos.map((p,i)=>`<label title="${_mrEsc(p.label)}" style="cursor:pointer;position:relative"><input type="radio" name="sp-photo" value="${_mrEsc(p.url)}" ${i===0?'checked':''} onchange="window._spState.photo=this.value;window._spPreview()" style="position:absolute;top:4px;left:4px"><img class="mr-thumb" src="${_mrEsc(p.url)}" alt="${_mrEsc(p.label)}"></label>`).join('')}
+              <label title="No photo — post a link card instead" style="cursor:pointer;position:relative"><input type="radio" name="sp-photo" value="" ${photos.length?'':'checked'} onchange="window._spState.photo='';window._spPreview()" style="position:absolute;top:4px;left:4px"><div class="mr-thumb" style="display:flex;align-items:center;justify-content:center;font-size:.65rem;color:var(--text-2);text-align:center;padding:.2rem">Link card only</div></label>
+            </div>
+            <label class="mr-btn mr-btn-sm" style="cursor:pointer;margin-top:.5rem">🖼 Upload another<input type="file" accept="image/*" style="display:none" onchange="window._spUploadPhoto(this)"></label>
+          </div>
+          <div class="mr-sec"><h3>Caption</h3>
+            <div class="mr-row" style="justify-content:space-between;margin-bottom:.4rem"><span class="mr-note" id="sp-count"></span><button class="mr-btn mr-btn-sm" onclick="window._spDraft(this)">✨ AI draft</button></div>
+            <textarea id="sp-msg" class="mr-textarea" style="min-height:200px" oninput="window._spPreview()">${_mrEsc(_spDefaultCaption(deal))}</textarea>
+            <label class="mr-lbl" for="sp-link" style="margin-top:.6rem">Link</label><input id="sp-link" class="mr-input" style="width:100%" value="${_mrEsc(link)}" oninput="window._spPreview()">
+            <div class="mr-note" style="margin-top:.3rem">${deal.listingSiteId&&deal.listingPublished!==false?'Using this listing’s website.':'No listing website yet — using the default link. Build one from the deal card’s 🌐 Create Listing Website for a better landing page.'}</div>
+          </div>
+        </div>
+        <div class="mr-sec" style="position:sticky;top:0"><h3>Preview</h3><div id="sp-preview"></div></div>
+      </div>
+    </div>
+    <div class="mr-modal-f"><span class="mr-note" id="sp-foot"></span><span style="flex:1"></span><button class="mr-btn" onclick="window._spClose()">Cancel</button><button class="mr-btn mr-btn-primary" id="sp-post" onclick="window._spPost(this)">📣 Post now</button></div>
+  </div>`;
+  document.body.appendChild(ov);
+  window._spPreview();
+  _spStatus().then(s=>{ const st=window._spState; if(!st) return; st.status=s;
+    const line=[]; const set=(key,label,cbId,noteId)=>{ const x=s[key]||{}; const cb=document.getElementById(cbId), note=document.getElementById(noteId);
+      if(x.ok){ line.push(label+': '+(x.name||'connected')+' ✓'); if(note) note.textContent=x.name?('— '+x.name):''; }
+      else { line.push(label+': '+(x.configured?('error — '+(x.error||'')):'not connected yet')); if(cb){ cb.checked=false; cb.disabled=true; } if(note) note.textContent='— '+(x.configured?(x.error||'error'):'not connected yet'); } };
+    set('facebook','Facebook','sp-fb','sp-fb-note'); set('linkedin','LinkedIn','sp-li','sp-li-note');
+    const el=document.getElementById('sp-status'); if(el) el.textContent=s.unreachable?('Social worker unreachable — '+(s.facebook.error||'')):line.join(' · ');
+    window._spPreview(); });
+};
+window._spClose=function(){ document.getElementById('sp-ov')?.remove(); window._spState=null; };
+window._spPreview=function(){
+  const st=window._spState; if(!st) return;
+  const msg=(document.getElementById('sp-msg')?.value||''); const link=(document.getElementById('sp-link')?.value||'').trim();
+  const cnt=document.getElementById('sp-count'); if(cnt) cnt.textContent=msg.length+' / 3,000 characters'+(msg.length>3000?' — too long for LinkedIn':'');
+  let host=''; try{ host=new URL(link).hostname.replace(/^www\./,''); }catch(_){}
+  const box=document.getElementById('sp-preview'); if(!box) return;
+  box.innerHTML=`<div style="border:1px solid var(--border);border-radius:10px;overflow:hidden;background:var(--surface)">
+    <div style="display:flex;gap:.5rem;align-items:center;padding:.6rem .7rem"><div style="width:34px;height:34px;border-radius:50%;background:var(--brand-red);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:800">E</div><div><div style="font-weight:700;font-size:.85rem">Eshenbaugh Land Company</div><div class="mr-muted">Just now · 🌐</div></div></div>
+    <div style="padding:0 .7rem .6rem;font-size:.85rem;white-space:pre-wrap;line-height:1.4;color:var(--text-1)">${_mrEsc(msg)}</div>
+    ${st.photo?`<img src="${_mrEsc(st.photo)}" alt="" style="width:100%;max-height:320px;object-fit:cover;display:block">`:(host?`<div style="border-top:1px solid var(--border);padding:.6rem .7rem;background:var(--bg)"><div class="mr-muted" style="text-transform:uppercase">${_mrEsc(host)}</div><div style="font-weight:700;font-size:.85rem">${_mrEsc(_mrDealName(st.deal))}</div></div>`:'')}
+    <div class="mr-muted" style="padding:.5rem .7rem;border-top:1px solid var(--border)">👍 Like &nbsp; 💬 Comment &nbsp; ↗ Share</div>
+  </div>
+  <div class="mr-note" style="margin-top:.5rem">${st.photo?'Photo post — the link is in the caption (Facebook shows it as text; LinkedIn makes it clickable).':'Link post — the pages will show a link preview card.'}</div>`;
+  const foot=document.getElementById('sp-foot'); if(foot){ const fb=document.getElementById('sp-fb')?.checked, li=document.getElementById('sp-li')?.checked; foot.textContent=(fb||li)?('Posting to '+[fb?'Facebook':'',li?'LinkedIn':''].filter(Boolean).join(' + ')):'Pick at least one page'; }
+};
+window._spDraft=async function(btn){
+  const st=window._spState; if(!st) return; const done=elcBusy(btn,'Drafting…');
+  try{ const txt=await _spAiCaption(st.deal); const ta=document.getElementById('sp-msg'); if(ta){ ta.value=txt; window._spPreview(); } }
+  catch(e){ console.warn('[sp] ai',e); showToast('AI draft failed: '+e.message,'error'); }
+  finally{ done(); }
+};
+window._spUploadPhoto=async function(input){
+  const st=window._spState; const f=input.files&&input.files[0]; if(!st||!f) return;
+  try{ showToast('Uploading photo…','info',2000); const blob=await _mrShrinkImage(f,1600,.86); const url=await _mrUploadBlob('dealPhotos/'+st.dealId+'/social_'+Date.now()+'.jpg', blob,'image/jpeg');
+    st.photos.unshift({url,label:'Uploaded'}); st.photo=url;
+    const box=document.getElementById('sp-photos'); if(box){ const l=document.createElement('label'); l.style.cssText='cursor:pointer;position:relative'; l.innerHTML=`<input type="radio" name="sp-photo" value="${_mrEsc(url)}" checked onchange="window._spState.photo=this.value;window._spPreview()" style="position:absolute;top:4px;left:4px"><img class="mr-thumb" src="${_mrEsc(url)}" alt="Uploaded">`; box.prepend(l); }
+    window._spPreview(); }
+  catch(e){ console.error('[sp] upload',e); showToast('Upload failed: '+e.message,'error'); }
+};
+window._spPost=async function(btn){
+  const st=window._spState; if(!st||st.posting) return;
+  const platforms=[]; if(document.getElementById('sp-fb')?.checked) platforms.push('facebook'); if(document.getElementById('sp-li')?.checked) platforms.push('linkedin');
+  const message=(document.getElementById('sp-msg')?.value||'').trim(); const link=(document.getElementById('sp-link')?.value||'').trim();
+  if(!platforms.length){ showToast('Pick at least one page','warning'); return; }
+  if(!message){ showToast('Write a caption first','warning'); return; }
+  if(message.length>3000){ showToast('Caption is over 3,000 characters','warning'); return; }
+  const ok=await elcConfirm('Post this to '+platforms.map(p=>p==='facebook'?'the Facebook Page':'the LinkedIn Company Page').join(' and ')+' now?\n\nIt goes live immediately on the firm’s page(s).',{title:'Post to social media',okLabel:'Post now'});
+  if(!ok) return;
+  st.posting=true; const done=elcBusy(btn,'Posting…');
+  try{
+    const res=await _spWorkerPost('/post',{platforms, message, imageUrl:st.photo||'', link, title:_mrDealName(st.deal)});
+    const results=res.results||{}; const now=Date.now(); const okList=[], failList=[];
+    const posts=(st.deal.socialPosts||[]).slice();
+    platforms.forEach(p=>{ const r=results[p]||{ok:false,error:'no response'}; if(r.ok){ okList.push(p); posts.push({platform:p,id:r.id||'',url:r.url||'',at:now,by:currentUser?.uid||'',byName:currentUser?.name||'',message,imageUrl:st.photo||'',link,taskId:st.taskId||''}); } else failList.push(p+': '+(r.error||'failed')); });
+    if(okList.length){
+      await Store.updateDeal(st.dealId,{socialPosts:posts,updatedAt:now}); st.deal.socialPosts=posts;
+      try{ await window._dealLogActivity(st.dealId,'note',{ body:'📣 Posted new-listing announcement to '+okList.map(p=>{ const r=results[p]; return (p==='facebook'?'Facebook':'LinkedIn')+(r.url?' ('+r.url+')':''); }).join(' and ')+'.', source:'social-post', autoLogged:true }); }catch(e){ console.warn('[sp] log',e); }
+      if(st.taskId){ try{ await window.toggleTask(st.taskId,'complete'); }catch(e){ console.warn('[sp] task',e); } }
+      const links=okList.map(p=>results[p].url).filter(Boolean);
+      showToast('Posted to '+okList.map(p=>p==='facebook'?'Facebook':'LinkedIn').join(' + ')+' ✓'+(failList.length?' · '+failList.join(' · '):''), failList.length?'warning':'success', 8000, links.length?{label:'Open',onClick:()=>links.forEach(u=>window.open(u,'_blank','noopener'))}:null);
+      window._spClose();
+      try{ if(typeof renderCurrentView==='function') renderCurrentView(); }catch(_){}
+      try{ const blk=document.getElementById('pdw-social-block'); if(blk) blk.innerHTML=window._spMarketingBlock(st.deal); }catch(_){}
+    } else { showToast('Nothing posted — '+failList.join(' · '),'error',9000); }
+  }catch(e){ console.error('[sp] post',e); showToast('Post failed: '+e.message,'error',8000); }
+  finally{ st.posting=false; done(); }
+};
+/* ---- Monthly Report tie-in: pull this month's posts (photos + metrics) ---- */
+window._mrPullSocial=async function(btn){
+  const ed=window._mrState&&window._mrState.editor; if(!ed) return;
+  const rng=_mrMonthRange(ed.ym); const posts=(ed.deal.socialPosts||[]).filter(p=>p.at>=rng.start&&p.at<rng.end);
+  if(!posts.length){ showToast('No posts from Terra on this listing in '+_mrMonthLabel(ed.ym)+'. Posts made outside Terra can still be added by hand.','warning',6000); return; }
+  const done=elcBusy(btn,'Pulling…');
+  try{
+    let added=0; posts.forEach(p=>{ if(p.imageUrl && !ed.socialPhotos.includes(p.imageUrl)){ ed.socialPhotos.push(p.imageUrl); added++; } });
+    const box=document.getElementById('mr-social-photos'); if(box) box.innerHTML=_mrSocialThumbsHtml();
+    let fbRows=[], liRows=[], metricNote='';
+    try{ const m=await _spWorkerPost('/metrics',{posts:posts.filter(p=>p.id).map(p=>({platform:p.platform,id:p.id}))});
+      (m.metrics||[]).forEach(x=>{ const p=posts.find(q=>q.id===x.id)||{}; const date=x.date||_mrLocalDate(p.at);
+        if(x.platform==='facebook') fbRows.push({date, reach:x.reach??'', interactions:x.interactions??'', clicks:x.clicks??''});
+        if(x.platform==='linkedin') liRows.push({date, impressions:x.impressions??'', engRate:x.engagementRate!=null?x.engagementRate+'%':'', clicks:x.clicks??''}); });
+    }catch(e){ metricNote=' (metrics unavailable: '+e.message+')'; posts.forEach(p=>{ if(p.platform==='facebook') fbRows.push({date:_mrLocalDate(p.at)}); if(p.platform==='linkedin') liRows.push({date:_mrLocalDate(p.at)}); }); }
+    const merge=(id,cols,rows)=>{ const existing=_mrReadRows(id).filter(r=>!rows.some(n=>n.date===r.date)); const wrap=document.getElementById(id+'-wrap'); if(wrap) wrap.innerHTML=_mrRowsTable(id,cols,[...existing,...rows],id==='mr-fb'?'Add post':'Add post'); };
+    if(fbRows.length) merge('mr-fb',MR_FB_COLS,fbRows); if(liRows.length) merge('mr-li',MR_LI_COLS,liRows);
+    showToast(posts.length+' post'+(posts.length===1?'':'s')+' pulled · '+added+' photo'+(added===1?'':'s')+' added'+metricNote,'success',6000);
+  }catch(e){ console.error('[mr] pull social',e); showToast('Could not pull posts: '+e.message,'error'); }
+  finally{ done(); }
+};
+function _mrLocalDate(ts){ const d=new Date(ts||Date.now()); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+/* ===== SOCIAL_BLOCK_END ===== */
+
 </script>
 
 <!-- Mobile pipeline view (shown only on small screens) -->
