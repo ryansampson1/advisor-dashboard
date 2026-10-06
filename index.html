@@ -2285,6 +2285,8 @@ html.dark .deal-search-empty{ color:#A6ADBA !important; }
 const APP_CONFIG = {
   // Agreements tab — docx->PDF worker URL (deploy agreements-worker, then paste)
   agreements: { pdfProxyUrl: '' },
+  // 📬 Monthly Owner Reports (MREPORT-20261006). access: 'owner' | 'admins' | 'all' — overridden from eos/settings.monthlyReports
+  monthlyReports: { access: 'owner', workerUrl: 'https://elc-report-worker.dirtdog.workers.dev' },
   firebase: {
     apiKey:            "AIzaSyC1cKWQnk4TeH3EMeX-sF4RejGPYL9xyYw",
     authDomain:        "eshenbaugh-dashboard.firebaseapp.com",
@@ -8894,6 +8896,7 @@ const FB = {
           // Load admin/superAdmin email lists from Firestore so they're never exposed in source code
           if(Array.isArray(payload.adminEmails))      APP_CONFIG.adminEmails      = Array.from(new Set([...(APP_CONFIG.adminEmails||[]), ...payload.adminEmails]));
           if(Array.isArray(payload.superAdminEmails)) APP_CONFIG.superAdminEmails = Array.from(new Set([...(APP_CONFIG.superAdminEmails||[]), ...payload.superAdminEmails]));
+          if(payload.monthlyReports && typeof payload.monthlyReports==='object'){ const _mrPrev=(APP_CONFIG.monthlyReports||{}).access; APP_CONFIG.monthlyReports={...(APP_CONFIG.monthlyReports||{}), ...payload.monthlyReports}; if(_mrPrev!==APP_CONFIG.monthlyReports.access && currentUser && typeof renderShell==='function'){ try{ renderShell(); renderCurrentView(); }catch(_){} } } // MREPORT-20261006
           eosCache[docId] = payload.data;
         } else {
           eosCache[docId] = payload.data;
@@ -11342,6 +11345,7 @@ function buildNavItems(){
       {id:'buyers',        label:'🏡 Buyers',         advisor:true, admin:true, manager:true},
       {id:'videoProposals',label:'🎬 Video Proposals',advisor:true, admin:true, manager:true, staff:true},
       {id:'agreements',    label:'📝 Agreements',      advisor:true, admin:true, manager:true, staff:true},
+      {id:'monthlyReports',label:'📬 Monthly Reports', reports:true},   // MREPORT-20261006 — gated by _mrNavVisible
       {id:'activityLog',   label:'🕵️ Activity Log',   admin:true},
       {id:'earthnotes',    label:'🌎 EarthNotes',     always:true},
       {id:'valuation',     label:'🔍 Site Research',  advisor:true, admin:true, manager:true, staff:true},
@@ -11355,6 +11359,7 @@ function buildNavItems(){
         if(n.crm){ const cfg=APP_CONFIG.crm||{}; return cfg.enabled||((cfg.betaEmails||[]).includes(currentUser?.email)); }
         return false;
       }
+      if(n.reports) return _mrNavVisible(effectiveAdmin);   // MREPORT-20261006
       if(n.always) return true;
       if(n.advisor && (!effectiveAdmin || adminViewAsAdvisor)) return true;
       if(n.admin && effectiveAdmin) return true;
@@ -12065,7 +12070,7 @@ function renderCurrentView(){
     commissions:viewMyCommissions,
     splits:viewSplits,automations:viewAutomations,users:viewUsers,leaderboard:viewLeaderboard,
     manageStages:viewManageStages,officeManagers:viewOfficeManagers,approvedUsers:viewApprovedUsers,officeOverview:viewOfficeOverview,
-    eos:()=>viewEOS(window._eosSub||'rocks'),comps:viewComps,drive:viewDrive,documents:viewDocuments,hr:viewHR,crm:viewCRM,leads:viewLeads,inbox:viewSmartInbox,buyers:viewBuyers,videoProposals:viewVideoProposals,earthnotes:viewEarthNotes,valuation:viewValuation,activityLog:viewActivityLog,agreements:viewAgreements};
+    eos:()=>viewEOS(window._eosSub||'rocks'),comps:viewComps,drive:viewDrive,documents:viewDocuments,hr:viewHR,crm:viewCRM,leads:viewLeads,inbox:viewSmartInbox,buyers:viewBuyers,videoProposals:viewVideoProposals,earthnotes:viewEarthNotes,valuation:viewValuation,activityLog:viewActivityLog,agreements:viewAgreements,monthlyReports:viewMonthlyReports};
   try {
     (map[currentView]||viewBoard)();
   } catch(e) {
@@ -44682,6 +44687,976 @@ window._siAddSenderToCrm = async function(){
 };
 
 /* ===== SMART_INBOX_BLOCK_END ===== */
+
+/* =======================================================
+   📬 MONTHLY OWNER REPORTS — marker MREPORT-20261006
+   One PDF per active seller-rep listing per month, emailed from the listing
+   advisor's own mailbox (via the elc-report-worker, delegated service
+   account) to the owner(s) picked from the CRM / deal card. The PDF is also
+   filed on the deal (dealAttachments) and logged on the property feed.
+
+   Data lives in:
+     deals/{id}.reportRecipients[]      — [{name,email,contactId}]
+     deals/{id}.reportAppPropertyId     — app.thedirtdog.com property UUID
+     deals/{id}.reportListingLinks{}    — {loopnet,crexi,costar,…: url}
+     deals/{id}.reportSignPhotoUrl      — sign photo (remembered month to month)
+     deals/{id}/monthlyReports/{YYYY-MM}— per-month inputs + status + pdfUrl
+     eos/settings.monthlyReports        — {access, workerUrl, firmAddress, about, emailSubject, emailBody}
+     eos/monthlyReportLetters           — {[YYYY-MM]: {body, updatedAt, updatedBy}}
+     advisorProfiles/{uid}.reportDesignations / reportTitle / reportHeadshotUrl / reportPhone
+   Access: APP_CONFIG.monthlyReports.access = 'owner' (super-admin only, default)
+           | 'admins' | 'all'. Flip it from the tab's ⚙ Settings panel.
+   ======================================================= */
+const MR_ACTIVE_STAGES = ['Listing','LOI','Signed LOI/Contract Drafting','Due Diligence (Under Contract)','Closing'];
+const MR_SITE_TILES = [
+  {key:'loopnet',          label:'LoopNet',               site:'www.loopnet.com'},
+  {key:'crexi',            label:'Crexi',                 site:'www.crexi.com'},
+  {key:'costar',           label:'CoStar',                site:'www.costar.com', note:'CoStar membership required to view listing'},
+  {key:'commercialpartners',label:'Commercial Partners',  site:'www.commercialpartners.com'},
+  {key:'brevitas',         label:'Brevitas',              site:'brevitas.com'},
+  {key:'commercialedge',   label:'CommercialEdge Network',site:'www.commercialedge.com'},
+  {key:'totalcommercial',  label:'Total Commercial',      site:'www.totalcommercial.com'},
+  {key:'landcom',          label:'Land.com',              site:'www.land.com'},
+  {key:'thedirtdog',       label:'TheDirtDog.com',        site:'www.thedirtdog.com'},
+];
+const MR_DEFAULT_ABOUT = "At Eshenbaugh Land Company, our mission is to be your trusted land consultant, dedicated to shaping the future of our communities through thoughtful land solutions that maximize our clients' interests. Backed by a steadfast commitment to ethics, education, and experience, we empower individuals, businesses, and investors to achieve their goals in every aspect of land. Since 1992, we have closed over $2.2 billion in transactions, including more than $1 billion in sales in just the past five years. With an average of over 20 years of experience per advisor, our seasoned team anticipates challenges, develops innovative strategies, and executes deals with efficiency and precision.";
+const MR_DEFAULT_EMAIL_SUBJECT = '{month} Marketing Report — {property}';
+const MR_DEFAULT_EMAIL_BODY = 'Dear {names},\n\nAttached is the {month} marketing report for {property}. It summarizes our marketing activity, buyer inquiries and web traffic on the property over the past month.\n\nPlease reach out any time if you would like to discuss anything in more detail.\n\n{advisorName}\n{advisorDesignations}\nEshenbaugh Land Company\n{advisorPhone}\n{advisorEmail}';
+const MR_DEFAULT_LETTER = 'As part of our ongoing efforts to keep you fully informed, I wanted to share a brief overview of current market conditions along with a summary of activity specific to your property over the past 30 days.\n\nOur approach remains focused on maximizing exposure while targeting the most qualified and motivated buyers. Enclosed please find a detailed summary of marketing efforts and buyer engagement specific to your property.\n\nWe will continue to actively monitor the market and adjust our strategy as needed to ensure your property is positioned for the best possible outcome. Please don’t hesitate to reach out if you’d like to discuss any of this in more detail or if your goals or timing have evolved.\n\nFrom all of us on our team, thank you again for the opportunity to represent you.';
+
+window._mrState = window._mrState || { month:null, search:'', office:'', selected:{}, reports:{}, loading:false, editor:null, sending:false };
+
+/* ---------- small helpers (module-scoped, prefixed _mr) ---------- */
+function _mrEsc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function _mrCfg(){ return (APP_CONFIG.monthlyReports = APP_CONFIG.monthlyReports || {access:'owner', workerUrl:''}); }
+function _mrPrevMonth(){ const d=new Date(); d.setDate(1); d.setMonth(d.getMonth()-1); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); }
+function _mrMonthLabel(ym){ if(!ym) return ''; const [y,m]=ym.split('-').map(Number); return new Date(y,m-1,1).toLocaleDateString('en-US',{month:'long',year:'numeric'}); }
+function _mrMonthRange(ym){ const [y,m]=ym.split('-').map(Number); return {start:new Date(y,m-1,1).getTime(), end:new Date(y,m,1).getTime()}; }
+function _mrFmtDate(v){ if(!v) return ''; let d; if(typeof v==='number') d=new Date(v); else if(/^\d{4}-\d{2}-\d{2}$/.test(v)){ const [y,m,dd]=v.split('-').map(Number); d=new Date(y,m-1,dd); } else d=new Date(v); if(isNaN(d)) return String(v); return d.toLocaleDateString('en-US',{month:'numeric',day:'numeric',year:'2-digit'}); }
+function _mrFmtDateLong(v){ if(!v) return ''; let d; if(typeof v==='number') d=new Date(v); else if(/^\d{4}-\d{2}-\d{2}$/.test(v)){ const [y,m,dd]=v.split('-').map(Number); d=new Date(y,m-1,dd); } else d=new Date(v); if(isNaN(d)) return String(v); return d.toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'}); }
+function _mrFmtMoney(n){ n=Number(n); if(!n) return ''; return '$'+Math.round(n).toLocaleString('en-US'); }
+function _mrNum(v){ const n=Number(String(v==null?'':v).replace(/[^0-9.\-]/g,'')); return isFinite(n)?n:0; }
+function _mrDealAddr(d){ return d.propertyAddress||d.address||d.projectName||'Property'; }
+function _mrDealName(d){ return d.projectName||d.propertyAddress||d.address||'Property'; }
+function _mrListingStart(d){ if(d.listingEffectiveDate) return new Date(d.listingEffectiveDate+'T12:00:00').getTime(); if(d.listingEnteredAt) return d.listingEnteredAt; return d.createdAt||0; }
+function _mrDealPrice(d){ return Number(d.listedPrice||d.listPrice||d.askingPrice||d.purchasePrice||0); }
+function _mrIsSellerRep(d){ return (d.representation||'seller')!=='buyer'; }
+function _mrStageOf(d){ return (typeof STAGE_ALIAS!=='undefined' && STAGE_ALIAS[d.stage]) || d.stage; }
+function _mrIsActiveListing(d){ return MR_ACTIVE_STAGES.includes(_mrStageOf(d)) && _mrIsSellerRep(d) && d.dealType!=='lease'; }
+function _mrFirstName(n){ return String(n||'').trim().split(/\s+/)[0]||''; }
+function _mrCanAccess(){
+  if(!currentUser) return false;
+  const a=_mrCfg().access||'owner';
+  if(currentUser.isSuperAdmin) return true;
+  if(a==='admins') return !!currentUser.isAdmin;
+  if(a==='all') return !!(currentUser.isAdmin||currentUser.isOfficeManager||!currentUser.isStaff);
+  return false;
+}
+// Nav predicate — called from buildNavItems. Staff view never shows it; admins
+// previewing "advisor view" see it only when it's open to advisors.
+function _mrNavVisible(effectiveAdmin){
+  if(!currentUser) return false;
+  const a=_mrCfg().access||'owner';
+  if(a==='all') return true;
+  if(a==='admins') return !!effectiveAdmin;
+  return !!(effectiveAdmin && currentUser.isSuperAdmin);
+}
+window._mrNavVisible=_mrNavVisible;
+function _mrActiveDeals(){
+  const st=window._mrState;
+  let list=(allDeals||[]).filter(_mrIsActiveListing);
+  if(st.office && currentUser.isAdmin) list=list.filter(d=>(allProfiles[d.advisorUid]?.office||'')===st.office);
+  if(st.search){ const q=st.search.toLowerCase(); list=list.filter(d=>(_mrDealName(d)+' '+_mrDealAddr(d)+' '+(d.advisorName||'')+' '+(d.seller||'')).toLowerCase().includes(q)); }
+  list.sort((a,b)=>_mrDealName(a).localeCompare(_mrDealName(b)));
+  return list;
+}
+function _mrAdvisorsOf(d){
+  const out=[]; const seen=new Set();
+  const push=(uid,name,email)=>{ const k=uid||email; if(!k||seen.has(k)) return; seen.add(k);
+    const p=allProfiles[uid]||{};
+    out.push({uid, name:name||p.name||email||'', email:(email||p.email||'').toLowerCase(),
+      phone:window._fmtPhone?window._fmtPhone(p.reportPhone||p.phone||p.officePhone||''):(p.reportPhone||p.phone||''),
+      designations:p.reportDesignations||'', title:p.reportTitle||'', headshotUrl:p.reportHeadshotUrl||'',
+      bio:(typeof ADVISOR_BIOS!=='undefined' && ADVISOR_BIOS[(email||p.email||'').toLowerCase()])||''}); };
+  push(d.advisorUid, d.advisorName, d.advisorEmail);
+  (d.coAdvisors||[]).forEach(c=>push(c.uid,c.name,c.email));
+  return out;
+}
+// Owner candidates = CRM contacts linked to the deal + the card's own contact.
+function _mrRecipientCandidates(d){
+  const c=[];
+  (allContacts||[]).filter(x=>(x.linkedDeals||[]).includes(d.id)).forEach(x=>{
+    const name=((x.firstName||'')+' '+(x.lastName||'')).trim()||x.company||x.email||'';
+    if(x.email)  c.push({name, email:x.email.toLowerCase(), contactId:x.id, src:'CRM'});
+    if(x.email2) c.push({name, email:x.email2.toLowerCase(), contactId:x.id, src:'CRM'});
+  });
+  if(d.contactEmail && !c.some(x=>x.email===d.contactEmail.toLowerCase()))
+    c.push({name:d.contactPerson||(Array.isArray(d.sellers)&&d.sellers[0])||d.seller||'', email:d.contactEmail.toLowerCase(), src:'Deal card'});
+  if(d.sellerEmail && !c.some(x=>x.email===d.sellerEmail.toLowerCase()))
+    c.push({name:d.sellerContactName||d.seller||'', email:d.sellerEmail.toLowerCase(), src:'Deal card'});
+  return c;
+}
+function _mrRecipients(d){ return Array.isArray(d.reportRecipients)?d.reportRecipients.filter(r=>r&&r.email):[]; }
+function _mrOwnerLabel(d){
+  const r=_mrRecipients(d);
+  const arr = Array.isArray(d.sellers)&&d.sellers.length ? d.sellers : (d.seller?[d.seller]:[]);
+  if(arr.length) return arr.join(' & ');
+  if(d.ownershipEntity) return d.ownershipEntity;
+  if(r.length) return r.map(x=>x.name).filter(Boolean).join(' & ');
+  return d.contactPerson||'Property Owner';
+}
+
+/* ---------- Firestore I/O ---------- */
+async function _mrLoadReport(dealId, ym){
+  const st=window._mrState; const key=dealId+'|'+ym;
+  if(st.reports[key]) return st.reports[key];
+  if(!_fbDb||!_fbFns) return null;
+  const {doc,getDoc}=_fbFns;
+  try{ const s=await getDoc(doc(_fbDb,'deals',dealId,'monthlyReports',ym)); const v=s.exists()?{id:s.id,...s.data()}:null; st.reports[key]=v; return v; }
+  catch(e){ console.warn('[mr] load report',e); return null; }
+}
+async function _mrSaveReport(dealId, ym, patch){
+  const {doc,setDoc}=_fbFns; const st=window._mrState; const key=dealId+'|'+ym;
+  const data={...patch, month:ym, updatedAt:Date.now(), updatedBy:currentUser?.uid||'', updatedByName:currentUser?.name||''};
+  await setDoc(doc(_fbDb,'deals',dealId,'monthlyReports',ym), data, {merge:true});
+  st.reports[key]={...(st.reports[key]||{}), ...data, id:ym};
+  return st.reports[key];
+}
+async function _mrPreloadReports(ym, deals){
+  const st=window._mrState; if(!_fbDb||!_fbFns) return;
+  const {doc,getDoc}=_fbFns;
+  const need=deals.filter(d=>!(st.reports[d.id+'|'+ym]!==undefined));
+  await Promise.all(need.map(async d=>{ try{ const s=await getDoc(doc(_fbDb,'deals',d.id,'monthlyReports',ym)); st.reports[d.id+'|'+ym]=s.exists()?{id:s.id,...s.data()}:null; }catch(e){ st.reports[d.id+'|'+ym]=null; } }));
+}
+function _mrLetters(){ return (eosCache && eosCache.monthlyReportLetters) || {}; }
+function _mrLetterFor(ym){ const L=_mrLetters(); return (L[ym]&&L[ym].body)||''; }
+async function _mrSaveLetter(ym, body){
+  const {doc,setDoc}=_fbFns;
+  const entry={body, updatedAt:Date.now(), updatedBy:currentUser?.name||''};
+  await setDoc(doc(_fbDb,'eos','monthlyReportLetters'), {data:{[ym]:entry}}, {merge:true});
+  eosCache.monthlyReportLetters={...(eosCache.monthlyReportLetters||{}), [ym]:entry};
+}
+async function _mrSaveSettings(patch){
+  const {doc,setDoc}=_fbFns;
+  const cfg={..._mrCfg(), ...patch};
+  await setDoc(doc(_fbDb,'eos','settings'), {monthlyReports:cfg}, {merge:true});
+  APP_CONFIG.monthlyReports=cfg;
+}
+async function _mrUploadBlob(path, blob, contentType){
+  const {ref:fbRef,uploadBytes,getDownloadURL}=_fbFns;
+  const snap=await uploadBytes(fbRef(_fbStorage,path), blob, contentType?{contentType}:undefined);
+  return await getDownloadURL(snap.ref);
+}
+// Downscale an image file in-browser before upload (same approach as the listing builder).
+function _mrShrinkImage(file, maxPx, q){
+  return new Promise((res)=>{
+    const url=URL.createObjectURL(file); const im=new Image();
+    im.onload=()=>{ let w=im.naturalWidth,h=im.naturalHeight; const s=Math.min(1,(maxPx||1920)/Math.max(w,h)); w=Math.round(w*s); h=Math.round(h*s);
+      const c=document.createElement('canvas'); c.width=w; c.height=h; c.getContext('2d').drawImage(im,0,0,w,h);
+      c.toBlob(b=>{ URL.revokeObjectURL(url); res(b||file); },'image/jpeg',q||0.85); };
+    im.onerror=()=>{ URL.revokeObjectURL(url); res(file); };
+    im.src=url;
+  });
+}
+async function _mrFetchTasks(dealId){
+  const {collection,query,where,getDocs}=_fbFns;
+  try{ const s=await getDocs(query(collection(_fbDb,'tasks'), where('dealId','==',dealId))); return s.docs.map(d=>({id:d.id,...d.data()})); }
+  catch(e){ console.warn('[mr] tasks',e); return (allTasks||[]).filter(t=>t.dealId===dealId); }
+}
+async function _mrFetchActivities(dealId){
+  const {collection,getDocs}=_fbFns;
+  try{ const s=await getDocs(collection(_fbDb,'deals',dealId,'activities')); return s.docs.map(d=>({id:d.id,...d.data()})); }
+  catch(e){ console.warn('[mr] activities',e); return []; }
+}
+// Property history since the listing was signed, newest first. Mirrors what the
+// deal feed shows (structured activities + legacy "[when] what" note lines).
+function _mrHistoryRows(deal, activities, tasks){
+  const since=_mrListingStart(deal);
+  const rows=[];
+  (activities||[]).forEach(a=>{
+    const ts=a.createdAt||0; if(since && ts<since) return;
+    if(a.source==='monthly-report') return;                  // never list the report mail itself
+    let text=a.body||'';
+    if(a.type==='email') text=(a.gmailSubject?('Email: '+a.gmailSubject+(text?' — ':'')):'')+text;
+    if(a.type==='call') text='Call'+(a.callDuration?(' ('+a.callDuration+' min)'):'')+(text?': '+text:'');
+    if(a.type==='meeting') text='Meeting'+(a.meetingTitle?(' — '+a.meetingTitle):'')+(text?': '+text:'');
+    if(a.type==='stage_change') text='Stage: '+text;
+    if(a.type==='attachment') text='Document: '+text;
+    text=String(text).replace(/\s+/g,' ').trim(); if(!text) return;
+    rows.push({ts, date:_mrFmtDate(ts), type:(a.type||'note'), by:a.createdByName||'', text});
+  });
+  if(deal.notes){
+    deal.notes.split('\n').filter(l=>/^\s*\[[^\]]+\]/.test(l)).forEach(line=>{
+      const m=line.match(/^\s*\[([^\]]+)\]\s*(.*)/); const ts=m?new Date(m[1]).getTime():0; const text=(m?m[2]:line).trim();
+      if(!text||(since&&ts&&ts<since)) return; rows.push({ts, date:_mrFmtDate(ts), type:'note', by:'', text});
+    });
+  }
+  rows.sort((a,b)=>(b.ts||0)-(a.ts||0));
+  const done=(tasks||[]).filter(t=>t.status==='complete').map(t=>({ts:t.completedAt||t.updatedAt||0, date:_mrFmtDate(t.completedAt||t.updatedAt||0), title:t.title||'', by:t.completedByName||t.assignedToName||''}))
+    .filter(t=>!since||!t.ts||t.ts>=since).sort((a,b)=>(b.ts||0)-(a.ts||0));
+  return {history:rows, tasks:done};
+}
+
+/* ---------- traffic: fetch via worker, or parse a paste / CSV ---------- */
+function _mrWorkerUrl(){ return (_mrCfg().workerUrl||'').replace(/\/+$/,''); }
+async function _mrIdToken(){ try{ return _fbAuth&&_fbAuth.currentUser ? await _fbAuth.currentUser.getIdToken() : ''; }catch(e){ return ''; } }
+async function _mrWorkerPost(path, body){
+  const base=_mrWorkerUrl(); if(!base) throw new Error('Report worker URL is not set (⚙ Settings).');
+  const tok=await _mrIdToken(); if(!tok) throw new Error('Not signed in.');
+  const r=await fetch(base+path,{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+tok},body:JSON.stringify(body||{})});
+  const data=await r.json().catch(()=>({}));
+  if(!r.ok) throw new Error((data.error&&data.error.message)||('Worker '+r.status));
+  return data;
+}
+function _mrSplitCsvLine(line){
+  const out=[]; let cur='', q=false;
+  for(let i=0;i<line.length;i++){ const ch=line[i];
+    if(q){ if(ch==='"'){ if(line[i+1]==='"'){ cur+='"'; i++; } else q=false; } else cur+=ch; }
+    else { if(ch==='"') q=true; else if(ch===','){ out.push(cur); cur=''; } else cur+=ch; } }
+  out.push(cur); return out;
+}
+// Accepts the activity table copied from app.thedirtdog.com / Buildout (tab-separated)
+// or a CSV export. Returns [{at,by,email,company,role,activity}].
+function _mrParseActivityText(txt){
+  const lines=String(txt||'').split(/\r?\n/).map(l=>l.replace(/\s+$/,'')).filter(l=>l.trim());
+  if(!lines.length) return [];
+  const isTab=lines.some(l=>l.includes('\t'));
+  const split=l=> isTab ? l.split('\t').map(s=>s.trim()) : _mrSplitCsvLine(l).map(s=>s.trim());
+  let rows=lines.map(split);
+  const hdr=rows[0].map(h=>h.toLowerCase());
+  const looksHeader=hdr.some(h=>/performed|date|activity|email|company|role|name/.test(h)) && !/\d{4}-\d{2}-\d{2}|\d+\/\d+\/\d+/.test(rows[0].join(' '));
+  let idx={at:0,by:1,email:2,company:3,role:4,activity:5};
+  if(looksHeader){
+    const find=(...pats)=>{ for(const p of pats){ const i=hdr.findIndex(h=>p.test(h)); if(i>=0) return i; } return -1; };
+    idx={ at:find(/performed at|date|time|when/), by:find(/performed by|name|user|visitor/), email:find(/e-?mail/), company:find(/company|organization|firm/), role:find(/role|type/), activity:find(/activity|action|event|description/) };
+    rows=rows.slice(1);
+  }
+  const get=(r,i)=> i>=0&&i<r.length ? (r[i]||'') : '';
+  return rows.map(r=>({at:get(r,idx.at), by:get(r,idx.by)||'Anonymous User', email:get(r,idx.email), company:get(r,idx.company), role:get(r,idx.role), activity:get(r,idx.activity)}))
+    .filter(r=>r.at||r.activity);
+}
+// Normalize whatever the traffic endpoint returns into the shape the PDF reads.
+function _mrNormalizeTraffic(j){
+  if(!j||typeof j!=='object') return null;
+  const m=j.metrics||j;
+  const pick=(...ks)=>{ for(const k of ks){ if(m[k]!=null&&m[k]!=='') return _mrNum(m[k]); } return null; };
+  return {
+    source:'api', fetchedAt:Date.now(), listedSince:j.listedSince||j.listed_since||'',
+    siteVisits:pick('siteVisits','website_visits','thedirtdog_visits','visits'), uniqueVisitors:pick('uniqueVisitors','unique_visitors'),
+    docsViewed:pick('docsViewed','docs_viewed','documents_viewed'), casSigned:pick('casSigned','cas_signed'),
+    gaSessions:pick('gaSessions','ga_sessions','sessions'), gaUsers:pick('gaActiveUsers','active_users','gaUsers'), gaNewUsers:pick('gaNewUsers','new_users'),
+    gaPageViews:pick('gaPageViews','page_views','pageviews'), gaEngaged:pick('gaEngagedSessions','engaged_sessions'), gaEvents:pick('gaEvents','events'),
+    totalCommercialViews:pick('totalCommercialViews','total_commercial_views','marketplace_views'), loopnetViews:pick('loopnetViews','loopnet_views'), crexiViews:pick('crexiViews','crexi_views'),
+    daysOnMarket:pick('daysOnMarket','days_on_market'), totalViews:pick('totalViews','total_views'), totalLeads:pick('totalLeads','total_leads','leads'),
+    sources:Array.isArray(j.sources)?j.sources.map(s=>({source:s.source||s.name||'', label:s.label||s.description||'', primary:s.primary||'', secondary:s.secondary||''})):[],
+    gaSources:Array.isArray(j.gaSources||j.ga_sources)?(j.gaSources||j.ga_sources).map(s=>({label:s.label||((s.source||'')+' / '+(s.medium||'')), channel:s.channel||'', sessions:_mrNum(s.sessions)})):[],
+    landingPages:Array.isArray(j.landingPages||j.landing_pages)?(j.landingPages||j.landing_pages).map(p=>({path:p.path||p.page||'', sessions:_mrNum(p.sessions), conversions:_mrNum(p.conversions)})):[],
+    activity:Array.isArray(j.activity||j.activities)?(j.activity||j.activities).map(a=>({at:a.at||a.performedAt||a.performed_at||a.date||'', by:a.by||a.performedBy||a.performed_by||a.name||'Anonymous User', email:a.email||'', company:a.company||a.companyName||a.company_name||'', role:a.role||'', activity:a.activity||a.action||a.event||''})):[],
+  };
+}
+async function _mrFetchTraffic(deal, ym){
+  if(!deal.reportAppPropertyId) throw new Error('This listing has no app.thedirtdog.com property ID yet — paste it in the report editor.');
+  const data=await _mrWorkerPost('/traffic',{propertyId:deal.reportAppPropertyId, month:ym});
+  const t=_mrNormalizeTraffic(data.report||data); if(!t) throw new Error('Traffic source returned nothing for '+ym);
+  return t;
+}
+
+/* ---------- VIEW: list of active listings for the month ---------- */
+function _mrStatusChip(rep, d){
+  const recips=_mrRecipients(d).length;
+  if(rep&&rep.status==='sent') return `<span class="mr-chip mr-chip-sent" title="Sent ${_mrFmtDate(rep.sentAt)} by ${_mrEsc(rep.sentByName||'')}">✓ Sent ${_mrFmtDate(rep.sentAt)}</span>`;
+  if(!recips) return `<span class="mr-chip mr-chip-warn">No recipients</span>`;
+  if(rep&&rep.updatedAt) return `<span class="mr-chip mr-chip-draft">Draft</span>`;
+  return `<span class="mr-chip mr-chip-new">Not started</span>`;
+}
+function _mrInjectStyles(){
+  if(document.getElementById('mr-styles')) return;
+  const s=document.createElement('style'); s.id='mr-styles'; s.textContent=`
+  .mr-wrap{padding:1.25rem 1.5rem;max-width:1180px}
+  .mr-head{display:flex;align-items:center;gap:.75rem;flex-wrap:wrap;margin-bottom:1rem}
+  .mr-head h1{font-size:1.25rem;font-weight:800;color:var(--text-1);margin:0}
+  .mr-toolbar{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin-left:auto}
+  .mr-input,.mr-select,.mr-textarea{border:1px solid var(--border);border-radius:8px;padding:.45rem .6rem;font-size:.85rem;background:var(--surface);color:var(--text-1);min-height:40px}
+  .mr-textarea{min-height:120px;width:100%;line-height:1.45;font-family:inherit}
+  .mr-btn{display:inline-flex;align-items:center;gap:.35rem;border-radius:8px;padding:.5rem .85rem;font-size:.82rem;font-weight:600;border:1px solid var(--border);background:var(--surface);color:var(--text-1);cursor:pointer;min-height:40px;line-height:1.2}
+  .mr-btn:hover{background:var(--bg)}
+  .mr-btn:disabled{opacity:.55;cursor:not-allowed}
+  .mr-btn-primary{background:var(--brand-red);border-color:var(--brand-red);color:#fff}
+  .mr-btn-primary:hover{background:#b82217}
+  .mr-btn-teal{background:var(--brand-teal);border-color:var(--brand-teal);color:#fff}
+  .mr-btn-teal:hover{background:#009a92}
+  .mr-btn-sm{padding:.3rem .6rem;font-size:.75rem;min-height:34px}
+  .mr-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow-sm);overflow:hidden}
+  .mr-table{width:100%;border-collapse:collapse;font-size:.84rem}
+  .mr-table th{text-align:left;font-size:.68rem;letter-spacing:.08em;text-transform:uppercase;color:var(--text-2);padding:.6rem .75rem;border-bottom:1px solid var(--border);background:var(--bg)}
+  .mr-table td{padding:.6rem .75rem;border-bottom:1px solid var(--border);color:var(--text-1);vertical-align:middle}
+  .mr-table tr:hover td{background:rgba(0,178,169,.05)}
+  .mr-chip{display:inline-block;font-size:.7rem;font-weight:700;border-radius:999px;padding:.18rem .55rem;white-space:nowrap}
+  .mr-chip-sent{background:#dcfce7;color:#166534}.mr-chip-draft{background:#fef3c7;color:#92400e}.mr-chip-new{background:#e5e7eb;color:#374151}.mr-chip-warn{background:#fee2e2;color:#991b1b}
+  .mr-muted{color:var(--text-2);font-size:.78rem}
+  .mr-ov{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:10040;display:flex;align-items:center;justify-content:center;padding:1rem}
+  .mr-modal{background:var(--surface);color:var(--text-1);border-radius:14px;width:min(1040px,100%);max-height:94vh;display:flex;flex-direction:column;box-shadow:var(--shadow-lg)}
+  .mr-modal-h{display:flex;align-items:center;gap:.75rem;padding:.9rem 1.1rem;border-bottom:1px solid var(--border)}
+  .mr-modal-h h2{font-size:1.05rem;font-weight:800;margin:0}
+  .mr-modal-b{overflow:auto;padding:1rem 1.1rem;display:grid;gap:1rem}
+  .mr-modal-f{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;padding:.8rem 1.1rem;border-top:1px solid var(--border)}
+  .mr-sec{border:1px solid var(--border);border-radius:10px;padding:.85rem 1rem}
+  .mr-sec h3{font-size:.8rem;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:var(--text-2);margin:0 0 .6rem}
+  .mr-grid2{display:grid;grid-template-columns:1fr 1fr;gap:.75rem}
+  .mr-grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:.6rem}
+  @media(max-width:767px){.mr-grid2,.mr-grid3{grid-template-columns:1fr}.mr-wrap{padding:.9rem}.mr-input,.mr-select,.mr-textarea{font-size:16px}}
+  .mr-row{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap}
+  .mr-lbl{font-size:.72rem;font-weight:700;color:var(--text-2);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:.2rem}
+  .mr-mini td,.mr-mini th{padding:.3rem .4rem;font-size:.78rem}
+  .mr-mini input{width:100%;border:1px solid var(--border);border-radius:6px;padding:.3rem .4rem;font-size:.8rem;background:var(--surface);color:var(--text-1);min-height:34px}
+  .mr-x{border:0;background:none;color:var(--text-2);font-size:1.1rem;cursor:pointer;padding:.3rem .5rem;border-radius:6px;min-width:40px;min-height:40px}
+  .mr-x:hover{background:var(--bg);color:var(--brand-red)}
+  .mr-thumb{width:84px;height:60px;object-fit:cover;border-radius:6px;border:1px solid var(--border);background:var(--bg)}
+  .mr-check{width:18px;height:18px;accent-color:var(--brand-teal)}
+  .mr-wrap :focus-visible,.mr-modal :focus-visible{outline:2px solid var(--brand-teal);outline-offset:2px}
+  .mr-prog{height:8px;background:var(--bg);border-radius:999px;overflow:hidden}.mr-prog>div{height:100%;background:var(--brand-teal);transition:width .2s}
+  .mr-note{font-size:.78rem;color:var(--text-2);line-height:1.4}
+  html.dark .mr-chip-sent{background:#14532d;color:#bbf7d0}html.dark .mr-chip-draft{background:#78350f;color:#fde68a}html.dark .mr-chip-new{background:#374151;color:#e5e7eb}html.dark .mr-chip-warn{background:#7f1d1d;color:#fecaca}
+  `; document.head.appendChild(s);
+}
+function viewMonthlyReports(){
+  _mrInjectStyles();
+  const st=window._mrState;
+  if(!_mrCanAccess()){
+    setContent(`<div class="mr-wrap"><div class="mr-card" style="padding:2rem;text-align:center"><div style="font-size:2rem">🔒</div><p style="margin-top:.5rem;font-weight:700">Monthly Reports isn’t open to your account yet.</p><p class="mr-muted">An admin can enable it from the Monthly Reports settings.</p></div></div>`);
+    return;
+  }
+  if(typeof bootCRM==='function') bootCRM();   // recipients come from CRM contacts
+  if(!st.month) st.month=_mrPrevMonth();
+  const deals=_mrActiveDeals();
+  const ym=st.month;
+  const offices=currentUser.isAdmin ? [...new Set(Object.values(allProfiles||{}).map(p=>p.office).filter(Boolean))].sort() : [];
+  const monthOpts=(()=>{ const o=[]; const d=new Date(); d.setDate(1); for(let i=0;i<18;i++){ const v=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); o.push(`<option value="${v}" ${v===ym?'selected':''}>${_mrMonthLabel(v)}</option>`); d.setMonth(d.getMonth()-1);} return o.join(''); })();
+  const sel=Object.keys(st.selected).filter(id=>st.selected[id] && deals.some(d=>d.id===id));
+  const letter=_mrLetterFor(ym);
+  setContent(`<div class="mr-wrap">
+    <div class="mr-head">
+      <h1>📬 Monthly Owner Reports</h1>
+      <span class="mr-chip ${_mrCfg().access==='all'?'mr-chip-sent':(_mrCfg().access==='admins'?'mr-chip-draft':'mr-chip-new')}" title="Who can see this tab">${_mrCfg().access==='all'?'Open to all users':(_mrCfg().access==='admins'?'Admins only':'Only you')}</span>
+      <div class="mr-toolbar">
+        <label class="sr-only" for="mr-month">Report month</label>
+        <select id="mr-month" class="mr-select" onchange="window._mrSetMonth(this.value)">${monthOpts}</select>
+        ${offices.length>1?`<select class="mr-select" aria-label="Office" onchange="window._mrState.office=this.value;viewMonthlyReports()"><option value="">All offices</option>${offices.map(o=>`<option ${st.office===o?'selected':''}>${_mrEsc(o)}</option>`).join('')}</select>`:''}
+        <input id="mr-search" class="mr-input" type="search" placeholder="Search listings…" value="${_mrEsc(st.search)}" aria-label="Search listings" oninput="window._mrState.search=this.value;window._mrRenderRows()">
+        ${currentUser.isAdmin?`<button class="mr-btn" onclick="window._mrOpenSettings()" aria-label="Monthly report settings">⚙ Settings</button>`:''}
+      </div>
+    </div>
+    <div class="mr-card" style="padding:.8rem 1rem;margin-bottom:1rem;display:flex;gap:1rem;align-items:center;flex-wrap:wrap">
+      <div style="flex:1;min-width:240px">
+        <div class="mr-lbl">${_mrMonthLabel(ym)} status update letter (goes in every report)</div>
+        <div class="mr-note" id="mr-letter-preview">${letter?_mrEsc(letter.slice(0,160))+(letter.length>160?'…':''):'<span style="color:#b91c1c;font-weight:700">Not written yet</span> — reports can still be previewed, but Send is disabled until the letter is saved.'}</div>
+      </div>
+      ${currentUser.isAdmin?`<button class="mr-btn" onclick="window._mrOpenLetter()">✍️ ${letter?'Edit letter':'Write letter'}</button>`:''}
+    </div>
+    <div class="mr-card">
+      <div style="display:flex;align-items:center;gap:.6rem;padding:.7rem 1rem;border-bottom:1px solid var(--border);flex-wrap:wrap">
+        <span class="mr-muted" id="mr-count">${deals.length} active seller-rep listing${deals.length===1?'':'s'}</span>
+        <span style="flex:1"></span>
+        <button class="mr-btn mr-btn-sm" onclick="window._mrSelectAll(true)">Select all</button>
+        <button class="mr-btn mr-btn-sm" onclick="window._mrSelectAll(false)">Clear</button>
+        <button class="mr-btn mr-btn-primary mr-btn-sm" id="mr-send-selected" onclick="window._mrSendSelected()" ${sel.length?'':'disabled'}>📤 Send selected (${sel.length})</button>
+      </div>
+      <div style="overflow:auto"><table class="mr-table" aria-label="Active listings">
+        <thead><tr><th style="width:36px"><span class="sr-only">Select</span></th><th>Property</th><th>Advisor</th><th>Stage</th><th>Recipients</th><th>${_mrEsc(_mrMonthLabel(ym))} report</th><th style="text-align:right">Actions</th></tr></thead>
+        <tbody id="mr-rows"><tr><td colspan="7" class="mr-muted" style="padding:1.2rem">Loading…</td></tr></tbody>
+      </table></div>
+    </div>
+    <p class="mr-note" style="margin-top:.8rem">Reports are drafts until you click Send. Each one is emailed from the listing advisor’s mailbox, filed under the deal’s Attachments, and logged on the property’s history.</p>
+  </div>`);
+  _mrPreloadReports(ym, deals).then(()=>{ if(currentView==='monthlyReports') window._mrRenderRows(); });
+}
+window.viewMonthlyReports=viewMonthlyReports;
+window._mrRenderRows=function(){
+  const st=window._mrState; const ym=st.month; const tb=document.getElementById('mr-rows'); if(!tb) return;
+  const deals=_mrActiveDeals(); const cnt=document.getElementById('mr-count'); if(cnt) cnt.textContent=deals.length+' active seller-rep listing'+(deals.length===1?'':'s');
+  if(!deals.length){ tb.innerHTML=`<tr><td colspan="7" class="mr-muted" style="padding:1.2rem">No active seller-rep listings${st.search?' match your search':''}.</td></tr>`; return; }
+  tb.innerHTML=deals.map(d=>{
+    const rep=st.reports[d.id+'|'+ym]||null; const recips=_mrRecipients(d);
+    const ready=recips.length>0;
+    return `<tr>
+      <td><input type="checkbox" class="mr-check" aria-label="Select ${_mrEsc(_mrDealName(d))}" ${st.selected[d.id]?'checked':''} ${ready?'':'disabled title="Add recipients first"'} onchange="window._mrToggleSel('${d.id}',this.checked)"></td>
+      <td><div style="display:flex;gap:.6rem;align-items:center">${d.primaryPhotoUrl?`<img class="mr-thumb" src="${_mrEsc(d.primaryPhotoUrl)}" alt="">`:`<div class="mr-thumb"></div>`}<div><div style="font-weight:700">${_mrEsc(_mrDealName(d))}</div><div class="mr-muted">${_mrEsc(_mrDealAddr(d))}${_mrDealPrice(d)?' · '+_mrFmtMoney(_mrDealPrice(d)):''}</div></div></div></td>
+      <td>${_mrEsc(d.advisorName||d.advisorEmail||'')}</td>
+      <td><span class="mr-muted">${_mrEsc(_mrStageOf(d))}</span></td>
+      <td>${recips.length?`<span title="${_mrEsc(recips.map(r=>r.email).join(', '))}">${recips.length} owner${recips.length===1?'':'s'}</span>`:`<span style="color:#b91c1c;font-weight:600">None</span>`}</td>
+      <td>${_mrStatusChip(rep,d)}</td>
+      <td style="text-align:right;white-space:nowrap">
+        <button class="mr-btn mr-btn-sm" onclick="window._mrOpenEditor('${d.id}')">✏️ Edit</button>
+        <button class="mr-btn mr-btn-sm" onclick="window._mrPreview('${d.id}')">👁 Preview</button>
+        <button class="mr-btn mr-btn-sm mr-btn-teal" onclick="window._mrSendOne('${d.id}')" ${ready?'':'disabled'}>${rep&&rep.status==='sent'?'↻ Resend':'📤 Send'}</button>
+      </td></tr>`; }).join('');
+  const b=document.getElementById('mr-send-selected'); if(b){ const n=Object.keys(st.selected).filter(id=>st.selected[id]&&deals.some(d=>d.id===id)).length; b.disabled=!n; b.textContent='📤 Send selected ('+n+')'; }
+};
+window._mrSetMonth=function(v){ window._mrState.month=v; viewMonthlyReports(); };
+window._mrToggleSel=function(id,on){ window._mrState.selected[id]=!!on; window._mrRenderRows(); };
+window._mrSelectAll=function(on){ const st=window._mrState; _mrActiveDeals().forEach(d=>{ st.selected[d.id]= on && _mrRecipients(d).length>0; }); window._mrRenderRows(); };
+
+/* ---------- firm-wide letter editor (admin) ---------- */
+window._mrOpenLetter=function(){
+  const st=window._mrState; const ym=st.month; const cur=_mrLetterFor(ym);
+  const prev=(()=>{ const L=_mrLetters(); const keys=Object.keys(L).filter(k=>k<ym).sort(); return keys.length?L[keys[keys.length-1]].body:''; })();
+  const ov=document.createElement('div'); ov.className='mr-ov fixed inset-0 flex items-center justify-center'; ov.id='mr-letter-ov';
+  ov.innerHTML=`<div class="mr-modal" style="width:min(760px,100%)" role="dialog" aria-label="Monthly letter">
+    <div class="mr-modal-h"><h2>✍️ ${_mrEsc(_mrMonthLabel(ym))} status update letter</h2><span style="flex:1"></span><button class="mr-x" aria-label="Close" onclick="window._mrCloseLetter()">✕</button></div>
+    <div class="mr-modal-b">
+      <p class="mr-note">Printed on page 2 of every ${_mrEsc(_mrMonthLabel(ym))} report after “Dear &lt;owner&gt;:”. Write it once; the advisor can add a property-specific paragraph on each report. Plain text — blank lines start new paragraphs.</p>
+      <div class="mr-row">
+        ${prev?`<button class="mr-btn mr-btn-sm" onclick="document.getElementById('mr-letter-body').value=${JSON.stringify(prev).replace(/"/g,'&quot;')}">⤵ Copy last month’s letter</button>`:''}
+        <button class="mr-btn mr-btn-sm" onclick="document.getElementById('mr-letter-body').value=${JSON.stringify(MR_DEFAULT_LETTER).replace(/"/g,'&quot;')}">Use standard wording</button>
+      </div>
+      <textarea id="mr-letter-body" class="mr-textarea" style="min-height:320px" aria-label="Letter body">${_mrEsc(cur)}</textarea>
+      <div><label class="mr-lbl" for="mr-letter-sig">Signature block</label><input id="mr-letter-sig" class="mr-input" style="width:100%" value="${_mrEsc((_mrLetters()[ym]&&_mrLetters()[ym].signature)||_mrCfg().letterSignature||'Ryan Sampson, ALC, CCIM — Managing Partner / Broker of Record')}"></div>
+    </div>
+    <div class="mr-modal-f"><span style="flex:1"></span><button class="mr-btn" onclick="window._mrCloseLetter()">Cancel</button><button class="mr-btn mr-btn-primary" onclick="window._mrSaveLetterClick(this)">Save letter</button></div>
+  </div>`;
+  document.body.appendChild(ov);
+  setTimeout(()=>document.getElementById('mr-letter-body')?.focus(),50);
+};
+window._mrCloseLetter=function(){ document.getElementById('mr-letter-ov')?.remove(); };
+window._mrSaveLetterClick=async function(btn){
+  const ym=window._mrState.month; const body=(document.getElementById('mr-letter-body')?.value||'').trim(); const sig=(document.getElementById('mr-letter-sig')?.value||'').trim();
+  if(!body){ showToast('Write the letter first','error'); return; }
+  const done=elcBusy(btn,'Saving…');
+  try{
+    const {doc,setDoc}=_fbFns; const entry={body, signature:sig, updatedAt:Date.now(), updatedBy:currentUser?.name||''};
+    await setDoc(doc(_fbDb,'eos','monthlyReportLetters'), {data:{[ym]:entry}}, {merge:true});
+    eosCache.monthlyReportLetters={...(eosCache.monthlyReportLetters||{}), [ym]:entry};
+    showToast('Letter saved for '+_mrMonthLabel(ym),'success'); window._mrCloseLetter(); viewMonthlyReports();
+  }catch(e){ console.error('[mr] letter',e); showToast('Could not save: '+e.message,'error'); }
+  finally{ done(); }
+};
+
+/* ---------- settings (admin) ---------- */
+window._mrOpenSettings=function(){
+  const c=_mrCfg(); const isSA=!!currentUser.isSuperAdmin;
+  const ov=document.createElement('div'); ov.className='mr-ov fixed inset-0 flex items-center justify-center'; ov.id='mr-settings-ov';
+  ov.innerHTML=`<div class="mr-modal" style="width:min(820px,100%)" role="dialog" aria-label="Monthly report settings">
+    <div class="mr-modal-h"><h2>⚙ Monthly Reports — settings</h2><span style="flex:1"></span><button class="mr-x" aria-label="Close" onclick="window._mrCloseSettings()">✕</button></div>
+    <div class="mr-modal-b">
+      <div class="mr-sec"><h3>Who can see the tab</h3>
+        ${isSA?`<div class="mr-row" role="radiogroup" aria-label="Access">
+          ${[['owner','Only me (super-admin)'],['admins','Admins'],['all','All users (advisors, managers, admins)']].map(([v,l])=>`<label class="mr-btn" style="cursor:pointer"><input type="radio" name="mr-access" value="${v}" ${(c.access||'owner')===v?'checked':''}> ${l}</label>`).join('')}
+        </div><p class="mr-note" style="margin-top:.5rem">Nothing auto-sends. Opening the tab to all users only lets advisors prepare and send their own listings’ reports.</p>`:`<p class="mr-note">Current: <b>${_mrEsc(c.access||'owner')}</b>. Only a super-admin can change this.</p>`}
+      </div>
+      <div class="mr-sec"><h3>Delivery</h3>
+        <div class="mr-grid2">
+          <div><label class="mr-lbl" for="mr-s-worker">Report worker URL</label><input id="mr-s-worker" class="mr-input" style="width:100%" value="${_mrEsc(c.workerUrl||'')}" placeholder="https://elc-report-worker.dirtdog.workers.dev"><div class="mr-note">Sends the email from the advisor’s mailbox and proxies the traffic feed. Deploy it with <code>elc-report-worker/deploy-report-worker.command</code>.</div></div>
+          <div><label class="mr-lbl" for="mr-s-cc">Always Cc</label><input id="mr-s-cc" class="mr-input" style="width:100%" value="${_mrEsc(c.alwaysCc||'')}" placeholder="e.g. ryan@thedirtdog.com (comma-separated)"><div class="mr-note">The listing advisor is always Cc’d so the report lands in their Sent and Inbox.</div></div>
+        </div>
+        <div style="margin-top:.6rem"><label class="mr-lbl" for="mr-s-subj">Email subject</label><input id="mr-s-subj" class="mr-input" style="width:100%" value="${_mrEsc(c.emailSubject||MR_DEFAULT_EMAIL_SUBJECT)}"></div>
+        <div style="margin-top:.6rem"><label class="mr-lbl" for="mr-s-body">Email body</label><textarea id="mr-s-body" class="mr-textarea" style="min-height:170px">${_mrEsc(c.emailBody||MR_DEFAULT_EMAIL_BODY)}</textarea><div class="mr-note">Tokens: {names} {month} {property} {address} {advisorName} {advisorDesignations} {advisorPhone} {advisorEmail}</div></div>
+      </div>
+      <div class="mr-sec"><h3>Report branding</h3>
+        <div class="mr-grid2">
+          <div><label class="mr-lbl" for="mr-s-addr">Office address (cover page)</label><input id="mr-s-addr" class="mr-input" style="width:100%" value="${_mrEsc(c.firmAddress||'1918 W. Cass Street, Tampa, FL 33606')}"></div>
+          <div><label class="mr-lbl" for="mr-s-web">Website (cover page)</label><input id="mr-s-web" class="mr-input" style="width:100%" value="${_mrEsc(c.firmWebsite||'WWW.THEDIRTDOG.COM')}"></div>
+        </div>
+        <div style="margin-top:.6rem"><label class="mr-lbl" for="mr-s-about">About Eshenbaugh Land Company (last page)</label><textarea id="mr-s-about" class="mr-textarea" style="min-height:140px">${_mrEsc(c.about||MR_DEFAULT_ABOUT)}</textarea></div>
+        <div style="margin-top:.6rem"><label class="mr-lbl" for="mr-s-sig">Default letter signature</label><input id="mr-s-sig" class="mr-input" style="width:100%" value="${_mrEsc(c.letterSignature||'Ryan Sampson, ALC, CCIM — Managing Partner / Broker of Record')}"></div>
+      </div>
+      <div class="mr-sec"><h3>Advisor contact cards (last page)</h3>
+        <p class="mr-note" style="margin-bottom:.5rem">Designations, direct line and headshot printed on the Contact Information page. Each advisor can also edit their own from a report.</p>
+        <div id="mr-adv-cards">${_mrAdvisorCardsHtml()}</div>
+      </div>
+    </div>
+    <div class="mr-modal-f"><span style="flex:1"></span><button class="mr-btn" onclick="window._mrCloseSettings()">Cancel</button><button class="mr-btn mr-btn-primary" onclick="window._mrSaveSettingsClick(this)">Save settings</button></div>
+  </div>`;
+  document.body.appendChild(ov);
+};
+function _mrAdvisorCardsHtml(){
+  const advs=(typeof getDistinctAdvisors==='function'?getDistinctAdvisors():[]).filter(a=>a.uid);
+  if(!advs.length) return '<p class="mr-note">No advisor profiles loaded.</p>';
+  return `<table class="mr-table mr-mini"><thead><tr><th>Advisor</th><th>Designations</th><th>Title</th><th>Direct line</th><th>Headshot</th></tr></thead><tbody>${advs.map(a=>{ const p=allProfiles[a.uid]||{}; return `<tr data-uid="${a.uid}">
+    <td style="white-space:nowrap">${_mrEsc(a.name||p.name||a.email||'')}</td>
+    <td><input data-f="reportDesignations" value="${_mrEsc(p.reportDesignations||'')}" placeholder="ALC, CCIM"></td>
+    <td><input data-f="reportTitle" value="${_mrEsc(p.reportTitle||'')}" placeholder="Senior Advisor"></td>
+    <td><input data-f="reportPhone" value="${_mrEsc(p.reportPhone||p.phone||'')}" placeholder="813-287-8787 x104"></td>
+    <td style="white-space:nowrap">${p.reportHeadshotUrl?`<img src="${_mrEsc(p.reportHeadshotUrl)}" alt="" style="width:34px;height:34px;border-radius:50%;object-fit:cover;vertical-align:middle;margin-right:.3rem">`:''}<label class="mr-btn mr-btn-sm" style="cursor:pointer">📷 <input type="file" accept="image/*" style="display:none" onchange="window._mrUploadHeadshot('${a.uid}',this)"></label></td>
+  </tr>`; }).join('')}</tbody></table>`;
+}
+window._mrUploadHeadshot=async function(uid, input){
+  const f=input.files&&input.files[0]; if(!f) return;
+  try{ showToast('Uploading headshot…','info',2000);
+    const blob=await _mrShrinkImage(f,600,.88);
+    const url=await _mrUploadBlob('dealPhotos/_advisors/'+uid+'_headshot_'+Date.now()+'.jpg', blob,'image/jpeg');
+    const {doc,setDoc}=_fbFns; await setDoc(doc(_fbDb,'advisorProfiles',uid),{reportHeadshotUrl:url},{merge:true});
+    if(allProfiles[uid]) allProfiles[uid].reportHeadshotUrl=url;
+    const box=document.getElementById('mr-adv-cards'); if(box) box.innerHTML=_mrAdvisorCardsHtml();
+    const ed=document.getElementById('mr-ed-advcard'); if(ed && window._mrState.editor) ed.innerHTML=_mrEditorAdvisorCardHtml(window._mrState.editor.deal);
+    showToast('Headshot saved ✓','success');
+  }catch(e){ console.error('[mr] headshot',e); showToast('Upload failed: '+e.message,'error'); }
+};
+window._mrCloseSettings=function(){ document.getElementById('mr-settings-ov')?.remove(); };
+window._mrSaveSettingsClick=async function(btn){
+  const done=elcBusy(btn,'Saving…');
+  try{
+    const v=id=>(document.getElementById(id)?.value||'').trim();
+    const patch={ workerUrl:v('mr-s-worker').replace(/\/+$/,''), alwaysCc:v('mr-s-cc'), emailSubject:v('mr-s-subj')||MR_DEFAULT_EMAIL_SUBJECT, emailBody:v('mr-s-body')||MR_DEFAULT_EMAIL_BODY, firmAddress:v('mr-s-addr'), firmWebsite:v('mr-s-web'), about:v('mr-s-about')||MR_DEFAULT_ABOUT, letterSignature:v('mr-s-sig') };
+    const acc=document.querySelector('input[name="mr-access"]:checked'); if(acc) patch.access=acc.value;
+    await _mrSaveSettings(patch);
+    // advisor cards
+    const {doc,setDoc}=_fbFns;
+    const rows=[...document.querySelectorAll('#mr-adv-cards tr[data-uid]')];
+    for(const tr of rows){ const uid=tr.dataset.uid; const p=allProfiles[uid]||{}; const upd={}; let changed=false;
+      tr.querySelectorAll('input[data-f]').forEach(i=>{ const val=i.value.trim(); if((p[i.dataset.f]||'')!==val){ upd[i.dataset.f]=val; changed=true; } });
+      if(changed){ await setDoc(doc(_fbDb,'advisorProfiles',uid),upd,{merge:true}); Object.assign(allProfiles[uid]=allProfiles[uid]||{},upd); } }
+    showToast('Settings saved ✓','success'); window._mrCloseSettings();
+    if(typeof renderShell==='function') renderShell(); currentView='monthlyReports'; viewMonthlyReports();
+  }catch(e){ console.error('[mr] settings',e); showToast('Could not save: '+e.message,'error'); }
+  finally{ done(); }
+};
+
+/* ---------- per-listing report editor ---------- */
+function _mrEditorAdvisorCardHtml(deal){
+  const advs=_mrAdvisorsOf(deal);
+  return advs.map(a=>`<div class="mr-row" style="gap:.75rem">
+    ${a.headshotUrl?`<img src="${_mrEsc(a.headshotUrl)}" alt="" style="width:44px;height:44px;border-radius:50%;object-fit:cover">`:`<div style="width:44px;height:44px;border-radius:50%;background:var(--bg);display:flex;align-items:center;justify-content:center;font-weight:800;color:var(--text-2)">${_mrEsc(_mrFirstName(a.name).charAt(0))}</div>`}
+    <div style="flex:1;min-width:160px"><b>${_mrEsc(a.name)}</b>${a.designations?', '+_mrEsc(a.designations):''}<div class="mr-muted">${_mrEsc([a.title,a.phone,a.email].filter(Boolean).join(' · '))}</div></div>
+    ${(a.uid===currentUser.uid||currentUser.isAdmin)?`<label class="mr-btn mr-btn-sm" style="cursor:pointer">📷 Headshot<input type="file" accept="image/*" style="display:none" onchange="window._mrUploadHeadshot('${a.uid}',this)"></label>`:''}
+  </div>`).join('');
+}
+function _mrRowsTable(id, cols, rows, addLabel){
+  const body=(rows&&rows.length?rows:[{}]).map((r,i)=>`<tr>${cols.map(c=>`<td><input data-k="${c.key}" value="${_mrEsc(r[c.key]||'')}" placeholder="${_mrEsc(c.ph||'')}" aria-label="${_mrEsc(c.label)}" ${c.type==='date'?'type="date"':''}></td>`).join('')}<td><button class="mr-x" aria-label="Remove row" onclick="this.closest('tr').remove()">✕</button></td></tr>`).join('');
+  return `<table class="mr-table mr-mini" id="${id}"><thead><tr>${cols.map(c=>`<th>${_mrEsc(c.label)}</th>`).join('')}<th></th></tr></thead><tbody>${body}</tbody></table>
+  <button class="mr-btn mr-btn-sm" style="margin-top:.4rem" onclick="window._mrAddRow('${id}')">+ ${_mrEsc(addLabel||'Add row')}</button>`;
+}
+window._mrAddRow=function(id){ const t=document.getElementById(id); if(!t) return; const tr=t.tBodies[0].rows[0]; const clone=tr?tr.cloneNode(true):null; if(!clone) return; clone.querySelectorAll('input').forEach(i=>i.value=''); t.tBodies[0].appendChild(clone); clone.querySelector('input')?.focus(); };
+function _mrReadRows(id){ const t=document.getElementById(id); if(!t) return []; return [...t.tBodies[0].rows].map(tr=>{ const o={}; tr.querySelectorAll('input[data-k]').forEach(i=>o[i.dataset.k]=i.value.trim()); return o; }).filter(o=>Object.values(o).some(v=>v)); }
+const MR_EMAIL_COLS=[{key:'title',label:'Title',ph:'Symmes Rd Live Local'},{key:'date',label:'Date sent',type:'date'},{key:'recipients',label:'Recipients',ph:'814'},{key:'opens',label:'Opens',ph:'390'},{key:'clicks',label:'Clicks',ph:'43'}];
+const MR_FB_COLS=[{key:'date',label:'Date',type:'date'},{key:'reach',label:'Reach'},{key:'interactions',label:'Interactions'},{key:'clicks',label:'Clicks'}];
+const MR_LI_COLS=[{key:'date',label:'Date',type:'date'},{key:'impressions',label:'Impressions'},{key:'engRate',label:'Eng. rate',ph:'3.2%'},{key:'clicks',label:'Clicks'}];
+
+window._mrOpenEditor=async function(dealId){
+  const deal=(allDeals||[]).find(d=>d.id===dealId); if(!deal){ showToast('Deal not found','error'); return; }
+  const st=window._mrState; const ym=st.month||_mrPrevMonth();
+  const rep=(await _mrLoadReport(dealId,ym))||{};
+  st.editor={dealId, deal, ym, rep, traffic:rep.traffic||null, shots:{email:rep.emailScreenshotUrl||'', fb:rep.fbScreenshotUrl||'', li:rep.liScreenshotUrl||''}, signUrl:deal.reportSignPhotoUrl||''};
+  const cands=_mrRecipientCandidates(deal); const chosen=_mrRecipients(deal);
+  const chosenEmails=new Set(chosen.map(r=>r.email));
+  const manual=chosen.filter(r=>!cands.some(c=>c.email===r.email));
+  const links=deal.reportListingLinks||{};
+  const advs=_mrAdvisorsOf(deal);
+  const letter=_mrLetterFor(ym);
+  const ov=document.createElement('div'); ov.className='mr-ov fixed inset-0 flex items-center justify-center'; ov.id='mr-editor-ov';
+  ov.innerHTML=`<div class="mr-modal" role="dialog" aria-label="Monthly report editor">
+    <div class="mr-modal-h">
+      ${deal.primaryPhotoUrl?`<img class="mr-thumb" src="${_mrEsc(deal.primaryPhotoUrl)}" alt="">`:''}
+      <div style="min-width:0"><h2 style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${_mrEsc(_mrDealName(deal))}</h2><div class="mr-muted">${_mrEsc(_mrDealAddr(deal))} · ${_mrEsc(_mrMonthLabel(ym))} report · ${_mrEsc(deal.advisorName||'')}</div></div>
+      <span style="flex:1"></span>${rep.status==='sent'?`<span class="mr-chip mr-chip-sent">Sent ${_mrFmtDate(rep.sentAt)}</span>`:''}
+      <button class="mr-x" aria-label="Close" onclick="window._mrCloseEditor()">✕</button>
+    </div>
+    <div class="mr-modal-b">
+      <div class="mr-sec"><h3>1 · Owner recipients</h3>
+        ${cands.length?`<div class="mr-grid2">${cands.map((c,i)=>`<label class="mr-row" style="gap:.5rem;cursor:pointer"><input type="checkbox" class="mr-check mr-recip" data-i="${i}" ${chosenEmails.has(c.email)?'checked':''}> <span><b>${_mrEsc(c.name||'(no name)')}</b> <span class="mr-muted">${_mrEsc(c.email)} · ${_mrEsc(c.src)}</span></span></label>`).join('')}</div>`:`<p class="mr-note">No CRM contacts are linked to this deal and the card has no contact email. Add the owner(s) below, or link their CRM contact to the deal.</p>`}
+        <div style="margin-top:.6rem"><span class="mr-lbl">Additional recipients</span>${_mrRowsTable('mr-manual',[{key:'name',label:'Name',ph:'Jane Owner'},{key:'email',label:'Email',ph:'jane@example.com'}],manual,'Add recipient')}</div>
+      </div>
+      <div class="mr-sec"><h3>2 · Listing details (from the deal card)</h3>
+        <div class="mr-grid3">
+          <div><span class="mr-lbl">Asking price</span><div>${_mrDealPrice(deal)?_mrFmtMoney(_mrDealPrice(deal)):'<span style="color:#b91c1c">Not set — edit the deal’s Listed Price</span>'}</div></div>
+          <div><span class="mr-lbl">Listing start</span><div>${deal.listingEffectiveDate?_mrFmtDateLong(deal.listingEffectiveDate):(deal.listingEnteredAt?_mrFmtDateLong(deal.listingEnteredAt)+' <span class="mr-muted">(entered Listing)</span>':'<span style="color:#b91c1c">Not set</span>')}</div></div>
+          <div><span class="mr-lbl">Listing expiration</span><div>${deal.listingExpiration?_mrFmtDateLong(deal.listingExpiration):'<span style="color:#b91c1c">Not set — edit the deal</span>'}</div></div>
+        </div>
+        <div class="mr-grid2" style="margin-top:.6rem">
+          <div><label class="mr-lbl" for="mr-ed-owner">“Prepared for” (cover page)</label><input id="mr-ed-owner" class="mr-input" style="width:100%" value="${_mrEsc(rep.preparedFor||_mrOwnerLabel(deal))}"></div>
+          <div><label class="mr-lbl" for="mr-ed-appid">app.thedirtdog.com property ID</label><input id="mr-ed-appid" class="mr-input" style="width:100%" value="${_mrEsc(deal.reportAppPropertyId||'')}" placeholder="UUID from the property’s URL"><div class="mr-note">Used to pull the web-traffic section automatically once the feed is live.</div></div>
+        </div>
+      </div>
+      <div class="mr-sec"><h3>3 · Status update letter</h3>
+        <div class="mr-note" style="white-space:pre-wrap;max-height:120px;overflow:auto;border:1px dashed var(--border);border-radius:8px;padding:.5rem .6rem">${letter?_mrEsc(letter):'<b style="color:#b91c1c">The firm-wide letter for '+_mrEsc(_mrMonthLabel(ym))+' hasn’t been written yet.</b>'}</div>
+        <div style="margin-top:.6rem"><div class="mr-row" style="justify-content:space-between"><label class="mr-lbl" for="mr-ed-note">Property-specific paragraph (optional, printed after the letter)</label><button class="mr-btn mr-btn-sm" onclick="window._mrAiDraft(this)">✨ AI draft from this month’s activity</button></div>
+        <textarea id="mr-ed-note" class="mr-textarea" style="min-height:110px">${_mrEsc(rep.advisorNote||'')}</textarea></div>
+      </div>
+      <div class="mr-sec"><h3>4 · Email blasts</h3>
+        ${_mrRowsTable('mr-emails',MR_EMAIL_COLS,rep.emailBlasts||[],'Add e-blast')}
+        <div class="mr-row" style="margin-top:.5rem"><label class="mr-btn mr-btn-sm" style="cursor:pointer">🖼 Upload e-blast screenshot<input type="file" accept="image/*" style="display:none" onchange="window._mrUploadShot('email',this)"></label><span id="mr-shot-email" class="mr-muted">${st.editor.shots.email?'✓ screenshot attached':''}</span></div>
+      </div>
+      <div class="mr-sec"><h3>5 · Social media</h3>
+        <div class="mr-grid2">
+          <div><span class="mr-lbl">Facebook</span>${_mrRowsTable('mr-fb',MR_FB_COLS,rep.facebook||[],'Add post')}<div class="mr-row" style="margin-top:.4rem"><label class="mr-btn mr-btn-sm" style="cursor:pointer">🖼 Screenshot<input type="file" accept="image/*" style="display:none" onchange="window._mrUploadShot('fb',this)"></label><span id="mr-shot-fb" class="mr-muted">${st.editor.shots.fb?'✓ attached':''}</span></div></div>
+          <div><span class="mr-lbl">LinkedIn</span>${_mrRowsTable('mr-li',MR_LI_COLS,rep.linkedin||[],'Add post')}<div class="mr-row" style="margin-top:.4rem"><label class="mr-btn mr-btn-sm" style="cursor:pointer">🖼 Screenshot<input type="file" accept="image/*" style="display:none" onchange="window._mrUploadShot('li',this)"></label><span id="mr-shot-li" class="mr-muted">${st.editor.shots.li?'✓ attached':''}</span></div></div>
+        </div>
+      </div>
+      <div class="mr-sec"><h3>6 · Listing sites &amp; signage</h3>
+        <div class="mr-grid3">${MR_SITE_TILES.map(t=>`<div><label class="mr-lbl" for="mr-link-${t.key}">${_mrEsc(t.label)}</label><input id="mr-link-${t.key}" class="mr-input" style="width:100%" value="${_mrEsc(links[t.key]||'')}" placeholder="listing URL"></div>`).join('')}</div>
+        <div class="mr-row" style="margin-top:.7rem"><label class="mr-btn mr-btn-sm" style="cursor:pointer">📷 Sign photo<input type="file" accept="image/*" style="display:none" onchange="window._mrUploadSign(this)"></label><span id="mr-sign-status" class="mr-muted">${deal.reportSignPhotoUrl?'✓ sign photo on file (remembered every month)':'none yet — the Property Signage page is skipped until one is added'}</span></div>
+      </div>
+      <div class="mr-sec"><h3>7 · Leads &amp; website activity</h3>
+        <div class="mr-row">
+          <button class="mr-btn mr-btn-sm mr-btn-teal" onclick="window._mrPullTraffic(this)">⬇ Pull from app.thedirtdog.com</button>
+          <label class="mr-btn mr-btn-sm" style="cursor:pointer">📄 Upload CSV<input type="file" accept=".csv,text/csv,.txt" style="display:none" onchange="window._mrTrafficFile(this)"></label>
+          <span id="mr-traffic-status" class="mr-muted">${st.editor.traffic?((st.editor.traffic.activity||[]).length+' activity rows · '+(st.editor.traffic.source==='api'?'from feed':'pasted')):'nothing yet'}</span>
+        </div>
+        <div style="margin-top:.6rem"><label class="mr-lbl" for="mr-traffic-paste">Or paste the activity table (Performed At · Performed By · Email · Company · Role · Activity)</label><textarea id="mr-traffic-paste" class="mr-textarea" style="min-height:80px;font-family:ui-monospace,monospace;font-size:.75rem" placeholder="Copy the rows from the Leads & Website Activity table and paste here" onchange="window._mrTrafficPaste(this.value)"></textarea></div>
+        <div class="mr-grid3" style="margin-top:.6rem">
+          ${[['siteVisits','TheDirtDog.com visits'],['uniqueVisitors','Unique visitors'],['docsViewed','Docs viewed'],['casSigned','CAs signed'],['gaSessions','Google sessions'],['totalCommercialViews','Total Commercial views'],['loopnetViews','LoopNet views'],['crexiViews','Crexi views'],['totalLeads','Total leads']].map(([k,l])=>`<div><label class="mr-lbl" for="mr-t-${k}">${l}</label><input id="mr-t-${k}" class="mr-input" style="width:100%" inputmode="numeric" value="${st.editor.traffic&&st.editor.traffic[k]!=null?_mrEsc(st.editor.traffic[k]):''}"></div>`).join('')}
+        </div>
+      </div>
+      <div class="mr-sec"><h3>8 · Property notes &amp; completed tasks</h3><div id="mr-hist-summary" class="mr-note">Counting…</div></div>
+      <div class="mr-sec"><h3>9 · Contact page</h3><div id="mr-ed-advcard">${_mrEditorAdvisorCardHtml(deal)}</div></div>
+    </div>
+    <div class="mr-modal-f">
+      <span class="mr-note" id="mr-ed-status"></span><span style="flex:1"></span>
+      <button class="mr-btn" onclick="window._mrCloseEditor()">Close</button>
+      <button class="mr-btn" onclick="window._mrSaveEditor(this)">💾 Save draft</button>
+      <button class="mr-btn" onclick="window._mrSaveEditor(this).then(ok=>ok&&window._mrPreview('${deal.id}'))">👁 Preview PDF</button>
+      <button class="mr-btn mr-btn-primary" onclick="window._mrSaveEditor(this).then(ok=>ok&&window._mrSendOne('${deal.id}'))">📤 Send report</button>
+    </div>
+  </div>`;
+  document.body.appendChild(ov);
+  // history counts (async)
+  Promise.all([_mrFetchActivities(dealId),_mrFetchTasks(dealId)]).then(([acts,tasks])=>{ const h=_mrHistoryRows(deal,acts,tasks); const el=document.getElementById('mr-hist-summary'); if(el) el.innerHTML=`<b>${h.history.length}</b> history entries and <b>${h.tasks.length}</b> completed tasks since the listing started (${_mrFmtDateLong(_mrListingStart(deal))}) will print newest → oldest. Add or fix entries from the deal card’s Activity &amp; Notes.`; });
+};
+window._mrCloseEditor=function(){ document.getElementById('mr-editor-ov')?.remove(); window._mrState.editor=null; };
+function _mrCollectEditor(){
+  const ed=window._mrState.editor; if(!ed) return null;
+  const cands=_mrRecipientCandidates(ed.deal);
+  const recips=[]; document.querySelectorAll('.mr-recip:checked').forEach(cb=>{ const c=cands[+cb.dataset.i]; if(c) recips.push({name:c.name||'',email:c.email,contactId:c.contactId||''}); });
+  _mrReadRows('mr-manual').forEach(r=>{ const e=(r.email||'').toLowerCase(); if(/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e) && !recips.some(x=>x.email===e)) recips.push({name:r.name||'',email:e}); });
+  const links={}; MR_SITE_TILES.forEach(t=>{ const v=(document.getElementById('mr-link-'+t.key)?.value||'').trim(); if(v) links[t.key]=v; });
+  const traffic={...(ed.traffic||{})};
+  ['siteVisits','uniqueVisitors','docsViewed','casSigned','gaSessions','totalCommercialViews','loopnetViews','crexiViews','totalLeads'].forEach(k=>{ const v=(document.getElementById('mr-t-'+k)?.value||'').trim(); traffic[k]= v===''?null:_mrNum(v); });
+  if(!traffic.source) traffic.source='manual';
+  return {
+    recips, links,
+    appId:(document.getElementById('mr-ed-appid')?.value||'').trim(),
+    report:{ preparedFor:(document.getElementById('mr-ed-owner')?.value||'').trim(), advisorNote:(document.getElementById('mr-ed-note')?.value||'').trim(),
+      emailBlasts:_mrReadRows('mr-emails'), facebook:_mrReadRows('mr-fb'), linkedin:_mrReadRows('mr-li'),
+      emailScreenshotUrl:ed.shots.email||'', fbScreenshotUrl:ed.shots.fb||'', liScreenshotUrl:ed.shots.li||'', traffic }
+  };
+}
+window._mrSaveEditor=async function(btn){
+  const ed=window._mrState.editor; if(!ed) return false;
+  const c=_mrCollectEditor(); const done=btn?elcBusy(btn,'Saving…'):()=>{};
+  try{
+    const dealPatch={reportRecipients:c.recips, reportListingLinks:c.links, reportAppPropertyId:c.appId, updatedAt:Date.now()};
+    if(ed.signUrl) dealPatch.reportSignPhotoUrl=ed.signUrl;
+    await Store.updateDeal(ed.dealId, dealPatch); Object.assign(ed.deal, dealPatch);
+    const saved=await _mrSaveReport(ed.dealId, ed.ym, {...c.report, status: ed.rep.status==='sent'?'sent':'draft'});
+    ed.rep=saved;
+    const s=document.getElementById('mr-ed-status'); if(s) s.textContent='Saved '+new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit'});
+    if(currentView==='monthlyReports') window._mrRenderRows();
+    return true;
+  }catch(e){ console.error('[mr] save',e); showToast('Could not save: '+e.message,'error'); return false; }
+  finally{ done(); }
+};
+window._mrUploadShot=async function(kind, input){
+  const ed=window._mrState.editor; const f=input.files&&input.files[0]; if(!ed||!f) return;
+  const lbl=document.getElementById('mr-shot-'+kind); if(lbl) lbl.textContent='Uploading…';
+  try{ const blob=await _mrShrinkImage(f,1400,.85); const url=await _mrUploadBlob('dealPhotos/'+ed.dealId+'/report_'+kind+'_'+ed.ym+'_'+Date.now()+'.jpg', blob,'image/jpeg'); ed.shots[kind]=url; if(lbl) lbl.textContent='✓ screenshot attached'; }
+  catch(e){ console.error('[mr] shot',e); if(lbl) lbl.textContent='Upload failed'; showToast('Upload failed: '+e.message,'error'); }
+};
+window._mrUploadSign=async function(input){
+  const ed=window._mrState.editor; const f=input.files&&input.files[0]; if(!ed||!f) return;
+  const lbl=document.getElementById('mr-sign-status'); if(lbl) lbl.textContent='Uploading…';
+  try{ const blob=await _mrShrinkImage(f,1600,.85); const url=await _mrUploadBlob('dealPhotos/'+ed.dealId+'/report_sign_'+Date.now()+'.jpg', blob,'image/jpeg'); ed.signUrl=url;
+    await Store.updateDeal(ed.dealId,{reportSignPhotoUrl:url}); ed.deal.reportSignPhotoUrl=url; if(lbl) lbl.textContent='✓ sign photo on file (remembered every month)'; }
+  catch(e){ console.error('[mr] sign',e); if(lbl) lbl.textContent='Upload failed'; showToast('Upload failed: '+e.message,'error'); }
+};
+function _mrApplyTraffic(t, srcLabel){
+  const ed=window._mrState.editor; if(!ed) return;
+  ed.traffic={...(ed.traffic||{}), ...t};
+  ['siteVisits','uniqueVisitors','docsViewed','casSigned','gaSessions','totalCommercialViews','loopnetViews','crexiViews','totalLeads'].forEach(k=>{ const el=document.getElementById('mr-t-'+k); if(el && t[k]!=null) el.value=t[k]; });
+  const s=document.getElementById('mr-traffic-status'); if(s) s.textContent=(ed.traffic.activity||[]).length+' activity rows · '+srcLabel;
+}
+window._mrTrafficPaste=function(txt){ const rows=_mrParseActivityText(txt); if(!rows.length){ showToast('Couldn’t read any rows from the paste','warning'); return; } _mrApplyTraffic({activity:rows, source:'manual', pastedAt:Date.now()},'pasted'); showToast(rows.length+' activity rows read','success'); };
+window._mrTrafficFile=function(input){ const f=input.files&&input.files[0]; if(!f) return; const r=new FileReader(); r.onload=e=>window._mrTrafficPaste(e.target.result); r.readAsText(f); };
+window._mrPullTraffic=async function(btn){
+  const ed=window._mrState.editor; if(!ed) return;
+  const id=(document.getElementById('mr-ed-appid')?.value||'').trim(); if(id) ed.deal.reportAppPropertyId=id;
+  const done=elcBusy(btn,'Pulling…');
+  try{ const t=await _mrFetchTraffic(ed.deal, ed.ym); _mrApplyTraffic(t,'from feed · '+new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})); showToast('Traffic pulled ✓','success'); }
+  catch(e){ console.warn('[mr] traffic',e); showToast(e.message,'warning',6000); }
+  finally{ done(); }
+};
+window._mrAiDraft=async function(btn){
+  const ed=window._mrState.editor; if(!ed) return;
+  const done=elcBusy(btn,'Drafting…');
+  try{
+    const [acts,tasks]=await Promise.all([_mrFetchActivities(ed.dealId),_mrFetchTasks(ed.dealId)]);
+    const h=_mrHistoryRows(ed.deal,acts,tasks); const rng=_mrMonthRange(ed.ym);
+    const month=h.history.filter(r=>r.ts>=rng.start&&r.ts<rng.end).slice(0,40).map(r=>r.date+' '+r.type+': '+r.text.slice(0,160)).join('\n');
+    const t=ed.traffic||{};
+    const sys='You write short, factual property-marketing updates for a Florida land brokerage (Eshenbaugh Land Company). Write ONE paragraph (90-140 words), first person plural, addressed to the property owner, summarizing this month\'s marketing activity and buyer interest for their listing. No greeting, no sign-off, no bullet points, no invented numbers — only use facts given.';
+    const user='Property: '+_mrDealName(ed.deal)+' — '+_mrDealAddr(ed.deal)+'\nMonth: '+_mrMonthLabel(ed.ym)+'\nAsking price: '+(_mrFmtMoney(_mrDealPrice(ed.deal))||'n/a')+'\nStage: '+_mrStageOf(ed.deal)+'\nWeb traffic: site visits '+(t.siteVisits??'n/a')+', unique '+(t.uniqueVisitors??'n/a')+', docs viewed '+(t.docsViewed??'n/a')+', CAs signed '+(t.casSigned??'n/a')+', leads '+(t.totalLeads??'n/a')+'\nActivity this month:\n'+(month||'(no logged activity this month)');
+    const txt=await leadAI(sys,user,500);
+    const ta=document.getElementById('mr-ed-note'); if(ta) ta.value=txt.trim();
+  }catch(e){ console.warn('[mr] ai',e); showToast('AI draft failed: '+e.message,'error'); }
+  finally{ done(); }
+};
+
+/* ---------- PDF generation (jsPDF + autotable, loaded on demand) ---------- */
+function _mrLoadScript(src){ return new Promise((res,rej)=>{ if(document.querySelector('script[src="'+src+'"]')) return res(); const s=document.createElement('script'); s.src=src; s.onload=res; s.onerror=()=>rej(new Error('Could not load '+src)); document.head.appendChild(s); }); }
+async function _mrLoadLibs(){
+  if(!(window.jspdf&&window.jspdf.jsPDF)) await _mrLoadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js');
+  if(!(window.jspdf.jsPDF.API&&window.jspdf.jsPDF.API.autoTable)) await _mrLoadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.4/jspdf.plugin.autotable.min.js');
+}
+function _mrB64(buf){ const u=new Uint8Array(buf); let s=''; for(let i=0;i<u.length;i+=0x8000) s+=String.fromCharCode.apply(null,u.subarray(i,i+0x8000)); return btoa(s); }
+async function _mrFonts(doc){
+  window._mrFontCache=window._mrFontCache||{};
+  const C=window._mrFontCache;
+  try{
+    if(!C.regular||!C.bold){
+      const base='https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/poppins/';
+      const [r,b]=await Promise.all([fetch(base+'Poppins-Regular.ttf').then(x=>x.arrayBuffer()), fetch(base+'Poppins-SemiBold.ttf').then(x=>x.arrayBuffer())]);
+      C.regular=_mrB64(r); C.bold=_mrB64(b);
+    }
+    doc.addFileToVFS('Poppins-Regular.ttf',C.regular); doc.addFont('Poppins-Regular.ttf','Poppins','normal');
+    doc.addFileToVFS('Poppins-SemiBold.ttf',C.bold);   doc.addFont('Poppins-SemiBold.ttf','Poppins','bold');
+    return 'Poppins';
+  }catch(e){ console.warn('[mr] Poppins unavailable, using Helvetica',e); return 'helvetica'; }
+}
+// Load an image URL into a (possibly cover-cropped) JPEG/PNG data URL + size.
+async function _mrImg(url, opts){
+  opts=opts||{}; if(!url) return null;
+  const load=src=>new Promise((res,rej)=>{ const im=new Image(); im.crossOrigin='anonymous'; im.onload=()=>res(im); im.onerror=()=>rej(new Error('img')); im.src=src; });
+  let im=null, objUrl=null;
+  try{ const r=await fetch(url,{mode:'cors'}); if(!r.ok) throw new Error('http '+r.status); const b=await r.blob(); objUrl=URL.createObjectURL(b); im=await load(objUrl); }
+  catch(e){ try{ im=await load(url); }catch(e2){ console.warn('[mr] image failed',url.slice(0,80),e2); return null; } }
+  finally{ if(objUrl) setTimeout(()=>URL.revokeObjectURL(objUrl),2000); }
+  const maxPx=opts.maxPx||1600; let sw=im.naturalWidth, sh=im.naturalHeight, sx=0, sy=0;
+  if(opts.cover){ // crop to aspect
+    const want=opts.cover; const cur=sw/sh;
+    if(cur>want){ const nw=Math.round(sh*want); sx=Math.round((sw-nw)/2); sw=nw; } else { const nh=Math.round(sw/want); sy=Math.round((sh-nh)/2); sh=nh; }
+  }
+  const s=Math.min(1,maxPx/Math.max(sw,sh)); const w=Math.max(1,Math.round(sw*s)), h=Math.max(1,Math.round(sh*s));
+  const c=document.createElement('canvas'); c.width=w; c.height=h; const ctx=c.getContext('2d');
+  if(!opts.png){ ctx.fillStyle='#fff'; ctx.fillRect(0,0,w,h); }
+  try{ ctx.drawImage(im,sx,sy,sw,sh,0,0,w,h); return {data:opts.png?c.toDataURL('image/png'):c.toDataURL('image/jpeg',opts.q||0.86), w, h, fmt:opts.png?'PNG':'JPEG'}; }
+  catch(e){ console.warn('[mr] canvas tainted',e); return null; }
+}
+const MR_RED=[218,41,28], MR_TEAL=[79,195,201], MR_INK=[60,74,74], MR_GREY=[107,114,128], MR_LINE=[79,195,201];
+function _mrPdfRenderer(doc, font){
+  const R={doc, W:612, H:792, M:48, font, page:1, footerText:''};
+  R.text=(s,x,y,o)=>{ o=o||{}; doc.setFont(font,o.bold?'bold':'normal'); doc.setFontSize(o.size||10); doc.setTextColor(...(o.color||MR_INK)); doc.text(String(s==null?'':s),x,y,{align:o.align||'left',maxWidth:o.maxWidth,baseline:o.baseline||'alphabetic',lineHeightFactor:o.lh||1.35}); };
+  R.split=(s,w,size,bold)=>{ doc.setFont(font,bold?'bold':'normal'); doc.setFontSize(size||10); return doc.splitTextToSize(String(s==null?'':s),w); };
+  R.rect=(x,y,w,h,c)=>{ doc.setFillColor(...c); doc.rect(x,y,w,h,'F'); };
+  R.rrect=(x,y,w,h,r,c)=>{ doc.setFillColor(...c); doc.roundedRect(x,y,w,h,r,r,'F'); };
+  R.line=(x1,y1,x2,y2,c,w)=>{ doc.setDrawColor(...(c||MR_LINE)); doc.setLineWidth(w||0.8); doc.line(x1,y1,x2,y2); };
+  R.img=(im,x,y,w,h)=>{ if(!im) return; try{ doc.addImage(im.data,im.fmt||'JPEG',x,y,w,h,undefined,'FAST'); }catch(e){ console.warn('[mr] addImage',e); } };
+  R.fit=(im,x,y,maxW,maxH)=>{ if(!im) return 0; const s=Math.min(maxW/im.w,maxH/im.h); const w=im.w*s,h=im.h*s; R.img(im,x+(maxW-w)/2,y,w,h); return h; };
+  R.footer=()=>{ const y=R.H-36; R.rect(0,y,R.W,36,MR_RED); R.rect(0,y,118,36,MR_TEAL);
+    doc.setFillColor(...MR_TEAL); doc.triangle(118,y,134,y,118,y+36,'F');
+    R.text('Page '+R.page,34,y+23,{size:12,bold:true,color:[255,255,255]});
+    R.text(R.footerText,R.W-40,y+23,{size:12,bold:true,color:[255,255,255],align:'right'}); };
+  R.newPage=()=>{ doc.addPage(); R.page++; R.footer(); return R.M+16; };
+  R.title=(t,y)=>{ R.text(t,R.M,y,{size:28,bold:true,color:MR_INK}); const w=doc.getTextWidth(t); R.line(R.M+w+14,y-9,R.W,y-9,MR_INK,0.9); return y+26; };
+  R.para=(s,x,y,w,o)=>{ o=o||{}; doc.setFont(font,o.bold?'bold':'normal'); doc.setFontSize(o.size||10.5); doc.setTextColor(...(o.color||MR_INK)); const lines=doc.splitTextToSize(String(s||''),w); const lh=(o.size||10.5)*(o.lh||1.4); lines.forEach((ln,i)=>doc.text(ln,x,y+i*lh)); return y+lines.length*lh; };
+  R.table=(opts)=>{ const {contHeading, ...rest}=opts; const base={ theme:'plain', styles:{font, fontSize:9.5, textColor:MR_INK, cellPadding:{top:5,bottom:5,left:6,right:6}, lineColor:MR_LINE, lineWidth:{bottom:0.8}, overflow:'linebreak'},
+      headStyles:{fillColor:MR_RED, textColor:[255,255,255], fontStyle:'bold', fontSize:10.5, lineWidth:0}, margin:{left:R.M,right:R.M,bottom:56,top:R.M+30}, ...rest };
+    const before=doc.internal.getNumberOfPages();
+    doc.autoTable(base);
+    const after=doc.internal.getNumberOfPages();
+    for(let p=before+1;p<=after;p++){ doc.setPage(p); R.page=p; R.footer(); if(contHeading){ R.text(contHeading,R.M,R.M+10,{size:16,bold:true}); } }
+    doc.setPage(after); R.page=after;
+    return doc.lastAutoTable.finalY; };
+  return R;
+}
+function _mrEmailLabel(arr){ return (arr||[]).map(r=>r.name).filter(Boolean); }
+// Gather everything the PDF needs for one deal/month.
+async function _mrAssemble(deal, ym){
+  const rep=(await _mrLoadReport(deal.id,ym))||{};
+  const [acts,tasks]=await Promise.all([_mrFetchActivities(deal.id),_mrFetchTasks(deal.id)]);
+  const h=_mrHistoryRows(deal,acts,tasks);
+  const cfg=_mrCfg(); const L=_mrLetters()[ym]||{};
+  const advisors=_mrAdvisorsOf(deal);
+  const [hero,logo,sign,shotE,shotF,shotL,heads]=await Promise.all([
+    _mrImg(deal.primaryPhotoUrl,{cover:612/476,maxPx:1800}),
+    _mrImg('proposals/assets/logo-dark.png',{png:true,maxPx:900}),
+    _mrImg(deal.reportSignPhotoUrl,{maxPx:1600}),
+    _mrImg(rep.emailScreenshotUrl,{maxPx:1200}), _mrImg(rep.fbScreenshotUrl,{maxPx:1000}), _mrImg(rep.liScreenshotUrl,{maxPx:1000}),
+    Promise.all(advisors.map(a=>_mrImg(a.headshotUrl,{cover:1,maxPx:400})))
+  ]);
+  advisors.forEach((a,i)=>a.head=heads[i]);
+  return { deal, ym, rep, history:h.history, tasks:h.tasks, letter:L.body||'', signature:L.signature||cfg.letterSignature||'Ryan Sampson, ALC, CCIM — Managing Partner / Broker of Record', about:cfg.about||MR_DEFAULT_ABOUT,
+    firmAddress:cfg.firmAddress||'1918 W. Cass Street, Tampa, FL 33606', firmWebsite:cfg.firmWebsite||'WWW.THEDIRTDOG.COM', advisors, hero, logo, sign, shotE, shotF, shotL,
+    preparedFor:rep.preparedFor||_mrOwnerLabel(deal), traffic:rep.traffic||{} };
+}
+async function _mrBuildPdf(A){
+  await _mrLoadLibs();
+  const {jsPDF}=window.jspdf; const doc=new jsPDF({unit:'pt',format:'letter',compress:true});
+  const font=await _mrFonts(doc); const R=_mrPdfRenderer(doc,font);
+  const d=A.deal, monthLabel=_mrMonthLabel(A.ym).toUpperCase(), addr=_mrDealAddr(d);
+  const shortAddr=addr.split(',')[0]; R.footerText=shortAddr+' - '+_mrMonthLabel(A.ym)+' Monthly Report';
+  doc.setProperties({title:_mrMonthLabel(A.ym)+' Monthly Report — '+addr, author:'Eshenbaugh Land Company', subject:'Monthly owner marketing report'});
+  /* ---- 1 · Cover ---- */
+  R.rect(0,0,R.W,R.H,MR_RED);
+  R.rrect(160,12,292,66,4,[255,255,255]);
+  R.text(monthLabel,R.W/2,40,{size:22,bold:true,color:MR_RED,align:'center'});
+  R.text('MONTHLY REPORT',R.W/2,66,{size:22,bold:true,color:MR_RED,align:'center'});
+  if(A.hero) R.img(A.hero,0,90,R.W,476); else { R.rect(0,90,R.W,476,[160,30,20]); R.text('Add a primary photo to the deal card to show it here',R.W/2,330,{size:12,color:[255,255,255],align:'center'}); }
+  R.line(R.W/2,600,R.W/2,660,[255,255,255],1.2);
+  R.text(R.split(addr.toUpperCase(),240,14),R.W/4,620,{size:14,bold:false,color:[255,255,255],align:'center',lh:1.3});
+  R.text('PREPARED FOR',R.W*3/4,616,{size:14,color:[255,255,255],align:'center'});
+  R.text(R.split(String(A.preparedFor||'PROPERTY OWNER').toUpperCase(),240,14),R.W*3/4,638,{size:14,color:[255,255,255],align:'center',lh:1.3});
+  R.text(R.split(A.firmAddress.toUpperCase(),260,12),28,722,{size:12,color:[255,255,255],lh:1.35});
+  R.text(A.firmWebsite.toUpperCase(),28,770,{size:12,color:[255,255,255]});
+  if(A.logo){ R.rrect(420,700,164,80,6,[255,255,255]); R.fit(A.logo,428,706,148,68); }
+  /* ---- 2 · Status update ---- */
+  let y=R.newPage(); y=R.title('Status Update',y+30);
+  const owners=_mrEmailLabel(_mrRecipients(d)).map(_mrFirstName).filter(Boolean);
+  const dear='Dear '+(owners.length?owners.join(owners.length===2?' and ':', ').replace(/, ([^,]*)$/,' and $1'):'Property Owner')+':';
+  y=R.para(dear,R.M,y+6,R.W-2*R.M,{size:10.5})+8;
+  const letterBody=(A.letter||'').trim();
+  if(letterBody){ letterBody.split(/\n\s*\n/).forEach(p=>{ y=R.para(p.trim(),R.M,y,R.W-2*R.M,{size:10.5})+8; }); }
+  else { y=R.para('[Status update letter for '+_mrMonthLabel(A.ym)+' not written yet]',R.M,y,R.W-2*R.M,{size:10.5,color:[185,28,28]})+8; }
+  if(A.rep.advisorNote){ y+=4; y=R.para('Property-Specific Activity',R.M,y,R.W-2*R.M,{size:12,bold:true})+4; A.rep.advisorNote.split(/\n\s*\n/).forEach(p=>{ y=R.para(p.trim(),R.M,y,R.W-2*R.M,{size:10.5})+8; }); }
+  y+=10; y=R.para('Sincerely,',R.M,y,300,{size:10.5})+16; R.para(A.signature,R.M,y,400,{size:10.5,bold:true});
+  /* ---- 3 · Listing details + marketing channels ---- */
+  y=R.newPage(); y=R.title('Listing Details',y+30);
+  const lead=A.advisors[0]||{};
+  const intro='This reporting letter provides a comprehensive overview of Eshenbaugh Land Company\'s marketing efforts in the promotion of the property located at '+addr+' (hereafter referred to as the “Property”). The assignment is being managed by Eshenbaugh Land Company’s Land Services team under the direction of '+(lead.name||'your advisor')+(lead.designations?', '+lead.designations:'')+', who serves as the exclusive listing broker for the Property.';
+  y=R.para(intro,R.M,y+4,R.W-2*R.M-40,{size:10.5,lh:1.5})+16;
+  const dl=[['Listing Start Date:',d.listingEffectiveDate?_mrFmtDateLong(d.listingEffectiveDate):(d.listingEnteredAt?_mrFmtDateLong(d.listingEnteredAt):'—')],['Listing Expiration Date:',d.listingExpiration?_mrFmtDateLong(d.listingExpiration):'—'],['Asking Price:',_mrFmtMoney(_mrDealPrice(d))||'Call for details']];
+  dl.forEach(([k,v])=>{ R.text(k,R.M,y,{size:14,bold:true}); R.text(v,R.M+200,y,{size:14}); y+=22; });
+  y=R.title('Marketing Channels',y+30);
+  const tiles=[['EMAIL BLASTS',MR_TEAL],['SOCIAL MEDIA',MR_RED],['LISTING SERVICES',MR_TEAL],['SIGN INSTALLATIONS',MR_TEAL],['PROPERTY NOTES',MR_RED],['LEADS AND WEB ACTIVITY',MR_TEAL]];
+  const tw=150, th=150, gap=18, x0=R.M+((R.W-2*R.M)-(3*tw+2*gap))/2;
+  tiles.forEach((t,i)=>{ const cx=x0+(i%3)*(tw+gap), cy=y+8+Math.floor(i/3)*(th+gap); R.rect(cx,cy,tw,th,t[1]);
+    doc.setDrawColor(255,255,255); doc.setLineWidth(2); doc.circle(cx+tw/2,cy+58,24,'S');
+    R.text(R.split(t[0],tw-20,11,true),cx+tw/2,cy+108,{size:11,bold:true,color:[255,255,255],align:'center',lh:1.25}); });
+  /* ---- 4 · Email report ---- */
+  const eb=(A.rep.emailBlasts||[]).filter(r=>r.title||r.date);
+  if(eb.length||A.shotE){
+    y=R.newPage(); y=R.title('Email Report',y+30);
+    if(eb.length){ y=R.table({startY:y+6, head:[['Title','Date Sent','Recipients','Opens','Clicks']], body:eb.map(r=>[r.title||'',_mrFmtDate(r.date),r.recipients||'',r.opens||'',r.clicks||'']), columnStyles:{0:{cellWidth:230}}, contHeading:'Email Report (cont.)'})+18; }
+    if(A.shotE){ const maxH=R.H-56-y-10; if(maxH>120) R.fit(A.shotE,R.M+40,y,R.W-2*R.M-80,maxH); }
+  }
+  /* ---- 5 · Social media ---- */
+  const fb=(A.rep.facebook||[]).filter(r=>r.date||r.reach), li=(A.rep.linkedin||[]).filter(r=>r.date||r.impressions);
+  if(fb.length||li.length||A.shotF||A.shotL){
+    y=R.newPage(); y=R.title('Social Media Report',y+30);
+    const colW=(R.W-2*R.M-24)/2; const xl=R.M, xr=R.M+colW+24; const top=y+10;
+    R.text('Facebook',xl+colW/2,top+14,{size:20,bold:true,align:'center'}); R.text('LinkedIn',xr+colW/2,top+14,{size:20,bold:true,align:'center'});
+    R.line(xl,top+26,xl+colW,top+26,MR_TEAL,2.2); R.line(xr,top+26,xr+colW,top+26,MR_TEAL,2.2); R.line(R.W/2,top-4,R.W/2,R.H-70,MR_TEAL,2.2);
+    let yl=top+40, yr=top+40;
+    if(fb.length) yl=R.table({startY:yl, margin:{left:xl,right:R.W-(xl+colW)}, tableWidth:colW, head:[['Date','Reach','Interactions','Clicks']], body:fb.map(r=>[_mrFmtDate(r.date),r.reach||'',r.interactions||'',r.clicks||'']), styles:{font,fontSize:9,textColor:MR_INK,cellPadding:4,lineColor:MR_LINE,lineWidth:{bottom:0.8}}})+14;
+    if(li.length) yr=R.table({startY:yr, margin:{left:xr,right:R.M}, tableWidth:colW, head:[['Date','Impressions','Eng. Rate','Clicks']], body:li.map(r=>[_mrFmtDate(r.date),r.impressions||'',r.engRate||'',r.clicks||'']), styles:{font,fontSize:9,textColor:MR_INK,cellPadding:4,lineColor:MR_LINE,lineWidth:{bottom:0.8}}})+14;
+    if(A.shotF) R.fit(A.shotF,xl,yl,colW,R.H-70-yl); if(A.shotL) R.fit(A.shotL,xr,yr,colW,R.H-70-yr);
+  }
+  /* ---- 6 · Listing summary ---- */
+  y=R.newPage(); y=R.title('Listing Summary',y+30);
+  const T=A.traffic||{}; const links=d.reportListingLinks||{};
+  const totalViews = T.totalViews!=null ? T.totalViews : [T.siteVisits,T.totalCommercialViews,T.loopnetViews,T.crexiViews,T.gaSessions].filter(v=>v!=null).reduce((a,b)=>a+Number(b),0);
+  const totalLeads = T.totalLeads!=null ? T.totalLeads : ((T.activity||[]).filter(a=>a.email).map(a=>a.email.toLowerCase()).filter((v,i,arr)=>arr.indexOf(v)===i).length||'');
+  const since=_mrListingStart(d);
+  y=R.table({startY:y+6, head:[['On Market Since','Asking Price','Total Views','Total Leads']], body:[[since?_mrFmtDate(since):'—', _mrFmtMoney(_mrDealPrice(d))||'Call for details', (totalViews||totalViews===0)?String(totalViews):'—', totalLeads!==''?String(totalLeads):'—']], styles:{font,fontSize:12,textColor:MR_INK,cellPadding:7,halign:'center',lineWidth:0}, headStyles:{fillColor:MR_RED,textColor:[255,255,255],fontStyle:'bold',fontSize:12,halign:'center'}})+24;
+  const sites=MR_SITE_TILES.filter(t=>links[t.key]||['loopnet','crexi','costar'].includes(t.key));
+  const tW=(R.W-2*R.M-20)/2, tH=92; sites.forEach((t,i)=>{ const cx=R.M+(i%2)*(tW+20), cy=y+Math.floor(i/2)*(tH+14); if(cy+tH>R.H-60) return;
+    doc.setDrawColor(226,232,240); doc.setLineWidth(1); doc.setFillColor(255,255,255); doc.roundedRect(cx,cy,tW,tH,4,4,'FD');
+    R.text(t.label.toUpperCase(),cx+14,cy+58,{size:10,bold:true,color:MR_RED}); R.text(t.site,cx+14,cy+74,{size:9,color:[37,99,235]});
+    if(links[t.key]){ R.rrect(cx+tW-96,cy+14,82,22,2,[59,130,246]); R.text('VIEW LISTING',cx+tW-55,cy+29,{size:8,bold:true,color:[255,255,255],align:'center'}); doc.link(cx+tW-96,cy+14,82,22,{url:links[t.key]}); }
+    else if(t.note){ R.text(R.split(t.note,150,7.5),cx+tW-14,cy+24,{size:7.5,color:MR_GREY,align:'right',lh:1.3}); }
+    else { R.text('Listing URL not provided',cx+tW-14,cy+24,{size:7.5,color:MR_GREY,align:'right'}); } });
+  /* ---- 7 · Signage ---- */
+  if(A.sign){ y=R.newPage(); y=R.title('Property Signage',y+30); const maxW=R.W-2*R.M-60, maxH=R.H-60-y-50; const s=Math.min(maxW/A.sign.w,maxH/A.sign.h); const w=A.sign.w*s,h=A.sign.h*s; const x=(R.W-w)/2, yy=y+40; doc.setDrawColor(20,20,20); doc.setLineWidth(3); doc.rect(x,yy,w,h,'S'); R.img(A.sign,x,yy,w,h); }
+  /* ---- 8 · Property notes ---- */
+  y=R.newPage(); y=R.title('Property Notes',y+30);
+  y=R.para('The following is the activity and history logged on the Property since the listing was signed'+(since?' ('+_mrFmtDateLong(since)+')':'')+', newest first.',R.M,y+4,R.W-2*R.M,{size:10.5})+10;
+  if(A.history.length){ y=R.table({startY:y, head:[['Date','Type','By','Note']], body:A.history.map(r=>[r.date, r.type.replace('_',' '), r.by, r.text.length>420?r.text.slice(0,417)+'…':r.text]), columnStyles:{0:{cellWidth:56},1:{cellWidth:56},2:{cellWidth:86}}, styles:{font,fontSize:8.5,textColor:MR_INK,cellPadding:4,lineColor:MR_LINE,lineWidth:{bottom:0.8},overflow:'linebreak'}, contHeading:'Property Notes (cont.)'})+18; }
+  else { y=R.para('No history has been logged on this property yet.',R.M,y,R.W-2*R.M,{size:10.5,color:MR_GREY})+18; }
+  if(A.tasks.length){ if(y>R.H-160){ y=R.newPage()+30; } R.text('Completed Tasks',R.M,y+6,{size:16,bold:true}); y=R.table({startY:y+16, head:[['Completed','Task','Completed by']], body:A.tasks.map(t=>[t.date,t.title,t.by]), columnStyles:{0:{cellWidth:70},2:{cellWidth:110}}, styles:{font,fontSize:8.5,textColor:MR_INK,cellPadding:4,lineColor:MR_LINE,lineWidth:{bottom:0.8}}, contHeading:'Completed Tasks (cont.)'}); }
+  /* ---- 9 · Leads & website activity ---- */
+  const act=T.activity||[];
+  const stats=[['TheDirtDog.com visits',T.siteVisits],['Unique visitors',T.uniqueVisitors],['Docs viewed',T.docsViewed],['CAs signed',T.casSigned],['Google sessions',T.gaSessions],['Total Commercial views',T.totalCommercialViews],['LoopNet views',T.loopnetViews],['Crexi views',T.crexiViews]].filter(s=>s[1]!=null&&s[1]!=='');
+  if(act.length||stats.length){
+    y=R.newPage(); y=R.title('Leads and Website Activity',y+30);
+    y=R.para('The following inquiries are a result of our property’s website traffic and listing-service exposure during '+_mrMonthLabel(A.ym)+'. Each named individual has requested further information.',R.M,y+4,R.W-2*R.M,{size:10.5})+8;
+    if(stats.length){ const bw=(R.W-2*R.M-3*10)/4; stats.slice(0,8).forEach((s,i)=>{ const cx=R.M+(i%4)*(bw+10), cy=y+Math.floor(i/4)*58; R.rect(cx,cy,bw,50,MR_RED); R.text(String(s[1]),cx+10,cy+34,{size:18,bold:true,color:[255,255,255]}); R.text(s[0].toUpperCase(),cx+10,cy+14,{size:6.5,bold:true,color:[255,230,230]}); }); y+=Math.ceil(Math.min(stats.length,8)/4)*58+8; }
+    if(act.length) R.table({startY:y, head:[['Performed At','Performed By','Email','Company','Role','Activity']], body:act.map(a=>[a.at,a.by,a.email,a.company,a.role,a.activity]), styles:{font,fontSize:7,textColor:MR_INK,cellPadding:2.5,lineColor:[203,213,225],lineWidth:0.4,overflow:'linebreak'}, headStyles:{fillColor:[229,231,235],textColor:MR_INK,fontStyle:'bold',fontSize:7.5,lineWidth:0.4,lineColor:[203,213,225]}, alternateRowStyles:{fillColor:[248,250,252]}, columnStyles:{0:{cellWidth:84},1:{cellWidth:74},2:{cellWidth:112},3:{cellWidth:78},4:{cellWidth:54}}, theme:'grid', contHeading:'Leads and Website Activity (cont.)'});
+  }
+  /* ---- 10 · Contact information ---- */
+  y=R.newPage(); R.rect(0,0,R.W,R.H-36,[246,247,244]); y=R.title('Contact Information',y+30);
+  let cy=y+30;
+  A.advisors.slice(0,3).forEach(a=>{ const cx=R.M+30; if(a.head){ let clipped=false; try{ doc.saveGraphicsState(); doc.circle(cx+55,cy+55,55,null); doc.clip(); doc.discardPath(); clipped=true; }catch(e){} R.img(a.head,cx,cy,110,110); if(clipped){ try{ doc.restoreGraphicsState(); }catch(e){} } } else { R.rrect(cx,cy,110,110,55,[220,224,228]); R.text(_mrFirstName(a.name).charAt(0).toUpperCase(),cx+55,cy+70,{size:40,bold:true,color:[255,255,255],align:'center'}); }
+    const tx=cx+150, tw2=R.W-R.M-tx; let ty=cy+30;
+    R.text(a.name.toUpperCase(),tx+tw2/2,ty,{size:16,bold:true,align:'center'}); ty+=22;
+    if(a.designations||a.title){ R.text((a.designations||a.title).toUpperCase(),tx+tw2/2,ty,{size:13,bold:true,align:'center'}); ty+=20; }
+    if(a.phone){ R.text(a.phone.toUpperCase(),tx+tw2/2,ty,{size:13,bold:true,align:'center'}); ty+=20; }
+    if(a.email){ R.text(a.email.toUpperCase(),tx+tw2/2,ty,{size:13,bold:true,align:'center'}); }
+    cy+=150; });
+  cy+=10; R.text('ABOUT ESHENBAUGH LAND COMPANY',R.W/2,cy,{size:15,bold:true,align:'center'}); cy+=22;
+  R.para(A.about,R.M+10,cy,R.W-2*R.M-20,{size:10.5,bold:true,lh:1.5});
+  return doc;
+}
+window._mrPreview=async function(dealId){
+  const deal=(allDeals||[]).find(d=>d.id===dealId); if(!deal) return;
+  const ym=window._mrState.month||_mrPrevMonth();
+  showToast('Building preview…','info',2500);
+  try{ const A=await _mrAssemble(deal,ym); const doc=await _mrBuildPdf(A); const url=doc.output('bloburl'); const w=window.open(url,'_blank'); if(!w) showToast('Pop-up blocked — allow pop-ups for Terra to see the preview','warning',6000); }
+  catch(e){ console.error('[mr] preview',e); showToast('Preview failed: '+e.message,'error',6000); }
+};
+
+/* ---------- send: PDF → Storage → deal attachments → advisor mailbox → history ---------- */
+function _mrFill(tpl, map){ return String(tpl||'').replace(/\{(\w+)\}/g,(m,k)=>map[k]!=null?map[k]:m); }
+function _mrPlainToHtml(txt){ return '<div style="font-family:Helvetica,Arial,sans-serif;font-size:14px;line-height:1.5;color:#111">'+_mrEsc(txt).replace(/\n/g,'<br>')+'</div>'; }
+async function _mrSendDeal(deal, ym, opts){
+  opts=opts||{};
+  const recips=_mrRecipients(deal); if(!recips.length) throw new Error('No recipients on '+_mrDealName(deal));
+  if(!_mrLetterFor(ym)) throw new Error('The '+_mrMonthLabel(ym)+' status update letter hasn’t been written yet.');
+  const advs=_mrAdvisorsOf(deal); const from=advs[0]||{}; if(!/@thedirtdog\.com$/i.test(from.email||'')) throw new Error('Listing advisor on '+_mrDealName(deal)+' has no @thedirtdog.com email to send from.');
+  const A=await _mrAssemble(deal,ym); const doc=await _mrBuildPdf(A);
+  const blob=doc.output('blob'); const b64=_mrB64(await blob.arrayBuffer());
+  const fileName=(_mrMonthLabel(ym)+' Monthly Report - '+_mrDealAddr(deal).split(',')[0]).replace(/[^A-Za-z0-9 _.-]+/g,'')+'.pdf';
+  // 1 · file on the deal
+  const url=await _mrUploadBlob('dealDocs/'+deal.id+'/report_'+ym+'_'+Date.now()+'.pdf', blob,'application/pdf');
+  const existing=(deal.dealAttachments||[]).filter(a=>!(a.monthlyReport===ym));   // a resend replaces the same month's file
+  const updated=[...existing,{name:fileName,url,uploadedAt:Date.now(),uploadedBy:currentUser?.name||currentUser?.email||'',monthlyReport:ym}];
+  await Store.updateDeal(deal.id,{dealAttachments:updated,updatedAt:Date.now()}); deal.dealAttachments=updated;
+  // 2 · email from the advisor's mailbox
+  const cfg=_mrCfg(); const names=recips.map(r=>_mrFirstName(r.name)).filter(Boolean);
+  const map={names:names.length?names.join(names.length===2?' and ':', ').replace(/, ([^,]*)$/,' and $1'):'Property Owner', month:_mrMonthLabel(ym), property:_mrDealName(deal), address:_mrDealAddr(deal), advisorName:from.name||'', advisorDesignations:from.designations||'', advisorPhone:from.phone||'', advisorEmail:from.email||''};
+  const subject=_mrFill(cfg.emailSubject||MR_DEFAULT_EMAIL_SUBJECT,map); const text=_mrFill(cfg.emailBody||MR_DEFAULT_EMAIL_BODY,map).replace(/\n{3,}/g,'\n\n');
+  const cc=[...new Set([...advs.map(a=>a.email), ...String(cfg.alwaysCc||'').split(/[,;\s]+/)].map(e=>(e||'').trim().toLowerCase()).filter(e=>/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)))];
+  const res=await _mrWorkerPost('/send',{ from:from.email, fromName:from.name||'', to:recips.map(r=>r.email), cc, subject, text, html:_mrPlainToHtml(text), attachments:[{name:fileName,type:'application/pdf',b64}] });
+  // 3 · record + history
+  const sentRec={status:'sent', sentAt:Date.now(), sentBy:currentUser?.uid||'', sentByName:currentUser?.name||'', sentTo:recips.map(r=>r.email), sentFrom:from.email, pdfUrl:url, pdfName:fileName, gmailId:res.id||'', gmailThreadId:res.threadId||''};
+  await _mrSaveReport(deal.id, ym, sentRec);
+  try{ await window._dealLogActivity(deal.id,'email',{ body:'📬 '+_mrMonthLabel(ym)+' monthly owner report sent to '+recips.map(r=>r.name?(r.name+' <'+r.email+'>'):r.email).join(', ')+' from '+from.email+' — PDF filed under Attachments.', gmailId:res.id||('mr_'+deal.id+'_'+ym+'_'+Date.now()), gmailThreadId:res.threadId||'', gmailSubject:subject, gmailFrom:from.email, gmailDate:new Date().toISOString(), source:'monthly-report', autoLogged:true }); }catch(e){ console.warn('[mr] history log',e); }
+  return sentRec;
+}
+window._mrSendOne=async function(dealId){
+  const deal=(allDeals||[]).find(d=>d.id===dealId); if(!deal) return;
+  const ym=window._mrState.month||_mrPrevMonth(); const recips=_mrRecipients(deal);
+  if(!recips.length){ showToast('Add recipients first (✏️ Edit)','warning'); return; }
+  if(!_mrLetterFor(ym)){ showToast('Write the '+_mrMonthLabel(ym)+' letter first','warning'); return; }
+  const from=_mrAdvisorsOf(deal)[0]||{};
+  const ok=await elcConfirm('Send the '+_mrMonthLabel(ym)+' report for '+_mrDealName(deal)+' to:\n\n'+recips.map(r=>'• '+(r.name?r.name+' — ':'')+r.email).join('\n')+'\n\nFrom: '+(from.email||'?')+' (advisor is Cc’d)',{title:'Send monthly report',okLabel:'Send now'});
+  if(!ok) return;
+  showToast('Building and sending…','info',4000);
+  try{ await _mrSendDeal(deal,ym); showToast('Sent ✓ '+_mrDealName(deal),'success'); if(window._mrState.editor&&window._mrState.editor.dealId===dealId) window._mrCloseEditor(); if(currentView==='monthlyReports') window._mrRenderRows(); }
+  catch(e){ console.error('[mr] send',e); showToast('Send failed: '+e.message,'error',8000); }
+};
+window._mrSendSelected=async function(){
+  const st=window._mrState; const ym=st.month||_mrPrevMonth();
+  const deals=_mrActiveDeals().filter(d=>st.selected[d.id]&&_mrRecipients(d).length);
+  if(!deals.length){ showToast('Select at least one listing with recipients','warning'); return; }
+  if(!_mrLetterFor(ym)){ showToast('Write the '+_mrMonthLabel(ym)+' letter first','warning'); return; }
+  const already=deals.filter(d=>(st.reports[d.id+'|'+ym]||{}).status==='sent');
+  const ok=await elcConfirm('Send '+deals.length+' '+_mrMonthLabel(ym)+' report'+(deals.length===1?'':'s')+' now?'+(already.length?('\n\n'+already.length+' of these were already sent this month and will be re-sent.'):'')+'\n\nEach goes from its listing advisor’s mailbox to the owners picked on that listing.',{title:'Send selected reports',okLabel:'Send '+deals.length});
+  if(!ok) return;
+  if(st.sending) return; st.sending=true;
+  const ov=document.createElement('div'); ov.className='mr-ov fixed inset-0 flex items-center justify-center'; ov.id='mr-bulk-ov';
+  ov.innerHTML=`<div class="mr-modal" style="width:min(520px,100%)" role="dialog" aria-label="Sending reports"><div class="mr-modal-h"><h2>📤 Sending reports</h2></div><div class="mr-modal-b"><div class="mr-prog"><div id="mr-bulk-bar" style="width:0%"></div></div><div id="mr-bulk-log" class="mr-note" style="max-height:300px;overflow:auto;white-space:pre-wrap"></div></div><div class="mr-modal-f"><span style="flex:1"></span><button class="mr-btn" id="mr-bulk-close" disabled onclick="document.getElementById('mr-bulk-ov').remove()">Close</button></div></div>`;
+  document.body.appendChild(ov);
+  const log=document.getElementById('mr-bulk-log'), bar=document.getElementById('mr-bulk-bar');
+  let okN=0, failN=0;
+  for(let i=0;i<deals.length;i++){ const d=deals[i];
+    log.textContent+=(i+1)+'/'+deals.length+' '+_mrDealName(d)+' … '; log.scrollTop=log.scrollHeight;
+    try{ await _mrSendDeal(d,ym); okN++; log.textContent+='sent ✓\n'; st.selected[d.id]=false; }
+    catch(e){ failN++; log.textContent+='FAILED — '+e.message+'\n'; console.error('[mr] bulk',d.id,e); }
+    bar.style.width=Math.round((i+1)/deals.length*100)+'%';
+  }
+  st.sending=false; document.getElementById('mr-bulk-close').disabled=false;
+  log.textContent+='\nDone: '+okN+' sent'+(failN?', '+failN+' failed (fix and resend individually)':'')+'.';
+  showToast(okN+' report'+(okN===1?'':'s')+' sent'+(failN?' · '+failN+' failed':''), failN?'warning':'success',6000);
+  if(currentView==='monthlyReports') window._mrRenderRows();
+};
+/* ===== MREPORT_BLOCK_END ===== */
 
 </script>
 
