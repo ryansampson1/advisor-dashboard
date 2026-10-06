@@ -2287,6 +2287,7 @@ const APP_CONFIG = {
   agreements: { pdfProxyUrl: '' },
   // 📬 Monthly Owner Reports (MREPORT-20261006). access: 'owner' | 'admins' | 'all' — overridden from eos/settings.monthlyReports
   monthlyReports: { access: 'owner', workerUrl: 'https://elc-report-worker.dirtdog.workers.dev' },
+  social: { workerUrl: 'https://elc-social-worker.dirtdog.workers.dev', defaultLink: 'https://www.thedirtdog.com' },   // SOCIAL-20261006-hooks
   firebase: {
     apiKey:            "AIzaSyC1cKWQnk4TeH3EMeX-sF4RejGPYL9xyYw",
     authDomain:        "eshenbaugh-dashboard.firebaseapp.com",
@@ -8896,6 +8897,7 @@ const FB = {
           // Load admin/superAdmin email lists from Firestore so they're never exposed in source code
           if(Array.isArray(payload.adminEmails))      APP_CONFIG.adminEmails      = Array.from(new Set([...(APP_CONFIG.adminEmails||[]), ...payload.adminEmails]));
           if(Array.isArray(payload.superAdminEmails)) APP_CONFIG.superAdminEmails = Array.from(new Set([...(APP_CONFIG.superAdminEmails||[]), ...payload.superAdminEmails]));
+          if(payload.social && typeof payload.social==='object') APP_CONFIG.social={...(APP_CONFIG.social||{}), ...payload.social};   // SOCIAL-20261006
           if(payload.monthlyReports && typeof payload.monthlyReports==='object'){ const _mrPrev=(APP_CONFIG.monthlyReports||{}).access; APP_CONFIG.monthlyReports={...(APP_CONFIG.monthlyReports||{}), ...payload.monthlyReports}; if(_mrPrev!==APP_CONFIG.monthlyReports.access && currentUser && typeof renderShell==='function'){ try{ renderShell(); renderCurrentView(); }catch(_){} } } // MREPORT-20261006
           eosCache[docId] = payload.data;
         } else {
@@ -18234,6 +18236,7 @@ window.openPropertyDetail = (dealId) => {
     <div class="prop-section">
       <div class="prop-section-title">Marketing</div>
       <div id="pdw-listing-block">${window._lsModalBlock ? window._lsModalBlock(deal) : ''}</div>
+      <div id="pdw-social-block" style="margin-top:.5rem">${window._spMarketingBlock ? window._spMarketingBlock(deal) : ''}</div>
     </div>
     <!-- Attachments -->
     <div class="prop-section">
@@ -24675,7 +24678,8 @@ function viewTasks(){
   return `<span id="${pid}" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${esc(t.description)}</span>
   <button onclick="var e=document.getElementById('${pid}');var exp=e.dataset.exp;e.style.cssText=exp?'display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden':'';e.dataset.exp=exp?'':'1';this.textContent=exp?'\u25bc Read more':'\u25b2 Less';" class="text-blue-500 text-xs hover:underline font-medium mt-0.5">&#9660; Read more</button>`;
 })()}</div>`:''}
-        ${(t.invoiceDealId||t.gmailUrl||t.attachmentUrl||t.approvePaymentDealId)?`<div class="flex gap-2 mt-2 flex-wrap">
+        ${(t.invoiceDealId||t.gmailUrl||t.attachmentUrl||t.approvePaymentDealId||(window._spIsSocialTask&&window._spIsSocialTask(t)))?`<div class="flex gap-2 mt-2 flex-wrap">
+          ${(window._spIsSocialTask&&window._spIsSocialTask(t))?`<button onclick="window._spOpen('${t.dealId}','${t.id}')" class="text-xs font-semibold px-2.5 py-1 rounded-lg text-white" style="background:#0A66C2">📣 Compose post</button>`:''}
           ${t.invoiceDealId?`<button onclick="openCommissionInvoice('${t.invoiceDealId}')" class="text-xs font-semibold px-2.5 py-1 rounded-lg text-white" style="background:#1a1a1a">📄 Download Invoice (Word)</button>`:''}
           ${t.gmailUrl?`<a href="${t.gmailUrl}" target="_blank" class="text-xs font-semibold px-2.5 py-1 rounded-lg text-white inline-block" style="background:#DA291C">📧 Open Email Draft</a>`:''}
           ${t.attachmentUrl?`<a href="${t.attachmentUrl}" target="_blank" class="text-xs font-semibold px-2.5 py-1 rounded-lg text-white inline-block" style="background:#2563EB">📎 ${(t.attachmentName||'Download').replace(/[<>]/g,'')}</a>`:''}
@@ -30924,6 +30928,7 @@ window._taRenderDealTasks = function(dealId){
       <input type="checkbox" ${done?'checked':''} onchange="window.toggleTask('${t.id}', this.checked?'complete':'pending')" style="margin-top:.15rem;cursor:pointer;flex-shrink:0"/>
       <div style="flex:1;min-width:0">
         <div onclick="window.openTaskModal('${t.id}','${dealId}')" title="Edit task" style="font-size:.82rem;line-height:1.3;cursor:pointer;color:${done?'#9ca3af':'#111827'};${done?'text-decoration:line-through':''}">${esc(t.title)}</div>
+        ${(window._spIsSocialTask&&window._spIsSocialTask(t))?`<button class="prop-note-btn" style="margin-top:.25rem;font-size:.7rem" onclick="window._spOpen('${dealId}','${t.id}')">📣 Compose post</button>`:''}
         <div style="font-size:.7rem;color:#6b7280;margin-top:.15rem;display:flex;gap:.6rem;flex-wrap:wrap">
           ${t.assignedToName?`<span>👤 ${esc(t.assignedToName)}</span>`:''}
           ${t.dueDate?`<span style="color:${overdue?'#dc2626':'#6b7280'}">📅 ${fmt(t.dueDate)}${overdue?' · overdue':''}</span>`:''}
@@ -45140,6 +45145,12 @@ window._mrOpenSettings=function(){
         <div style="margin-top:.6rem"><label class="mr-lbl" for="mr-s-subj">Email subject</label><input id="mr-s-subj" class="mr-input" style="width:100%" value="${_mrEsc(c.emailSubject||MR_DEFAULT_EMAIL_SUBJECT)}"></div>
         <div style="margin-top:.6rem"><label class="mr-lbl" for="mr-s-body">Email body</label><textarea id="mr-s-body" class="mr-textarea" style="min-height:170px">${_mrEsc(c.emailBody||MR_DEFAULT_EMAIL_BODY)}</textarea><div class="mr-note">Tokens: {names} {month} {property} {address} {advisorName} {advisorDesignations} {advisorPhone} {advisorEmail}</div></div>
       </div>
+      <div class="mr-sec"><h3>📣 Social posting</h3>
+        <div class="mr-grid2">
+          <div><label class="mr-lbl" for="mr-s-social-worker">Social worker URL</label><input id="mr-s-social-worker" class="mr-input" style="width:100%" value="${_mrEsc((APP_CONFIG.social||{}).workerUrl||'')}" placeholder="https://elc-social-worker.dirtdog.workers.dev"><div class="mr-note">Holds the Facebook Page / LinkedIn tokens. Deploy with <code>elc-social-worker/deploy-social-worker.command</code>.</div></div>
+          <div><label class="mr-lbl" for="mr-s-social-link">Default link in posts</label><input id="mr-s-social-link" class="mr-input" style="width:100%" value="${_mrEsc((APP_CONFIG.social||{}).defaultLink||'https://www.thedirtdog.com')}"><div class="mr-note">Used when a listing has no listing website yet.</div></div>
+        </div>
+      </div>
       <div class="mr-sec"><h3>Report branding</h3>
         <div class="mr-grid2">
           <div><label class="mr-lbl" for="mr-s-addr">Office address (cover page)</label><input id="mr-s-addr" class="mr-input" style="width:100%" value="${_mrEsc(c.firmAddress||'304 S. Willow Ave, Tampa, FL 33606')}"></div>
@@ -45188,6 +45199,7 @@ window._mrSaveSettingsClick=async function(btn){
     const patch={ workerUrl:v('mr-s-worker').replace(/\/+$/,''), alwaysCc:v('mr-s-cc'), emailSubject:v('mr-s-subj')||MR_DEFAULT_EMAIL_SUBJECT, emailBody:v('mr-s-body')||MR_DEFAULT_EMAIL_BODY, firmAddress:v('mr-s-addr'), firmWebsite:v('mr-s-web'), about:v('mr-s-about')||MR_DEFAULT_ABOUT, letterSignature:v('mr-s-sig') };
     const acc=document.querySelector('input[name="mr-access"]:checked'); if(acc) patch.access=acc.value;
     await _mrSaveSettings(patch);
+    { const {doc,setDoc}=_fbFns; const social={...(APP_CONFIG.social||{}), workerUrl:v('mr-s-social-worker').replace(/\/+$/,''), defaultLink:v('mr-s-social-link')||'https://www.thedirtdog.com'}; await setDoc(doc(_fbDb,'eos','settings'),{social},{merge:true}); APP_CONFIG.social=social; window._spStatusCache=null; }
     // advisor cards
     const {doc,setDoc}=_fbFns;
     const rows=[...document.querySelectorAll('#mr-adv-cards tr[data-uid]')];
@@ -45265,9 +45277,10 @@ window._mrOpenEditor=async function(dealId){
       </div>
       <div class="mr-sec"><h3>5 · Social media</h3>
         <div class="mr-grid2">
-          <div><span class="mr-lbl">Facebook</span>${_mrRowsTable('mr-fb',MR_FB_COLS,rep.facebook||[],'Add post')}</div>
-          <div><span class="mr-lbl">LinkedIn</span>${_mrRowsTable('mr-li',MR_LI_COLS,rep.linkedin||[],'Add post')}</div>
+          <div><span class="mr-lbl">Facebook</span><div id="mr-fb-wrap">${_mrRowsTable('mr-fb',MR_FB_COLS,rep.facebook||[],'Add post')}</div></div>
+          <div><span class="mr-lbl">LinkedIn</span><div id="mr-li-wrap">${_mrRowsTable('mr-li',MR_LI_COLS,rep.linkedin||[],'Add post')}</div></div>
         </div>
+        <div class="mr-row" style="margin-top:.6rem"><button class="mr-btn mr-btn-sm mr-btn-teal" onclick="window._mrPullSocial(this)">⬇ Pull this month’s posts from Terra</button><span class="mr-note">Photos and reach/clicks from posts made with 📣 Post to social.</span></div>
         <div style="margin-top:.7rem"><span class="mr-lbl">Post photos (printed on the Social Media page)</span>
           <div id="mr-social-photos" class="mr-row" style="gap:.5rem">${_mrSocialThumbsHtml()}</div>
           <label class="mr-btn mr-btn-sm" style="cursor:pointer;margin-top:.4rem">🖼 Add post photo(s)<input type="file" accept="image/*" multiple style="display:none" onchange="window._mrUploadSocial(this)"></label>
