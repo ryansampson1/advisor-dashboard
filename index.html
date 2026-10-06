@@ -34844,59 +34844,103 @@ function viewEOS(sub='rocks'){
           + goalCell(qv, qg, qSub, '')
           + '</tr>';
       };
+      // ── PROFITSGA2-20261006: expenses + commissions synced from Gusto + Ramp ──
+      // eos/adminL10Fin is written by admin_fin_sync.js (Claude's Monday sync).
+      // A number typed into the Expenses row is a manual override for that week;
+      // clearing it falls back to the synced figure.
+      const fin  = _al10FinMap();
+      const finW = k => (fin.weeks||{})[k] || null;
+      const _own = (o,k) => Object.prototype.hasOwnProperty.call(o,k);
+      const expOf = k => {
+        const f = finW(k);
+        if(_own(exp,k)) return {v:Number(exp[k])||0, has:true, src:'manual', f};
+        if(f && f.expenses!=null) return {v:Number(f.expenses)||0, has:true, src:'synced', f};
+        return {v:0, has:false, src:'', f};
+      };
+      const finTip = (title, f) => !f ? '' : window._scTipHtml(title, [
+        'Gusto payroll (W-2, incl. employer taxes) — '+fmt$(f.payroll||0),
+        'Gusto contractors, non-advisor — '+fmt$(f.contractorsOther||0),
+        'Ramp spend (cards, bills, reimbursements) — '+fmt$(f.ramp||0),
+        '<b>Expenses — '+fmt$(f.expenses||0)+'</b>',
+        'Advisor commissions paid (Gusto) — '+fmt$(f.commissions||0),
+        'Synced '+(f.syncedAt?new Date(f.syncedAt).toLocaleDateString('en-US',{month:'short',day:'numeric'}):'')]);
       const expCell = w => {
-        const has = Object.prototype.hasOwnProperty.call(exp, w.key);
-        const val = has ? exp[w.key] : '';
-        return '<td class="p-1.5 align-top">'
+        const e = expOf(w.key);
+        const tipHtml = finTip('Expenses · '+wkHdr(w), e.f);
+        const srcLine = e.src==='manual'
+          ? 'typed in'+(e.f&&e.f.expenses!=null?' · synced '+fmtM$(e.f.expenses):'')
+          : e.src==='synced' ? 'Gusto + Ramp' : '';
+        return '<td class="p-1.5 align-top"'+(tipHtml?' tabindex="0" data-sctip="'+tipHtml+'"':'')+'>'
           + (canEdit
             ? '<input type="text" inputmode="decimal" aria-label="Expenses for week of '+wkHdr(w)+'" placeholder="$ —"'
-              + ' value="'+(has?Number(val).toLocaleString('en-US'):'')+'"'
+              + ' value="'+(e.has?Number(e.v).toLocaleString('en-US',{maximumFractionDigits:0}):'')+'"'
               + ' onchange="al10SetExpense(\''+w.key+'\', this.value)" onkeydown="if(event.key===\'Enter\')this.blur()"'
               + ' class="w-full border rounded-lg px-2 py-1.5 text-sm text-center font-semibold text-gray-800 outline-none focus:border-gray-500 bg-white" style="min-width:84px"/>'
-            : '<div class="rounded-lg border px-2 py-1.5 text-center text-sm font-bold text-gray-800">'+(has?fmtM$(val):'—')+'</div>')
+            : '<div class="rounded-lg border px-2 py-1.5 text-center text-sm font-bold text-gray-800">'+(e.has?fmtM$(e.v):'—')+'</div>')
+          + (srcLine?'<div class="text-gray-500 text-center mt-0.5" style="font-size:10.5px;line-height:1.2">'+srcLine+'</div>':'')
           + '</td>';
       };
-      const qExpKeys = Q.keys.filter(k=>Object.prototype.hasOwnProperty.call(exp,k));
-      const qExp = qExpKeys.reduce((s,k)=>s+(Number(exp[k])||0),0);
+      const qExpKeys = Q.keys.filter(k=>expOf(k).has);
+      const qExp = qExpKeys.reduce((s,k)=>s+expOf(k).v,0);
       const expRow = '<tr class="border-t border-gray-100">'
         + '<th scope="row" class="py-2 pr-2 text-left align-top" style="min-width:132px"><div class="text-sm font-semibold text-gray-800">🧾 Expenses</div>'
-        + '<div class="text-xs text-gray-500">Company total · admins only</div>'
+        + '<div class="text-xs text-gray-500">Gusto payroll + Ramp · company total · admins only</div>'
         +'</th>'
         + SC.weeks.map(expCell).join('')
         + '<td class="p-1.5 align-top"><div class="rounded-lg border px-2 py-1.5 text-center">'
         + '<div class="text-sm font-bold text-gray-800" title="'+fmt$(qExp)+'">'+fmtM$(qExp)+'</div>'
-        + '<div class="text-gray-500" style="font-size:10.5px;line-height:1.2">total · '+qExpKeys.length+' of '+Q.n+' wks entered</div>'
+        + '<div class="text-gray-500" style="font-size:10.5px;line-height:1.2">total · '+qExpKeys.length+' of '+Q.n+' wks in</div>'
         + '</div></td></tr>';
-      // ── PROFITSGA-20261006: Profit = revenue − advisor commissions − expenses ──
+      // ── Profit = revenue received − commissions paid − expenses (PROFITSGA-20261006) ──
+      // Commissions: what Gusto actually paid advisors that week. Weeks with no
+      // Gusto sync fall back to the Pay-tab ladder estimate on that week's revenue.
       const sMoney = n => (n<0?'−':'')+fmtM$(Math.abs(n));
       const sMoneyF = n => (n<0?'−':'')+fmt$(Math.abs(n));
-      const profitCell = (rev, net, expV, expHas, sub, items) => {
-        const comm = Math.max(0, rev - net);
-        const p = net - (expHas ? expV : 0);
+      const commOf = w => {
+        const f = finW(w.key);
+        if(f && f.commissions!=null) return {v:Number(f.commissions)||0, src:'gusto', f};
+        return {v:Math.max(0, w.revenue.v - w.net.v), src:'est', f};
+      };
+      const profitCell = (rev, comm, commSrc, expV, expHas, sub, items, f) => {
+        const p = rev - comm - (expHas ? expV : 0);
         const margin = rev>0 ? Math.round(p/rev*100) : null;
-        const tone = !expHas ? 'neutral' : (p>=0 ? 'pos' : 'neg');
+        // GOALS-20261006: green when net margin meets the benchmark, red below it.
+        const tone = !expHas || rev<=0 ? (expHas && p<0 ? 'neg' : 'neutral') : (margin >= ADMIN_L10_GOALS.netMargin ? 'pos' : 'neg');
         const box = tone==='pos' ? 'bg-green-50 border-green-200' : tone==='neg' ? 'bg-red-50 border-red-200' : 'bg-gray-50 border-gray-200';
         const txt = tone==='pos' ? 'text-green-800' : tone==='neg' ? 'text-red-800' : 'text-gray-800';
-        const lines = ['Revenue received — '+fmt$(rev), 'Less commissions to advisors — '+fmt$(comm),
+        const commLbl = commSrc==='gusto' ? 'Less commissions paid (Gusto)' : commSrc==='mixed' ? 'Less commissions (Gusto where synced, else estimated)' : 'Less commissions (estimated — Pay-tab split on this revenue)';
+        const lines = ['Revenue received — '+fmt$(rev), commLbl+' — '+fmt$(comm),
           'Less expenses — '+(expHas ? fmt$(expV) : 'not entered'), '<b>Profit — '+sMoneyF(p)+'</b>'];
-        (items||[]).slice().sort((a,b)=>b.gross-a.gross).forEach(i=>lines.push(esc(i.name)+' — '+fmt$(i.gross)+' in, '+fmt$(i.gross-i.v)+' to advisors'));
+        if(f && f.detail && Array.isArray(f.detail.advisors)) f.detail.advisors.forEach(a=>lines.push(esc(a.name)+' — '+fmt$(a.amount)+' paid'));
+        else (items||[]).slice().sort((a,b)=>b.gross-a.gross).forEach(i=>lines.push(esc(i.name)+' — '+fmt$(i.gross)+' in, ~'+fmt$(i.gross-i.v)+' to advisors'));
         const tipHtml = window._scTipHtml('Profit', lines);
+        const tag = commSrc==='est' ? ' · est. comm.' : '';
         return '<td class="p-1.5 align-top"><div class="rounded-lg border px-2 py-1.5 text-center '+box+'" tabindex="0" data-sctip="'+tipHtml+'" style="cursor:help">'
           + '<div class="text-sm font-bold '+txt+'" title="'+sMoneyF(p)+'">'+sMoney(p)+'</div>'
-          + '<div class="text-xs font-semibold '+txt+'">'+(margin===null ? '—' : margin+'% margin')+'</div>'
-          + '<div class="text-gray-500" style="font-size:10.5px;line-height:1.2">'+(expHas ? (sub||'') : 'before expenses — none entered')+'</div>'
+          + '<div class="text-xs font-semibold '+txt+'">'+(margin===null ? '—' : (tone==='pos'?'▲ ':tone==='neg'?'▼ ':'')+margin+'% margin')+'</div>'
+          + '<div class="text-gray-500" style="font-size:10.5px;line-height:1.2">'+(expHas ? (sub||'')+tag : 'before expenses — none in')+'</div>'
           + '</div></td>';
       };
-      const qProfitExpHas = qExpKeys.length>0;
-      const profitRow = '<tr class="border-t border-gray-100">'
+      const qWk = Q.wk || [];
+      const qComm = qWk.reduce((s,w)=>s+commOf(w).v, 0);
+      const qCommSrcs = new Set(qWk.map(w=>commOf(w).src));
+      const qCommSrc = qCommSrcs.size>1 ? 'mixed' : (qCommSrcs.values().next().value||'est');
+      const profitRow = l10Office!=='both'
+        ? '<tr class="border-t border-gray-100">'
+          + '<th scope="row" class="py-2 pr-2 text-left align-top" style="min-width:132px"><div class="text-sm font-semibold text-gray-800">📈 Profit</div>'
+          + '<div class="text-xs text-gray-500">admins only</div></th>'
+          + '<td colspan="'+(SC.weeks.length+1)+'" class="p-1.5 align-top"><div class="rounded-lg border px-2 py-1.5 text-center text-xs text-gray-600 bg-gray-50 border-gray-200">'
+          + 'Profit is company-wide (payroll, commissions and expenses aren\'t split by office). '
+          + '<button type="button" onclick="setL10Office(\'both\')" class="text-blue-600 hover:underline font-semibold">Show both offices</button></div></td></tr>'
+        : '<tr class="border-t border-gray-100">'
         + '<th scope="row" class="py-2 pr-2 text-left align-top" style="min-width:132px"><div class="text-sm font-semibold text-gray-800">📈 Profit</div>'
-        + '<div class="text-xs text-gray-500">Revenue − commissions − expenses · admins only</div></th>'
+        + '<div class="text-xs text-gray-500">Goal ≥ '+ADMIN_L10_GOALS.netMargin+'% net margin · revenue − commissions paid − expenses · admins only</div></th>'
         + SC.weeks.map((w,i)=>{
-            const has = Object.prototype.hasOwnProperty.call(exp, w.key);
-            return profitCell(w.revenue.v, w.net.v, has?Number(exp[w.key])||0:0, has, i===0?'prior week':'', w.net.items);
+            const e = expOf(w.key), c = commOf(w);
+            return profitCell(w.revenue.v, c.v, c.src, e.v, e.has, i===0?'prior week':'', w.net.items, c.f);
           }).join('')
-        + profitCell(Q.revenue, Q.net, qExp, qProfitExpHas,
-            'total · expenses for '+qExpKeys.length+' of '+Q.n+' wks', [])
+        + profitCell(Q.revenue, qComm, qCommSrc, qExp, qExpKeys.length>0,
+            'total · '+qExpKeys.length+' of '+Q.n+' wks in', [], null)
         + '</tr>';
       // ── SG&A % — prior calendar month, from QuickBooks ──
       const sga = _al10SgaMap();
@@ -34917,8 +34961,10 @@ function viewEOS(sub='rocks'){
         + '<button type="button" onclick="al10SetSga(\''+sgaMonth+'\')" class="px-3 py-1.5 rounded-lg text-sm font-semibold text-white" style="background:var(--brand-black)">Save</button>'
         + (sCur?'<button type="button" onclick="al10ToggleSgaEdit()" class="px-2 py-1.5 text-xs font-semibold text-gray-600 hover:underline">Cancel</button>':'')
         + '</div><p class="text-gray-500 mt-1" style="font-size:10.5px">From the QuickBooks P&amp;L: operating expenses excluding advisor commissions, and total income.</p>';
+      const sgaHit = sCur ? sCur.pct <= ADMIN_L10_GOALS.sgaPct : null;   // GOALS-20261006
+      const sgaBox = p => p===null ? 'bg-gray-50 border-gray-200' : (p <= ADMIN_L10_GOALS.sgaPct ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200');
       const sgaMain = sCur
-        ? '<div class="text-sm font-bold text-gray-800">'+sCur.pct.toFixed(1)+'% of revenue'
+        ? '<div class="text-sm font-bold '+(sgaHit?'text-green-800':'text-red-800')+'">'+(sgaHit?'▲ ':'▼ ')+sCur.pct.toFixed(1)+'% of revenue'
           + (sPrev ? ' <span class="text-xs font-semibold '+(sCur.pct<=sPrev.pct?'text-green-700':'text-red-700')+'">'+(sCur.pct<=sPrev.pct?'▼ ':'▲ ')+Math.abs(sCur.pct-sPrev.pct).toFixed(1)+' pts vs '+_al10MonthLbl(sgaPrevM).split(' ')[0]+'</span>' : '')+'</div>'
           + '<div class="text-gray-500" style="font-size:10.5px;line-height:1.3">'+_al10MonthLbl(sgaMonth, true)+' · SG&amp;A '+fmt$(sCur.sga)+' ÷ revenue '+fmt$(sCur.revenue)
           + ' · '+srcLbl(sCur)+(sCur.at?' '+new Date(sCur.at).toLocaleDateString('en-US',{month:'short',day:'numeric'}):'')
@@ -34927,9 +34973,9 @@ function viewEOS(sub='rocks'){
         : '<div class="text-sm font-semibold text-gray-700">'+_al10MonthLbl(sgaMonth, true)+' not entered yet</div>' + sgaForm();
       const sgaRow = '<tr class="border-t border-gray-100">'
         + '<th scope="row" class="py-2 pr-2 text-left align-top" style="min-width:132px"><div class="text-sm font-semibold text-gray-800">🏢 SG&amp;A</div>'
-        + '<div class="text-xs text-gray-500">% of revenue · prior month · QuickBooks · admins only</div></th>'
-        + '<td colspan="'+SC.weeks.length+'" class="p-1.5 align-top"><div class="rounded-lg border px-2 py-1.5 text-center bg-gray-50 border-gray-200">'+sgaMain+'</div></td>'
-        + '<td class="p-1.5 align-top"><div class="rounded-lg border px-2 py-1.5 text-center bg-gray-50 border-gray-200">'
+        + '<div class="text-xs text-gray-500">Goal ≤ '+ADMIN_L10_GOALS.sgaPct+'% of revenue · prior month · QuickBooks · admins only</div></th>'
+        + '<td colspan="'+SC.weeks.length+'" class="p-1.5 align-top"><div class="rounded-lg border px-2 py-1.5 text-center '+sgaBox(sCur?sCur.pct:null)+'">'+sgaMain+'</div></td>'
+        + '<td class="p-1.5 align-top"><div class="rounded-lg border px-2 py-1.5 text-center '+sgaBox(t3Pct)+'">'
         + '<div class="text-sm font-bold text-gray-800">'+(t3Pct===null?'—':t3Pct.toFixed(1)+'%')+'</div>'
         + '<div class="text-gray-500" style="font-size:10.5px;line-height:1.2">trailing 3 mo · '+t3.length+' of 3 months entered</div>'
         + '</div></td></tr>';
@@ -34950,7 +34996,7 @@ function viewEOS(sub='rocks'){
         + 'Listings: list price, dated by listing effective date (else the day it moved to Listing). '
         + 'Revenue: gross commission to ELC on Sold deals by close date + logged non-deal payments. '
         + 'Contracts: purchase/contract price, dated by effective date (else the day it went under contract).'
-        + (canEdit ? ' Profit: revenue received less the advisor payouts on that revenue (the same split-ladder numbers as the Pay tab, incl. co-advisor and mentor shares) less that week\'s expenses; grey until expenses are entered. '
+        + (canEdit ? ' Expenses: Gusto W-2 payroll (incl. employer taxes) + non-advisor Gusto contractors + Ramp spend, by payment date, synced Mondays; a typed number overrides that week. Profit: revenue received less advisor commissions Gusto paid that week (weeks not yet synced use the Pay-tab split estimate, marked est.) less expenses; grey until expenses are in. '
           + 'SG&amp;A: the prior calendar month\'s QuickBooks operating expenses (excluding advisor commissions) as a % of QuickBooks total income; company-wide, not office-filtered.' : '')
         + '</p>';
 
@@ -36547,7 +36593,11 @@ window.removeVacation = async id => {
      contracts → _itrContractTs (effectiveDate → contractEnteredAt → history).
      revenue   → Sold deals by closeDate × getEffectiveRevenue (= Financials "Closed")
                  + otherRevenue rows by dateReceived.                              */
-const ADMIN_L10_GOALS = { listings:10000000, revenue:250000, contracts:14000000 };
+const ADMIN_L10_GOALS = { listings:10000000, revenue:250000, contracts:14000000,
+  // GOALS-20261006 (Ryan): market benchmarks for a commission-split CRE brokerage
+  // (Marcus & Millichap: 2021 SG&A 19.7% / net 11.0%; 2020 28.5% / 6.0%).
+  netMargin:10,   // Profit ÷ revenue — green at or above
+  sgaPct:25 };    // SG&A ÷ revenue — green at or below
 function _al10Monday(ms){
   const d = new Date(ms); const dow = d.getDay();
   d.setDate(d.getDate() - (dow===0 ? 6 : dow-1)); d.setHours(0,0,0,0);
@@ -36616,7 +36666,7 @@ function _al10Scorecard(deals, misc, nowMs){
   }
   const sum = k => qWeeks.reduce((s,w)=>s+w[k].v, 0);
   return { thisMon, pw, weeks,
-    quarter:{ label:'Q'+(qIdx+1)+' '+pd.getFullYear(), n:qWeeks.length, keys:qWeeks.map(w=>w.key),
+    quarter:{ label:'Q'+(qIdx+1)+' '+pd.getFullYear(), n:qWeeks.length, keys:qWeeks.map(w=>w.key), wk:qWeeks,
       listings:sum('listings'), contracts:sum('contracts'), revenue:sum('revenue'), net:sum('net') } };
 }
 window._al10Monday = _al10Monday; window._al10Week = _al10Week;
@@ -36648,10 +36698,17 @@ const _AL10_EXP_KEY  = 'adminL10Expenses';   // eos/adminL10Expenses — shown t
    SG&A % = sga / revenue. Filled from QuickBooks (via Claude's QuickBooks connector) or typed
    in by an admin. Admin-only in the UI, same as expenses. */
 const _AL10_SGA_KEY  = 'adminL10Sga';
+function _al10FinMap(){            // PROFITSGA2-20261006 — eos/adminL10Fin (Gusto/Ramp/QuickBooks sync)
+  if(!_al10IsAdminUser()) return {};
+  return eosGet('adminL10Fin', {}) || {};
+}
 function _al10SgaMap(){
   if(!_al10IsAdminUser()) return {};
-  return eosGet(_AL10_SGA_KEY, {}) || {};
+  const synced = {};
+  Object.entries((_al10FinMap().months)||{}).forEach(([k,r])=>{ if(r && Number(r.revenue)>0) synced[k] = {...r, source:r.source||'quickbooks', at:r.syncedAt||r.at}; });
+  return {...synced, ...(eosGet(_AL10_SGA_KEY, {}) || {})};   // a hand-typed month overrides the sync
 }
+window._al10FinMap = _al10FinMap;
 function _al10MonthKey(ms){ const d=new Date(ms); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); }
 function _al10PrevMonthKey(key, back){
   const [y,m] = String(key).split('-').map(Number);
