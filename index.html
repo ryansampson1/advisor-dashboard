@@ -45280,8 +45280,11 @@ window._mrOpenEditor=async function(dealId){
           <div><span class="mr-lbl">Facebook</span><div id="mr-fb-wrap">${_mrRowsTable('mr-fb',MR_FB_COLS,rep.facebook||[],'Add post')}</div></div>
           <div><span class="mr-lbl">LinkedIn</span><div id="mr-li-wrap">${_mrRowsTable('mr-li',MR_LI_COLS,rep.linkedin||[],'Add post')}</div></div>
         </div>
-        <div class="mr-row" style="margin-top:.6rem"><button class="mr-btn mr-btn-sm mr-btn-teal" onclick="window._mrPullSocial(this)">⬇ Pull this month’s posts from Terra</button><span class="mr-note">Photos and reach/clicks from posts made with 📣 Post to social.</span></div>
-        <div style="margin-top:.7rem"><span class="mr-lbl">Post photos (printed on the Social Media page)</span>
+        <div class="mr-row" style="margin-top:.6rem"><button class="mr-btn mr-btn-sm mr-btn-teal" onclick="window._mrPullSocial(this)">⬇ Pull reach & clicks from Terra posts</button><span class="mr-note">Fills the rows above from posts made with 📣 Post to social. (The report also does this on its own when it builds.)</span></div>
+        <div style="margin-top:.7rem"><span class="mr-lbl">Posts made from Terra in ${_mrEsc(_mrMonthLabel(ym))} — printed automatically as post cards</span>
+          <div id="mr-social-posts" class="mr-row" style="gap:.5rem">${_mrSocialPostsHtml()}</div>
+        </div>
+        <div style="margin-top:.7rem"><span class="mr-lbl">Other post photos (screenshots of posts made outside Terra)</span>
           <div id="mr-social-photos" class="mr-row" style="gap:.5rem">${_mrSocialThumbsHtml()}</div>
           <label class="mr-btn mr-btn-sm" style="cursor:pointer;margin-top:.4rem">🖼 Add post photo(s)<input type="file" accept="image/*" multiple style="display:none" onchange="window._mrUploadSocial(this)"></label>
           <span id="mr-social-status" class="mr-muted"></span>
@@ -45365,6 +45368,12 @@ window._mrUploadSign=async function(input){
     await Store.updateDeal(ed.dealId,{reportSignPhotoUrl:url}); ed.deal.reportSignPhotoUrl=url; if(lbl) lbl.textContent='✓ on file'; const t=document.getElementById('mr-sign-thumb'); if(t) t.innerHTML=`<img class="mr-thumb" src="${_mrEsc(url)}" alt="">`; }
   catch(e){ console.error('[mr] sign',e); if(lbl) lbl.textContent='Upload failed'; showToast('Upload failed: '+e.message,'error'); }
 };
+function _mrSocialPostsHtml(){
+  const ed=window._mrState.editor; if(!ed) return '';
+  const posts=(typeof _mrMonthPosts==='function')?_mrMonthPosts(ed.deal,ed.ym):[];
+  if(!posts.length) return '<span class="mr-muted">None yet — posts made with 📣 Post to social on this listing this month will appear here.</span>';
+  return posts.map(p=>`<div style="display:flex;gap:.5rem;align-items:center;border:1px solid var(--border);border-radius:10px;padding:.35rem .5rem;max-width:340px">${p.imageUrl?`<img class="mr-thumb" src="${_mrEsc(p.imageUrl)}" alt="Post photo" style="width:54px;height:54px;object-fit:cover">`:''}<div style="font-size:.75rem;line-height:1.3"><div style="font-weight:600">${_mrEsc(_mrFmtDateLong(p.at))} · ${p.platforms.map(q=>q==='facebook'?'Facebook':'LinkedIn').join(' + ')}</div><div class="mr-muted" style="max-width:250px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${_mrEsc((p.message||'').split('\n')[0])}</div>${Object.values(p.urls||{}).slice(0,1).map(u=>`<a href="${_mrEsc(u)}" target="_blank" rel="noopener" style="color:var(--brand-teal)">Open post ↗</a>`).join('')}</div></div>`).join('');
+}
 function _mrSocialThumbsHtml(){
   const ed=window._mrState.editor; if(!ed) return '';
   return (ed.socialPhotos||[]).map((u,i)=>`<span style="position:relative;display:inline-block"><img class="mr-thumb" src="${_mrEsc(u)}" alt="Post photo ${i+1}"><button class="mr-x" style="position:absolute;top:-8px;right:-8px;background:var(--surface);border:1px solid var(--border);min-width:28px;min-height:28px;font-size:.8rem;padding:0" aria-label="Remove post photo ${i+1}" onclick="window._mrRemoveSocial(${i})">✕</button></span>`).join('');
@@ -45485,9 +45494,30 @@ function _mrPdfRenderer(doc, font){
   return R;
 }
 function _mrEmailLabel(arr){ return (arr||[]).map(r=>r.name).filter(Boolean); }
+// Posts made with 📣 Post to social during the report month, grouped so a post that went to
+// Facebook AND LinkedIn prints as one card. Newest first.
+function _mrMonthPosts(deal, ym){
+  const rng=_mrMonthRange(ym); const groups=new Map();
+  (deal.socialPosts||[]).filter(p=>p&&p.at>=rng.start&&p.at<rng.end).sort((a,b)=>(b.at||0)-(a.at||0)).forEach(p=>{
+    const key=(p.message||'')+'|'+(p.imageUrl||'')+'|'+Math.round((p.at||0)/120000);   // same caption+photo within 2 min
+    let g=groups.get(key); if(!g){ g={at:p.at, message:p.message||'', imageUrl:p.imageUrl||'', link:p.link||'', byName:p.byName||'', platforms:[], ids:[], urls:{}}; groups.set(key,g); }
+    if(!g.platforms.includes(p.platform)) g.platforms.push(p.platform); if(p.id) g.ids.push({platform:p.platform,id:p.id}); if(p.url) g.urls[p.platform]=p.url;
+  });
+  const order={facebook:0,linkedin:1}; const out=[...groups.values()]; out.forEach(g=>g.platforms.sort((a,b)=>(order[a]??9)-(order[b]??9))); return out;
+}
+// Reach / clicks for those posts from the social worker. Best effort — never blocks the report.
+async function _mrPostMetrics(groups){
+  const ids=groups.flatMap(g=>g.ids); if(!ids.length || typeof _spWorkerPost!=='function') return;
+  try{ const m=await Promise.race([_spWorkerPost('/metrics',{posts:ids}), new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')),9000))]);
+    (m.metrics||[]).forEach(x=>{ const g=groups.find(g=>g.ids.some(i=>i.id===x.id)); if(!g) return; (g.metrics=g.metrics||{})[x.platform]={reach:x.reach, impressions:x.impressions, interactions:x.interactions, clicks:x.clicks, engagementRate:x.engagementRate}; });
+  }catch(e){ console.warn('[mr] post metrics',e.message); }
+}
 // Gather everything the PDF needs for one deal/month.
 async function _mrAssemble(deal, ym){
   const rep=(await _mrLoadReport(deal.id,ym))||{};
+  const posts=_mrMonthPosts(deal,ym); const postUrls=new Set(posts.map(p=>p.imageUrl).filter(Boolean));
+  const [postImgs]=await Promise.all([Promise.all(posts.map(p=>_mrImg(p.imageUrl,{maxPx:1000}))), _mrPostMetrics(posts)]);
+  posts.forEach((p,i)=>p.img=postImgs[i]);
   const [acts,tasks]=await Promise.all([_mrFetchActivities(deal.id),_mrFetchTasks(deal.id)]);
   const h=_mrHistoryRows(deal,acts,tasks);
   const cfg=_mrCfg(); const L=_mrLetters()[ym]||{};
@@ -45498,12 +45528,12 @@ async function _mrAssemble(deal, ym){
     _mrImg(deal.reportSignPhotoUrl,{maxPx:1600}),
     _mrImg(deal.reportWebsitePhotoUrl,{maxPx:1600}),
     _mrImg(rep.emailScreenshotUrl,{maxPx:1200}),
-    Promise.all((Array.isArray(rep.socialPhotos)?rep.socialPhotos.slice(0,12):[]).map(u=>_mrImg(u,{maxPx:1000}))),
+    Promise.all((Array.isArray(rep.socialPhotos)?rep.socialPhotos.filter(u=>!postUrls.has(u)).slice(0,12):[]).map(u=>_mrImg(u,{maxPx:1000}))),
     Promise.all(advisors.map(a=>_mrImg(a.headshotUrl,{cover:1,maxPx:400})))
   ]);
   advisors.forEach((a,i)=>a.head=heads[i]);
   return { deal, ym, rep, history:h.history, tasks:h.tasks, letter:L.body||'', signature:L.signature||cfg.letterSignature||'Ryan Sampson, ALC, CCIM — Managing Partner / Broker of Record', about:cfg.about||MR_DEFAULT_ABOUT,
-    firmAddress:cfg.firmAddress||'304 S. Willow Ave, Tampa, FL 33606', firmWebsite:cfg.firmWebsite||'WWW.THEDIRTDOG.COM', advisors, hero, logo, sign, web, shotE, social:(social||[]).filter(Boolean),
+    firmAddress:cfg.firmAddress||'304 S. Willow Ave, Tampa, FL 33606', firmWebsite:cfg.firmWebsite||'WWW.THEDIRTDOG.COM', advisors, hero, logo, sign, web, shotE, social:(social||[]).filter(Boolean), posts,
     preparedFor:rep.preparedFor||_mrOwnerLabel(deal), traffic:rep.traffic||{} };
 }
 async function _mrBuildPdf(A){
@@ -45586,19 +45616,57 @@ async function _mrBuildPdf(A){
     if(A.shotE){ const maxH=R.H-56-y-10; if(maxH>120) R.fit(A.shotE,R.M+40,y,R.W-2*R.M-80,maxH); }
   }
   /* ---- 5 · Social media ---- */
+  // Table rows: what was typed in the editor + rows derived from this month's Terra posts (metrics from the worker).
   const fb=(A.rep.facebook||[]).filter(r=>r.date||r.reach), li=(A.rep.linkedin||[]).filter(r=>r.date||r.impressions);
-  if(fb.length||li.length||A.social.length){
+  (A.posts||[]).forEach(p=>{ const date=_mrLocalDate(p.at); const m=p.metrics||{};
+    if(p.platforms.includes('facebook') && !fb.some(r=>r.date===date)) fb.push({date, reach:m.facebook?m.facebook.reach:'', interactions:m.facebook?m.facebook.interactions:'', clicks:m.facebook?m.facebook.clicks:''});
+    if(p.platforms.includes('linkedin') && !li.some(r=>r.date===date)) li.push({date, impressions:m.linkedin?m.linkedin.impressions:'', engRate:(m.linkedin&&m.linkedin.engagementRate!=null)?m.linkedin.engagementRate+'%':'', clicks:m.linkedin?m.linkedin.clicks:''}); });
+  const nz=v=>(v==null||v==='')?'':String(v);
+  if(fb.length||li.length||A.social.length||(A.posts&&A.posts.length)){
     y=R.newPage(); y=R.title('Social Media Report',y+30);
     if(fb.length||li.length){
       const colW=(R.W-2*R.M-24)/2; const xl=R.M, xr=R.M+colW+24; const top=y+10;
       R.text('Facebook',xl+colW/2,top+14,{size:20,bold:true,align:'center'}); R.text('LinkedIn',xr+colW/2,top+14,{size:20,bold:true,align:'center'});
       R.line(xl,top+26,xl+colW,top+26,MR_TEAL,2.2); R.line(xr,top+26,xr+colW,top+26,MR_TEAL,2.2);
       let yl=top+40, yr=top+40;
-      if(fb.length) yl=R.table({startY:yl, margin:{left:xl,right:R.W-(xl+colW)}, tableWidth:colW, head:[['Date','Reach','Interactions','Clicks']], body:fb.map(r=>[_mrFmtDate(r.date),r.reach||'',r.interactions||'',r.clicks||'']), styles:{font,fontSize:9,textColor:MR_INK,cellPadding:4,lineColor:MR_LINE,lineWidth:{bottom:0.8}}})+14;
-      if(li.length) yr=R.table({startY:yr, margin:{left:xr,right:R.M}, tableWidth:colW, head:[['Date','Impressions','Eng. Rate','Clicks']], body:li.map(r=>[_mrFmtDate(r.date),r.impressions||'',r.engRate||'',r.clicks||'']), styles:{font,fontSize:9,textColor:MR_INK,cellPadding:4,lineColor:MR_LINE,lineWidth:{bottom:0.8}}})+14;
+      if(fb.length) yl=R.table({startY:yl, margin:{left:xl,right:R.W-(xl+colW)}, tableWidth:colW, head:[['Date','Reach','Interactions','Clicks']], body:fb.map(r=>[_mrFmtDate(r.date),nz(r.reach),nz(r.interactions),nz(r.clicks)]), styles:{font,fontSize:9,textColor:MR_INK,cellPadding:4,lineColor:MR_LINE,lineWidth:{bottom:0.8}}})+14;
+      else { R.text('No Facebook posts this month.',xl+colW/2,yl+10,{size:9,color:MR_GREY,align:'center'}); yl+=24; }
+      if(li.length) yr=R.table({startY:yr, margin:{left:xr,right:R.M}, tableWidth:colW, head:[['Date','Impressions','Eng. Rate','Clicks']], body:li.map(r=>[_mrFmtDate(r.date),nz(r.impressions),nz(r.engRate),nz(r.clicks)]), styles:{font,fontSize:9,textColor:MR_INK,cellPadding:4,lineColor:MR_LINE,lineWidth:{bottom:0.8}}})+14;
+      else { R.text('No LinkedIn posts this month.',xr+colW/2,yr+10,{size:9,color:MR_GREY,align:'center'}); yr+=24; }
       y=Math.max(yl,yr)+6;
     }
+    /* Post cards — one per post, drawn the way the post looks on the Page (name, date, caption, photo, results). */
+    const cards=(A.posts||[]);
+    if(cards.length){
+      const cw=R.W-2*R.M, pad=12, textW=cw-2*pad, maxImgH=230, lineH=12.5;
+      cards.forEach((p,i)=>{
+        const lines=R.split(p.message||'',textW,9); const shown=lines.slice(0,10); if(lines.length>10) shown[9]=shown[9].replace(/\s*\S*$/,'')+' …';
+        const imgH=p.img?Math.min(maxImgH,p.img.h*(textW/p.img.w)):0;
+        const m=p.metrics||{}; const stats=[];
+        if(m.facebook){ stats.push('Facebook — reach '+nz(m.facebook.reach)+' · interactions '+nz(m.facebook.interactions)+' · link clicks '+nz(m.facebook.clicks)); }
+        if(m.linkedin){ stats.push('LinkedIn — impressions '+nz(m.linkedin.impressions)+(m.linkedin.engagementRate!=null?' · engagement '+m.linkedin.engagementRate+'%':'')+' · clicks '+nz(m.linkedin.clicks)); }
+        const h=pad+34+shown.length*lineH+(imgH?imgH+10:0)+(stats.length?stats.length*12+6:0)+22+pad;
+        if(y+h>R.H-56){ y=R.newPage(); R.text('Social Media Posts (cont.)',R.M,y+10,{size:16,bold:true}); y+=30; }
+        if(i===0 && y>R.M+40) { R.text('Posts',R.M,y+6,{size:16,bold:true}); y+=18; }
+        const x=R.M; doc.setDrawColor(226,232,240); doc.setLineWidth(1); doc.roundedRect(x,y,cw,h,6,6,'S');
+        // header: avatar + page name + date · platforms
+        let cy=y+pad; doc.setFillColor(...MR_RED); doc.circle(x+pad+14,cy+14,14,'F'); R.text('E',x+pad+14,cy+19,{size:13,bold:true,color:[255,255,255],align:'center'});
+        R.text('Eshenbaugh Land Company',x+pad+36,cy+11,{size:10,bold:true});
+        R.text(_mrFmtDateLong(p.at)+' · '+p.platforms.map(q=>q==='facebook'?'Facebook':q==='linkedin'?'LinkedIn':q).join(' + ')+(p.byName?' · posted by '+p.byName:''),x+pad+36,cy+24,{size:8,color:MR_GREY});
+        cy+=34;
+        // caption
+        doc.setFont(font,'normal'); doc.setFontSize(9); doc.setTextColor(...MR_INK); shown.forEach((ln,k)=>doc.text(ln,x+pad,cy+9+k*lineH)); cy+=shown.length*lineH;
+        // photo
+        if(p.img){ cy+=4; const w=textW, hh=imgH; const s=Math.min(w/p.img.w,hh/p.img.h); const iw=p.img.w*s, ih=p.img.h*s; R.img(p.img,x+pad+(w-iw)/2,cy,iw,ih); cy+=hh+6; }
+        // results
+        if(stats.length){ stats.forEach((t,k)=>R.text(t,x+pad,cy+9+k*12,{size:8,color:MR_INK})); cy+=stats.length*12+6; }
+        R.line(x+pad,cy+2,x+cw-pad,cy+2,[226,232,240],0.8);
+        R.text('Like          Comment          Share',x+pad,cy+15,{size:8,color:MR_GREY});
+        y+=h+14;
+      });
+    }
     if(A.social.length){
+      if(cards.length){ if(y>R.H-200){ y=R.newPage(); } R.text('Other post photos',R.M,y+6,{size:14,bold:true}); y+=20; }
       const gap=16, colW=(R.W-2*R.M-gap)/2, cellH=250; let col=0;
       A.social.forEach((im,i)=>{
         if(y+cellH>R.H-56){ y=R.newPage(); R.text('Social Media Posts (cont.)',R.M,y+10,{size:16,bold:true}); y+=30; col=0; }
@@ -45877,8 +45945,8 @@ window._mrPullSocial=async function(btn){
   if(!posts.length){ showToast('No posts from Terra on this listing in '+_mrMonthLabel(ed.ym)+'. Posts made outside Terra can still be added by hand.','warning',6000); return; }
   const done=elcBusy(btn,'Pulling…');
   try{
-    let added=0; posts.forEach(p=>{ if(p.imageUrl && !ed.socialPhotos.includes(p.imageUrl)){ ed.socialPhotos.push(p.imageUrl); added++; } });
-    const box=document.getElementById('mr-social-photos'); if(box) box.innerHTML=_mrSocialThumbsHtml();
+    // Post photos print automatically as post cards (see _mrMonthPosts); this only fills the metric rows.
+    ed.socialPhotos=(ed.socialPhotos||[]).filter(u=>!posts.some(p=>p.imageUrl===u)); const box=document.getElementById('mr-social-photos'); if(box) box.innerHTML=_mrSocialThumbsHtml();
     let fbRows=[], liRows=[], metricNote='';
     try{ const m=await _spWorkerPost('/metrics',{posts:posts.filter(p=>p.id).map(p=>({platform:p.platform,id:p.id}))});
       (m.metrics||[]).forEach(x=>{ const p=posts.find(q=>q.id===x.id)||{}; const date=x.date||_mrLocalDate(p.at);
@@ -45887,7 +45955,7 @@ window._mrPullSocial=async function(btn){
     }catch(e){ metricNote=' (metrics unavailable: '+e.message+')'; posts.forEach(p=>{ if(p.platform==='facebook') fbRows.push({date:_mrLocalDate(p.at)}); if(p.platform==='linkedin') liRows.push({date:_mrLocalDate(p.at)}); }); }
     const merge=(id,cols,rows)=>{ const existing=_mrReadRows(id).filter(r=>!rows.some(n=>n.date===r.date)); const wrap=document.getElementById(id+'-wrap'); if(wrap) wrap.innerHTML=_mrRowsTable(id,cols,[...existing,...rows],id==='mr-fb'?'Add post':'Add post'); };
     if(fbRows.length) merge('mr-fb',MR_FB_COLS,fbRows); if(liRows.length) merge('mr-li',MR_LI_COLS,liRows);
-    showToast(posts.length+' post'+(posts.length===1?'':'s')+' pulled · '+added+' photo'+(added===1?'':'s')+' added'+metricNote,'success',6000);
+    showToast(posts.length+' post'+(posts.length===1?'':'s')+' pulled'+metricNote,'success',6000);
   }catch(e){ console.error('[mr] pull social',e); showToast('Could not pull posts: '+e.message,'error'); }
   finally{ done(); }
 };
