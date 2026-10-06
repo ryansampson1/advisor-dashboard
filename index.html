@@ -33508,7 +33508,7 @@ function viewEOS(sub='rocks'){
     const compRocks = eosGet('compRocks',[]);
     const myRocks   = (eosGet('myRocks',{})[uid]||[]);
     const allRocks  = eosGet('myRocks',{});
-    const compOpen  = _rockEntriesOpen(compRocks);   // ROCKHIST-20261005
+    const compOpen  = _rockEntriesOpen(compRocks).filter(x=>_rockVisible(x.r));   // ROCKHIST-20261005 · ROCKPRIV-20261006
     const myOpen    = _rockEntriesOpen(myRocks);
 
     body=`
@@ -33534,7 +33534,7 @@ function viewEOS(sub='rocks'){
                 <div class="flex-1 min-w-0">
                   <div class="text-sm ${r.status==='complete'?'line-through text-gray-400':'text-gray-800'}">${r.text}</div>
                   ${_rockDueHtml(r)}
-                  ${_rockOwnerChip(r)}
+                  ${_rockPrivBadge(r)}${_rockOwnerChip(r)}
                 </div>
                 ${effectiveAdminGlobal?`<button onclick="editCompRock(${i})" class="text-gray-300 hover:text-blue-500 text-xs" title="Edit rock">✏️</button>
                 <button onclick="deleteCompRock(${i})" class="text-gray-300 hover:text-red-400 text-xs" title="Delete rock">✕</button>`:''}
@@ -34897,7 +34897,8 @@ function viewEOS(sub='rocks'){
               return '<div class="flex items-start gap-2">'
                 + '<span style="font-size:.9rem;line-height:1.4">'+(done?'✅':ip?'🔄':'⬜')+'</span>'
                 + '<div class="flex-1 min-w-0 text-sm '+(done?'line-through text-gray-500':'text-gray-800')+'">'+_rockEsc(r.text||'Unnamed Rock')
-                + (own?' <span class="text-xs font-semibold" style="color:#075985">· 👤 '+_rockEsc(own)+'</span>':'')+'</div>'
+                + (own?' <span class="text-xs font-semibold" style="color:#075985">· 👤 '+_rockEsc(own)+'</span>':'')
+                + (r.private?' <span class="text-xs font-semibold" style="color:#334155" title="Private — admins only">· 🔒 Admins only</span>':'')+'</div>'
                 + '<span class="text-xs px-1.5 py-0.5 rounded-full font-semibold shrink-0 '+(done?'bg-green-50 text-green-800':ip?'bg-yellow-50 text-yellow-800':'bg-gray-100 text-gray-700')+'">'+(done?'Complete':ip?'In progress':'Not started')+'</span>'
                 + '</div>';
             }).join('') + '</div>';
@@ -35085,7 +35086,7 @@ function viewEOS(sub='rocks'){
 
         ${!isAdminTab ? section('🪨','Rock Review','5',`
           ${(()=>{
-            const compRocks = _rocksNow(eosGet('compRocks',[]));   // current quarter only
+            const compRocks = _rocksNow(eosGet('compRocks',[])).filter(r=>!r.private);   // current quarter only; ROCKPRIV: private rocks never shown in team L-10s
             const allMyRocks = eosGet('myRocks',{});
             // Only the people in THIS meeting: staff L-10 → staff roster, advisor L-10 → advisors
             const rockMembers = roleFilter==='staff' ? l10StaffRoster() : l10AdvisorRoster();
@@ -35702,7 +35703,7 @@ window.printRocks = () => {
     </div>
     <div class="section">
       <div class="section-label">Company Rocks</div>
-      <div style="margin-top:8px">${rockList(_rocksNow(compRocks))}</div>
+      <div style="margin-top:8px">${rockList(_rocksNow(compRocks).filter(r=>!r.private))}</div>
     </div>
     ${advisorSections}
     <div class="footer">
@@ -35894,6 +35895,16 @@ function _rockLockGuard(r){
   return false;
 }
 function _rockEsc(t){ return String(t==null?'':t).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+/* ROCKPRIV-20261006 — a company rock can be marked Private (r.private=true): only an admin
+   (in admin view — not "view as advisor"/staff view) sees it. Public (no flag) = everyone.
+   Private rocks are left out of the advisor/staff L-10 and the printed handout; the admin
+   L-10 shows them with a 🔒 badge. UI-level privacy: the eos doc itself is team-readable. */
+function _rockAdminView(){ return !!(currentUser && currentUser.isAdmin) && !adminViewAsAdvisor && !staffViewMode; }
+function _rockVisible(r){ return !r || !r.private || _rockAdminView(); }
+function _rockPrivBadge(r){
+  return (r && r.private) ? '<span class="inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full mt-1 mr-1" style="background:#f1f5f9;color:#334155" title="Private — only admins can see this rock">🔒 Admins only</span>' : '';
+}
+window._rockVisible=_rockVisible; window._rockPrivBadge=_rockPrivBadge;
 /* ROCKOWNER-20261005 — a company rock stays a company rock but can carry one accountable owner (ownerUid). */
 function _rockOwnerName(r){
   if(!r || !r.ownerUid) return '';
@@ -35912,7 +35923,7 @@ function _rockOwnerOptions(){
     .sort((x,y)=>x.name.localeCompare(y.name));
 }
 /* Company rocks owned by uid (open quarters only, with real index). */
-function _compRocksOwnedBy(uid, list){ return _rockEntriesOpen(list||eosGet('compRocks',[])).filter(x=>x.r.ownerUid===uid); }
+function _compRocksOwnedBy(uid, list){ return _rockEntriesOpen(list||eosGet('compRocks',[])).filter(x=>x.r.ownerUid===uid && _rockVisible(x.r)); }
 window._rockOwnerName=_rockOwnerName; window._rockOwnerChip=_rockOwnerChip; window._compRocksOwnedBy=_compRocksOwnedBy;
 /* Hover tooltip (data-sctip) listing a person's rocks for this quarter. */
 function _rockTip(name, rocks, ownedComp){
@@ -35926,7 +35937,7 @@ function _rockHistoryHtml(compRocks, allRocks, uid, showAll){
   const people = showAll ? Object.keys(allRocks||{}) : [uid];
   const byQ = {};
   const add = (q, key, r) => { (byQ[q] = byQ[q] || {comp:[], people:{}}); if(key==='comp') byQ[q].comp.push(r); else (byQ[q].people[key] = byQ[q].people[key] || []).push(r); };
-  (compRocks||[]).forEach(r => { if(_rockLocked(r)) add(_rockQOf(r), 'comp', r); });
+  (compRocks||[]).forEach(r => { if(_rockLocked(r) && _rockVisible(r)) add(_rockQOf(r), 'comp', r); });   // ROCKPRIV
   people.forEach(p => ((allRocks||{})[p]||[]).forEach(r => { if(_rockLocked(r)) add(_rockQOf(r), p, r); }));
   const qs = Object.keys(byQ).sort().reverse();
   const nameOf = p => (allProfiles[p] && (allProfiles[p].name || allProfiles[p].email)) || (p===uid ? (currentUser.name||'Me') : p);
@@ -35934,7 +35945,7 @@ function _rockHistoryHtml(compRocks, allRocks, uid, showAll){
     const done = r.status === 'complete';
     return '<div class="flex items-start gap-2 py-1">'
       + '<span style="line-height:1.3">' + (done ? '✅' : '❌') + '</span>'
-      + '<span class="text-sm flex-1 ' + (done ? 'text-gray-700' : 'text-gray-500') + '">' + _rockEsc(r.text||'') + (_rockOwnerName(r) ? ' <span class="text-xs text-gray-500">· 👤 ' + _rockEsc(_rockOwnerName(r)) + '</span>' : '') + '</span>'
+      + '<span class="text-sm flex-1 ' + (done ? 'text-gray-700' : 'text-gray-500') + '">' + (r.private ? '🔒 ' : '') + _rockEsc(r.text||'') + (_rockOwnerName(r) ? ' <span class="text-xs text-gray-500">· 👤 ' + _rockEsc(_rockOwnerName(r)) + '</span>' : '') + '</span>'
       + '<span class="text-xs font-semibold px-2 py-0.5 rounded-full shrink-0" style="background:' + (done?'#d1fae5':'#fee2e2') + ';color:' + (done?'#065f46':'#991b1b') + '">' + (done?'Completed':'Not completed') + '</span>'
       + '</div>';
   };
@@ -36016,7 +36027,12 @@ function _rockDialog(opts){
           + '<option value="">— Unassigned —</option>'
           + _rockOwnerOptions().map(o => '<option value="' + _rockEsc(o.uid) + '"' + (o.uid===opts.ownerUid?' selected':'') + '>' + _rockEsc(o.name) + '</option>').join('')
           + '</select>'
-          + '<p class="text-xs text-gray-500 mt-1.5">Stays a company rock — the owner is accountable for it and sees it under My Rocks.</p>') : '')
+          + '<p class="text-xs text-gray-500 mt-1.5">Stays a company rock — the owner is accountable for it and sees it under My Rocks.</p>'
+          + '<label for="rockdlg-private" class="flex items-start gap-2 mt-3 p-2 rounded-lg border cursor-pointer" style="min-height:44px">'
+          +   '<input type="checkbox" id="rockdlg-private" class="mt-0.5 rounded" style="width:18px;height:18px;flex-shrink:0"' + (opts.private ? ' checked' : '') + '/>'
+          +   '<span class="text-sm"><span class="font-semibold text-gray-800">🔒 Private — admins only</span>'
+          +   '<span class="block text-xs text-gray-500 mt-0.5">Unchecked = public to all users. Private rocks are hidden from advisors and staff (including a non-admin owner), the team L-10s and the printed handout.</span></span>'
+          + '</label>') : '')
       + '<p id="rockdlg-err" class="text-xs mt-1 hidden" style="color:#DA291C" role="alert">Enter the rock first.</p>'
       + '<div class="elc-confirm-row" style="margin-top:1.1rem">'
       +   '<button type="button" class="elc-cbtn elc-cbtn-cancel" data-act="cancel">Cancel</button>'
@@ -36041,6 +36057,8 @@ function _rockDialog(opts){
       const out = { text: t, quarter: sel.value, dueDate: _rockQEnd(sel.value) };
       const ownSel = card.querySelector('#rockdlg-owner');
       if(ownSel){ out.ownerUid = ownSel.value || ''; out.ownerName = ownSel.value ? (ownSel.options[ownSel.selectedIndex].text||'') : ''; }
+      const privCb = card.querySelector('#rockdlg-private');
+      if(privCb) out.private = !!privCb.checked;   // ROCKPRIV-20261006
       close(out);
     };
     const onKey = e => {
@@ -36059,6 +36077,7 @@ window._rockDialog = _rockDialog;
 function _applyRock(rock, res){
   rock.text = res.text; rock.quarter = res.quarter; rock.dueDate = res.dueDate;
   if('ownerUid' in res){ if(res.ownerUid){ rock.ownerUid = res.ownerUid; rock.ownerName = res.ownerName||''; } else { delete rock.ownerUid; delete rock.ownerName; } }
+  if('private' in res){ if(res.private) rock.private = true; else delete rock.private; }   // ROCKPRIV-20261006
   return rock;
 }
 
@@ -36067,7 +36086,7 @@ window.addCompRock = async () => {
   const list = eosGet('compRocks',[]);
   list.push(_applyRock({ id:'cr-'+Date.now(), status:'inprocess' }, res));
   eosSave('compRocks',list); viewEOS('rocks');
-  showToast && showToast('Rock added for ' + _rockQLabel(res.quarter) + (res.ownerName ? ' — owner: ' + res.ownerName : ''), 'success');
+  showToast && showToast((res.private ? '🔒 Private rock' : 'Rock') + ' added for ' + _rockQLabel(res.quarter) + (res.ownerName ? ' — owner: ' + res.ownerName : ''), 'success');
 };
 window.toggleCompRock = (i,done) => {
   const list=eosGet('compRocks',[]);
@@ -36113,7 +36132,7 @@ window.editMyRock = async i => {
 window.editCompRock = async i => {
   const list=eosGet('compRocks',[]);
   if(!list[i] || _rockLockGuard(list[i])) return;
-  const res = await _rockDialog({ title: 'Edit company rock', text: list[i].text||'', quarter: _rockQOf(list[i]), owner: true, ownerUid: list[i].ownerUid||'' }); if(!res) return;
+  const res = await _rockDialog({ title: 'Edit company rock', text: list[i].text||'', quarter: _rockQOf(list[i]), owner: true, ownerUid: list[i].ownerUid||'', private: !!list[i].private }); if(!res) return;
   const fresh=eosGet('compRocks',[]); if(!fresh[i]) return;
   _applyRock(fresh[i], res); eosSave('compRocks',fresh); viewEOS('rocks');
 };
