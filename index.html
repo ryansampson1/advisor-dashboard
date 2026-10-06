@@ -34867,6 +34867,72 @@ function viewEOS(sub='rocks'){
         + '<div class="text-sm font-bold text-gray-800" title="'+fmt$(qExp)+'">'+fmtM$(qExp)+'</div>'
         + '<div class="text-gray-500" style="font-size:10.5px;line-height:1.2">total · '+qExpKeys.length+' of '+Q.n+' wks entered</div>'
         + '</div></td></tr>';
+      // ── PROFITSGA-20261006: Profit = revenue − advisor commissions − expenses ──
+      const sMoney = n => (n<0?'−':'')+fmtM$(Math.abs(n));
+      const sMoneyF = n => (n<0?'−':'')+fmt$(Math.abs(n));
+      const profitCell = (rev, net, expV, expHas, sub, items) => {
+        const comm = Math.max(0, rev - net);
+        const p = net - (expHas ? expV : 0);
+        const margin = rev>0 ? Math.round(p/rev*100) : null;
+        const tone = !expHas ? 'neutral' : (p>=0 ? 'pos' : 'neg');
+        const box = tone==='pos' ? 'bg-green-50 border-green-200' : tone==='neg' ? 'bg-red-50 border-red-200' : 'bg-gray-50 border-gray-200';
+        const txt = tone==='pos' ? 'text-green-800' : tone==='neg' ? 'text-red-800' : 'text-gray-800';
+        const lines = ['Revenue received — '+fmt$(rev), 'Less commissions to advisors — '+fmt$(comm),
+          'Less expenses — '+(expHas ? fmt$(expV) : 'not entered'), '<b>Profit — '+sMoneyF(p)+'</b>'];
+        (items||[]).slice().sort((a,b)=>b.gross-a.gross).forEach(i=>lines.push(esc(i.name)+' — '+fmt$(i.gross)+' in, '+fmt$(i.gross-i.v)+' to advisors'));
+        const tipHtml = window._scTipHtml('Profit', lines);
+        return '<td class="p-1.5 align-top"><div class="rounded-lg border px-2 py-1.5 text-center '+box+'" tabindex="0" data-sctip="'+tipHtml+'" style="cursor:help">'
+          + '<div class="text-sm font-bold '+txt+'" title="'+sMoneyF(p)+'">'+sMoney(p)+'</div>'
+          + '<div class="text-xs font-semibold '+txt+'">'+(margin===null ? '—' : margin+'% margin')+'</div>'
+          + '<div class="text-gray-500" style="font-size:10.5px;line-height:1.2">'+(expHas ? (sub||'') : 'before expenses — none entered')+'</div>'
+          + '</div></td>';
+      };
+      const qProfitExpHas = qExpKeys.length>0;
+      const profitRow = '<tr class="border-t border-gray-100">'
+        + '<th scope="row" class="py-2 pr-2 text-left align-top" style="min-width:132px"><div class="text-sm font-semibold text-gray-800">📈 Profit</div>'
+        + '<div class="text-xs text-gray-500">Revenue − commissions − expenses · admins only</div></th>'
+        + SC.weeks.map((w,i)=>{
+            const has = Object.prototype.hasOwnProperty.call(exp, w.key);
+            return profitCell(w.revenue.v, w.net.v, has?Number(exp[w.key])||0:0, has, i===0?'prior week':'', w.net.items);
+          }).join('')
+        + profitCell(Q.revenue, Q.net, qExp, qProfitExpHas,
+            'total · expenses for '+qExpKeys.length+' of '+Q.n+' wks', [])
+        + '</tr>';
+      // ── SG&A % — prior calendar month, from QuickBooks ──
+      const sga = _al10SgaMap();
+      const sgaMonth = _al10PrevMonthKey(_al10MonthKey(SC.thisMon), 1);
+      const sgaPrevM = _al10PrevMonthKey(sgaMonth, 1);
+      const sgaOf = k => { const r=sga[k]; return (r && Number(r.revenue)>0) ? {...r, pct:Number(r.sga)/Number(r.revenue)*100} : null; };
+      const sCur = sgaOf(sgaMonth), sPrev = sgaOf(sgaPrevM);
+      const t3 = [0,1,2].map(i=>_al10PrevMonthKey(sgaMonth, i)).map(sgaOf).filter(Boolean);
+      const t3Pct = t3.length ? t3.reduce((s,r)=>s+Number(r.sga),0) / t3.reduce((s,r)=>s+Number(r.revenue),0) * 100 : null;
+      const srcLbl = r => r.source==='quickbooks' ? 'QuickBooks' : 'entered by hand'+(r.by?' ('+esc(r.by)+')':'');
+      const sgaForm = () => '<div class="flex gap-2 flex-wrap items-end justify-center mt-1">'
+        + '<label class="text-left text-xs text-gray-600">SG&amp;A $ ('+_al10MonthLbl(sgaMonth)+')<input id="al10-sga-amt" type="text" inputmode="decimal" placeholder="e.g. 84,500"'
+        + ' value="'+(sga[sgaMonth]?Number(sga[sgaMonth].sga).toLocaleString('en-US'):'')+'" onkeydown="if(event.key===\'Enter\')al10SetSga(\''+sgaMonth+'\')"'
+        + ' class="block w-32 border rounded-lg px-2 py-1.5 text-sm text-center font-semibold text-gray-800 outline-none focus:border-gray-500 bg-white"/></label>'
+        + '<label class="text-left text-xs text-gray-600">Total revenue $<input id="al10-sga-rev" type="text" inputmode="decimal" placeholder="e.g. 410,000"'
+        + ' value="'+(sga[sgaMonth]?Number(sga[sgaMonth].revenue).toLocaleString('en-US'):'')+'" onkeydown="if(event.key===\'Enter\')al10SetSga(\''+sgaMonth+'\')"'
+        + ' class="block w-32 border rounded-lg px-2 py-1.5 text-sm text-center font-semibold text-gray-800 outline-none focus:border-gray-500 bg-white"/></label>'
+        + '<button type="button" onclick="al10SetSga(\''+sgaMonth+'\')" class="px-3 py-1.5 rounded-lg text-sm font-semibold text-white" style="background:var(--brand-black)">Save</button>'
+        + (sCur?'<button type="button" onclick="al10ToggleSgaEdit()" class="px-2 py-1.5 text-xs font-semibold text-gray-600 hover:underline">Cancel</button>':'')
+        + '</div><p class="text-gray-500 mt-1" style="font-size:10.5px">From the QuickBooks P&amp;L: operating expenses excluding advisor commissions, and total income.</p>';
+      const sgaMain = sCur
+        ? '<div class="text-sm font-bold text-gray-800">'+sCur.pct.toFixed(1)+'% of revenue'
+          + (sPrev ? ' <span class="text-xs font-semibold '+(sCur.pct<=sPrev.pct?'text-green-700':'text-red-700')+'">'+(sCur.pct<=sPrev.pct?'▼ ':'▲ ')+Math.abs(sCur.pct-sPrev.pct).toFixed(1)+' pts vs '+_al10MonthLbl(sgaPrevM).split(' ')[0]+'</span>' : '')+'</div>'
+          + '<div class="text-gray-500" style="font-size:10.5px;line-height:1.3">'+_al10MonthLbl(sgaMonth, true)+' · SG&amp;A '+fmt$(sCur.sga)+' ÷ revenue '+fmt$(sCur.revenue)
+          + ' · '+srcLbl(sCur)+(sCur.at?' '+new Date(sCur.at).toLocaleDateString('en-US',{month:'short',day:'numeric'}):'')
+          + ' · <button type="button" onclick="al10ToggleSgaEdit()" class="text-blue-600 hover:underline font-medium">Edit</button></div>'
+          + (window._al10SgaEdit ? sgaForm() : '')
+        : '<div class="text-sm font-semibold text-gray-700">'+_al10MonthLbl(sgaMonth, true)+' not entered yet</div>' + sgaForm();
+      const sgaRow = '<tr class="border-t border-gray-100">'
+        + '<th scope="row" class="py-2 pr-2 text-left align-top" style="min-width:132px"><div class="text-sm font-semibold text-gray-800">🏢 SG&amp;A</div>'
+        + '<div class="text-xs text-gray-500">% of revenue · prior month · QuickBooks · admins only</div></th>'
+        + '<td colspan="'+SC.weeks.length+'" class="p-1.5 align-top"><div class="rounded-lg border px-2 py-1.5 text-center bg-gray-50 border-gray-200">'+sgaMain+'</div></td>'
+        + '<td class="p-1.5 align-top"><div class="rounded-lg border px-2 py-1.5 text-center bg-gray-50 border-gray-200">'
+        + '<div class="text-sm font-bold text-gray-800">'+(t3Pct===null?'—':t3Pct.toFixed(1)+'%')+'</div>'
+        + '<div class="text-gray-500" style="font-size:10.5px;line-height:1.2">trailing 3 mo · '+t3.length+' of 3 months entered</div>'
+        + '</div></td></tr>';
       const scorecardHtml =
         '<p class="text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Prior Week: '+weekLabel2+' · '+scopeLbl+'</p>'
         + '<div class="overflow-x-auto -mx-1"><table class="w-full" style="min-width:600px">'
@@ -34877,13 +34943,16 @@ function viewEOS(sub='rocks'){
         + '</tr></thead><tbody>'
         + metricRow('🏠','New Listings','$10M / wk','listings',G.listings,'avg')
         + metricRow('💵','Revenue Received','$250K / wk','revenue',G.revenue,'total')
-        + (canEdit ? expRow : '')   // expenses are admins-only — non-admins never see the row
+        + (canEdit ? expRow + profitRow + sgaRow : '')   // expenses, profit, SG&A are admins-only — non-admins never see them (PROFITSGA-20261006)
         + metricRow('📝','New Under Contract','$14M / wk','contracts',G.contracts,'total')
         + '</tbody></table></div>'
         + '<p class="text-xs text-gray-500 mt-2 leading-snug">Green = goal hit or beaten, red = missed; % is of goal'+(l10Office==='both'?'':' (goals are company-wide)')+'. Hover a week for the deals behind it. '
         + 'Listings: list price, dated by listing effective date (else the day it moved to Listing). '
         + 'Revenue: gross commission to ELC on Sold deals by close date + logged non-deal payments. '
-        + 'Contracts: purchase/contract price, dated by effective date (else the day it went under contract).</p>';
+        + 'Contracts: purchase/contract price, dated by effective date (else the day it went under contract).'
+        + (canEdit ? ' Profit: revenue received less the advisor payouts on that revenue (the same split-ladder numbers as the Pay tab, incl. co-advisor and mentor shares) less that week\'s expenses; grey until expenses are entered. '
+          + 'SG&amp;A: the prior calendar month\'s QuickBooks operating expenses (excluding advisor commissions) as a % of QuickBooks total income; company-wide, not office-filtered.' : '')
+        + '</p>';
 
       // ── 2. Company rocks ─────────────────────────────────────────────
       const compRocks = _rocksNow(eosGet('compRocks',[]));
@@ -36510,18 +36579,24 @@ function _al10Week(ws, deals, misc){
   const we = _al10AddDays(ws, 7);
   const inW = t => t!==null && t!==undefined && t>=ws && t<we;
   const out = { ws, we, key:_al10Key(ws),
-    listings:{v:0, items:[]}, contracts:{v:0, items:[]}, revenue:{v:0, items:[]} };
+    listings:{v:0, items:[]}, contracts:{v:0, items:[]}, revenue:{v:0, items:[]},
+    net:{v:0, items:[]} };   // PROFITSGA-20261006: revenue less advisor payouts (Pay-tab ladder)
   (deals||[]).forEach(d=>{
     if(!d) return;
     if(inW(_al10ListingTs(d))){ const v=_al10ListVol(d); out.listings.v+=v; out.listings.items.push({name:_al10Name(d), v}); }
     if(inW(_itrContractTs(d))){ const v=_itrVol(d); out.contracts.v+=v; out.contracts.items.push({name:_al10Name(d), v}); }
-    if(inW(_itrClosedTs(d))){ const v=getEffectiveRevenue(d)||0; out.revenue.v+=v; out.revenue.items.push({name:_al10Name(d), v}); }
+    if(inW(_itrClosedTs(d))){ const v=getEffectiveRevenue(d)||0; out.revenue.v+=v; out.revenue.items.push({name:_al10Name(d), v});
+      const nv = Math.min(v, Math.max(0, getDealNetToCompany(d)||0));   // PROFITSGA-20261006
+      out.net.v += nv; out.net.items.push({name:_al10Name(d), v:nv, gross:v}); }
   });
   (misc||[]).forEach(r=>{
     if(!r || !inW(_itrParseDay(r.dateReceived))) return;
     const v = Number(r.amount)||0;
     out.revenue.v += v;
     out.revenue.items.push({name:(r.category||'Other payment')+(r.advisorName?' · '+r.advisorName:''), v});
+    const nv = Math.min(v, Math.max(0, miscNetToCompany(r)||0));   // PROFITSGA-20261006
+    out.net.v += nv;
+    out.net.items.push({name:(r.category||'Other payment')+(r.advisorName?' · '+r.advisorName:''), v:nv, gross:v});
   });
   return out;
 }
@@ -36542,7 +36617,7 @@ function _al10Scorecard(deals, misc, nowMs){
   const sum = k => qWeeks.reduce((s,w)=>s+w[k].v, 0);
   return { thisMon, pw, weeks,
     quarter:{ label:'Q'+(qIdx+1)+' '+pd.getFullYear(), n:qWeeks.length, keys:qWeeks.map(w=>w.key),
-      listings:sum('listings'), contracts:sum('contracts'), revenue:sum('revenue') } };
+      listings:sum('listings'), contracts:sum('contracts'), revenue:sum('revenue'), net:sum('net') } };
 }
 window._al10Monday = _al10Monday; window._al10Week = _al10Week;
 window._al10Scorecard = _al10Scorecard; window._al10ListingTs = _al10ListingTs;
@@ -36566,6 +36641,48 @@ window._al10AdminRoster = _al10AdminRoster;
 
 const _AL10_TODO_KEY = 'l10-todos-admin';
 const _AL10_EXP_KEY  = 'adminL10Expenses';   // eos/adminL10Expenses — shown to admins only (no extra Firestore rule needed)
+/* PROFITSGA-20261006 — SG&A % on the Admin L-10 scorecard.
+   eos/adminL10Sga = { 'YYYY-MM': {sga, revenue, source:'quickbooks'|'manual', at, by} }
+   sga     = QuickBooks P&L operating expenses for the month, EXCLUDING advisor commissions
+   revenue = QuickBooks P&L total income for the month
+   SG&A % = sga / revenue. Filled from QuickBooks (via Claude's QuickBooks connector) or typed
+   in by an admin. Admin-only in the UI, same as expenses. */
+const _AL10_SGA_KEY  = 'adminL10Sga';
+function _al10SgaMap(){
+  if(!_al10IsAdminUser()) return {};
+  return eosGet(_AL10_SGA_KEY, {}) || {};
+}
+function _al10MonthKey(ms){ const d=new Date(ms); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); }
+function _al10PrevMonthKey(key, back){
+  const [y,m] = String(key).split('-').map(Number);
+  const d = new Date(y, m-1-(back||0), 1);
+  return _al10MonthKey(d.getTime());
+}
+function _al10MonthLbl(key, long){
+  const [y,m] = String(key).split('-').map(Number);
+  return new Date(y, m-1, 1).toLocaleDateString('en-US',{month:long?'long':'short', year:'numeric'});
+}
+window._al10SgaMap = _al10SgaMap; window._al10PrevMonthKey = _al10PrevMonthKey;
+window.al10ToggleSgaEdit = () => { window._al10SgaEdit = !window._al10SgaEdit; window._eosRerender('l10');
+  if(window._al10SgaEdit) setTimeout(()=>document.getElementById('al10-sga-amt')?.focus(), 60); };
+window.al10SetSga = (monthKey) => {
+  if(!_al10IsAdminUser()){ showToast('Only admins can enter SG&A','error'); return; }
+  const num = id => { const s=String(document.getElementById(id)?.value||'').replace(/[$,\s]/g,''); return s==='' ? null : Number(s); };
+  const sga = num('al10-sga-amt'), rev = num('al10-sga-rev');
+  const map = {...(eosGet(_AL10_SGA_KEY, {})||{})};
+  if(sga===null && rev===null){
+    delete map[monthKey]; eosSave(_AL10_SGA_KEY, map);
+    window._al10SgaEdit = false; showToast('SG&A cleared for '+_al10MonthLbl(monthKey),'success',2000); window._eosRerender('l10'); return;
+  }
+  if(sga===null || !isFinite(sga) || sga<0){ document.getElementById('al10-sga-amt')?.focus(); showToast('Enter the month\'s SG&A in dollars, e.g. 84,500','error'); return; }
+  if(rev===null || !isFinite(rev) || rev<=0){ document.getElementById('al10-sga-rev')?.focus(); showToast('Enter the month\'s total revenue (QuickBooks total income) — it must be above $0','error'); return; }
+  map[monthKey] = { sga:Math.round(sga*100)/100, revenue:Math.round(rev*100)/100, source:'manual',
+                    at:Date.now(), by:currentUser?.name||currentUser?.email||'' };
+  eosSave(_AL10_SGA_KEY, map);
+  window._al10SgaEdit = false;
+  showToast('SG&A saved · '+(sga/rev*100).toFixed(1)+'% of revenue','success',2200);
+  window._eosRerender('l10');
+};
 // The new Admin L-10 agenda starts with the Mon Oct 12, 2026 meeting. Before that
 // the admin tab keeps the existing agenda (with a Preview button).
 const ADMIN_L10_START = new Date(2026, 9, 12).getTime();
