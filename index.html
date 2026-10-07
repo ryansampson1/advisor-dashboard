@@ -10733,7 +10733,8 @@ const ADVISOR_BIO_VIDEOS = {
             if(!bodyParas) bodyParas=`[ADD BUYER PLANS -- what the buyer intends to develop]\n\n[ADD SELLER CONTEXT -- who the seller is and why they sold]`;
             if(!quote1) quote1=`"[Advisor quote about the deal.]" said ${deal.advisorName||'the advisor'}.`;
             const {Document,Paragraph,TextRun,Packer,AlignmentType}=window.docx;
-            const advisorPhone=deal.advisorPhone||'813-287-8787';
+            const _prBio=(typeof getAdvisorBio==='function')?getAdvisorBio(deal.advisorUid||deal.advisorEmail):null;   // ADVBIO-20261006
+            const advisorPhone=(_prBio&&_prBio.phone)||deal.advisorPhone||'813-287-8787';
             const advisorEmail=deal.advisorEmail||'[advisor@thedirtdog.com]';
             const mk=(text,opts={})=>new Paragraph({
               alignment:opts.align||AlignmentType.LEFT,
@@ -10744,7 +10745,8 @@ const ADVISOR_BIO_VIDEOS = {
             kids.push(mk('FOR IMMEDIATE RELEASE',{bold:true,size:24,after:60}));
             kids.push(mk('For additional information contact:',{after:80}));
             kids.push(mk(''));
-            kids.push(mk(deal.advisorName||'[Advisor Name]',{bold:true,after:40}));
+            kids.push(mk((_prBio&&_prBio.nameWithDesignations)||deal.advisorName||'[Advisor Name]',{bold:true,after:40}));
+            if(_prBio&&_prBio.title) kids.push(mk(_prBio.title+', Eshenbaugh Land Company',{after:40}));
             kids.push(mk(advisorPhone+' | '+advisorEmail,{after:240}));
             kids.push(mk(''));
             kids.push(mk(headline,{bold:true,size:24,after:200,before:80}));
@@ -10759,7 +10761,7 @@ const ADVISOR_BIO_VIDEOS = {
             kids.push(mk(''));
             kids.push(mk('About '+(deal.advisorName||'[Advisor Name]'),{bold:true,size:22,after:120,before:160}));
             // Look up real bio from website data
-            const advisorBio = ADVISOR_BIOS[advisorEmail] || ADVISOR_BIOS[(deal.advisorEmail||'').toLowerCase()];
+            const advisorBio = (_prBio&&_prBio.bio) || ADVISOR_BIOS[advisorEmail] || ADVISOR_BIOS[(deal.advisorEmail||'').toLowerCase()];   // ADVBIO-20261006
             if(advisorBio){
               advisorBio.split(/\n\n+/).forEach(bp=>{if(bp.trim())kids.push(mk(bp.trim(),{after:140}));});
             } else {
@@ -11328,6 +11330,7 @@ function buildNavItems(){
       {id:'dashboard',     label:'📊 Financials',    admin:true, manager:true},
       {id:'itr',           label:'📈 ITR',           admin:true},
       {id:'commissions',   label:'💰 My Pay',         advisor:true},
+      {id:'bio',           label:effectiveAdmin?'👤 Advisor Bios':'👤 My Bio', advisor:true, admin:true, manager:true},   // ADVBIO-20261006 — advisors edit their own, admins see all; never in staff view
       {id:'users',         label:'👤 Users',           admin:true},
       {id:'splits',        label:'⚖️ Splits',         admin:true},
       {id:'automations',   label:'⚡ Automations',    admin:true},
@@ -12070,6 +12073,7 @@ function renderCurrentView(){
   window._elcScoreCache?.clear();   // elc-v443: week scores are memoised per paint
   const map={exportContacts:viewExportContacts,board:viewBoard,tasks:viewTasks,calendar:viewCalendar,dashboard:viewDashboard,itr:viewITR,projection:viewProjection,
     commissions:viewMyCommissions,
+    bio:viewAdvisorBio,   // ADVBIO-20261006
     splits:viewSplits,automations:viewAutomations,users:viewUsers,leaderboard:viewLeaderboard,
     manageStages:viewManageStages,officeManagers:viewOfficeManagers,approvedUsers:viewApprovedUsers,officeOverview:viewOfficeOverview,
     eos:()=>viewEOS(window._eosSub||'rocks'),comps:viewComps,drive:viewDrive,documents:viewDocuments,hr:viewHR,crm:viewCRM,leads:viewLeads,inbox:viewSmartInbox,buyers:viewBuyers,videoProposals:viewVideoProposals,earthnotes:viewEarthNotes,valuation:viewValuation,activityLog:viewActivityLog,agreements:viewAgreements,monthlyReports:viewMonthlyReports};
@@ -12085,6 +12089,388 @@ function renderCurrentView(){
     </div>`);
   }
 }
+
+
+/* =======================================================
+   VIEW: 👤 ADVISOR BIO  (ADVBIO-20261006)
+   One source of truth for everything that describes an advisor in client-facing
+   output — proposals, listing packages, monthly owner reports, listing websites,
+   press releases, offering memorandums.
+
+   Data lives on advisorProfiles/{uid} (Firestore rule: owner or admin may write):
+     bioHeadshotUrl   Storage URL (dealPhotos/_advisors/<uid>_headshot_<ts>.jpg)
+     bioTitle         "Senior Advisor/Partner"
+     bioDesignations  ["ALC","CCIM"]            (array, canonical order)
+     bioCell          "813-417-5928"
+     bioOfficePhone   "813-287-8787"            (defaults from office)
+     bioExt           "104"
+     bioLocation      "Tampa, FL"
+     bioLinkedin      URL
+     bioEducation     text (paragraphs)
+     bioText          text (paragraphs)         — the narrative bio
+     bioMemberships   text (one per line)
+     bioUpdatedAt / bioUpdatedBy / bioSource ('thedirtdog.com' when seeded, 'terra' when edited in-app)
+
+   Access: advisors (and admins/office managers in advisor view) see and edit ONLY
+   their own bio. Admins see every advisor's bio and can edit any of them. Staff-
+   only accounts never see the tab (no `staff` flag → hidden in staff view).
+
+   Everything downstream reads through getAdvisorBio(uidOrEmail), which falls back
+   to the older per-report fields (reportDesignations/reportTitle/reportPhone/
+   reportHeadshotUrl) and the hard-coded ADVISOR_BIOS text so nothing that worked
+   before goes blank. Seeded from www.thedirtdog.com by advisor-bios-seed/seed_advisor_bios.js.
+   ======================================================= */
+const BIO_DESIGNATIONS = ['ALC','CCIM','MAB','MAI','SIOR','CRE','CPM','MBA','JD','CPA','AICP','PE','GRI','LEED AP'];
+const BIO_OFFICE_PHONES = { 'Tampa':'813-287-8787', 'Orlando':'407-710-7374' };
+const BIO_OFFICE_LOCATIONS = { 'Tampa':'Tampa, FL', 'Orlando':'Winter Park, FL' };
+window._bioState = window._bioState || { uid:null, dirty:false, desig:[] };
+
+function _bioEsc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function _bioFmtPhone(v){ return (typeof window._fmtPhone==='function') ? (window._fmtPhone(v||'')||'') : String(v||''); }
+function _bioInitials(name){ return String(name||'').split(/\s+/).filter(Boolean).slice(0,2).map(s=>s[0].toUpperCase()).join('')||'?'; }
+function _bioParseDesig(v){
+  if(Array.isArray(v)) return v.map(s=>String(s).trim()).filter(Boolean);
+  return String(v||'').split(/[,/;|]+/).map(s=>s.trim()).filter(Boolean);
+}
+function _bioSortDesig(list){
+  const seen=new Set(); const out=[];
+  list.forEach(d=>{ const k=d.toUpperCase(); if(seen.has(k)) return; seen.add(k); out.push(BIO_DESIGNATIONS.find(x=>x===k)||d); });
+  return out.sort((a,b)=>{ const ia=BIO_DESIGNATIONS.indexOf(a.toUpperCase()), ib=BIO_DESIGNATIONS.indexOf(b.toUpperCase()); return (ia<0?99:ia)-(ib<0?99:ib); });
+}
+// Resolve a uid OR an email to the profile uid (ADVISOR_BIOS is keyed by email).
+function _bioResolveUid(key){
+  if(!key) return null;
+  if(allProfiles && allProfiles[key]) return key;
+  const em=String(key).toLowerCase();
+  if(em.includes('@')){
+    const hit=Object.entries(allProfiles||{}).find(([u,p])=>p && !p.removed && String(p.email||'').toLowerCase()===em);
+    if(hit) return hit[0];
+    if(currentUser && String(currentUser.email||'').toLowerCase()===em) return currentUser.uid;
+  }
+  return key;
+}
+// Is this uid an advisor (someone who should have a bio)? Pure-staff accounts are not.
+function _bioIsAdvisorUid(uid){
+  const p=(allProfiles||{})[uid]||{};
+  if(p.removed) return false;
+  const em=String(p.email||'').toLowerCase();
+  if(typeof isStaffOnlyEmail==='function' && isStaffOnlyEmail(em)) return false;
+  const roles=Array.isArray(p.roles)?p.roles:[];
+  if(roles.length && roles.includes('staff') && !roles.includes('advisor') && !roles.includes('admin')) return false;
+  return true;
+}
+/* Public accessor — the ONE place downstream code should read advisor identity from. */
+function getAdvisorBio(key){
+  const uid=_bioResolveUid(key);
+  const p=(uid && allProfiles && allProfiles[uid])||{};
+  const da=(typeof getDistinctAdvisors==='function' ? getDistinctAdvisors().find(a=>a.uid===uid) : null)||{};
+  const email=String(p.email||da.email||(String(key||'').includes('@')?key:'')||(currentUser&&currentUser.uid===uid?currentUser.email:'')||'').toLowerCase();
+  const looksLikeUid=s=>!s||(s.length>=20&&!s.includes(' ')&&!s.includes('@')&&!s.includes('.'));
+  const name=(!looksLikeUid(p.name)&&p.name)||da.name||(currentUser&&currentUser.uid===uid?currentUser.name:'')||email||'';
+  const office=p.office||'';
+  const designations=_bioSortDesig(_bioParseDesig(p.bioDesignations!=null?p.bioDesignations:(p.reportDesignations||'')));
+  const officePhone=p.bioOfficePhone||BIO_OFFICE_PHONES[office]||'813-287-8787';
+  const ext=String(p.bioExt||'').trim();
+  const legacyLine=p.reportPhone||p.phone||p.officePhone||'';
+  const cell=_bioFmtPhone(p.bioCell||'');
+  const directLine=ext?`${officePhone} x${ext}`:(legacyLine||officePhone);
+  const bioText=p.bioText||((typeof ADVISOR_BIOS!=='undefined' && ADVISOR_BIOS[email])||'');
+  const out={
+    uid, email, name, office,
+    title: p.bioTitle||p.reportTitle||p.title||'Advisor',
+    designations, designationsStr: designations.join(', '),
+    nameWithDesignations: designations.length? `${name}, ${designations.join(', ')}` : name,
+    cell, ext, officePhone, directLine,
+    phone: cell||directLine,                    // best single number to print
+    headshotUrl: p.bioHeadshotUrl||p.reportHeadshotUrl||'',
+    location: p.bioLocation||BIO_OFFICE_LOCATIONS[office]||'',
+    linkedin: p.bioLinkedin||'',
+    education: p.bioEducation||'',
+    bio: bioText,
+    memberships: p.bioMemberships||'',
+    updatedAt: p.bioUpdatedAt||0, source: p.bioSource||''
+  };
+  out.contactLine=[out.title,out.phone,out.email].filter(Boolean).join(' · ');
+  return out;
+}
+window.getAdvisorBio=getAdvisorBio;
+function _bioCompleteness(b){
+  // designations are optional (not every advisor holds one) — they don't count against completeness
+  const parts=[b.headshotUrl, b.title, b.cell, b.ext, b.education, b.bio];
+  const n=parts.filter(Boolean).length;
+  return {n, of:parts.length, pct:Math.round(n/parts.length*100)};
+}
+function _bioCanSeeAll(){ return !!(currentUser && currentUser.isAdmin && !adminViewAsAdvisor && !staffViewMode); }
+function _bioCanEdit(uid){ return !!(currentUser && (uid===currentUser.uid || currentUser.isAdmin)); }
+function _bioAdvisorList(){
+  const list=(typeof getDistinctAdvisors==='function'?getDistinctAdvisors():[]).filter(a=>a.uid && _bioIsAdvisorUid(a.uid));
+  return list.map(a=>getAdvisorBio(a.uid)).sort((a,b)=>a.name.localeCompare(b.name));
+}
+function _bioAvatar(b, px){
+  px=px||64;
+  return b.headshotUrl
+    ? `<img src="${_bioEsc(b.headshotUrl)}" alt="${_bioEsc(b.name)}" style="width:${px}px;height:${px}px;border-radius:50%;object-fit:cover;flex:none;background:#e5e7eb">`
+    : `<div aria-hidden="true" style="width:${px}px;height:${px}px;border-radius:50%;flex:none;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:${Math.round(px*.34)}px;background:var(--brand-teal,#2a9d8f);color:#fff">${_bioEsc(_bioInitials(b.name))}</div>`;
+}
+function _bioInjectStyles(){
+  if(document.getElementById('bio-styles')) return;
+  const st=document.createElement('style'); st.id='bio-styles';
+  st.textContent=`
+    .bio-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:.9rem}
+    .bio-card{display:flex;gap:.8rem;align-items:center;text-align:left;width:100%;padding:.9rem;border:1px solid var(--border,#e5e7eb);border-radius:1rem;background:#fff;cursor:pointer;transition:box-shadow .15s,transform .15s;min-height:44px}
+    .bio-card:hover{box-shadow:0 6px 18px rgba(0,0,0,.08);transform:translateY(-1px)}
+    .bio-card:focus-visible{outline:3px solid var(--brand-teal,#2a9d8f);outline-offset:2px}
+    .bio-meter{height:6px;border-radius:999px;background:#e5e7eb;overflow:hidden;margin-top:.4rem}
+    .bio-meter>span{display:block;height:100%;background:var(--brand-teal,#2a9d8f)}
+    .bio-form{display:grid;grid-template-columns:minmax(0,320px) minmax(0,1fr);gap:1.25rem;align-items:start}
+    @media (max-width:860px){.bio-form{grid-template-columns:minmax(0,1fr)}}
+    .bio-sec{background:#fff;border:1px solid var(--border,#e5e7eb);border-radius:1rem;padding:1rem 1.1rem;margin-bottom:1rem}
+    .bio-sec h3{font-size:.8rem;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:#6b7280;margin:0 0 .7rem}
+    .bio-lbl{display:block;font-size:.72rem;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:.05em;margin:.6rem 0 .25rem}
+    .bio-lbl:first-child{margin-top:0}
+    .bio-in,.bio-ta{width:100%;border:1px solid var(--border,#d1d5db);border-radius:.6rem;padding:.55rem .7rem;font-size:.9rem;min-height:44px;background:#fff;color:#111827}
+    .bio-ta{min-height:140px;line-height:1.5;resize:vertical;font-family:inherit}
+    .bio-in:focus-visible,.bio-ta:focus-visible{outline:3px solid rgba(42,157,143,.35);outline-offset:0;border-color:var(--brand-teal,#2a9d8f)}
+    .bio-chip{display:inline-flex;align-items:center;gap:.3rem;min-height:36px;padding:.3rem .75rem;border-radius:999px;border:1px solid var(--border,#d1d5db);background:#fff;font-size:.82rem;font-weight:700;color:#374151;cursor:pointer}
+    .bio-chip[aria-pressed="true"]{background:var(--brand-teal,#2a9d8f);border-color:var(--brand-teal,#2a9d8f);color:#fff}
+    .bio-chip:focus-visible{outline:3px solid rgba(42,157,143,.35);outline-offset:1px}
+    .bio-preview{display:flex;gap:1rem;align-items:center;padding:1rem;border-radius:1rem;background:linear-gradient(135deg,#111827,#1f2937);color:#fff}
+    .bio-preview .nm{font-weight:800;font-size:1.05rem}
+    .bio-preview .ln{font-size:.82rem;opacity:.85}
+    .bio-sticky{position:sticky;bottom:0;background:#fff;border-top:1px solid var(--border,#e5e7eb);padding:.75rem 0;margin-top:.5rem;display:flex;gap:.6rem;align-items:center;justify-content:flex-end;flex-wrap:wrap}
+    html.dark .bio-card,html.dark .bio-sec,html.dark .bio-sticky{background:#1b1d22;border-color:#2e3238}
+    html.dark .bio-in,html.dark .bio-ta,html.dark .bio-chip{background:#121417;border-color:#3a3f47;color:#e3e5ea}
+    html.dark .bio-chip[aria-pressed="true"]{background:var(--brand-teal,#2a9d8f);color:#fff}
+    html.dark .bio-meter{background:#2e3238}
+    @media (max-width:767px){.bio-in,.bio-ta{font-size:16px}}
+  `;
+  document.head.appendChild(st);
+}
+
+/* ---------- the view ---------- */
+function viewAdvisorBio(){
+  _bioInjectStyles();
+  if(!currentUser){ setContent(''); return; }
+  if(currentUser.isStaff){   // pure-staff accounts have no bio; office managers in manager view still get their own
+    setContent(`<div class="text-center py-16 text-gray-400"><div class="text-5xl mb-3">🔒</div><div class="font-medium text-gray-500">Bios are for advisors only.</div></div>`);
+    return;
+  }
+  const st=window._bioState;
+  const seeAll=_bioCanSeeAll();
+  if(!seeAll) st.uid=currentUser.uid;               // advisors only ever see themselves
+  if(seeAll && st.uid && !_bioIsAdvisorUid(st.uid)) st.uid=null;
+  if(st.uid) return _bioRenderEditor(st.uid, seeAll);
+  // ----- admin roster -----
+  const advs=_bioAdvisorList();
+  const incomplete=advs.filter(b=>_bioCompleteness(b).n<_bioCompleteness(b).of).length;
+  setContent(`
+    <div class="flex items-center justify-between mb-6 flex-wrap gap-3">
+      <div>
+        <h2 class="text-xl font-bold text-gray-800">👤 Advisor Bios</h2>
+        <p class="text-sm text-gray-500 mt-0.5">Headshot, designations, contact and bio for every advisor — used in proposals, listing packages, monthly reports, listing websites and press releases. Each advisor can edit their own; you can edit any of them.</p>
+      </div>
+      <div class="text-xs text-gray-500">${advs.length} advisor${advs.length!==1?'s':''}${incomplete?` · <span class="font-semibold" style="color:var(--brand-red,#DA291C)">${incomplete} incomplete</span>`:' · all complete ✓'}</div>
+    </div>
+    ${advs.length? `<div class="bio-grid">${advs.map(b=>{ const c=_bioCompleteness(b); return `
+      <button type="button" class="bio-card" onclick="window._bioOpen('${_bioEsc(b.uid)}')" aria-label="Edit bio for ${_bioEsc(b.name)}">
+        ${_bioAvatar(b,56)}
+        <div style="flex:1;min-width:0">
+          <div class="font-bold text-gray-800 truncate">${_bioEsc(b.name)}${b.designations.length?`<span class="text-gray-500 font-semibold">, ${_bioEsc(b.designationsStr)}</span>`:''}</div>
+          <div class="text-xs text-gray-600 truncate">${_bioEsc([b.title,b.office?b.office+' office':''].filter(Boolean).join(' · '))}</div>
+          <div class="text-xs text-gray-500 truncate">${_bioEsc([b.cell?'📱 '+b.cell:'', b.ext?'☎ x'+b.ext:''].filter(Boolean).join('  '))||'<span style="color:var(--brand-red,#DA291C)">No phone on file</span>'}</div>
+          <div class="bio-meter" title="${c.n} of ${c.of} fields filled" aria-label="${c.n} of ${c.of} fields filled"><span style="width:${c.pct}%"></span></div>
+        </div>
+      </button>`; }).join('')}</div>`
+    : `<div class="text-center py-16 text-gray-400"><div class="text-5xl mb-3">👤</div><div class="font-medium text-gray-500">No advisor profiles loaded yet.</div></div>`}
+  `);
+}
+window.viewAdvisorBio=viewAdvisorBio;
+window._bioOpen=uid=>{ window._bioState.uid=uid; window._bioState.dirty=false; viewAdvisorBio(); };
+window._bioBack=async()=>{
+  const st=window._bioState;
+  if(st.dirty && typeof elcConfirm==='function'){ const ok=await elcConfirm('You have unsaved changes to this bio. Leave without saving?',{title:'Unsaved changes',okLabel:'Leave',danger:true}); if(!ok) return; }
+  st.uid=null; st.dirty=false; viewAdvisorBio();
+};
+
+function _bioRenderEditor(uid, seeAll){
+  const st=window._bioState;
+  const b=getAdvisorBio(uid);
+  const p=(allProfiles||{})[uid]||{};
+  const canEdit=_bioCanEdit(uid);
+  const self=uid===currentUser.uid;
+  st.desig=b.designations.slice();
+  const custom=st.desig.filter(d=>!BIO_DESIGNATIONS.includes(d.toUpperCase()));
+  const upd=b.updatedAt?new Date(b.updatedAt).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}):'';
+  const src=b.source==='thedirtdog.com'?'Imported from thedirtdog.com':(b.source==='terra'?'Last edited in Terra':'');
+  const ro=canEdit?'':'disabled';
+  setContent(`
+    <div class="flex items-center justify-between mb-5 flex-wrap gap-3">
+      <div>
+        ${seeAll?`<button type="button" class="text-sm font-semibold text-gray-600 mb-1" style="min-height:44px" onclick="window._bioBack()">← All advisors</button>`:''}
+        <h2 class="text-xl font-bold text-gray-800">${self?'👤 My Bio':'👤 '+_bioEsc(b.name)}</h2>
+        <p class="text-sm text-gray-500 mt-0.5">${self?'This is how you appear to clients in proposals, listing packages, monthly owner reports, listing websites and press releases. Keep it current — changes apply everywhere immediately.':'Shown to clients in proposals, listing packages, monthly owner reports, listing websites and press releases.'}${upd?` <span class="text-gray-400">· ${_bioEsc(src)} ${upd}</span>`:''}</p>
+      </div>
+      ${!canEdit?`<div class="text-xs text-gray-500">Read-only</div>`:''}
+    </div>
+
+    <div class="bio-preview mb-5" id="bio-preview">${_bioPreviewInner(b)}</div>
+
+    <form id="bio-form" class="bio-form" onsubmit="event.preventDefault();window._bioSave(document.getElementById('bio-save-btn'))" oninput="window._bioMarkDirty()">
+      <div>
+        <div class="bio-sec">
+          <h3>Headshot</h3>
+          <div style="display:flex;gap:1rem;align-items:center;flex-wrap:wrap">
+            <div id="bio-avatar">${_bioAvatar(b,112)}</div>
+            <div style="flex:1;min-width:160px">
+              <p class="text-xs text-gray-500 mb-2">Square or portrait, face centred. Resized to 1200px on upload.</p>
+              ${canEdit?`<label class="brand-btn px-3 py-2 rounded-lg text-sm font-semibold inline-flex items-center gap-1" style="cursor:pointer;min-height:44px" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.querySelector('input').click();}">📷 ${b.headshotUrl?'Replace photo':'Upload photo'}<input type="file" accept="image/*" style="display:none" onchange="window._bioUploadHeadshot('${_bioEsc(uid)}',this)"></label>
+              ${b.headshotUrl?`<button type="button" class="text-xs text-gray-500 ml-2" style="min-height:44px" onclick="window._bioRemoveHeadshot('${_bioEsc(uid)}',this)">Remove</button>`:''}`:''}
+            </div>
+          </div>
+        </div>
+        <div class="bio-sec">
+          <h3>Contact</h3>
+          <label class="bio-lbl" for="bio-name">Name</label>
+          <input id="bio-name" class="bio-in" value="${_bioEsc(b.name)}" disabled aria-describedby="bio-name-hint">
+          <div id="bio-name-hint" class="text-xs text-gray-400 mt-1">${seeAll?'Change names on the 👤 Users tab.':'Ask an admin to change your name.'}</div>
+          <label class="bio-lbl" for="bio-title">Title</label>
+          <input id="bio-title" class="bio-in" value="${_bioEsc(b.title)}" placeholder="Senior Advisor/Partner" ${ro}>
+          <label class="bio-lbl" for="bio-cell">Cell</label>
+          <input id="bio-cell" class="bio-in" type="tel" inputmode="tel" value="${_bioEsc(b.cell)}" placeholder="813-555-5555" ${ro}>
+          <div style="display:grid;grid-template-columns:1fr 100px;gap:.6rem">
+            <div><label class="bio-lbl" for="bio-office-phone">Office line</label><input id="bio-office-phone" class="bio-in" type="tel" inputmode="tel" value="${_bioEsc(b.officePhone)}" ${ro}></div>
+            <div><label class="bio-lbl" for="bio-ext">Ext.</label><input id="bio-ext" class="bio-in" inputmode="numeric" value="${_bioEsc(b.ext)}" placeholder="104" ${ro}></div>
+          </div>
+          <label class="bio-lbl" for="bio-email">Email</label>
+          <input id="bio-email" class="bio-in" value="${_bioEsc(b.email)}" disabled>
+          <label class="bio-lbl" for="bio-location">Location</label>
+          <input id="bio-location" class="bio-in" value="${_bioEsc(b.location)}" placeholder="Tampa, FL" ${ro}>
+          <label class="bio-lbl" for="bio-linkedin">LinkedIn</label>
+          <input id="bio-linkedin" class="bio-in" type="url" value="${_bioEsc(b.linkedin)}" placeholder="https://www.linkedin.com/in/…" ${ro}>
+        </div>
+        <div class="bio-sec">
+          <h3>Designations</h3>
+          <div id="bio-desig" role="group" aria-label="Designations" style="display:flex;flex-wrap:wrap;gap:.4rem">
+            ${BIO_DESIGNATIONS.map(d=>`<button type="button" class="bio-chip" aria-pressed="${st.desig.map(x=>x.toUpperCase()).includes(d)?'true':'false'}" data-d="${d}" onclick="window._bioToggleDesig(this)" ${ro}>${d}</button>`).join('')}
+          </div>
+          <label class="bio-lbl" for="bio-desig-other">Other (comma-separated)</label>
+          <input id="bio-desig-other" class="bio-in" value="${_bioEsc(custom.join(', '))}" placeholder="e.g. CRE, MSRE" ${ro} oninput="window._bioMarkDirty();window._bioRefreshPreview()">
+        </div>
+      </div>
+      <div>
+        <div class="bio-sec">
+          <h3>Bio</h3>
+          <p class="text-xs text-gray-500 mb-2">Third person, 1–3 short paragraphs. This is the paragraph printed under “About ${_bioEsc(b.name.split(' ')[0]||'the advisor')}” in packages and press releases.</p>
+          <textarea id="bio-text" class="bio-ta" style="min-height:220px" ${ro} placeholder="${_bioEsc(b.name.split(' ')[0]||'')} joined Eshenbaugh Land Company in …">${_bioEsc(b.bio)}</textarea>
+        </div>
+        <div class="bio-sec">
+          <h3>Education</h3>
+          <textarea id="bio-education" class="bio-ta" style="min-height:110px" ${ro} placeholder="Florida State University — B.S. Real Estate">${_bioEsc(b.education)}</textarea>
+        </div>
+        <div class="bio-sec">
+          <h3>Memberships &amp; associations</h3>
+          <textarea id="bio-memberships" class="bio-ta" style="min-height:110px" ${ro} placeholder="One per line — Realtors Land Institute, ULI, NAIOP…">${_bioEsc(b.memberships)}</textarea>
+        </div>
+      </div>
+      ${canEdit?`<div class="bio-sticky" style="grid-column:1/-1">
+        <span id="bio-dirty" class="text-xs text-gray-500" style="flex:1"></span>
+        ${seeAll?`<button type="button" class="px-4 py-2 rounded-lg text-sm font-semibold border text-gray-700" style="min-height:44px" onclick="window._bioBack()">Cancel</button>`:''}
+        <button type="submit" id="bio-save-btn" class="brand-btn px-5 py-2 rounded-lg text-sm font-semibold" style="min-height:44px">Save bio</button>
+      </div>`:''}
+    </form>
+  `);
+  st.dirty=false;
+}
+function _bioPreviewInner(b){
+  return `${_bioAvatar(b,72)}
+    <div style="min-width:0">
+      <div class="nm">${_bioEsc(b.nameWithDesignations)}</div>
+      <div class="ln">${_bioEsc(b.title)} · Eshenbaugh Land Company${b.office?' · '+_bioEsc(b.office):''}</div>
+      <div class="ln">${_bioEsc([b.cell?'Cell '+b.cell:'', b.ext?'Office '+b.officePhone+' x'+b.ext:b.officePhone?'Office '+b.officePhone:'', b.email].filter(Boolean).join('  ·  '))}</div>
+    </div>`;
+}
+function _bioReadForm(){
+  const v=id=>(document.getElementById(id)?.value||'').trim();
+  const other=_bioParseDesig(v('bio-desig-other'));
+  const pressed=[...document.querySelectorAll('#bio-desig .bio-chip[aria-pressed="true"]')].map(x=>x.dataset.d);
+  return {
+    bioTitle:v('bio-title'), bioCell:_bioFmtPhone(v('bio-cell')), bioOfficePhone:_bioFmtPhone(v('bio-office-phone')), bioExt:v('bio-ext').replace(/\D/g,''),
+    bioLocation:v('bio-location'), bioLinkedin:v('bio-linkedin'),
+    bioDesignations:_bioSortDesig(pressed.concat(other)),
+    bioText:v('bio-text'), bioEducation:v('bio-education'), bioMemberships:v('bio-memberships')
+  };
+}
+window._bioRefreshPreview=function(){
+  const st=window._bioState; if(!st.uid) return;
+  const f=_bioReadForm(); const b=getAdvisorBio(st.uid);
+  const merged={...b, title:f.bioTitle||'Advisor', cell:f.bioCell, officePhone:f.bioOfficePhone||b.officePhone, ext:f.bioExt, designations:f.bioDesignations};
+  merged.nameWithDesignations=merged.designations.length?`${b.name}, ${merged.designations.join(', ')}`:b.name;
+  const el=document.getElementById('bio-preview'); if(el) el.innerHTML=_bioPreviewInner(merged);
+};
+window._bioMarkDirty=function(){
+  const st=window._bioState; st.dirty=true;
+  const d=document.getElementById('bio-dirty'); if(d) d.textContent='Unsaved changes';
+  window._bioRefreshPreview();
+};
+window._bioToggleDesig=function(btn){
+  if(btn.disabled) return;
+  btn.setAttribute('aria-pressed', btn.getAttribute('aria-pressed')==='true'?'false':'true');
+  window._bioMarkDirty();
+};
+window._bioSave=async function(btn){
+  const st=window._bioState; const uid=st.uid; if(!uid) return;
+  if(!_bioCanEdit(uid)){ showToast('You can only edit your own bio','error'); return; }
+  const done=typeof elcBusy==='function'?elcBusy(btn,'Saving…'):()=>{};
+  try{
+    const f=_bioReadForm();
+    const patch={...f, bioUpdatedAt:Date.now(), bioUpdatedBy:currentUser.uid, bioSource:'terra',
+      // keep the older monthly-report fields in step so nothing already printing them changes
+      reportDesignations:f.bioDesignations.join(', '), reportTitle:f.bioTitle, reportPhone:f.bioExt?`${f.bioOfficePhone||'813-287-8787'} x${f.bioExt}`:(f.bioCell||'') };
+    if(_fbDb && _fbFns){ const {doc,setDoc}=_fbFns; await setDoc(doc(_fbDb,'advisorProfiles',uid),patch,{merge:true}); }
+    else if(typeof Store!=='undefined' && Store.saveProfile){ await Store.saveProfile(uid,patch); }
+    allProfiles[uid]={...(allProfiles[uid]||{}),...patch};
+    st.dirty=false; const d=document.getElementById('bio-dirty'); if(d) d.textContent='Saved ✓';
+    showToast('Bio saved ✓ — live in proposals, reports and listing sites','success');
+    window._bioRefreshPreview();
+  }catch(e){ console.error('[bio] save',e); showToast('Could not save: '+(e.message||e),'error'); }
+  finally{ done(); }
+};
+window._bioUploadHeadshot=async function(uid, input){
+  const f=input.files&&input.files[0]; if(!f) return;
+  if(!_bioCanEdit(uid)){ showToast('You can only change your own headshot','error'); return; }
+  if(!/^image\//.test(f.type)){ showToast('Please choose an image file','error'); return; }
+  const lbl=input.closest('label'); let done=(lbl&&typeof elcBusy==='function')?elcBusy(lbl,'Uploading…'):()=>{};
+  try{
+    const blob=await _mrShrinkImage(f,1200,.88);
+    const url=await _mrUploadBlob('dealPhotos/_advisors/'+uid+'_headshot_'+Date.now()+'.jpg', blob,'image/jpeg');
+    const patch={bioHeadshotUrl:url, reportHeadshotUrl:url, bioUpdatedAt:Date.now(), bioUpdatedBy:currentUser.uid};
+    const {doc,setDoc}=_fbFns; await setDoc(doc(_fbDb,'advisorProfiles',uid),patch,{merge:true});
+    allProfiles[uid]={...(allProfiles[uid]||{}),...patch};
+    done(); done=()=>{};                       // restore the label (and its file input) BEFORE relabelling it
+    const b=getAdvisorBio(uid);
+    const av=document.getElementById('bio-avatar'); if(av) av.innerHTML=_bioAvatar(b,112);
+    window._bioRefreshPreview();
+    if(lbl && lbl.childNodes[0] && lbl.childNodes[0].nodeType===3) lbl.childNodes[0].nodeValue='📷 Replace photo';
+    showToast('Headshot saved ✓','success');
+  }catch(e){ console.error('[bio] headshot',e); showToast('Upload failed: '+(e.message||e),'error'); }
+  finally{ done(); try{ input.value=''; }catch(_){} }
+};
+window._bioRemoveHeadshot=async function(uid, btn){
+  if(!_bioCanEdit(uid)) return;
+  const ok=typeof elcConfirm==='function'?await elcConfirm('Remove this headshot? Reports and proposals will show initials until a new photo is uploaded.',{title:'Remove headshot',okLabel:'Remove',danger:true}):confirm('Remove headshot?');
+  if(!ok) return;
+  const prev={bioHeadshotUrl:(allProfiles[uid]||{}).bioHeadshotUrl||'', reportHeadshotUrl:(allProfiles[uid]||{}).reportHeadshotUrl||''};
+  const done=typeof elcBusy==='function'?elcBusy(btn,'Removing…'):()=>{};
+  try{
+    const {doc,setDoc}=_fbFns; const patch={bioHeadshotUrl:'', reportHeadshotUrl:'', bioUpdatedAt:Date.now(), bioUpdatedBy:currentUser.uid};
+    await setDoc(doc(_fbDb,'advisorProfiles',uid),patch,{merge:true}); allProfiles[uid]={...(allProfiles[uid]||{}),...patch};
+    viewAdvisorBio();
+    if(typeof showUndoToast==='function') showUndoToast('Headshot removed', async()=>{ await setDoc(doc(_fbDb,'advisorProfiles',uid),prev,{merge:true}); allProfiles[uid]={...(allProfiles[uid]||{}),...prev}; viewAdvisorBio(); });
+    else showToast('Headshot removed','success');
+  }catch(e){ console.error('[bio] remove',e); showToast('Could not remove: '+(e.message||e),'error'); done(); }
+};
+/* ---- end ADVBIO-20261006 ---- */
+
 
 /* =======================================================
    VIEW: VIDEO PROPOSALS (native, Firestore-backed builder)
@@ -12174,16 +12560,18 @@ function _vpAdvisorName(uid){ if(!uid) return ''; if(uid===currentUser.uid) retu
   const a=getDistinctAdvisors().find(x=>x.uid===uid); return (a&&a.name)||(allProfiles[uid]&&allProfiles[uid].name)||uid; }
 function _vpDefaultBroker(){ let b={}; try{ b=JSON.parse(localStorage.getItem('dd_broker_default')||'{}'); }catch(e){}
   const prof=(allProfiles&&allProfiles[currentUser.uid])||{};
-  return { name:b.name||currentUser.name||'', phone:b.phone||prof.phone||prof.officePhone||'', email:b.email||currentUser.email||'' }; }
+  const bb=(typeof getAdvisorBio==='function')?getAdvisorBio(currentUser.uid):null;   // ADVBIO-20261006 — bio tab wins over the remembered default
+  return { name:(bb&&bb.nameWithDesignations)||b.name||currentUser.name||'', phone:(bb&&bb.phone)||b.phone||prof.phone||prof.officePhone||'', email:b.email||currentUser.email||'' }; }
 // Contact card {name,phone,email} for any advisor uid — pulled from their profile so the
 // static client viewer can show co-advisors without needing access to the roster.
 function _vpAdvisorContact(uid){
   if(!uid) return null;
   const prof=allProfiles[uid]||{};
   const da=getDistinctAdvisors().find(x=>x.uid===uid)||{};
-  const name =(uid===currentUser.uid?(currentUser.name||''):'')||da.name||prof.name||'';
+  const bb=(typeof getAdvisorBio==='function')?getAdvisorBio(uid):null;   // ADVBIO-20261006
+  const name =(bb&&bb.nameWithDesignations)||(uid===currentUser.uid?(currentUser.name||''):'')||da.name||prof.name||'';
   const email=(uid===currentUser.uid?(currentUser.email||''):'')||da.email||prof.email||'';
-  const c={ name, phone:window._fmtPhone(prof.phone||prof.officePhone||''), email };
+  const c={ name, phone:(bb&&bb.phone)||window._fmtPhone(prof.phone||prof.officePhone||''), email };
   return (c.name||c.phone||c.email)?c:null;
 }
 function _vpDealTeamUids(dealId){ const d=allDeals.find(x=>x.id===dealId); if(!d) return [];
@@ -14795,6 +15183,7 @@ window._vpOnDealChange=_vpOnDealChange; window._vpToggleCo=_vpToggleCo; window._
 window._vpGenerate=_vpGenerate; window._vpQuickLink=_vpQuickLink; window._vpArchive=_vpArchive; window._vpRestore=_vpRestore;
 window._vpDelete=_vpDelete;
 window._vpPhotoFile=_vpPhotoFile; window._vpPhotoClear=_vpPhotoClear;
+window.viewAdvisorBio=viewAdvisorBio; window.getAdvisorBio=getAdvisorBio;   // ADVBIO-20261006
 window._vpvPreviewVoice=_vpvPreviewVoice; window._vpvGenerate=_vpvGenerate; window._vpvRemove=_vpvRemove;
 window._vpvSetVoiceMode=_vpvSetVoiceMode; window._vpvRecToggle=_vpvRecToggle; window._vpvRecReset=_vpvRecReset;
 window._vpvScriptInput=_vpvScriptInput; window._vpvFieldInput=_vpvFieldInput; window._vpvItemInput=_vpvItemInput;
@@ -17152,11 +17541,12 @@ ${(()=>{
   }
 
   const advisor = typeof currentUser !== 'undefined' ? currentUser : {};
-  const advisorName = advisor.name || 'Matt Eshenbaugh';
+  const _omBio = (typeof getAdvisorBio==='function' && advisor.uid) ? getAdvisorBio(advisor.uid) : null;   // ADVBIO-20261006
+  const advisorName = (_omBio && _omBio.nameWithDesignations) || advisor.name || 'Matt Eshenbaugh';
   const advisorEmail = advisor.email || 'matt@thedirtdog.com';
-  const advisorPhone = advisor.phone || '407.949.0744';
-  const advisorTitle = advisor.title || (advisor.isAdmin ? 'Principal' : 'Advisor');
-  const advisorBio = (typeof ADVISOR_BIOS !== 'undefined' && ADVISOR_BIOS[advisorEmail]) || '';
+  const advisorPhone = (_omBio && _omBio.phone) || advisor.phone || '407.949.0744';
+  const advisorTitle = (_omBio && _omBio.title) || advisor.title || (advisor.isAdmin ? 'Principal' : 'Advisor');
+  const advisorBio = (_omBio && _omBio.bio) || (typeof ADVISOR_BIOS !== 'undefined' && ADVISOR_BIOS[advisorEmail]) || '';
 
   const whyItems=[
     ['🏛','Florida Land Experts','Deep knowledge of Florida zoning, entitlements, environmental constraints, and water management — from the Panhandle to the Keys.'],
@@ -19271,13 +19661,16 @@ function _lsDealAdvisors(deal){
     const name = p.name || fallbackName || em || '';
     if(!name) return;
     if(out.some(a => a.email === em && em)) return;
+    const bb = (typeof getAdvisorBio==='function') ? getAdvisorBio(uid||em) : null;   // ADVBIO-20261006
     out.push({
       include: true,
       name,
-      title: p.title || 'Land Advisor',
-      phone: (typeof window._fmtPhone==='function' ? window._fmtPhone(p.phone||p.officePhone||'') : (p.phone||p.officePhone||'')),
+      title: (bb && bb.title) || p.title || 'Land Advisor',
+      phone: (bb && bb.phone) || (typeof window._fmtPhone==='function' ? window._fmtPhone(p.phone||p.officePhone||'') : (p.phone||p.officePhone||'')),
       email: em,
-      bio: (typeof ADVISOR_BIOS!=='undefined' && ADVISOR_BIOS[em]) || ''
+      bio: (bb && bb.bio) || (typeof ADVISOR_BIOS!=='undefined' && ADVISOR_BIOS[em]) || '',
+      photo: (bb && bb.headshotUrl) || '',
+      designations: (bb && bb.designationsStr) || ''
     });
   };
   push(deal.advisorUid, deal.advisorEmail, deal.advisorName);
@@ -19600,7 +19993,7 @@ window._lsPublish = async () => {
       heroPhoto: st.heroPhoto || '',
       gallery: st.gallery.map(g=>({url:g.url,caption:(g.caption||'').trim()})),
       docs: st.docs.filter(d=>d.include && d.url).map(d=>({label:(d.label||'Document').trim(),category:d.category||'other',url:d.url,name:d.name||''})),
-      advisors: st.advisors.filter(a=>a.include).map(a=>({name:a.name,title:a.title||'Land Advisor',phone:a.phone||'',email:a.email||'',bio:a.bio||''})),
+      advisors: st.advisors.filter(a=>a.include).map(a=>({name:a.name,title:a.title||'Land Advisor',phone:a.phone||'',email:a.email||'',bio:a.bio||'',photo:a.photo||'',designations:a.designations||''})),   // ADVBIO-20261006
       mapQuery: v('ls-f-mapq') || address,
       updatedAt: Date.now(),
       updatedBy: currentUser?.displayName || currentUser?.name || currentUser?.email || ''
@@ -44768,10 +45161,11 @@ function _mrAdvisorsOf(d){
   const out=[]; const seen=new Set();
   const push=(uid,name,email)=>{ const k=uid||email; if(!k||seen.has(k)) return; seen.add(k);
     const p=allProfiles[uid]||{};
-    out.push({uid, name:name||p.name||email||'', email:(email||p.email||'').toLowerCase(),
-      phone:window._fmtPhone?window._fmtPhone(p.reportPhone||p.phone||p.officePhone||''):(p.reportPhone||p.phone||''),
-      designations:p.reportDesignations||'', title:p.reportTitle||'', headshotUrl:p.reportHeadshotUrl||'',
-      bio:(typeof ADVISOR_BIOS!=='undefined' && ADVISOR_BIOS[(email||p.email||'').toLowerCase()])||''}); };
+    const bb=getAdvisorBio(uid||email);   // ADVBIO-20261006 — single source of truth
+    out.push({uid, name:name||bb.name||p.name||email||'', email:(email||bb.email||p.email||'').toLowerCase(),
+      phone:bb.directLine||bb.phone||'', cell:bb.cell||'', ext:bb.ext||'',
+      designations:bb.designationsStr||'', title:bb.title||'', headshotUrl:bb.headshotUrl||'',
+      bio:bb.bio||'', education:bb.education||''}); };
   push(d.advisorUid, d.advisorName, d.advisorEmail);
   (d.coAdvisors||[]).forEach(c=>push(c.uid,c.name,c.email));
   return out;
@@ -45169,23 +45563,27 @@ window._mrOpenSettings=function(){
   document.body.appendChild(ov);
 };
 function _mrAdvisorCardsHtml(){
-  const advs=(typeof getDistinctAdvisors==='function'?getDistinctAdvisors():[]).filter(a=>a.uid);
+  // ADVBIO-20261006: designations / title / direct line / headshot now live on the 👤 Advisor Bios
+  // tab (advisorProfiles.bio*). This panel is a read-only mirror with a jump link.
+  const advs=(typeof _bioAdvisorList==='function'?_bioAdvisorList():[]);
   if(!advs.length) return '<p class="mr-note">No advisor profiles loaded.</p>';
-  return `<table class="mr-table mr-mini"><thead><tr><th>Advisor</th><th>Designations</th><th>Title</th><th>Direct line</th><th>Headshot</th></tr></thead><tbody>${advs.map(a=>{ const p=allProfiles[a.uid]||{}; return `<tr data-uid="${a.uid}">
-    <td style="white-space:nowrap">${_mrEsc(a.name||p.name||a.email||'')}</td>
-    <td><input data-f="reportDesignations" value="${_mrEsc(p.reportDesignations||'')}" placeholder="ALC, CCIM"></td>
-    <td><input data-f="reportTitle" value="${_mrEsc(p.reportTitle||'')}" placeholder="Senior Advisor"></td>
-    <td><input data-f="reportPhone" value="${_mrEsc(p.reportPhone||p.phone||'')}" placeholder="813-287-8787 x104"></td>
-    <td style="white-space:nowrap">${p.reportHeadshotUrl?`<img src="${_mrEsc(p.reportHeadshotUrl)}" alt="" style="width:34px;height:34px;border-radius:50%;object-fit:cover;vertical-align:middle;margin-right:.3rem">`:''}<label class="mr-btn mr-btn-sm" style="cursor:pointer">📷 <input type="file" accept="image/*" style="display:none" onchange="window._mrUploadHeadshot('${a.uid}',this)"></label></td>
-  </tr>`; }).join('')}</tbody></table>`;
+  return `<p class="mr-note" style="margin-bottom:.5rem">Edited on the <button type="button" class="mr-btn mr-btn-sm" onclick="window._mrCloseSettings();switchView('bio')">👤 Advisor Bios</button> tab — each advisor can update their own.</p>
+  <table class="mr-table mr-mini"><thead><tr><th>Advisor</th><th>Designations</th><th>Title</th><th>Direct line</th><th>Cell</th><th>Headshot</th></tr></thead><tbody>${advs.map(b=>`<tr>
+    <td style="white-space:nowrap">${_mrEsc(b.name)}</td>
+    <td>${_mrEsc(b.designationsStr)||'<span class="mr-muted">—</span>'}</td>
+    <td>${_mrEsc(b.title)}</td>
+    <td style="white-space:nowrap">${_mrEsc(b.directLine)}</td>
+    <td style="white-space:nowrap">${_mrEsc(b.cell)||'<span class="mr-muted">—</span>'}</td>
+    <td>${b.headshotUrl?`<img src="${_mrEsc(b.headshotUrl)}" alt="" style="width:34px;height:34px;border-radius:50%;object-fit:cover;vertical-align:middle">`:'<span class="mr-muted">none</span>'}</td>
+  </tr>`).join('')}</tbody></table>`;
 }
 window._mrUploadHeadshot=async function(uid, input){
   const f=input.files&&input.files[0]; if(!f) return;
   try{ showToast('Uploading headshot…','info',2000);
     const blob=await _mrShrinkImage(f,600,.88);
     const url=await _mrUploadBlob('dealPhotos/_advisors/'+uid+'_headshot_'+Date.now()+'.jpg', blob,'image/jpeg');
-    const {doc,setDoc}=_fbFns; await setDoc(doc(_fbDb,'advisorProfiles',uid),{reportHeadshotUrl:url},{merge:true});
-    if(allProfiles[uid]) allProfiles[uid].reportHeadshotUrl=url;
+    const {doc,setDoc}=_fbFns; await setDoc(doc(_fbDb,'advisorProfiles',uid),{reportHeadshotUrl:url, bioHeadshotUrl:url},{merge:true});   // ADVBIO-20261006
+    if(allProfiles[uid]){ allProfiles[uid].reportHeadshotUrl=url; allProfiles[uid].bioHeadshotUrl=url; }
     const box=document.getElementById('mr-adv-cards'); if(box) box.innerHTML=_mrAdvisorCardsHtml();
     const ed=document.getElementById('mr-ed-advcard'); if(ed && window._mrState.editor) ed.innerHTML=_mrEditorAdvisorCardHtml(window._mrState.editor.deal);
     showToast('Headshot saved ✓','success');
