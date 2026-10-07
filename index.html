@@ -45504,8 +45504,10 @@ function viewMonthlyReports(){
       </table></div>
     </div>
     <p class="mr-note" style="margin-top:.8rem">Reports are drafts until you click Send. Each one is emailed from the listing advisor’s mailbox, filed under the deal’s Attachments, and logged on the property’s history.</p>
+    ${_mrSeesAll()&&window._sdPanelHtml?window._sdPanelHtml():''}
   </div>`);
   _mrPreloadReports(ym, deals).then(()=>{ if(currentView==='monthlyReports') window._mrRenderRows(); if(window._mbRun) window._mbRun({silent:true}); });   // MCBLAST-20261007
+  if(_mrSeesAll()&&window._sdLoad) setTimeout(()=>window._sdLoad(false),300);   // SOCIALDAILY-20261007
 }
 window.viewMonthlyReports=viewMonthlyReports;
 window._mrRenderRows=function(){
@@ -45961,8 +45963,10 @@ function _mrMonthPosts(deal, ym){
   const rng=_mrMonthRange(ym); const groups=new Map();
   (deal.socialPosts||[]).filter(p=>p&&p.at>=rng.start&&p.at<rng.end).sort((a,b)=>(b.at||0)-(a.at||0)).forEach(p=>{
     const key=(p.message||'')+'|'+(p.imageUrl||'')+'|'+Math.round((p.at||0)/120000);   // same caption+photo within 2 min
-    let g=groups.get(key); if(!g){ g={at:p.at, message:p.message||'', imageUrl:p.imageUrl||'', link:p.link||'', byName:p.byName||'', platforms:[], ids:[], urls:{}}; groups.set(key,g); }
+    let g=groups.get(key); if(!g){ g={at:p.at, message:p.message||'', imageUrl:p.imageUrl||'', link:p.link||'', byName:p.byName||'', platforms:[], ids:[], urls:{}, stored:{}, comments:[], reason:p.reason||''}; groups.set(key,g); }
     if(!g.platforms.includes(p.platform)) g.platforms.push(p.platform); if(p.id) g.ids.push({platform:p.platform,id:p.id}); if(p.url) g.urls[p.platform]=p.url;
+    // SOCIALDAILY-20261007: the 24-hour results and comments the cron saved on the post
+    if(p.metrics) g.stored[p.platform]=p.metrics; (p.comments||[]).forEach(c=>{ if(c&&c.message) g.comments.push({platform:p.platform, name:c.name||'', message:c.message, at:c.at||''}); });
   });
   const order={facebook:0,linkedin:1}; const out=[...groups.values()]; out.forEach(g=>g.platforms.sort((a,b)=>(order[a]??9)-(order[b]??9))); return out;
 }
@@ -45972,6 +45976,7 @@ async function _mrPostMetrics(groups){
   try{ const m=await Promise.race([_spWorkerPost('/metrics',{posts:ids}), new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')),9000))]);
     (m.metrics||[]).forEach(x=>{ const g=groups.find(g=>g.ids.some(i=>i.id===x.id)); if(!g) return; (g.metrics=g.metrics||{})[x.platform]={reach:x.reach, impressions:x.impressions, interactions:x.interactions, clicks:x.clicks, engagementRate:x.engagementRate}; });
   }catch(e){ console.warn('[mr] post metrics',e.message); }
+  groups.forEach(g=>{ Object.entries(g.stored||{}).forEach(([pl,m])=>{ g.metrics=g.metrics||{}; if(!g.metrics[pl]) g.metrics[pl]=m; }); });
 }
 // Gather everything the PDF needs for one deal/month.
 async function _mrAssemble(deal, ym){
@@ -46146,14 +46151,19 @@ async function _mrBuildPdf(A){
         const m=p.metrics||{}; const stats=[];
         if(m.facebook){ stats.push('Facebook — reach '+nz(m.facebook.reach)+' · interactions '+nz(m.facebook.interactions)+' · link clicks '+nz(m.facebook.clicks)); }
         if(m.linkedin){ stats.push('LinkedIn — impressions '+nz(m.linkedin.impressions)+(m.linkedin.engagementRate!=null?' · engagement '+m.linkedin.engagementRate+'%':'')+' · clicks '+nz(m.linkedin.clicks)); }
-        const h=pad+34+shown.length*lineH+(imgH?imgH+10:0)+(stats.length?stats.length*12+6:0)+22+pad;
+        const eng=[m.facebook,m.linkedin].filter(Boolean).reduce((o,x)=>({likes:(o.likes||0)+(+x.likes||0), comments:(o.comments||0)+(+x.comments||0), shares:(o.shares||0)+(+x.shares||0)}),{});
+        if(eng.likes||eng.comments||eng.shares) stats.push('Likes '+(eng.likes||0)+' · Comments '+(eng.comments||0)+' · Shares '+(eng.shares||0)+' (24 hours after posting)');
+        const comments=(p.comments||[]).slice(0,4).map(c=>{ const who=(c.name||'Someone')+': '; const ln=R.split(who+c.message.replace(/\s+/g,' '),textW-10,8.5); return ln.slice(0,2); });
+        const cH=comments.length?comments.reduce((a,l)=>a+l.length*11,0)+16:0;
+        const h=pad+34+shown.length*lineH+(imgH?imgH+10:0)+(stats.length?stats.length*12+6:0)+cH+22+pad;
         if(y+h>R.H-56){ y=R.newPage(); R.text('Social Media Posts (cont.)',R.M,y+10,{size:16,bold:true}); y+=30; }
         if(i===0 && y>R.M+40) { R.text('Posts',R.M,y+6,{size:16,bold:true}); y+=18; }
         const x=R.M; doc.setDrawColor(226,232,240); doc.setLineWidth(1); doc.roundedRect(x,y,cw,h,6,6,'S');
         // header: avatar + page name + date · platforms
         let cy=y+pad; doc.setFillColor(...MR_RED); doc.circle(x+pad+14,cy+14,14,'F'); R.text('E',x+pad+14,cy+19,{size:13,bold:true,color:[255,255,255],align:'center'});
         R.text('Eshenbaugh Land Company',x+pad+36,cy+11,{size:10,bold:true});
-        R.text(_mrFmtDateLong(p.at)+' · '+p.platforms.map(q=>q==='facebook'?'Facebook':q==='linkedin'?'LinkedIn':q).join(' + ')+(p.byName?' · posted by '+p.byName:''),x+pad+36,cy+24,{size:8,color:MR_GREY});
+        const reasonLabel={new:'New listing',price:'Price reduced',back:'Back on the market',renewed:'Listing extended',expiring:'Expiring soon',nooffer:'Available',rotation:'Available'}[p.reason]||'';
+        R.text(_mrFmtDateLong(p.at)+' · '+p.platforms.map(q=>q==='facebook'?'Facebook':q==='linkedin'?'LinkedIn':q).join(' + ')+(p.byName?' · posted by '+p.byName:'')+(reasonLabel?' · '+reasonLabel:''),x+pad+36,cy+24,{size:8,color:MR_GREY});
         cy+=34;
         // caption
         doc.setFont(font,'normal'); doc.setFontSize(9); doc.setTextColor(...MR_INK); shown.forEach((ln,k)=>doc.text(ln,x+pad,cy+9+k*lineH)); cy+=shown.length*lineH;
@@ -46161,6 +46171,8 @@ async function _mrBuildPdf(A){
         if(p.img){ cy+=4; const w=textW, hh=imgH; const s=Math.min(w/p.img.w,hh/p.img.h); const iw=p.img.w*s, ih=p.img.h*s; R.img(p.img,x+pad+(w-iw)/2,cy,iw,ih); cy+=hh+6; }
         // results
         if(stats.length){ stats.forEach((t,k)=>R.text(t,x+pad,cy+9+k*12,{size:8,color:MR_INK})); cy+=stats.length*12+6; }
+        // comments (saved 24 h after the post)
+        if(comments.length){ R.text('Comments',x+pad,cy+9,{size:8,bold:true,color:MR_GREY}); cy+=12; comments.forEach(ls=>{ doc.setFillColor(243,244,246); doc.roundedRect(x+pad,cy,textW,ls.length*11+4,4,4,'F'); ls.forEach((ln,k)=>R.text(ln,x+pad+5,cy+9+k*11,{size:8.5,color:MR_INK})); cy+=ls.length*11+4+4; }); }
         R.line(x+pad,cy+2,x+cw-pad,cy+2,[226,232,240],0.8);
         R.text('Like          Comment          Share',x+pad,cy+15,{size:8,color:MR_GREY});
         y+=h+14;
@@ -46953,6 +46965,67 @@ window._mbCreate=async function(btn){
   }catch(e){ console.error('[mb] create',e); showToast(e.message,'error',8000); }
 };
 /* ===== MCBLAST_BLOCK_END ===== */
+/* =======================================================
+   📣 DAILY LISTING POST — Terra side — marker SOCIALDAILY-20261007
+   The social worker's cron posts one available listing per connected
+   platform every morning at 9:00 AM Eastern (see worker.js SOCIALDAILY).
+   Terra shows the plan on the 📬 Monthly Reports tab: what posts today /
+   tomorrow and why, the next listings in line, yesterday's results, and
+   buttons to post now or re-pull results. Posts land in deal.socialPosts
+   with auto:true + reason, and print on the report's Social Media page
+   with their 24-hour results and comments.
+   ======================================================= */
+const SD_REASON_LABEL={new:'New listing',price:'Price reduced',back:'Back on the market',renewed:'Listing renewed / extended',expiring:'Listing expiring soon',nooffer:'No offers yet',rotation:'Available (rotation)'};
+window._sdPanelHtml=function(){
+  return `<div class="mr-sec" id="sd-panel" style="margin-top:.8rem"><div class="mr-row" style="justify-content:space-between;align-items:center;gap:.6rem;flex-wrap:wrap">
+    <h3 style="margin:0">📣 Daily listing post <span class="mr-note">— one listing per platform, every morning at 9:00 AM ET</span></h3>
+    <div class="mr-row" style="gap:.4rem"><button class="mr-btn mr-btn-sm" onclick="window._sdLoad(true,this)">↻ Refresh</button>${currentUser&&(currentUser.isAdmin||currentUser.isSuperAdmin)?`<button class="mr-btn mr-btn-sm" onclick="window._sdPostNow(this)" title="Post today's pick right now instead of waiting for 9 AM">📣 Post now</button><button class="mr-btn mr-btn-sm" onclick="window._sdPullMetrics(this)" title="Pull reach, likes and comments for posts older than 24 hours">📊 Pull results</button>`:''}</div>
+  </div><div id="sd-body" class="mr-muted" style="margin-top:.4rem">Loading today’s plan…</div></div>`;
+};
+window._sdLoad=async function(force, btn){
+  const box=document.getElementById('sd-body'); if(!box) return; const done=btn?elcBusy(btn,'…'):()=>{};
+  try{
+    const st=window._mrState; if(force||!st.sdPlan||Date.now()-(st.sdPlanAt||0)>5*60*1000){ st.sdPlan=await _spWorkerPost('/daily/preview',{}); st.sdPlanAt=Date.now(); }
+    const plan=st.sdPlan; const live=plan.platformsLive||[];
+    const name=pl=>pl==='facebook'?'Facebook':'LinkedIn';
+    const rows=live.map(pl=>{ const p=plan.picks[pl]; const sk=plan.skipped[pl];
+      if(sk) return `<div style="padding:.4rem 0;border-top:1px solid var(--line,#e5e7eb)"><b>${name(pl)}</b> — <span class="mr-muted">${_mrEsc(sk)}</span></div>`;
+      const deal=(allDeals||[]).find(d=>d.id===p.dealId);
+      return `<div style="padding:.5rem 0;border-top:1px solid var(--line,#e5e7eb);display:flex;gap:.7rem;align-items:flex-start">
+        ${p.imageUrl?`<img class="mr-thumb" src="${_mrEsc(p.imageUrl)}" alt="" style="width:96px;height:62px">`:`<div class="mr-thumb" style="width:96px;height:62px"></div>`}
+        <div style="flex:1;min-width:0"><div><b>${name(pl)}</b> → <a href="#" onclick="event.preventDefault();${deal?`window.openPropertyDetail&&window.openPropertyDetail('${deal.id}')`:''}" style="font-weight:700;color:#0A66C2">${_mrEsc(p.name)}</a> <span style="font-size:.72rem;color:#b45309;background:#fef3c7;border-radius:999px;padding:.1rem .5rem">${_mrEsc(SD_REASON_LABEL[p.reason]||p.reasonLabel||'')}</span> <span class="mr-muted">· ${p.candidates} eligible</span></div>
+          <pre style="white-space:pre-wrap;font:inherit;font-size:.78rem;margin:.3rem 0 0;color:var(--text-2,#4b5563);max-height:92px;overflow:auto">${_mrEsc(p.message)}</pre>
+          ${p.next&&p.next.length?`<div class="mr-note" style="margin-top:.3rem">Next in line: ${p.next.map(n=>_mrEsc(n.name)+' ('+_mrEsc(SD_REASON_LABEL[n.reason]||n.reason)+')').join(' · ')}</div>`:''}</div></div>`; }).join('');
+    const nowET=new Date().toLocaleString('en-US',{timeZone:'America/New_York',hour:'numeric',minute:'2-digit'});
+    box.className=''; box.innerHTML=(live.length?`<div class="mr-note">Plan for <b>${_mrEsc(plan.ymd)}</b> (${_mrEsc(nowET)} ET). Platforms connected: ${live.map(name).join(' + ')}${live.length<2?' — LinkedIn joins the rotation once its API approval lands':''}. Rules: one post per platform per day · each property at most once a month · platforms alternate month to month · priority new → price cut → back on market → renewed → expiring → no offers → rotation.</div>`:'<div class="mr-note">No platform connected yet — connect Facebook / LinkedIn in the social worker.</div>')+rows+_sdRecentHtml();
+  }catch(e){ box.textContent='Daily post plan unavailable: '+e.message; }
+  finally{ done(); }
+};
+function _sdRecentHtml(){
+  const cut=Date.now()-8*86400000; const items=[];
+  (allDeals||[]).forEach(d=>(d.socialPosts||[]).forEach(p=>{ if(p&&p.auto&&p.at>=cut) items.push({d,p}); }));
+  if(!items.length) return '';
+  items.sort((a,b)=>b.p.at-a.p.at);
+  return `<div style="margin-top:.6rem"><div class="mr-lbl">Last 7 days</div>${items.slice(0,10).map(({d,p})=>{ const m=p.metrics||{}; return `<div class="mr-row" style="gap:.5rem;font-size:.78rem;padding:.2rem 0;flex-wrap:wrap"><span class="mr-muted">${_mrEsc(_mrFmtDate(p.at))}</span> <b>${p.platform==='facebook'?'Facebook':'LinkedIn'}</b> ${_mrEsc(_mrDealName(d))} <span class="mr-muted">(${_mrEsc(SD_REASON_LABEL[p.reason]||'')})</span>${p.url?` <a href="${_mrEsc(p.url)}" target="_blank" rel="noopener" style="color:#0A66C2">view ↗</a>`:''} ${p.metricsAt?`<span class="mr-muted">· reach ${m.reach??m.impressions??'–'} · likes ${m.likes??0} · comments ${(p.comments||[]).length} · clicks ${m.clicks??'–'}</span>`:'<span class="mr-muted">· results in 24 h</span>'}</div>`; }).join('')}</div>`;
+}
+window._sdPostNow=async function(btn){
+  const st=window._mrState; const plan=st.sdPlan; const picks=plan?Object.entries(plan.picks||{}):[];
+  if(!picks.length){ showToast('Nothing to post — every platform is either done for today or has no eligible listing.','info',6000); return; }
+  if(!(await elcConfirm('Post now?\n\n'+picks.map(([pl,p])=>(pl==='facebook'?'Facebook':'LinkedIn')+': '+p.name+' ('+(SD_REASON_LABEL[p.reason]||p.reason)+')').join('\n')+'\n\nThis goes live on the firm’s page(s) immediately and counts as today’s post.',{title:'Daily listing post',okLabel:'Post now',icon:'📣'}))) return;
+  const done=elcBusy(btn,'Posting…');
+  try{ const r=await _spWorkerPost('/daily/run',{force:true}); const res=r.results||{}; const okp=Object.entries(res).filter(([,v])=>v.ok).map(([k])=>k==='facebook'?'Facebook':'LinkedIn'); const bad=Object.entries(res).filter(([,v])=>!v.ok).map(([k,v])=>k+': '+v.error);
+    showToast((okp.length?'Posted to '+okp.join(' + ')+' ✓':'Nothing posted')+(bad.length?' · '+bad.join(' · '):''), bad.length?'warning':'success', 8000);
+    st.sdPlan=null; setTimeout(()=>window._sdLoad(true),1500); }
+  catch(e){ showToast('Post failed: '+e.message,'error',8000); }
+  finally{ done(); }
+};
+window._sdPullMetrics=async function(btn){
+  const done=elcBusy(btn,'Pulling…');
+  try{ const r=await _spWorkerPost('/daily/metrics',{}); showToast((r.updated||[]).length+' post'+((r.updated||[]).length===1?'':'s')+' updated with results','success'); setTimeout(()=>window._sdLoad(true),1500); }
+  catch(e){ showToast('Could not pull results: '+e.message,'error'); }
+  finally{ done(); }
+};
+/* ===== SOCIALDAILY_BLOCK_END ===== */
 
 /* =======================================================
    📣 SOCIAL POSTING FOR LISTINGS — marker SOCIAL-20261006
