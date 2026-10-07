@@ -2288,6 +2288,7 @@ const APP_CONFIG = {
   // 📬 Monthly Owner Reports (MREPORT-20261006). access: 'owner' | 'admins' | 'all' — overridden from eos/settings.monthlyReports
   monthlyReports: { access: 'owner', workerUrl: 'https://elc-report-worker.dirtdog.workers.dev' },
   social: { workerUrl: 'https://elc-social-worker.dirtdog.workers.dev', defaultLink: 'https://www.thedirtdog.com' },   // SOCIAL-20261006-hooks
+  mcBlast: { enabled: true, dueDay: 20, autoDay: 25, autoResend: true },   // MCBLAST-20261007-hooks — monthly e-blast guarantee
   firebase: {
     apiKey:            "AIzaSyC1cKWQnk4TeH3EMeX-sF4RejGPYL9xyYw",
     authDomain:        "eshenbaugh-dashboard.firebaseapp.com",
@@ -8898,6 +8899,7 @@ const FB = {
           if(Array.isArray(payload.adminEmails))      APP_CONFIG.adminEmails      = Array.from(new Set([...(APP_CONFIG.adminEmails||[]), ...payload.adminEmails]));
           if(Array.isArray(payload.superAdminEmails)) APP_CONFIG.superAdminEmails = Array.from(new Set([...(APP_CONFIG.superAdminEmails||[]), ...payload.superAdminEmails]));
           if(payload.social && typeof payload.social==='object') APP_CONFIG.social={...(APP_CONFIG.social||{}), ...payload.social};   // SOCIAL-20261006
+          if(payload.mcBlast && typeof payload.mcBlast==='object') APP_CONFIG.mcBlast={...(APP_CONFIG.mcBlast||{}), ...payload.mcBlast};   // MCBLAST-20261007
           if(payload.monthlyReports && typeof payload.monthlyReports==='object'){ const _mrPrev=(APP_CONFIG.monthlyReports||{}).access; APP_CONFIG.monthlyReports={...(APP_CONFIG.monthlyReports||{}), ...payload.monthlyReports}; if(_mrPrev!==APP_CONFIG.monthlyReports.access && currentUser && typeof renderShell==='function'){ try{ renderShell(); renderCurrentView(); }catch(_){} } } // MREPORT-20261006
           eosCache[docId] = payload.data;
         } else {
@@ -18629,6 +18631,7 @@ window.openPropertyDetail = (dealId) => {
       <div id="pdw-listing-block">${window._lsModalBlock ? window._lsModalBlock(deal) : ''}</div>
       <div id="pdw-social-block" style="margin-top:.5rem">${window._spMarketingBlock ? window._spMarketingBlock(deal) : ''}</div>
       <div id="pdw-mrassets-block" style="margin-top:.5rem">${window._mrAssetsBlock ? window._mrAssetsBlock(deal) : ''}</div>   <!-- MRASSETS-20261007-hooks -->
+      <div id="pdw-mcblast-block" style="margin-top:.5rem">${window._mbMarketingBlock ? window._mbMarketingBlock(deal) : ''}</div>   <!-- MCBLAST-20261007-hooks -->
     </div>
     <!-- Attachments -->
     <div class="prop-section">
@@ -25073,9 +25076,10 @@ function viewTasks(){
   return `<span id="${pid}" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${esc(t.description)}</span>
   <button onclick="var e=document.getElementById('${pid}');var exp=e.dataset.exp;e.style.cssText=exp?'display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden':'';e.dataset.exp=exp?'':'1';this.textContent=exp?'\u25bc Read more':'\u25b2 Less';" class="text-blue-500 text-xs hover:underline font-medium mt-0.5">&#9660; Read more</button>`;
 })()}</div>`:''}
-        ${(t.invoiceDealId||t.gmailUrl||t.attachmentUrl||t.approvePaymentDealId||(window._spIsSocialTask&&window._spIsSocialTask(t))||(window._mrIsAssetsTask&&window._mrIsAssetsTask(t)))?`<div class="flex gap-2 mt-2 flex-wrap">
+        ${(t.invoiceDealId||t.gmailUrl||t.attachmentUrl||t.approvePaymentDealId||(window._spIsSocialTask&&window._spIsSocialTask(t))||(window._mrIsAssetsTask&&window._mrIsAssetsTask(t))||(window._mrIsBlastTask&&window._mrIsBlastTask(t)))?`<div class="flex gap-2 mt-2 flex-wrap">
           ${(window._spIsSocialTask&&window._spIsSocialTask(t))?`<button onclick="window._spOpen('${t.dealId}','${t.id}')" class="text-xs font-semibold px-2.5 py-1 rounded-lg text-white" style="background:#0A66C2">📣 Compose post</button>`:''}
           ${(window._mrIsAssetsTask&&window._mrIsAssetsTask(t))?`<button onclick="window._mrOpenAssets('${t.dealId}','${t.id}')" class="text-xs font-semibold px-2.5 py-1 rounded-lg text-white" style="background:#DA291C">📎 Upload report assets</button>`:''}
+          ${(window._mrIsBlastTask&&window._mrIsBlastTask(t))?`<button onclick="window._mbOpen('${t.dealId}','${t.id}')" class="text-xs font-semibold px-2.5 py-1 rounded-lg text-white" style="background:#FFE01B;color:#241C15">📧 Compose e-blast</button>`:''}
           ${t.invoiceDealId?`<button onclick="openCommissionInvoice('${t.invoiceDealId}')" class="text-xs font-semibold px-2.5 py-1 rounded-lg text-white" style="background:#1a1a1a">📄 Download Invoice (Word)</button>`:''}
           ${t.gmailUrl?`<a href="${t.gmailUrl}" target="_blank" class="text-xs font-semibold px-2.5 py-1 rounded-lg text-white inline-block" style="background:#DA291C">📧 Open Email Draft</a>`:''}
           ${t.attachmentUrl?`<a href="${t.attachmentUrl}" target="_blank" class="text-xs font-semibold px-2.5 py-1 rounded-lg text-white inline-block" style="background:#2563EB">📎 ${(t.attachmentName||'Download').replace(/[<>]/g,'')}</a>`:''}
@@ -31329,6 +31333,7 @@ window._taRenderDealTasks = function(dealId){
         <div onclick="window.openTaskModal('${t.id}','${dealId}')" title="Edit task" style="font-size:.82rem;line-height:1.3;cursor:pointer;color:${done?'#9ca3af':'#111827'};${done?'text-decoration:line-through':''}">${esc(t.title)}</div>
         ${(window._spIsSocialTask&&window._spIsSocialTask(t))?`<button class="prop-note-btn" style="margin-top:.25rem;font-size:.7rem" onclick="window._spOpen('${dealId}','${t.id}')">📣 Compose post</button>`:''}
         ${(window._mrIsAssetsTask&&window._mrIsAssetsTask(t))?`<button class="prop-note-btn" style="margin-top:.25rem;font-size:.7rem" onclick="window._mrOpenAssets('${dealId}','${t.id}')">📎 Upload report assets</button>`:''}
+        ${(window._mrIsBlastTask&&window._mrIsBlastTask(t))?`<button class="prop-note-btn" style="margin-top:.25rem;font-size:.7rem" onclick="window._mbOpen('${dealId}','${t.id}')">📧 Compose e-blast</button>`:''}
         <div style="font-size:.7rem;color:#6b7280;margin-top:.15rem;display:flex;gap:.6rem;flex-wrap:wrap">
           ${t.assignedToName?`<span>👤 ${esc(t.assignedToName)}</span>`:''}
           ${t.dueDate?`<span style="color:${overdue?'#dc2626':'#6b7280'}">📅 ${fmt(t.dueDate)}${overdue?' · overdue':''}</span>`:''}
@@ -45494,19 +45499,19 @@ function viewMonthlyReports(){
         <button class="mr-btn mr-btn-primary mr-btn-sm" id="mr-send-selected" onclick="window._mrSendSelected()" ${sel.length?'':'disabled'}>📤 Send selected (${sel.length})</button>
       </div>
       <div style="overflow:auto"><table class="mr-table" aria-label="Active listings">
-        <thead><tr><th style="width:36px"><span class="sr-only">Select</span></th><th>Property</th><th>Advisor</th><th>Stage</th><th>Recipients</th><th>Assets</th><th>${_mrEsc(_mrMonthLabel(ym))} report</th><th style="text-align:right">Actions</th></tr></thead>
-        <tbody id="mr-rows"><tr><td colspan="8" class="mr-muted" style="padding:1.2rem">Loading…</td></tr></tbody>
+        <thead><tr><th style="width:36px"><span class="sr-only">Select</span></th><th>Property</th><th>Advisor</th><th>Stage</th><th>Recipients</th><th>Assets</th><th title="Mailchimp e-blast on this listing this month">E-blast</th><th>${_mrEsc(_mrMonthLabel(ym))} report</th><th style="text-align:right">Actions</th></tr></thead>
+        <tbody id="mr-rows"><tr><td colspan="9" class="mr-muted" style="padding:1.2rem">Loading…</td></tr></tbody>
       </table></div>
     </div>
     <p class="mr-note" style="margin-top:.8rem">Reports are drafts until you click Send. Each one is emailed from the listing advisor’s mailbox, filed under the deal’s Attachments, and logged on the property’s history.</p>
   </div>`);
-  _mrPreloadReports(ym, deals).then(()=>{ if(currentView==='monthlyReports') window._mrRenderRows(); });
+  _mrPreloadReports(ym, deals).then(()=>{ if(currentView==='monthlyReports') window._mrRenderRows(); if(window._mbRun) window._mbRun({silent:true}); });   // MCBLAST-20261007
 }
 window.viewMonthlyReports=viewMonthlyReports;
 window._mrRenderRows=function(){
   const st=window._mrState; const ym=st.month; const tb=document.getElementById('mr-rows'); if(!tb) return;
   const deals=_mrActiveDeals(); const cnt=document.getElementById('mr-count'); if(cnt) cnt.textContent=deals.length+' active seller-rep listing'+(deals.length===1?'':'s');
-  if(!deals.length){ tb.innerHTML=`<tr><td colspan="8" class="mr-muted" style="padding:1.2rem">No active seller-rep listings${st.search?' match your search':''}.</td></tr>`; return; }
+  if(!deals.length){ tb.innerHTML=`<tr><td colspan="9" class="mr-muted" style="padding:1.2rem">No active seller-rep listings${st.search?' match your search':''}.</td></tr>`; return; }
   tb.innerHTML=deals.map(d=>{
     const rep=st.reports[d.id+'|'+ym]||null; const recips=_mrRecipients(d);
     const ready=recips.length>0;
@@ -45517,6 +45522,7 @@ window._mrRenderRows=function(){
       <td><span class="mr-muted">${_mrEsc(_mrStageOf(d))}</span></td>
       <td>${recips.length?`<span title="${_mrEsc(recips.map(r=>r.email).join(', '))}">${recips.length} owner${recips.length===1?'':'s'}</span>`:`<span style="color:#b91c1c;font-weight:600">None</span>`}</td>
       <td>${(()=>{ const miss=(typeof _mrAssetsMissing==='function')?_mrAssetsMissing(d):[]; const task=(typeof _mrAssetsTaskFor==='function')?_mrAssetsTaskFor(d.id):null; return miss.length?`<span style="font-size:.72rem;color:#b45309;background:#fef3c7;border-radius:999px;padding:.1rem .5rem" title="Missing: ${_mrEsc(miss.join(', '))}">${miss.length} missing</span>${task?`<div class="mr-muted" style="font-size:.68rem">→ ${_mrEsc(task.assignedToName||'Nick')}</div>`:`<div><button class="mr-btn mr-btn-sm" style="font-size:.68rem;padding:.1rem .4rem" onclick="window._mrAssignAssets('${d.id}',this)">→ Nick</button></div>`}`:`<span style="font-size:.72rem;color:#047857;background:#d1fae5;border-radius:999px;padding:.1rem .5rem">✓</span>`; })()}</td>
+      <td>${window._mbCellHtml?window._mbCellHtml(d,ym):''}</td>
       <td>${_mrStatusChip(rep,d)}</td>
       <td style="text-align:right;white-space:nowrap">
         <button class="mr-btn mr-btn-sm" onclick="window._mrOpenEditor('${d.id}')">✏️ Edit</button>
@@ -46407,27 +46413,55 @@ window._mrAssignAllAssets=async function(btn){
    📧 MAILCHIMP E-BLASTS IN THE MONTHLY REPORT — marker MCREPORT-20261007
    Every e-blast sent through Mailchimp during the report month is pulled
    from the social worker (/mailchimp/campaigns — list, results, hero image),
-   matched to the listing by subject/title (address, street, project name,
-   city, acreage), and printed on the Email Report page as a card with the
+   matched to the listing by its BODY text + subject (street number, street,
+   project name, city/zip, parcel numbers, acreage — MCMATCH-20261007), and printed on the Email Report page as a card with the
    campaign picture and its delivery results. The editor lets you confirm or
    change the match; the choice is saved on the month's report doc as
    emailCampaigns[] + emailCampaignsPicked.
    ======================================================= */
-const MR_MC_STOP=new Set(['land','acres','acre','property','deal','road','street','county','florida','parcel','site','lots','commercial','residential','development','ranch','farm','north','south','east','west','drive','avenue','highway','listing','sale','with','from','the','and','for','zoned','zoning','vacant','offering','opportunity','price','reduced','new','just','listed']);
+const MR_MC_STOP=new Set(['land','acres','acre','property','deal','road','street','county','florida','parcel','site','lots','commercial','residential','development','ranch','farm','north','south','east','west','drive','avenue','highway','listing','sale','with','from','the','and','for','zoned','zoning','vacant','offering','opportunity','price','reduced','new','just','listed','high','school','condo','home','homes','units','entitled','mixed','retail','industrial','multifamily','office','corner','frontage','minutes','available','under','contract','pending','closed','sold','assemblage','outparcel','pad','pads','tract','groves','grove','lake','lakes','creek','river','springs','hill','hills','park','point','pointe','estates','village','center','plaza','crossing','crossings','county','city','blvd','boulevard','pkwy','parkway','trail','loop','lane','court','circle','terrace','place','way']);
 function _mrMcTokens(s){ return String(s||'').toLowerCase().split(/[^a-z0-9]+/).filter(w=>w.length>=4 && !MR_MC_STOP.has(w)); }
-function _mrMcScore(deal, c){
-  const hay=' '+((c.subject||'')+' '+(c.title||'')+' '+(c.preview||'')).toLowerCase().replace(/[^a-z0-9.±]+/g,' ')+' ';
-  let s=0; const seen=new Set();
-  const addr=String(deal.propertyAddress||deal.address||'').toLowerCase();
-  const m=addr.match(/^\s*(\d{2,6})\s+([^,]+)/);
-  if(m){ if(hay.includes(' '+m[1]+' ')) s+=2.5; _mrMcTokens(m[2].replace(/\b(rd|st|ave|hwy|blvd|dr|ln|ct|pkwy|us|sr|cr|fl)\b\.?/g,' ')).forEach(w=>{ if(!seen.has(w)&&hay.includes(w)){ s+=1.5; seen.add(w); } }); }
-  _mrMcTokens(deal.projectName).forEach(w=>{ if(!seen.has(w)&&hay.includes(w)){ s+=1.5; seen.add(w); } });
-  const city=String(deal.city||(addr.split(',')[1]||'')).trim().toLowerCase().replace(/\s+fl.*$/,''); if(city.length>=4 && !seen.has(city) && hay.includes(city)){ s+=1; seen.add(city); }
-  const acres=Number(deal.acres||deal.acreage||0); if(acres>0){ const a=String(Math.round(acres*100)/100); if(hay.includes(' '+a+' ')||hay.includes(' '+a+'±')||hay.includes(a+' ')) s+=2; }
-  return s;
+function _mrMcNorm(s){ return ' '+String(s||'').toLowerCase().replace(/[^a-z0-9.±]+/g,' ')+' '; }
+// Street words of an address line: "11400 US Highway 19 N" → ["11400"? no — the number is scored separately] ["19"] ; "Cortez Blvd" → ["cortez"]
+function _mrMcStreetWords(line){ return String(line||'').toLowerCase().replace(/\b(rd|st|ave|hwy|blvd|dr|ln|ct|pkwy|us|sr|cr|fl|n|s|e|w|ne|nw|se|sw|road|street|avenue|highway|boulevard|drive|lane|court|parkway|north|south|east|west|county)\b\.?/g,' ').split(/[^a-z0-9]+/).filter(w=>w.length>=3 && !/^\d{1,2}$/.test(w) && !MR_MC_STOP.has(w)); }
+/* Score how well an e-blast matches a listing. The HEAD (subject / title / preview) is what the
+   advisor wrote about the property; the BODY (worker's bodyText) is the full e-blast and always
+   carries the property address, zip, parcel numbers and the listing link, so it is the primary
+   evidence. Returns {s, strong}: strong = address-level evidence (street number, street name,
+   parcel/folio, decimal acreage, or 2+ project-name words) — a match needs s ≥ 2.5 AND strong. */
+function _mrMcScoreDetail(deal, c){
+  const head=_mrMcNorm((c.subject||'')+' '+(c.title||'')+' '+(c.preview||''));
+  const body=_mrMcNorm(c.bodyText||''); const hay=head+body;
+  const bodyDigits=' '+String(c.bodyText||'').replace(/[^0-9]+/g,' ')+' ';
+  let s=0, strong=false; const seen=new Set();
+  const addr=String(deal.propertyAddress||deal.address||''); const first=addr.split(',')[0]||'';
+  // street number
+  const num=(first.match(/^\s*(\d{2,6})\b/)||[])[1];
+  if(num && hay.includes(' '+num+' ')){ s+=2.5; strong=true; }
+  // street / road words (with or without a number)
+  _mrMcStreetWords(first.replace(/^\s*\d{2,6}\b/,'')).forEach(w=>{ if(seen.has(w)) return; if(head.includes(' '+w+' ')){ s+=1.5; strong=true; seen.add(w); } else if(body.includes(' '+w+' ')){ s+=1; strong=true; seen.add(w); } });
+  // project name words
+  let nameHits=0;
+  _mrMcTokens(deal.projectName).forEach(w=>{ if(seen.has(w)) return; if(head.includes(' '+w+' ')){ s+=1.5; nameHits++; seen.add(w); } else if(body.includes(' '+w+' ')){ s+=0.75; nameHits++; seen.add(w); } });
+  if(nameHits>=2) strong=true;
+  // city and zip
+  const rest=addr.split(',').slice(1).join(' '); let city=String(deal.city||'').toLowerCase().trim();
+  if(!city){ const m=rest.match(/^\s*([a-z .'-]+?)\s*,?\s*(fl|florida)?\b/i); city=(m&&m[1]||'').toLowerCase().trim(); }
+  city=city.replace(/\s+fl.*$/,'').trim();
+  if(city.length>=4 && !seen.has(city)){ if(head.includes(' '+city+' ')) s+=1; else if(body.includes(' '+city+' ')) s+=0.5; seen.add(city); }
+  const zip=(addr.match(/\b(3[0-4]\d{3})\b/)||[])[1]; if(zip && body.includes(' '+zip+' ')) s+=1;
+  // parcel / folio numbers (digits only, 8+ digits)
+  const ids=[].concat(deal.parcelIds||[], deal.folioNumber||[], deal.parcelId||[]).map(x=>String(x||'').replace(/[^0-9]/g,'')).filter(x=>x.length>=8);
+  if(ids.some(x=>bodyDigits.includes(' '+x+' ')||String(c.bodyText||'').replace(/[^0-9]/g,'').includes(x))){ s+=3; strong=true; }
+  // acreage — decimal acreage is specific ("18.85±"), whole numbers are not
+  const acres=Number(deal.acres||deal.acreage||0);
+  if(acres>0){ const a=String(Math.round(acres*100)/100); const hit=hay.includes(' '+a+' ')||hay.includes(' '+a+'±')||hay.includes(' '+a+'± ');
+    if(hit){ if(a.includes('.')){ s+=2; strong=true; } else s+=1; } }
+  return {s, strong};
 }
+function _mrMcScore(deal, c){ const d=_mrMcScoreDetail(deal,c); return d.strong ? d.s : Math.min(d.s, 2.4); }
 function _mrMcMatch(deal, campaigns){ return (campaigns||[]).filter(c=>_mrMcScore(deal,c)>=2.5); }
-function _mrMcSlim(c){ return {id:c.id, subject:c.subject||'', title:c.title||'', sendTime:c.sendTime||'', emailsSent:c.emailsSent||0, uniqueOpens:c.uniqueOpens||0, openRate:c.openRate||0, uniqueClicks:c.uniqueClicks||0, clickRate:c.clickRate||0, image:c.image||'', archiveUrl:c.archiveUrl||'', segment:c.segment||''}; }
+function _mrMcSlim(c){ return {id:c.id, subject:c.subject||'', title:c.title||'', sendTime:c.sendTime||'', emailsSent:c.emailsSent||0, uniqueOpens:c.uniqueOpens||0, openRate:c.openRate||0, uniqueClicks:c.uniqueClicks||0, clickRate:c.clickRate||0, image:c.image||'', archiveUrl:c.archiveUrl||'', segment:c.segment||'', listName:c.listName||''}; }
 function _mrMcRow(c){ return {title:c.subject||c.title||'E-blast', date:_mrLocalDate(Date.parse(c.sendTime)||Date.now()), recipients:String(c.emailsSent||''), opens:String(c.uniqueOpens||''), clicks:String(c.uniqueClicks||'')}; }
 // All sent campaigns in the month — one worker call per month per session (shared by every listing's report).
 async function _mrMcCampaigns(ym){
@@ -46437,9 +46471,14 @@ async function _mrMcCampaigns(ym){
 }
 // What prints for this listing/month: the saved pick if one was made, otherwise the automatic match.
 async function _mrMcForReport(deal, ym, rep){
-  if(rep && rep.emailCampaignsPicked) return (rep.emailCampaigns||[]).map(_mrMcSlim);
-  try{ const all=await _mrMcCampaigns(ym); return _mrMcMatch(deal,all).map(_mrMcSlim); }
-  catch(e){ console.warn('[mr] mailchimp',e.message); return ((rep&&rep.emailCampaigns)||[]).map(_mrMcSlim); }
+  let base, fresh=[];
+  if(rep && rep.emailCampaignsPicked) base=(rep.emailCampaigns||[]).map(_mrMcSlim);
+  else { try{ fresh=await _mrMcCampaigns(ym); base=_mrMcMatch(deal,fresh).map(_mrMcSlim); } catch(e){ console.warn('[mr] mailchimp',e.message); base=((rep&&rep.emailCampaigns)||[]).map(_mrMcSlim); } }
+  // E-blasts sent from Terra are pinned on the report doc (MCBLAST-20261007) — always included, with fresh results when Mailchimp has them.
+  const pinned=(rep&&Array.isArray(rep.emailCampaignsPinned))?rep.emailCampaignsPinned:[];
+  if(pinned.length){ if(!fresh.length){ try{ fresh=await _mrMcCampaigns(ym); }catch(_){ } }
+    pinned.forEach(p=>{ if(!p||!p.id||base.some(b=>b.id===p.id)) return; const f=fresh.find(c=>c.id===p.id); base.push(f?_mrMcSlim(f):_mrMcSlim(p)); }); }
+  return base;
 }
 // Mailchimp-hosted images are fetched through the worker so the PDF canvas is not tainted.
 async function _mrMcImage(url){
@@ -46635,6 +46674,285 @@ window._mrDrawOffers=function(R,doc,font,A,y){
   return y;
 };
 /* ===== OFFERS_BLOCK_END ===== */
+/* =======================================================
+   📧 MONTHLY E-BLAST GUARANTEE — marker MCBLAST-20261007
+   Every listing still in the Listing column (no LOI — an LOI moves the card
+   to the LOI column) gets at least one Mailchimp e-blast each month, so the
+   Monthly Marketing Report always has an Email Report page.
+     • Runner (_mbRun): on the Monthly Reports tab and ~20 s after an admin /
+       staff login. For each eligible listing with no e-blast matched this
+       month → one task for Nick and one for the listing advisor (due the
+       20th; either completes both). Once an e-blast is found or sent, the
+       tasks close themselves. From the 25th, if a prior e-blast exists for
+       the listing, Terra resends it to the same audience automatically
+       ("Still Available: …") — APP_CONFIG.mcBlast.autoResend.
+     • Composer (_mbOpen): resend a prior e-blast to the same groups (Mailchimp
+       replicate → retitle → test / schedule / send), or build a new one from
+       the deal card (audience segments/tags, AI-drafted copy, hero photo,
+       advisor block) through the social worker.
+     • Whatever is sent is pinned to that month's report doc
+       (monthlyReports/{ym}.emailCampaignsPinned[]) and logged on the deal
+       (deal.mcBlastLog[ym]) and its history.
+   ======================================================= */
+const MR_BLAST_TASK_TITLE='📧 Monthly e-blast';
+function _mbCfg(){ return (APP_CONFIG.mcBlast = APP_CONFIG.mcBlast || {enabled:true, dueDay:20, autoDay:25, autoResend:true}); }
+function _mbYm(){ return _mrLocalDate(Date.now()).slice(0,7); }
+function _mbEligible(d){ return _mrStageOf(d)==='Listing' && _mrIsSellerRep(d) && d.dealType!=='lease' && !d.archived; }
+window._mrIsBlastTask=function(t){ return !!(t && t.dealId && t.status!=='complete' && /monthly e-blast/i.test(t.title||'')); };
+function _mbTasksFor(dealId, ym){ return (typeof allTasks!=='undefined'?allTasks:[]).filter(t=>t&&t.dealId===dealId&&/monthly e-blast/i.test(t.title||'')&&(!ym||t.mcBlastMonth===ym)); }
+function _mbOpenTasksFor(dealId, ym){ return _mbTasksFor(dealId, ym).filter(t=>t.status!=='complete'); }
+function _mbLog(d, ym){ return (d.mcBlastLog&&d.mcBlastLog[ym])||null; }
+function _mbSlim(c){ return {id:c.id||'', subject:c.subject||'', title:c.title||'', sendTime:c.sendTime||'', emailsSent:c.emailsSent||c.recipientCount||0, uniqueOpens:c.uniqueOpens||0, openRate:c.openRate||0, uniqueClicks:c.uniqueClicks||0, clickRate:c.clickRate||0, image:c.image||'', archiveUrl:c.archiveUrl||'', segment:c.segment||'', listName:c.listName||''}; }
+
+/* ---- status for one listing / month ---- */
+async function _mbStatus(deal, ym, force){
+  const st=window._mrState; st.mb=st.mb||{}; const key=deal.id+'|'+ym;
+  if(st.mb[key] && !force && !st.mb[key].error) return st.mb[key];
+  const rep=await _mrLoadReport(deal.id, ym);
+  let sent=[], error='';
+  try{ sent=await _mrMcForReport(deal, ym, rep); }catch(e){ error=e.message; }
+  const log=_mbLog(deal, ym);
+  if(log && log.campaignId && !sent.some(c=>c.id===log.campaignId)) sent=[{id:log.campaignId, subject:log.subject||'', sendTime:log.sentAt?new Date(log.sentAt).toISOString():'', emailsSent:log.recipientCount||0, segment:log.segment||'', listName:log.listName||'', archiveUrl:log.archiveUrl||'', image:'', pending:true}, ...sent];
+  st.mb[key]={sent, log, error, at:Date.now(), tasks:_mbOpenTasksFor(deal.id, ym)};
+  return st.mb[key];
+}
+/* ---- prior e-blasts for a listing (last 6 months, matched on body text) ---- */
+async function _mbPrior(deal, force){
+  const st=window._mrState; st.mbPrior=st.mbPrior||{};
+  if(st.mbPrior[deal.id] && !force) return st.mbPrior[deal.id];
+  const months=[]; const now=new Date(); for(let i=0;i<6;i++){ const d=new Date(now.getFullYear(), now.getMonth()-i, 1); months.push(d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')); }
+  const lists=await Promise.all(months.map(ym=>_mrMcCampaigns(ym).catch(()=>[])));
+  const seen=new Set(); const out=[];
+  lists.flat().forEach(c=>{ if(seen.has(c.id)) return; if(_mrMcScore(deal,c)>=2.5){ seen.add(c.id); out.push(c); } });
+  Object.values(deal.mcBlastLog||{}).forEach(l=>{ if(l&&l.campaignId&&!seen.has(l.campaignId)){ seen.add(l.campaignId); out.push({id:l.campaignId, subject:l.subject||'', sendTime:l.sentAt?new Date(l.sentAt).toISOString():'', segment:l.segment||'', listName:l.listName||'', archiveUrl:l.archiveUrl||'', emailsSent:l.recipientCount||0}); } });
+  out.sort((a,b)=>(b.sendTime||'').localeCompare(a.sendTime||''));
+  st.mbPrior[deal.id]=out; return out;
+}
+/* ---- tasks ---- */
+function _mbDueDate(ym){ const [y,m]=ym.split('-').map(Number); const cfg=_mbCfg(); let due=new Date(y,m-1,cfg.dueDay||20); const soon=new Date(); soon.setDate(soon.getDate()+2); if(due<soon) due=soon; return _mrLocalDate(due.getTime()); }
+async function _mbCreateTasks(deal, ym){
+  const nick=_mrNickProfile(); const adv=_mrAdvisorsOf(deal)[0]||{};
+  const owners=[{uid:nick.uid||nick.email, name:nick.name, email:nick.email}];
+  if(adv.email && adv.email!==nick.email) owners.push({uid:deal.advisorUid||adv.uid||adv.email, name:adv.name||deal.advisorName||'', email:adv.email});
+  const title=MR_BLAST_TASK_TITLE+' — '+(typeof _taskHeadlineName==='function'?_taskHeadlineName(deal):_mrDealName(deal))+' ('+_mrMonthLabel(ym)+')';
+  const desc='No Mailchimp e-blast has gone out on this listing in '+_mrMonthLabel(ym)+'. Every active listing needs at least one e-blast a month so the owner’s Monthly Marketing Report has an Email Report page.\n\nProperty: '+_mrDealAddr(deal)+'\nAdvisor: '+(deal.advisorName||deal.advisorEmail||'')+'\n\nClick 📧 Compose e-blast on this task (or on the deal card) to resend the last e-blast to the same groups, or build a new one and pick the audience. Either Nick or the advisor sending it completes both tasks.'+(_mbCfg().autoResend!==false?'\n\nIf nothing goes out by the '+(_mbCfg().autoDay||25)+'th and a prior e-blast exists, Terra resends it to the same groups automatically.':'');
+  const ids=[];
+  for(const o of owners){
+    ids.push(await Store.createTask({ title, description:desc, assignedTo:o.uid, assignedToName:o.name, assignedToEmail:o.email, dealId:deal.id, dealAddress:deal.propertyAddress||'', dueDate:_mbDueDate(ym), status:'pending', mcBlastMonth:ym,
+      createdBy:(typeof currentUser!=='undefined'&&currentUser)?currentUser.uid:'system', createdByName:'Monthly Reports', createdAt:Date.now() }));
+  }
+  return ids;
+}
+async function _mbCloseTasks(dealId, ym){ for(const t of _mbOpenTasksFor(dealId, ym)){ try{ await window.toggleTask(t.id,'complete'); }catch(e){ console.warn('[mb] close task',e); } } }
+
+/* ---- record a send: deal log + pin on the month's report + history + tasks ---- */
+async function _mbRecordSent(deal, ym, campaign, mode, extra){
+  const now=Date.now(); const slim=_mbSlim(campaign); const log={...(deal.mcBlastLog||{})};
+  log[ym]={...(log[ym]||{}), campaignId:campaign.id, subject:campaign.subject||'', sentAt:now, mode, status:campaign.status||mode, by:currentUser?.uid||'', byName:currentUser?.name||'', segment:campaign.segment||'', listName:campaign.listName||'', archiveUrl:campaign.archiveUrl||'', editUrl:campaign.editUrl||'', recipientCount:campaign.recipientCount||0, scheduleAt:(extra&&extra.scheduleAt)||'', replicatedFrom:(extra&&extra.replicatedFrom)||''};
+  await Store.updateDeal(deal.id,{mcBlastLog:log, updatedAt:now}); deal.mcBlastLog=log;
+  try{ const rep=await _mrLoadReport(deal.id, ym); const pinned=((rep&&rep.emailCampaignsPinned)||[]).filter(c=>c.id!==slim.id); pinned.push(slim); await _mrSaveReport(deal.id, ym, {emailCampaignsPinned:pinned}); }catch(e){ console.warn('[mb] pin',e); }
+  try{ await window._dealLogActivity(deal.id,'note',{ body:'📧 '+(mode==='auto'?'Terra automatically resent':mode==='schedule'?'Scheduled':'Sent')+' a Mailchimp e-blast: “'+(campaign.subject||'')+'” → '+(campaign.listName||'audience')+(campaign.segment?' · '+campaign.segment:'')+(campaign.recipientCount?' ('+campaign.recipientCount.toLocaleString()+' recipients)':'')+(campaign.archiveUrl?' '+campaign.archiveUrl:''), source:'mailchimp-blast', autoLogged:true }); }catch(e){ console.warn('[mb] log',e); }
+  await _mbCloseTasks(deal.id, ym);
+  const st=window._mrState; if(st&&st.mb) delete st.mb[deal.id+'|'+ym]; if(st&&st.mbPrior) delete st.mbPrior[deal.id];
+}
+
+/* ---- the runner ---- */
+window._mbRun=async function(opts){
+  opts=opts||{}; const cfg=_mbCfg(); if(cfg.enabled===false) return;
+  if(!currentUser || !(currentUser.isAdmin||currentUser.isSuperAdmin||currentUser.isStaff||currentUser.isOfficeManager)) return;   // one runner role → no duplicate tasks
+  const st=window._mrState; if(!st) return; if(st.mbRunning) return; st.mbRunning=true;
+  const ym=_mbYm(); const day=new Date().getDate(); const result={created:0, closed:0, auto:0, autoSkipped:[], errors:[]};
+  try{
+    const deals=(allDeals||[]).filter(_mbEligible);
+    try{ await _mrMcCampaigns(ym); }catch(e){ result.errors.push('Mailchimp: '+e.message); st.mbRunning=false; if(!opts.silent) showToast('E-blast check skipped — '+e.message,'warning'); return result; }
+    for(const d of deals){
+      try{
+        const s=await _mbStatus(d, ym, true);
+        const open=_mbOpenTasksFor(d.id, ym);
+        if(s.sent.length){ if(open.length){ await _mbCloseTasks(d.id, ym); result.closed++; } continue; }
+        if(!_mbTasksFor(d.id, ym).length){ await _mbCreateTasks(d, ym); result.created++; continue; }
+        if(open.length && day>=(cfg.autoDay||25) && cfg.autoResend!==false && !(s.log&&s.log.autoAttemptedAt)){
+          const prior=await _mbPrior(d); const last=prior.find(c=>c.id);
+          const log={...(d.mcBlastLog||{})}; log[ym]={...(log[ym]||{}), autoAttemptedAt:Date.now()};
+          if(!last){ log[ym].autoSkipped='no prior e-blast'; await Store.updateDeal(d.id,{mcBlastLog:log}); d.mcBlastLog=log; result.autoSkipped.push(_mrDealName(d)); continue; }
+          await Store.updateDeal(d.id,{mcBlastLog:log}); d.mcBlastLog=log;   // mark first so two runners never double-send
+          const subject=/^still available/i.test(last.subject||'')?last.subject:('Still Available: '+(last.subject||_mrDealName(d)));
+          const r=await _spWorkerPost('/mailchimp/replicate',{campaignId:last.id, subject, mode:'send'});
+          await _mbRecordSent(d, ym, r.campaign, 'auto', {replicatedFrom:last.id}); result.auto++;
+        }
+      }catch(e){ console.error('[mb]',d.id,e); result.errors.push(_mrDealName(d)+': '+e.message); }
+    }
+  } finally { st.mbRunning=false; st.mbLastRun={at:Date.now(), ym, ...result}; }
+  if(!opts.silent){ const bits=[]; if(result.created) bits.push(result.created+' listing'+(result.created===1?'':'s')+' → e-blast tasks created'); if(result.closed) bits.push(result.closed+' task'+(result.closed===1?'':'s')+' closed (e-blast found)'); if(result.auto) bits.push(result.auto+' resent automatically'); if(result.autoSkipped.length) bits.push(result.autoSkipped.length+' could not auto-resend (no prior e-blast)'); if(result.errors.length) bits.push(result.errors.length+' error'+(result.errors.length===1?'':'s')); showToast(bits.length?bits.join(' · '):'Every active listing already has an e-blast this month ✓', result.errors.length?'warning':'success', 7000); }
+  if(currentView==='monthlyReports' && window._mrRenderRows) window._mrRenderRows();
+  return result;
+};
+setTimeout(()=>{ try{ if(typeof _mrCanAccess==='function' && _mrCanAccess()) window._mbRun({silent:true}); }catch(_){} }, 20000);
+
+/* ---- Monthly Reports table cell + deal-card block ---- */
+window._mbCellHtml=function(d, ym){
+  if(!_mbEligible(d)) return `<span class="mr-muted" style="font-size:.72rem">—</span>`;
+  const st=window._mrState; st.mb=st.mb||{}; const s=st.mb[d.id+'|'+ym];
+  if(!s){ _mbStatus(d, ym).then(()=>{ const cell=document.getElementById('mb-cell-'+d.id); if(cell) cell.outerHTML=window._mbCellHtml(d, ym); }); return `<span id="mb-cell-${d.id}" class="mr-muted" style="font-size:.72rem">…</span>`; }
+  const open=_mbOpenTasksFor(d.id, ym);
+  if(s.sent.length){ const c=s.sent[0]; return `<span id="mb-cell-${d.id}"><span style="font-size:.72rem;color:#047857;background:#d1fae5;border-radius:999px;padding:.1rem .5rem" title="${_mrEsc((c.subject||'')+(c.sendTime?' · '+_mrFmtDate(c.sendTime):''))}">✓ ${s.sent.length}${c.pending?' (scheduled)':''}</span></span>`; }
+  return `<span id="mb-cell-${d.id}"><span style="font-size:.72rem;color:#b45309;background:#fef3c7;border-radius:999px;padding:.1rem .5rem" title="No e-blast matched to this listing in ${_mrEsc(_mrMonthLabel(ym))}">none</span>${open.length?`<div class="mr-muted" style="font-size:.68rem">→ ${_mrEsc([...new Set(open.map(t=>_mrFirstName(t.assignedToName)||'?'))].join(' & '))}</div>`:''}<div><button class="mr-btn mr-btn-sm" style="font-size:.68rem;padding:.1rem .4rem" onclick="window._mbOpen('${d.id}')">📧 Send</button></div></span>`;
+};
+window._mbMarketingBlock=function(deal){
+  if(!deal || !_mbEligible(deal)) return '';
+  const ym=_mbYm(); const log=_mbLog(deal, ym); const open=_mbOpenTasksFor(deal.id, ym);
+  const prior=Object.values(deal.mcBlastLog||{}).filter(l=>l&&l.campaignId).length;
+  return `<div style="display:flex;flex-wrap:wrap;gap:.4rem;align-items:center">
+    <button class="prop-note-btn" onclick="window._mbOpen('${deal.id}')" title="Resend the last e-blast to the same groups, or build a new one">📧 E-blast</button>
+    <span style="font-size:.7rem;color:#6E7480">${log&&log.campaignId?`${_mrMonthLabel(ym)}: ${log.mode==='auto'?'auto-resent':log.mode==='schedule'?'scheduled':'sent'} ${_mrFmtDate(log.sentAt)}${log.archiveUrl?` · <a href="${_mrEsc(log.archiveUrl)}" target="_blank" rel="noopener" style="color:#0A66C2;font-weight:600">view</a>`:''}`:(open.length?`${_mrMonthLabel(ym)}: task open → ${_mrEsc([...new Set(open.map(t=>_mrFirstName(t.assignedToName)))].join(' & '))}`:`${_mrMonthLabel(ym)}: not checked yet`)}${prior?' · '+prior+' sent from Terra':''}</span>
+  </div>`;
+};
+
+/* ---- composer ---- */
+function _mbAdvisorFor(deal){ const a=_mrAdvisorsOf(deal)[0]||{}; return {name:a.name||deal.advisorName||'', email:a.email||(deal.advisorEmail||'').toLowerCase(), phone:a.phone||'', designations:a.designations||'', title:a.title||'', headshot:a.headshotUrl||''}; }
+function _mbDefaultCopy(deal){
+  const price=_mrDealPrice(deal); const bits=[];
+  if(deal.acreage) bits.push(Number(deal.acreage).toLocaleString('en-US',{maximumFractionDigits:2})+'± acres'); if(deal.county) bits.push(deal.county+' County'); if(deal.zoning) bits.push('zoned '+deal.zoning); if(deal.landType) bits.push(deal.landType);
+  return { subject:(deal.acreage?Number(deal.acreage).toLocaleString('en-US',{maximumFractionDigits:2})+'± Acres':_mrDealName(deal))+(deal.county?' in '+deal.county+' County':'')+(price?' — '+_mrFmtMoney(price):''),
+    previewText:_mrDealAddr(deal), headline:_mrDealName(deal), body:'Still available: '+_mrDealName(deal)+(bits.length?' — '+bits.join(', '):'')+'. Contact us for the offering memorandum, survey and due-diligence materials.', bullets:bits };
+}
+async function _mbAiCopy(deal){
+  const adv=_mbAdvisorFor(deal);
+  const sys='You write e-mail marketing for Eshenbaugh Land Company, a Florida land brokerage. Return ONLY a JSON object with keys: subject (≤ 70 chars, concrete, no clickbait), previewText (≤ 90 chars), headline (≤ 60 chars), body (2 short paragraphs, 50-90 words total, plain text, only facts given, no invented numbers), bullets (3-5 short facts/selling points, strings). No markdown.';
+  const user='Property: '+_mrDealName(deal)+'\nAddress: '+_mrDealAddr(deal)+'\nAcreage: '+(deal.acreage||'n/a')+'\nCounty: '+(deal.county||'n/a')+'\nZoning: '+(deal.zoning||'n/a')+'\nFuture land use: '+(deal.futureLandUse||deal.flu||'n/a')+'\nLand type: '+(deal.landType||'n/a')+'\nAsking price: '+(_mrFmtMoney(_mrDealPrice(deal))||'call for details')+'\nHighlights / notes: '+String(deal.highlights||deal.description||deal.notes||'').replace(/\s+/g,' ').slice(0,700)+'\nAdvisor: '+adv.name;
+  const txt=await leadAI(sys,user,700); const m=String(txt||'').match(/\{[\s\S]*\}/); if(!m) throw new Error('AI did not return JSON'); const j=JSON.parse(m[0]);
+  return { subject:String(j.subject||'').trim(), previewText:String(j.previewText||'').trim(), headline:String(j.headline||'').trim(), body:String(j.body||'').trim(), bullets:Array.isArray(j.bullets)?j.bullets.map(x=>String(x).trim()).filter(Boolean):[] };
+}
+function _mbWhenDefault(){ const d=new Date(Date.now()+60*60*1000); d.setMinutes(0,0,0); d.setHours(d.getHours()+1); return _mrLocalDate(d.getTime())+'T'+String(d.getHours()).padStart(2,'0')+':00'; }
+function _mbModeHtml(prefix){
+  return `<div class="mr-row" style="gap:.9rem;flex-wrap:wrap;margin-top:.5rem">
+    <label style="cursor:pointer"><input type="radio" name="${prefix}-mode" value="test" checked> Send me a test first</label>
+    <label style="cursor:pointer"><input type="radio" name="${prefix}-mode" value="send"> Send now</label>
+    <label style="cursor:pointer"><input type="radio" name="${prefix}-mode" value="schedule"> Schedule <input type="datetime-local" id="${prefix}-when" class="mr-input" style="width:auto" value="${_mbWhenDefault()}"></label>
+  </div>`;
+}
+window._mbOpen=async function(dealId, taskId){
+  const deal=(allDeals||[]).find(d=>d.id===dealId); if(!deal){ showToast('Deal not found','error'); return; }
+  _mrInjectStyles(); document.getElementById('mb-ov')?.remove();
+  const ym=_mbYm(); const adv=_mbAdvisorFor(deal); const photos=(typeof _spPhotoCandidates==='function')?_spPhotoCandidates(deal):[]; const link=(typeof _spLinkFor==='function')?_spLinkFor(deal):'https://www.thedirtdog.com';
+  const copy=_mbDefaultCopy(deal);
+  window._mbState={dealId, deal, ym, taskId:taskId||'', adv, hero:photos[0]?photos[0].url:'', link, prior:null, audience:null, draftId:'', draftKind:'', busy:false};
+  const ov=document.createElement('div'); ov.className='mr-ov fixed inset-0 flex items-center justify-center'; ov.id='mb-ov';
+  ov.innerHTML=`<div class="mr-modal" style="width:min(980px,100%)" role="dialog" aria-label="Monthly e-blast">
+    <div class="mr-modal-h"><div style="min-width:0"><h2>📧 E-blast — ${_mrEsc(_mrDealName(deal))}</h2><div class="mr-muted" id="mb-status">Checking ${_mrEsc(_mrMonthLabel(ym))} and prior e-blasts…</div></div><span style="flex:1"></span><button class="mr-x" aria-label="Close" onclick="window._mbClose()">✕</button></div>
+    <div class="mr-modal-b" style="display:grid;gap:1rem">
+      <div class="mr-sec"><h3>Resend a prior e-blast to the same groups</h3><div id="mb-prior" class="mr-muted">Loading…</div></div>
+      <div class="mr-sec"><h3>Or build a new e-blast</h3>
+        <div class="mr-grid2" style="align-items:start">
+          <div style="display:grid;gap:.6rem">
+            <div><div class="mr-lbl">Audience <span class="mr-note">(tags / saved segments — pick one or more)</span></div><div id="mb-aud" class="mr-muted">Loading audiences…</div></div>
+            <div class="mr-row" style="justify-content:space-between"><span class="mr-note">From ${_mrEsc(adv.name||'Eshenbaugh Land Company')}${adv.email?' · '+_mrEsc(adv.email):''}</span><button class="mr-btn mr-btn-sm" onclick="window._mbDraft(this)">✨ AI draft</button></div>
+            <label class="mr-lbl">Subject<input id="mb-subject" class="mr-input" style="width:100%" value="${_mrEsc(copy.subject)}" oninput="window._mbPreview()"></label>
+            <label class="mr-lbl">Preview text<input id="mb-preview" class="mr-input" style="width:100%" value="${_mrEsc(copy.previewText)}"></label>
+            <label class="mr-lbl">Headline<input id="mb-headline" class="mr-input" style="width:100%" value="${_mrEsc(copy.headline)}" oninput="window._mbPreview()"></label>
+            <label class="mr-lbl">Price line<input id="mb-price" class="mr-input" style="width:100%" value="${_mrEsc(_mrFmtMoney(_mrDealPrice(deal)))}" oninput="window._mbPreview()"></label>
+            <label class="mr-lbl">Body<textarea id="mb-body" class="mr-textarea" style="min-height:110px" oninput="window._mbPreview()">${_mrEsc(copy.body)}</textarea></label>
+            <label class="mr-lbl">Bullets <span class="mr-note">(one per line)</span><textarea id="mb-bullets" class="mr-textarea" style="min-height:80px" oninput="window._mbPreview()">${_mrEsc(copy.bullets.join('\n'))}</textarea></label>
+            <label class="mr-lbl">Link<input id="mb-link" class="mr-input" style="width:100%" value="${_mrEsc(link)}" oninput="window._mbPreview()"></label>
+            <div><div class="mr-lbl">Photo</div><div class="mr-row" style="gap:.5rem">${photos.map((p,i)=>`<label title="${_mrEsc(p.label)}" style="cursor:pointer;position:relative"><input type="radio" name="mb-photo" value="${_mrEsc(p.url)}" ${i===0?'checked':''} onchange="window._mbState.hero=this.value;window._mbPreview()" style="position:absolute;top:4px;left:4px"><img class="mr-thumb" src="${_mrEsc(p.url)}" alt=""></label>`).join('')||'<span class="mr-note">No photo on the deal card yet — add one in 📬 Monthly report assets.</span>'}</div></div>
+            ${_mbModeHtml('mb')}
+            <div class="mr-row" style="gap:.5rem;margin-top:.3rem"><button class="mr-btn mr-btn-primary" id="mb-create-btn" onclick="window._mbCreate(this)">📧 Build & send</button><span class="mr-note" id="mb-create-note"></span></div>
+          </div>
+          <div style="position:sticky;top:0"><div class="mr-lbl">Preview</div><div id="mb-pv" style="border:1px solid var(--line,#e5e7eb);border-radius:8px;overflow:hidden;background:#f3f4f6;padding:10px"></div></div>
+        </div>
+      </div>
+      <p class="mr-note">Whatever you send here is pinned to the ${_mrEsc(_mrMonthLabel(ym))} Monthly Marketing Report for this listing and logged on the deal’s history.</p>
+    </div>
+    <div class="mr-modal-f"><span class="mr-note" id="mb-foot"></span><span style="flex:1"></span><button class="mr-btn" onclick="window._mbClose()">Close</button></div>
+  </div>`;
+  document.body.appendChild(ov); window._mbPreview();
+  _mbStatus(deal, ym).then(s=>{ const el=document.getElementById('mb-status'); if(!el||!window._mbState) return; el.textContent=s.sent.length?(_mrMonthLabel(ym)+': '+s.sent.length+' e-blast'+(s.sent.length===1?'':'s')+' already on this listing ✓ — '+(s.sent[0].subject||'')):(_mrMonthLabel(ym)+': no e-blast yet on this listing.'); });
+  _mbPrior(deal).then(prior=>{ const st=window._mbState; if(!st) return; st.prior=prior; const box=document.getElementById('mb-prior'); if(!box) return;
+    if(!prior.length){ box.innerHTML='<span class="mr-muted">No e-blast about this listing in the last 6 months — build a new one below.</span>'; return; }
+    box.className=''; box.innerHTML=prior.slice(0,6).map((c,i)=>`<div class="mr-row" style="gap:.7rem;align-items:flex-start;padding:.45rem 0;border-top:${i?'1px solid var(--line,#e5e7eb)':'0'}">
+      ${c.image?`<img class="mr-thumb" src="${_mrEsc(c.image)}" alt="" style="width:88px;height:56px">`:`<div class="mr-thumb" style="width:88px;height:56px"></div>`}
+      <div style="flex:1;min-width:0"><div style="font-weight:700">${_mrEsc(c.subject||c.title||'E-blast')}</div><div class="mr-muted" style="font-size:.72rem">${_mrEsc(_mrFmtDate(c.sendTime))} · ${_mrEsc(c.listName||'')}${c.segment?' · '+_mrEsc(c.segment):''}${c.emailsSent?' · '+Number(c.emailsSent).toLocaleString()+' sent':''}${c.uniqueOpens?' · '+Number(c.uniqueOpens).toLocaleString()+' opened ('+c.openRate+'%)':''}${c.uniqueClicks?' · '+c.uniqueClicks+' clicked':''}${c.archiveUrl?` · <a href="${_mrEsc(c.archiveUrl)}" target="_blank" rel="noopener" style="color:#0A66C2">view ↗</a>`:''}</div></div>
+      <button class="mr-btn mr-btn-sm" onclick="window._mbResendForm('${_mrEsc(c.id)}')">↻ Resend to same groups</button></div>`).join('')+'<div id="mb-rs"></div>';
+  }).catch(e=>{ const box=document.getElementById('mb-prior'); if(box) box.textContent='Could not load prior e-blasts: '+e.message; });
+  _spWorkerPost('/mailchimp/audience',{}).then(a=>{ const st=window._mbState; if(!st) return; st.audience=a; const box=document.getElementById('mb-aud'); if(!box) return;
+    const lists=a.lists||[]; const segs=a.segments||[]; if(!lists.length){ box.textContent='No Mailchimp audience found.'; return; }
+    box.className=''; box.innerHTML=(lists.length>1?`<select id="mb-list" class="mr-input" style="width:100%;margin-bottom:.4rem" onchange="window._mbAudienceList()">${lists.map(l=>`<option value="${_mrEsc(l.id)}">${_mrEsc(l.name)} (${Number(l.memberCount).toLocaleString()})</option>`).join('')}</select>`:`<input type="hidden" id="mb-list" value="${_mrEsc(lists[0].id)}"><div class="mr-note" style="margin-bottom:.3rem">${_mrEsc(lists[0].name)} · ${Number(lists[0].memberCount).toLocaleString()} contacts</div>`)+
+      `<div id="mb-segs" style="max-height:170px;overflow:auto;border:1px solid var(--line,#e5e7eb);border-radius:6px;padding:.4rem .5rem;display:grid;gap:.2rem"></div><div class="mr-note" style="margin-top:.25rem">Nothing ticked = the whole audience.</div>`;
+    window._mbAudienceList(); });
+};
+window._mbAudienceList=function(){ const st=window._mbState; if(!st||!st.audience) return; const listId=document.getElementById('mb-list')?.value; const segs=(st.audience.segments||[]).filter(s=>s.listId===listId); const box=document.getElementById('mb-segs'); if(!box) return;
+  box.innerHTML=segs.length?segs.map(s=>`<label style="cursor:pointer;font-size:.8rem"><input type="checkbox" class="mb-seg" value="${s.id}"> ${_mrEsc(s.name)} <span class="mr-muted">(${Number(s.memberCount).toLocaleString()}${s.type==='saved'?' · segment':''})</span></label>`).join(''):'<span class="mr-muted">No tags or segments on this audience.</span>'; };
+window._mbClose=function(){ document.getElementById('mb-ov')?.remove(); window._mbState=null; };
+window._mbPreview=function(){
+  const st=window._mbState; if(!st) return; const pv=document.getElementById('mb-pv'); if(!pv) return;
+  const v=id=>document.getElementById(id)?.value||'';
+  const bullets=v('mb-bullets').split('\n').map(x=>x.trim()).filter(Boolean);
+  pv.innerHTML=`<div style="background:#fff;border-radius:8px;overflow:hidden;font-family:Arial,sans-serif;font-size:13px;color:#1F2933"><div style="background:#DA291C;color:#fff;padding:8px 12px;font-size:10px;letter-spacing:.1em;text-transform:uppercase;font-weight:700">Available Land · Eshenbaugh Land Company</div>${st.hero?`<img src="${_mrEsc(st.hero)}" style="width:100%;display:block">`:''}<div style="padding:12px"><div style="font-family:Georgia,serif;font-size:18px;font-weight:700">${_mrEsc(v('mb-headline'))}</div><div style="color:#6E7480;font-size:12px;margin-top:3px">${_mrEsc(_mrDealAddr(st.deal))}</div>${v('mb-price')?`<div style="color:#DA291C;font-weight:700;font-size:15px;margin-top:6px">${_mrEsc(v('mb-price'))}</div>`:''}<p style="margin:10px 0 0;line-height:1.45;white-space:pre-wrap">${_mrEsc(v('mb-body'))}</p>${bullets.length?`<ul style="margin:8px 0 0;padding-left:18px">${bullets.map(b=>`<li>${_mrEsc(b)}</li>`).join('')}</ul>`:''}<div style="margin-top:12px"><span style="background:#DA291C;color:#fff;padding:7px 12px;border-radius:5px;font-weight:700;font-size:12px">View the listing →</span></div><div style="margin-top:12px;font-size:12px"><b>${_mrEsc(st.adv.name||'Eshenbaugh Land Company')}</b>${st.adv.designations?', '+_mrEsc(st.adv.designations):''}${st.adv.phone?'<br>'+_mrEsc(st.adv.phone):''}</div></div></div>`;
+};
+window._mbDraft=async function(btn){
+  const st=window._mbState; if(!st) return; const done=elcBusy(btn,'Drafting…');
+  try{ const c=await _mbAiCopy(st.deal); const set=(id,val)=>{ const el=document.getElementById(id); if(el&&val) el.value=val; }; set('mb-subject',c.subject); set('mb-preview',c.previewText); set('mb-headline',c.headline); set('mb-body',c.body); if(c.bullets.length) set('mb-bullets',c.bullets.join('\n')); window._mbPreview(); }
+  catch(e){ showToast('AI draft failed: '+e.message,'error'); } finally{ done(); }
+};
+function _mbModeOf(prefix){ const mode=document.querySelector(`input[name="${prefix}-mode"]:checked`)?.value||'test'; const whenEl=document.getElementById(prefix+'-when'); let scheduleAt=''; if(mode==='schedule'){ const w=whenEl?.value; if(!w) throw new Error('Pick a date and time to schedule.'); const d=new Date(w); if(isNaN(d)||d.getTime()<Date.now()+5*60*1000) throw new Error('Schedule time must be in the future.'); scheduleAt=d.toISOString(); } return {mode, scheduleAt}; }
+async function _mbConfirmSend(mode, scheduleAt, what, audience){
+  if(mode==='test') return true;
+  return elcConfirm((mode==='send'?'Send ':'Schedule ')+what+' to '+audience+(mode==='schedule'?' for '+new Date(scheduleAt).toLocaleString():'')+'?\n\nThis goes out from Mailchimp to real recipients.',{title:mode==='send'?'Send e-blast now':'Schedule e-blast', okLabel:mode==='send'?'Send now':'Schedule', icon:'📧'});
+}
+async function _mbAfterDelivery(r, mode, extra){
+  const st=window._mbState; if(!st) return;
+  if(mode==='test'){ st.draftId=r.campaign.id; showToast('Test sent to '+(r.to||[]).join(', ')+'. Check your inbox, then send or schedule it.','success',8000); const note=document.getElementById(st.draftKind==='resend'?'mb-rs-note':'mb-create-note'); if(note) note.innerHTML=`Test sent ✓ · <a href="${_mrEsc(r.campaign.editUrl||'#')}" target="_blank" rel="noopener" style="color:#0A66C2">open in Mailchimp ↗</a>`; return; }
+  await _mbRecordSent(st.deal, st.ym, r.campaign, mode, {...(extra||{}), scheduleAt:r.scheduleAt||''});
+  showToast((mode==='send'?'Sent':'Scheduled')+' ✓ “'+(r.campaign.subject||'')+'” → '+(r.campaign.listName||'audience')+(r.campaign.segment?' · '+r.campaign.segment:''),'success',8000, r.campaign.archiveUrl?{label:'View',onClick:()=>window.open(r.campaign.archiveUrl,'_blank','noopener')}:null);
+  window._mbClose();
+  try{ if(currentView==='monthlyReports'&&window._mrRenderRows) window._mrRenderRows(); const blk=document.getElementById('pdw-mcblast-block'); if(blk) blk.innerHTML=window._mbMarketingBlock(st.deal); if(typeof renderCurrentView==='function') renderCurrentView(); }catch(_){}
+}
+window._mbResendForm=function(campaignId){
+  const st=window._mbState; if(!st) return; const c=(st.prior||[]).find(x=>x.id===campaignId); if(!c) return; st.draftId=''; st.draftKind='resend'; st.resendOf=campaignId;
+  const box=document.getElementById('mb-rs'); if(!box) return;
+  const subject=/^still available/i.test(c.subject||'')?c.subject:('Still Available: '+(c.subject||_mrDealName(st.deal)));
+  box.innerHTML=`<div style="margin-top:.6rem;padding:.7rem;border:1px solid var(--line,#e5e7eb);border-radius:8px;background:var(--bg-2,#f9fafb)"><div style="font-weight:700;margin-bottom:.4rem">↻ Resend “${_mrEsc(c.subject||'')}” → ${_mrEsc(c.listName||'audience')}${c.segment?' · '+_mrEsc(c.segment):''}</div>
+    <label class="mr-lbl">Subject<input id="mb-rs-subject" class="mr-input" style="width:100%" value="${_mrEsc(subject)}"></label>
+    <label class="mr-lbl" style="margin-top:.4rem">Preview text<input id="mb-rs-preview" class="mr-input" style="width:100%" value="${_mrEsc(c.preview||'')}" placeholder="(keeps the original)"></label>
+    ${_mbModeHtml('mb-rs')}
+    <div class="mr-row" style="gap:.5rem;margin-top:.5rem"><button class="mr-btn mr-btn-primary" onclick="window._mbResend(this)">↻ Resend</button><span class="mr-note" id="mb-rs-note">Same audience and design; only the subject/preview change.</span></div></div>`;
+  box.scrollIntoView({block:'nearest'});
+};
+window._mbResend=async function(btn){
+  const st=window._mbState; if(!st||st.busy) return;
+  try{
+    const {mode, scheduleAt}=_mbModeOf('mb-rs'); const subject=(document.getElementById('mb-rs-subject')?.value||'').trim(); if(!subject) throw new Error('Subject is required.');
+    const prior=(st.prior||[]).find(x=>x.id===st.resendOf)||{};
+    if(!(await _mbConfirmSend(mode, scheduleAt, 'the e-blast', (prior.listName||'the same audience')+(prior.segment?' · '+prior.segment:'')))) return;
+    st.busy=true; const done=elcBusy(btn, mode==='test'?'Sending test…':mode==='send'?'Sending…':'Scheduling…');
+    try{
+      const body={subject, previewText:document.getElementById('mb-rs-preview')?.value||undefined, mode, scheduleAt, testEmails:[currentUser?.email].filter(Boolean)};
+      const r= st.draftId ? await _spWorkerPost('/mailchimp/send',{campaignId:st.draftId, ...body}) : await _spWorkerPost('/mailchimp/replicate',{campaignId:st.resendOf, ...body});
+      await _mbAfterDelivery(r, mode, {replicatedFrom:st.resendOf});
+    } finally { st.busy=false; done(); }
+  }catch(e){ console.error('[mb] resend',e); showToast(e.message,'error',8000); }
+};
+window._mbCreate=async function(btn){
+  const st=window._mbState; if(!st||st.busy) return;
+  try{
+    const {mode, scheduleAt}=_mbModeOf('mb'); const v=id=>(document.getElementById(id)?.value||'').trim();
+    const subject=v('mb-subject'); if(!subject) throw new Error('Subject is required.');
+    const listId=v('mb-list'); if(!listId) throw new Error('Audience not loaded yet.');
+    const segmentIds=[...document.querySelectorAll('.mb-seg:checked')].map(x=>Number(x.value)); const segNames=[...document.querySelectorAll('.mb-seg:checked')].map(x=>x.parentElement.textContent.trim().replace(/\s*\(.*$/,''));
+    const listName=(st.audience.lists.find(l=>l.id===listId)||{}).name||'audience';
+    if(!(await _mbConfirmSend(mode, scheduleAt, '“'+subject+'”', segNames.length?listName+' · '+segNames.join(', '):'the whole '+listName+' audience'))) return;
+    st.busy=true; const done=elcBusy(btn, mode==='test'?'Sending test…':mode==='send'?'Sending…':'Scheduling…');
+    try{
+      const d=st.deal; const facts=[]; if(d.acreage) facts.push({label:'Acres',value:Number(d.acreage).toLocaleString('en-US',{maximumFractionDigits:2})+'±'}); if(d.county) facts.push({label:'County',value:d.county}); if(d.zoning) facts.push({label:'Zoning',value:d.zoning}); if(d.futureLandUse||d.flu) facts.push({label:'Future land use',value:d.futureLandUse||d.flu});
+      const content={kicker:'Available Land', hero:st.hero, headline:v('mb-headline'), address:_mrDealAddr(d), price:v('mb-price'), facts:facts.slice(0,4), body:v('mb-body'), bullets:v('mb-bullets').split('\n').map(x=>x.trim()).filter(Boolean), link:v('mb-link'), linkLabel:'View the listing', advisor:st.adv};
+      const body={listId, segmentIds, subject, previewText:v('mb-preview'), fromName:st.adv.name||'Eshenbaugh Land Company', replyTo:st.adv.email||'', title:'Terra e-blast '+_mrLocalDate(Date.now())+' — '+_mrDealName(d), mode, scheduleAt, testEmails:[currentUser?.email].filter(Boolean), content};
+      st.draftKind='create';
+      const r= st.draftId ? await _spWorkerPost('/mailchimp/send',{campaignId:st.draftId, subject, previewText:v('mb-preview'), mode, scheduleAt, testEmails:body.testEmails}) : await _spWorkerPost('/mailchimp/create',body);
+      await _mbAfterDelivery(r, mode, {});
+    } finally { st.busy=false; done(); }
+  }catch(e){ console.error('[mb] create',e); showToast(e.message,'error',8000); }
+};
+/* ===== MCBLAST_BLOCK_END ===== */
 
 /* =======================================================
    📣 SOCIAL POSTING FOR LISTINGS — marker SOCIAL-20261006
