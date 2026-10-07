@@ -18627,6 +18627,7 @@ window.openPropertyDetail = (dealId) => {
       <div class="prop-section-title">Marketing</div>
       <div id="pdw-listing-block">${window._lsModalBlock ? window._lsModalBlock(deal) : ''}</div>
       <div id="pdw-social-block" style="margin-top:.5rem">${window._spMarketingBlock ? window._spMarketingBlock(deal) : ''}</div>
+      <div id="pdw-mrassets-block" style="margin-top:.5rem">${window._mrAssetsBlock ? window._mrAssetsBlock(deal) : ''}</div>   <!-- MRASSETS-20261007-hooks -->
     </div>
     <!-- Attachments -->
     <div class="prop-section">
@@ -25071,8 +25072,9 @@ function viewTasks(){
   return `<span id="${pid}" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${esc(t.description)}</span>
   <button onclick="var e=document.getElementById('${pid}');var exp=e.dataset.exp;e.style.cssText=exp?'display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden':'';e.dataset.exp=exp?'':'1';this.textContent=exp?'\u25bc Read more':'\u25b2 Less';" class="text-blue-500 text-xs hover:underline font-medium mt-0.5">&#9660; Read more</button>`;
 })()}</div>`:''}
-        ${(t.invoiceDealId||t.gmailUrl||t.attachmentUrl||t.approvePaymentDealId||(window._spIsSocialTask&&window._spIsSocialTask(t)))?`<div class="flex gap-2 mt-2 flex-wrap">
+        ${(t.invoiceDealId||t.gmailUrl||t.attachmentUrl||t.approvePaymentDealId||(window._spIsSocialTask&&window._spIsSocialTask(t))||(window._mrIsAssetsTask&&window._mrIsAssetsTask(t)))?`<div class="flex gap-2 mt-2 flex-wrap">
           ${(window._spIsSocialTask&&window._spIsSocialTask(t))?`<button onclick="window._spOpen('${t.dealId}','${t.id}')" class="text-xs font-semibold px-2.5 py-1 rounded-lg text-white" style="background:#0A66C2">📣 Compose post</button>`:''}
+          ${(window._mrIsAssetsTask&&window._mrIsAssetsTask(t))?`<button onclick="window._mrOpenAssets('${t.dealId}','${t.id}')" class="text-xs font-semibold px-2.5 py-1 rounded-lg text-white" style="background:#DA291C">📎 Upload report assets</button>`:''}
           ${t.invoiceDealId?`<button onclick="openCommissionInvoice('${t.invoiceDealId}')" class="text-xs font-semibold px-2.5 py-1 rounded-lg text-white" style="background:#1a1a1a">📄 Download Invoice (Word)</button>`:''}
           ${t.gmailUrl?`<a href="${t.gmailUrl}" target="_blank" class="text-xs font-semibold px-2.5 py-1 rounded-lg text-white inline-block" style="background:#DA291C">📧 Open Email Draft</a>`:''}
           ${t.attachmentUrl?`<a href="${t.attachmentUrl}" target="_blank" class="text-xs font-semibold px-2.5 py-1 rounded-lg text-white inline-block" style="background:#2563EB">📎 ${(t.attachmentName||'Download').replace(/[<>]/g,'')}</a>`:''}
@@ -30555,6 +30557,7 @@ const TASK_AUTOMATIONS_DEFAULT = {
     ['📣 Add to marketing groups', _TA.BILL, 3],
     ['🪧 Order sign & request Telzio', _TA.MKTG, 3],
     ['🌐 List on websites', _TA.KRISSY, 3],
+    ['📬 Monthly report assets — upload sign photo, QR code & website links', _TA.NICK, 5],   // MRASSETS-20261007
   ]},
   proposal_todo: { label:'Proposal to Do', terminal:false, tasks:[
     ['📞 Follow up on outstanding proposal', _TA.ADV, 3],
@@ -30655,6 +30658,8 @@ function _mergeTaskAutomations(stored){
   for(const k of Object.keys(base)){
     if(Array.isArray(base[k].tasks)) base[k].tasks = _taFixRichOwnedRows(base[k].tasks, k).rows;
   }
+  // Every new listing needs its monthly-report assets uploaded by Nick (MRASSETS-20261007).
+  if(base.new_listing && Array.isArray(base.new_listing.tasks) && !base.new_listing.tasks.some(r=>Array.isArray(r)&&/monthly report assets/i.test(String(r[0]||'')))) base.new_listing.tasks.push(['📬 Monthly report assets — upload sign photo, QR code & website links', _TA.NICK, 5]);
   // The report was renamed — saved configs still say "Eshenbaugh Report" (LLREPORT-20261005).
   for(const k of Object.keys(base)){
     if(Array.isArray(base[k].tasks)) base[k].tasks = base[k].tasks.map(r => Array.isArray(r) ? [String(r[0]||'').replace(/\bEsh(?:enbaugh)?\.?\s+(?:Land\s+)?Report\b/gi,'Land Listings Report'), ...r.slice(1)] : r);
@@ -31322,6 +31327,7 @@ window._taRenderDealTasks = function(dealId){
       <div style="flex:1;min-width:0">
         <div onclick="window.openTaskModal('${t.id}','${dealId}')" title="Edit task" style="font-size:.82rem;line-height:1.3;cursor:pointer;color:${done?'#9ca3af':'#111827'};${done?'text-decoration:line-through':''}">${esc(t.title)}</div>
         ${(window._spIsSocialTask&&window._spIsSocialTask(t))?`<button class="prop-note-btn" style="margin-top:.25rem;font-size:.7rem" onclick="window._spOpen('${dealId}','${t.id}')">📣 Compose post</button>`:''}
+        ${(window._mrIsAssetsTask&&window._mrIsAssetsTask(t))?`<button class="prop-note-btn" style="margin-top:.25rem;font-size:.7rem" onclick="window._mrOpenAssets('${dealId}','${t.id}')">📎 Upload report assets</button>`:''}
         <div style="font-size:.7rem;color:#6b7280;margin-top:.15rem;display:flex;gap:.6rem;flex-wrap:wrap">
           ${t.assignedToName?`<span>👤 ${esc(t.assignedToName)}</span>`:''}
           ${t.dueDate?`<span style="color:${overdue?'#dc2626':'#6b7280'}">📅 ${fmt(t.dueDate)}${overdue?' · overdue':''}</span>`:''}
@@ -45161,11 +45167,10 @@ function _mrAdvisorsOf(d){
   const out=[]; const seen=new Set();
   const push=(uid,name,email)=>{ const k=uid||email; if(!k||seen.has(k)) return; seen.add(k);
     const p=allProfiles[uid]||{};
-    const bb=getAdvisorBio(uid||email);   // ADVBIO-20261006 — single source of truth
-    out.push({uid, name:name||bb.name||p.name||email||'', email:(email||bb.email||p.email||'').toLowerCase(),
-      phone:bb.directLine||bb.phone||'', cell:bb.cell||'', ext:bb.ext||'',
-      designations:bb.designationsStr||'', title:bb.title||'', headshotUrl:bb.headshotUrl||'',
-      bio:bb.bio||'', education:bb.education||''}); };
+    out.push({uid, name:name||p.name||email||'', email:(email||p.email||'').toLowerCase(),
+      phone:window._fmtPhone?window._fmtPhone(p.reportPhone||p.phone||p.officePhone||''):(p.reportPhone||p.phone||''),
+      designations:p.reportDesignations||'', title:p.reportTitle||'', headshotUrl:p.reportHeadshotUrl||'',
+      bio:(typeof ADVISOR_BIOS!=='undefined' && ADVISOR_BIOS[(email||p.email||'').toLowerCase()])||''}); };
   push(d.advisorUid, d.advisorName, d.advisorEmail);
   (d.coAdvisors||[]).forEach(c=>push(c.uid,c.name,c.email));
   return out;
@@ -45447,11 +45452,12 @@ function viewMonthlyReports(){
         <span style="flex:1"></span>
         <button class="mr-btn mr-btn-sm" onclick="window._mrSelectAll(true)">Select all</button>
         <button class="mr-btn mr-btn-sm" onclick="window._mrSelectAll(false)">Clear</button>
+        <button class="mr-btn mr-btn-sm" onclick="window._mrAssignAllAssets(this)" title="One task per active listing missing a sign photo, QR code or website links">📬 Assign missing assets to Nick</button>
         <button class="mr-btn mr-btn-primary mr-btn-sm" id="mr-send-selected" onclick="window._mrSendSelected()" ${sel.length?'':'disabled'}>📤 Send selected (${sel.length})</button>
       </div>
       <div style="overflow:auto"><table class="mr-table" aria-label="Active listings">
-        <thead><tr><th style="width:36px"><span class="sr-only">Select</span></th><th>Property</th><th>Advisor</th><th>Stage</th><th>Recipients</th><th>${_mrEsc(_mrMonthLabel(ym))} report</th><th style="text-align:right">Actions</th></tr></thead>
-        <tbody id="mr-rows"><tr><td colspan="7" class="mr-muted" style="padding:1.2rem">Loading…</td></tr></tbody>
+        <thead><tr><th style="width:36px"><span class="sr-only">Select</span></th><th>Property</th><th>Advisor</th><th>Stage</th><th>Recipients</th><th>Assets</th><th>${_mrEsc(_mrMonthLabel(ym))} report</th><th style="text-align:right">Actions</th></tr></thead>
+        <tbody id="mr-rows"><tr><td colspan="8" class="mr-muted" style="padding:1.2rem">Loading…</td></tr></tbody>
       </table></div>
     </div>
     <p class="mr-note" style="margin-top:.8rem">Reports are drafts until you click Send. Each one is emailed from the listing advisor’s mailbox, filed under the deal’s Attachments, and logged on the property’s history.</p>
@@ -45462,7 +45468,7 @@ window.viewMonthlyReports=viewMonthlyReports;
 window._mrRenderRows=function(){
   const st=window._mrState; const ym=st.month; const tb=document.getElementById('mr-rows'); if(!tb) return;
   const deals=_mrActiveDeals(); const cnt=document.getElementById('mr-count'); if(cnt) cnt.textContent=deals.length+' active seller-rep listing'+(deals.length===1?'':'s');
-  if(!deals.length){ tb.innerHTML=`<tr><td colspan="7" class="mr-muted" style="padding:1.2rem">No active seller-rep listings${st.search?' match your search':''}.</td></tr>`; return; }
+  if(!deals.length){ tb.innerHTML=`<tr><td colspan="8" class="mr-muted" style="padding:1.2rem">No active seller-rep listings${st.search?' match your search':''}.</td></tr>`; return; }
   tb.innerHTML=deals.map(d=>{
     const rep=st.reports[d.id+'|'+ym]||null; const recips=_mrRecipients(d);
     const ready=recips.length>0;
@@ -45472,6 +45478,7 @@ window._mrRenderRows=function(){
       <td>${_mrEsc(d.advisorName||d.advisorEmail||'')}</td>
       <td><span class="mr-muted">${_mrEsc(_mrStageOf(d))}</span></td>
       <td>${recips.length?`<span title="${_mrEsc(recips.map(r=>r.email).join(', '))}">${recips.length} owner${recips.length===1?'':'s'}</span>`:`<span style="color:#b91c1c;font-weight:600">None</span>`}</td>
+      <td>${(()=>{ const miss=(typeof _mrAssetsMissing==='function')?_mrAssetsMissing(d):[]; const task=(typeof _mrAssetsTaskFor==='function')?_mrAssetsTaskFor(d.id):null; return miss.length?`<span style="font-size:.72rem;color:#b45309;background:#fef3c7;border-radius:999px;padding:.1rem .5rem" title="Missing: ${_mrEsc(miss.join(', '))}">${miss.length} missing</span>${task?`<div class="mr-muted" style="font-size:.68rem">→ ${_mrEsc(task.assignedToName||'Nick')}</div>`:`<div><button class="mr-btn mr-btn-sm" style="font-size:.68rem;padding:.1rem .4rem" onclick="window._mrAssignAssets('${d.id}',this)">→ Nick</button></div>`}`:`<span style="font-size:.72rem;color:#047857;background:#d1fae5;border-radius:999px;padding:.1rem .5rem">✓</span>`; })()}</td>
       <td>${_mrStatusChip(rep,d)}</td>
       <td style="text-align:right;white-space:nowrap">
         <button class="mr-btn mr-btn-sm" onclick="window._mrOpenEditor('${d.id}')">✏️ Edit</button>
@@ -45563,27 +45570,23 @@ window._mrOpenSettings=function(){
   document.body.appendChild(ov);
 };
 function _mrAdvisorCardsHtml(){
-  // ADVBIO-20261006: designations / title / direct line / headshot now live on the 👤 Advisor Bios
-  // tab (advisorProfiles.bio*). This panel is a read-only mirror with a jump link.
-  const advs=(typeof _bioAdvisorList==='function'?_bioAdvisorList():[]);
+  const advs=(typeof getDistinctAdvisors==='function'?getDistinctAdvisors():[]).filter(a=>a.uid);
   if(!advs.length) return '<p class="mr-note">No advisor profiles loaded.</p>';
-  return `<p class="mr-note" style="margin-bottom:.5rem">Edited on the <button type="button" class="mr-btn mr-btn-sm" onclick="window._mrCloseSettings();switchView('bio')">👤 Advisor Bios</button> tab — each advisor can update their own.</p>
-  <table class="mr-table mr-mini"><thead><tr><th>Advisor</th><th>Designations</th><th>Title</th><th>Direct line</th><th>Cell</th><th>Headshot</th></tr></thead><tbody>${advs.map(b=>`<tr>
-    <td style="white-space:nowrap">${_mrEsc(b.name)}</td>
-    <td>${_mrEsc(b.designationsStr)||'<span class="mr-muted">—</span>'}</td>
-    <td>${_mrEsc(b.title)}</td>
-    <td style="white-space:nowrap">${_mrEsc(b.directLine)}</td>
-    <td style="white-space:nowrap">${_mrEsc(b.cell)||'<span class="mr-muted">—</span>'}</td>
-    <td>${b.headshotUrl?`<img src="${_mrEsc(b.headshotUrl)}" alt="" style="width:34px;height:34px;border-radius:50%;object-fit:cover;vertical-align:middle">`:'<span class="mr-muted">none</span>'}</td>
-  </tr>`).join('')}</tbody></table>`;
+  return `<table class="mr-table mr-mini"><thead><tr><th>Advisor</th><th>Designations</th><th>Title</th><th>Direct line</th><th>Headshot</th></tr></thead><tbody>${advs.map(a=>{ const p=allProfiles[a.uid]||{}; return `<tr data-uid="${a.uid}">
+    <td style="white-space:nowrap">${_mrEsc(a.name||p.name||a.email||'')}</td>
+    <td><input data-f="reportDesignations" value="${_mrEsc(p.reportDesignations||'')}" placeholder="ALC, CCIM"></td>
+    <td><input data-f="reportTitle" value="${_mrEsc(p.reportTitle||'')}" placeholder="Senior Advisor"></td>
+    <td><input data-f="reportPhone" value="${_mrEsc(p.reportPhone||p.phone||'')}" placeholder="813-287-8787 x104"></td>
+    <td style="white-space:nowrap">${p.reportHeadshotUrl?`<img src="${_mrEsc(p.reportHeadshotUrl)}" alt="" style="width:34px;height:34px;border-radius:50%;object-fit:cover;vertical-align:middle;margin-right:.3rem">`:''}<label class="mr-btn mr-btn-sm" style="cursor:pointer">📷 <input type="file" accept="image/*" style="display:none" onchange="window._mrUploadHeadshot('${a.uid}',this)"></label></td>
+  </tr>`; }).join('')}</tbody></table>`;
 }
 window._mrUploadHeadshot=async function(uid, input){
   const f=input.files&&input.files[0]; if(!f) return;
   try{ showToast('Uploading headshot…','info',2000);
     const blob=await _mrShrinkImage(f,600,.88);
     const url=await _mrUploadBlob('dealPhotos/_advisors/'+uid+'_headshot_'+Date.now()+'.jpg', blob,'image/jpeg');
-    const {doc,setDoc}=_fbFns; await setDoc(doc(_fbDb,'advisorProfiles',uid),{reportHeadshotUrl:url, bioHeadshotUrl:url},{merge:true});   // ADVBIO-20261006
-    if(allProfiles[uid]){ allProfiles[uid].reportHeadshotUrl=url; allProfiles[uid].bioHeadshotUrl=url; }
+    const {doc,setDoc}=_fbFns; await setDoc(doc(_fbDb,'advisorProfiles',uid),{reportHeadshotUrl:url},{merge:true});
+    if(allProfiles[uid]) allProfiles[uid].reportHeadshotUrl=url;
     const box=document.getElementById('mr-adv-cards'); if(box) box.innerHTML=_mrAdvisorCardsHtml();
     const ed=document.getElementById('mr-ed-advcard'); if(ed && window._mrState.editor) ed.innerHTML=_mrEditorAdvisorCardHtml(window._mrState.editor.deal);
     showToast('Headshot saved ✓','success');
@@ -45634,7 +45637,7 @@ window._mrOpenEditor=async function(dealId){
   const deal=(allDeals||[]).find(d=>d.id===dealId); if(!deal){ showToast('Deal not found','error'); return; }
   const st=window._mrState; const ym=st.month||_mrPrevMonth();
   const rep=(await _mrLoadReport(dealId,ym))||{};
-  st.editor={dealId, deal, ym, rep, traffic:rep.traffic||null, shots:{email:rep.emailScreenshotUrl||''}, socialPhotos:Array.isArray(rep.socialPhotos)?rep.socialPhotos.slice():[], signUrl:deal.reportSignPhotoUrl||'', webUrl:deal.reportWebsitePhotoUrl||''};
+  st.editor={dealId, deal, ym, rep, traffic:rep.traffic||null, shots:{email:rep.emailScreenshotUrl||''}, socialPhotos:Array.isArray(rep.socialPhotos)?rep.socialPhotos.slice():[], emailCampaigns:Array.isArray(rep.emailCampaigns)?rep.emailCampaigns.slice():[], emailCampaignsPicked:!!rep.emailCampaignsPicked, mcError:'', signUrl:deal.reportSignPhotoUrl||'', webUrl:deal.reportWebsitePhotoUrl||''};
   const cands=_mrRecipientCandidates(deal); const chosen=_mrRecipients(deal);
   const chosenEmails=new Set(chosen.map(r=>r.email));
   const manual=chosen.filter(r=>!cands.some(c=>c.email===r.email));
@@ -45670,7 +45673,10 @@ window._mrOpenEditor=async function(dealId){
         <textarea id="mr-ed-note" class="mr-textarea" style="min-height:110px">${_mrEsc(rep.advisorNote||'')}</textarea></div>
       </div>
       <div class="mr-sec"><h3>4 · Email blasts</h3>
-        ${_mrRowsTable('mr-emails',MR_EMAIL_COLS,rep.emailBlasts||[],'Add e-blast')}
+        <div style="margin-bottom:.6rem"><div class="mr-row" style="align-items:center"><span class="mr-lbl" style="margin:0">Sent through Mailchimp this month</span><button class="mr-btn mr-btn-sm mr-btn-teal" onclick="window._mrOpenMcPicker(this)">📧 Choose e-blasts</button></div>
+          <div id="mr-mc-summary" class="mr-row" style="gap:.5rem;margin-top:.4rem"><span class="mr-muted">Checking Mailchimp…</span></div></div>
+        <span class="mr-lbl">Results table (fills from Mailchimp; add rows by hand for anything sent another way)</span>
+        <div id="mr-emails-wrap">${_mrRowsTable('mr-emails',MR_EMAIL_COLS,rep.emailBlasts||[],'Add e-blast')}</div>
         <div class="mr-row" style="margin-top:.5rem"><label class="mr-btn mr-btn-sm" style="cursor:pointer">🖼 Upload e-blast screenshot<input type="file" accept="image/*" style="display:none" onchange="window._mrUploadShot('email',this)"></label><span id="mr-shot-email" class="mr-muted">${st.editor.shots.email?'✓ screenshot attached':''}</span></div>
       </div>
       <div class="mr-sec"><h3>5 · Social media</h3>
@@ -45688,11 +45694,8 @@ window._mrOpenEditor=async function(dealId){
           <span id="mr-social-status" class="mr-muted"></span>
         </div>
       </div>
-      <div class="mr-sec"><h3>6 · Sign &amp; website photos (remembered every month)</h3>
-        <div class="mr-grid2">
-          <div><span class="mr-lbl">Property sign</span><div class="mr-row"><span id="mr-sign-thumb">${deal.reportSignPhotoUrl?`<img class="mr-thumb" src="${_mrEsc(deal.reportSignPhotoUrl)}" alt="">`:''}</span><label class="mr-btn mr-btn-sm" style="cursor:pointer">📷 ${deal.reportSignPhotoUrl?'Replace':'Add'} sign photo<input type="file" accept="image/*" style="display:none" onchange="window._mrUploadSign(this)"></label></div><div id="mr-sign-status" class="mr-muted">${deal.reportSignPhotoUrl?'✓ on file':'none yet — the Property Signage page is skipped until one is added'}</div></div>
-          <div><span class="mr-lbl">Property website (Buildout screenshot)</span><div class="mr-row"><span id="mr-web-thumb">${deal.reportWebsitePhotoUrl?`<img class="mr-thumb" src="${_mrEsc(deal.reportWebsitePhotoUrl)}" alt="">`:''}</span><label class="mr-btn mr-btn-sm" style="cursor:pointer">🖼 ${deal.reportWebsitePhotoUrl?'Replace':'Add'} website screenshot<input type="file" accept="image/*" style="display:none" onchange="window._mrUploadWeb(this)"></label></div><div id="mr-web-status" class="mr-muted">${deal.reportWebsitePhotoUrl?'✓ on file':'none yet — printed under Listing Details once added'}</div></div>
-        </div>
+      <div class="mr-sec"><h3>6 · Sign photo, QR code &amp; website links (on the deal card — remembered every month)</h3>
+        <div id="mr-assets-block">${window._mrAssetsBlock?window._mrAssetsBlock(deal):''}</div>
       </div>
       <div class="mr-sec"><h3>7 · Leads &amp; website activity</h3>
         <div class="mr-row">
@@ -45717,6 +45720,7 @@ window._mrOpenEditor=async function(dealId){
     </div>
   </div>`;
   document.body.appendChild(ov);
+  if(window._mrMcAutoFill) window._mrMcAutoFill();   // MCREPORT-20261007
   // history counts (async)
   Promise.all([_mrFetchActivities(dealId),_mrFetchTasks(dealId)]).then(([acts,tasks])=>{ const h=_mrHistoryRows(deal,acts,tasks); const el=document.getElementById('mr-hist-summary'); if(el) el.innerHTML=`<b>${h.history.length}</b> history entries and <b>${h.tasks.length}</b> completed tasks since the listing started (${_mrFmtDateLong(_mrListingStart(deal))}) will print newest → oldest. Add or fix entries from the deal card’s Activity &amp; Notes.`; });
 };
@@ -45733,7 +45737,7 @@ function _mrCollectEditor(){
     recips,
     appId:(document.getElementById('mr-ed-appid')?.value||'').trim(),
     report:{ preparedFor:(document.getElementById('mr-ed-owner')?.value||'').trim(), advisorNote:(document.getElementById('mr-ed-note')?.value||'').trim(),
-      emailBlasts:_mrReadRows('mr-emails'), facebook:_mrReadRows('mr-fb'), linkedin:_mrReadRows('mr-li'),
+      emailBlasts:_mrReadRows('mr-emails'), emailCampaigns:(ed.emailCampaigns||[]).slice(0,20), emailCampaignsPicked:!!ed.emailCampaignsPicked, facebook:_mrReadRows('mr-fb'), linkedin:_mrReadRows('mr-li'),
       emailScreenshotUrl:ed.shots.email||'', socialPhotos:ed.socialPhotos.slice(0,12), traffic }
   };
 }
@@ -45916,22 +45920,25 @@ async function _mrAssemble(deal, ym){
   const posts=_mrMonthPosts(deal,ym); const postUrls=new Set(posts.map(p=>p.imageUrl).filter(Boolean));
   const [postImgs]=await Promise.all([Promise.all(posts.map(p=>_mrImg(p.imageUrl,{maxPx:1000}))), _mrPostMetrics(posts)]);
   posts.forEach((p,i)=>p.img=postImgs[i]);
+  const emails=(typeof _mrMcForReport==='function')?await _mrMcForReport(deal,ym,rep):[];   // MCREPORT-20261007
+  const emailImgs=await Promise.all(emails.map(e=>_mrMcImage(e.image))); emails.forEach((e,i)=>e.img=emailImgs[i]);
   const [acts,tasks]=await Promise.all([_mrFetchActivities(deal.id),_mrFetchTasks(deal.id)]);
   const h=_mrHistoryRows(deal,acts,tasks);
   const cfg=_mrCfg(); const L=_mrLetters()[ym]||{};
   const advisors=_mrAdvisorsOf(deal);
-  const [hero,logo,sign,web,shotE,social,heads]=await Promise.all([
+  const [hero,logo,sign,web,qr,shotE,social,heads]=await Promise.all([
     _mrImg(deal.primaryPhotoUrl,{cover:612/476,maxPx:1800}),
     _mrImg('proposals/assets/logo-dark.png',{png:true,maxPx:900}),
     _mrImg(deal.reportSignPhotoUrl,{maxPx:1600}),
     _mrImg(deal.reportWebsitePhotoUrl,{maxPx:1600}),
+    _mrImg(deal.reportQrUrl,{maxPx:600}),
     _mrImg(rep.emailScreenshotUrl,{maxPx:1200}),
     Promise.all((Array.isArray(rep.socialPhotos)?rep.socialPhotos.filter(u=>!postUrls.has(u)).slice(0,12):[]).map(u=>_mrImg(u,{maxPx:1000}))),
     Promise.all(advisors.map(a=>_mrImg(a.headshotUrl,{cover:1,maxPx:400})))
   ]);
   advisors.forEach((a,i)=>a.head=heads[i]);
   return { deal, ym, rep, history:h.history, tasks:h.tasks, letter:L.body||'', signature:L.signature||cfg.letterSignature||'Ryan Sampson, ALC, CCIM — Managing Partner / Broker of Record', about:cfg.about||MR_DEFAULT_ABOUT,
-    firmAddress:cfg.firmAddress||'304 S. Willow Ave, Tampa, FL 33606', firmWebsite:cfg.firmWebsite||'WWW.THEDIRTDOG.COM', advisors, hero, logo, sign, web, shotE, social:(social||[]).filter(Boolean), posts,
+    firmAddress:cfg.firmAddress||'304 S. Willow Ave, Tampa, FL 33606', firmWebsite:cfg.firmWebsite||'WWW.THEDIRTDOG.COM', advisors, hero, logo, sign, web, qr, links:(typeof _mrDealLinks==='function'?_mrDealLinks(deal):[]), shotE, social:(social||[]).filter(Boolean), posts, emails,
     preparedFor:rep.preparedFor||_mrOwnerLabel(deal), traffic:rep.traffic||{} };
 }
 async function _mrBuildPdf(A){
@@ -45939,13 +45946,13 @@ async function _mrBuildPdf(A){
   const {jsPDF}=window.jspdf; const doc=new jsPDF({unit:'pt',format:'letter',compress:true});
   const font=await _mrFonts(doc); const R=_mrPdfRenderer(doc,font);
   const d=A.deal, monthLabel=_mrMonthLabel(A.ym).toUpperCase(), addr=_mrDealAddr(d);
-  const shortAddr=addr.split(',')[0]; R.footerText=shortAddr+' - '+_mrMonthLabel(A.ym)+' Monthly Report';
-  doc.setProperties({title:_mrMonthLabel(A.ym)+' Monthly Report — '+addr, author:'Eshenbaugh Land Company', subject:'Monthly owner marketing report'});
+  const shortAddr=addr.split(',')[0]; R.footerText=shortAddr+' - '+_mrMonthLabel(A.ym)+' Monthly Marketing Report';
+  doc.setProperties({title:_mrMonthLabel(A.ym)+' Monthly Marketing Report — '+addr, author:'Eshenbaugh Land Company', subject:'Monthly owner marketing report'});
   /* ---- 1 · Cover ---- */
   R.rect(0,0,R.W,R.H,MR_RED);
-  R.rrect(160,12,292,66,4,[255,255,255]);
+  R.rrect(116,12,380,66,4,[255,255,255]);
   R.text(monthLabel,R.W/2,40,{size:22,bold:true,color:MR_RED,align:'center'});
-  R.text('MONTHLY REPORT',R.W/2,66,{size:22,bold:true,color:MR_RED,align:'center'});
+  R.text('MONTHLY MARKETING REPORT',R.W/2,66,{size:21,bold:true,color:MR_RED,align:'center'});
   if(A.hero) R.img(A.hero,0,90,R.W,476); else { R.rect(0,90,R.W,476,[160,30,20]); R.text('Add a primary photo to the deal card to show it here',R.W/2,330,{size:12,color:[255,255,255],align:'center'}); }
   R.line(R.W/2,600,R.W/2,660,[255,255,255],1.2);
   R.text(R.split(addr.toUpperCase(),240,14),R.W/4,620,{size:14,bold:false,color:[255,255,255],align:'center',lh:1.3});
@@ -45972,12 +45979,14 @@ async function _mrBuildPdf(A){
   const dl=[['Listing Start Date:',d.listingEffectiveDate?_mrFmtDateLong(d.listingEffectiveDate):(d.listingEnteredAt?_mrFmtDateLong(d.listingEnteredAt):'—')],['Listing Expiration Date:',d.listingExpiration?_mrFmtDateLong(d.listingExpiration):'—'],['Asking Price:',_mrFmtMoney(_mrDealPrice(d))||'Call for details']];
   dl.forEach(([k,v])=>{ R.text(k,R.M,y,{size:14,bold:true}); R.text(v,R.M+200,y,{size:14}); y+=22; });
   /* ---- 3a · Marketing at a glance (info-graphic tiles) ---- */
-  y=R.title('Marketing at a Glance',y+30);
   const T=A.traffic||{}; const rng=_mrMonthRange(A.ym);
   const offers=(Array.isArray(d.lois)&&d.lois.length)?d.lois.length:(d.loiBuyer?1:0);
   const viewsParts=[T.siteVisits,T.totalCommercialViews,T.loopnetViews,T.crexiViews,T.gaSessions].filter(v=>v!=null&&v!=='');
   const totalViews=T.totalViews!=null?Number(T.totalViews):(viewsParts.length?viewsParts.reduce((a,b)=>a+Number(b),0):null);
+  const nz=v=>(v==null||v==='')?'':String(v);
   const eb=(A.rep.emailBlasts||[]).filter(r=>r.title||r.date);
+  (A.emails||[]).map(_mrMcRow).forEach(r=>{ if(!eb.some(x=>x.date===r.date && String(x.title||'').trim().toLowerCase()===String(r.title||'').trim().toLowerCase())) eb.push(r); });   // Mailchimp campaigns count too (MCREPORT-20261007)
+  eb.sort((a,b)=>String(b.date||'').localeCompare(String(a.date||'')));
   const emailsSent=eb.length?eb.reduce((a,r)=>a+_mrNum(r.recipients),0):null;
   const emailOpens=eb.length?eb.reduce((a,r)=>a+_mrNum(r.opens),0):null;
   const act=T.activity||[];
@@ -45987,7 +45996,7 @@ async function _mrBuildPdf(A){
   const social=(fbReach||liImp)?fbReach+liImp:null;
   const monthActs=A.history.filter(r=>r.ts>=rng.start&&r.ts<rng.end).length;
   const fmtN=v=> v==null?'—':Number(v).toLocaleString('en-US');
-  const tiles=[
+  const tilesAll=[
     ['OFFERS RECEIVED', fmtN(offers), 'since listing signed', MR_RED],
     ['TOTAL WEBSITE VIEWS', fmtN(totalViews), viewsParts.length||T.totalViews!=null?'all listing sites, this month':'traffic not yet entered', MR_TEAL],
     ['EMAILS SENT', fmtN(emailsSent), emailOpens!=null?fmtN(emailOpens)+' opened':'e-blast recipients this month', MR_TEAL],
@@ -45998,20 +46007,53 @@ async function _mrBuildPdf(A){
     ['CAs SIGNED', fmtN(T.casSigned), 'confidentiality agreements', MR_RED],
     ['TOUCHES LOGGED', fmtN(monthActs), 'calls, emails & notes this month', MR_TEAL],
   ];
-  const tw=150, th=118, gap=18, x0=R.M+((R.W-2*R.M)-(3*tw+2*gap))/2;
+  // Only activity prints — a tile whose number is missing or zero is left out entirely.
+  const tiles=tilesAll.filter(t=>{ const n=Number(String(t[1]).replace(/[^0-9.]/g,'')); return t[1]!=='—' && isFinite(n) && n>0; });
+  if(tiles.length){ y=R.title('Marketing at a Glance',y+30); }
+  const tw=150, th=118, gap=18, perRow=Math.min(3,tiles.length)||1, x0=R.M+((R.W-2*R.M)-(perRow*tw+(perRow-1)*gap))/2;
   tiles.forEach((t,i)=>{ const cx=x0+(i%3)*(tw+gap), cy=y+6+Math.floor(i/3)*(th+gap); R.rect(cx,cy,tw,th,t[3]);
     R.text(t[0],cx+12,cy+22,{size:8,bold:true,color:[255,255,255]});
     R.text(t[1],cx+12,cy+68,{size:30,bold:true,color:[255,255,255]});
     R.text(R.split(t[2],tw-24,8),cx+12,cy+90,{size:8,color:[255,240,240],lh:1.25}); });
-  /* ---- 3b · Property website (Buildout screenshot) ---- */
-  if(A.web){ y=R.newPage(); y=R.title('Property Website',y+30); y=R.para('The Property’s dedicated marketing website, as presented to prospective buyers.',R.M,y+4,R.W-2*R.M,{size:10.5})+12; const maxW=R.W-2*R.M, maxH=R.H-56-y-16; const s=Math.min(maxW/A.web.w,maxH/A.web.h); const w=A.web.w*s,h=A.web.h*s; const x=(R.W-w)/2; doc.setDrawColor(203,213,225); doc.setLineWidth(1); doc.rect(x,y,w,h,'S'); R.img(A.web,x,y,w,h); }
+  /* ---- 3b · Property website: Buildout screenshot, QR code and the links the property is listed under ---- */
+  if(A.web||A.qr||(A.links&&A.links.length)){
+    y=R.newPage(); y=R.title('Property Website',y+30);
+    y=R.para('The Property’s dedicated marketing website and listing pages, as presented to prospective buyers.',R.M,y+4,R.W-2*R.M,{size:10.5})+12;
+    const hasBottom=!!(A.qr||(A.links&&A.links.length)); const bottomH=hasBottom?Math.max(A.qr?150:0, 30+(A.links||[]).length*18):0;
+    if(A.web){ const maxW=R.W-2*R.M, maxH=R.H-56-y-16-(hasBottom?bottomH+24:0); const s=Math.min(maxW/A.web.w,maxH/A.web.h); const w=A.web.w*s,h=A.web.h*s; const x=(R.W-w)/2; doc.setDrawColor(203,213,225); doc.setLineWidth(1); doc.rect(x,y,w,h,'S'); R.img(A.web,x,y,w,h); y+=h+24; }
+    if(hasBottom){
+      const qrW=A.qr?130:0; const lx=R.M, lw=R.W-2*R.M-(qrW?qrW+30:0);
+      R.text('WHERE THE PROPERTY IS LISTED',lx,y+12,{size:9,bold:true,color:MR_GREY}); R.line(lx,y+18,lx+lw,y+18,MR_TEAL,1.5);
+      let ly=y+36;
+      (A.links||[]).forEach(l=>{ R.text(l.label,lx,ly,{size:10,bold:true}); const lab=doc.getTextWidth(l.label)+8; doc.setFont(font,'normal'); doc.setFontSize(9); doc.setTextColor(...MR_TEAL); const txt=doc.splitTextToSize(l.url,lw-lab)[0]; doc.textWithLink(txt,lx+lab,ly,{url:l.url}); ly+=18; });
+      if(!(A.links||[]).length) R.text('Website links not yet added to the deal card.',lx,ly,{size:9,color:MR_GREY});
+      if(A.qr){ const qx=R.W-R.M-qrW; doc.setDrawColor(226,232,240); doc.setLineWidth(1); doc.rect(qx-6,y-2,qrW+12,qrW+34,'S'); R.fit(A.qr,qx,y+4,qrW,qrW); R.text('SCAN FOR THE PROPERTY WEBSITE',qx+qrW/2,y+qrW+22,{size:7,bold:true,color:MR_GREY,align:'center'}); }
+    }
+  }
   /* ---- 3c · Signage ---- */
   if(A.sign){ y=R.newPage(); y=R.title('Property Signage',y+30); const maxW=R.W-2*R.M-60, maxH=R.H-60-y-50; const s=Math.min(maxW/A.sign.w,maxH/A.sign.h); const w=A.sign.w*s,h=A.sign.h*s; const x=(R.W-w)/2, yy=y+40; doc.setDrawColor(20,20,20); doc.setLineWidth(3); doc.rect(x,yy,w,h,'S'); R.img(A.sign,x,yy,w,h); }
-  /* ---- 4 · Email report ---- */
-  if(eb.length||A.shotE){
+  /* ---- 4 · Email report: results table + one card per Mailchimp e-blast (picture + delivery results) ---- */
+  if(eb.length||A.shotE||(A.emails&&A.emails.length)){
     y=R.newPage(); y=R.title('Email Report',y+30);
-    if(eb.length){ y=R.table({startY:y+6, head:[['Title','Date Sent','Recipients','Opens','Clicks']], body:eb.map(r=>[r.title||'',_mrFmtDate(r.date),r.recipients||'',r.opens||'',r.clicks||'']), columnStyles:{0:{cellWidth:230}}, contHeading:'Email Report (cont.)'})+18; }
-    if(A.shotE){ const maxH=R.H-56-y-10; if(maxH>120) R.fit(A.shotE,R.M+40,y,R.W-2*R.M-80,maxH); }
+    y=R.para('E-mail campaigns sent to our buyer, broker and investor lists featuring the Property during '+_mrMonthLabel(A.ym)+'.',R.M,y+4,R.W-2*R.M,{size:10.5})+8;
+    if(eb.length){ y=R.table({startY:y+6, head:[['Title','Date Sent','Recipients','Opens','Clicks']], body:eb.map(r=>[r.title||'',_mrFmtDate(r.date),nz(r.recipients),nz(r.opens),nz(r.clicks)]), columnStyles:{0:{cellWidth:230}}, contHeading:'Email Report (cont.)'})+18; }
+    const cw=R.W-2*R.M, pad=12, textW=cw-2*pad;
+    (A.emails||[]).forEach(e=>{
+      const subj=R.split(e.subject||e.title||'E-blast',textW-60,11,true).slice(0,2);
+      const imgH=e.img?Math.min(300,e.img.h*(textW/e.img.w)):0;
+      const when=_mrFmtDateLong(Date.parse(e.sendTime)||0); const sent=Number(e.emailsSent||0);
+      const stats='Delivered to '+sent.toLocaleString('en-US')+' contacts · Opened by '+Number(e.uniqueOpens||0).toLocaleString('en-US')+' ('+(e.openRate||0)+'%) · Clicked by '+Number(e.uniqueClicks||0).toLocaleString('en-US')+' ('+(e.clickRate||0)+'%)';
+      const h=pad+subj.length*15+16+(imgH?imgH+10:0)+16+pad;
+      if(y+h>R.H-56){ y=R.newPage(); R.text('Email Report (cont.)',R.M,y+10,{size:16,bold:true}); y+=30; }
+      const x=R.M; doc.setDrawColor(226,232,240); doc.setLineWidth(1); doc.roundedRect(x,y,cw,h,6,6,'S');
+      let cy=y+pad; R.rrect(x+pad,cy,46,18,9,MR_TEAL); R.text('E-BLAST',x+pad+23,cy+12.5,{size:7,bold:true,color:[255,255,255],align:'center'});
+      subj.forEach((ln,k)=>R.text(ln,x+pad+56,cy+13+k*15,{size:11,bold:true})); cy+=subj.length*15+2;
+      R.text(when+(e.segment?' · '+e.segment:'')+' · via Mailchimp',x+pad,cy+10,{size:8,color:MR_GREY}); cy+=16;
+      if(e.img){ const s=Math.min(textW/e.img.w,imgH/e.img.h); const iw=e.img.w*s, ih=e.img.h*s; doc.setDrawColor(226,232,240); doc.rect(x+pad+(textW-iw)/2,cy,iw,ih,'S'); R.img(e.img,x+pad+(textW-iw)/2,cy,iw,ih); cy+=imgH+10; }
+      R.text(stats,x+pad,cy+10,{size:8.5,bold:true,color:MR_INK});
+      y+=h+14;
+    });
+    if(A.shotE){ const maxH=R.H-56-y-10; if(maxH<160){ y=R.newPage(); R.text('Email Report (cont.)',R.M,y+10,{size:16,bold:true}); y+=30; } R.fit(A.shotE,R.M+40,y,R.W-2*R.M-80,R.H-56-y-10); }
   }
   /* ---- 5 · Social media ---- */
   // Table rows: what was typed in the editor + rows derived from this month's Terra posts (metrics from the worker).
@@ -46019,7 +46061,6 @@ async function _mrBuildPdf(A){
   (A.posts||[]).forEach(p=>{ const date=_mrLocalDate(p.at); const m=p.metrics||{};
     if(p.platforms.includes('facebook') && !fb.some(r=>r.date===date)) fb.push({date, reach:m.facebook?m.facebook.reach:'', interactions:m.facebook?m.facebook.interactions:'', clicks:m.facebook?m.facebook.clicks:''});
     if(p.platforms.includes('linkedin') && !li.some(r=>r.date===date)) li.push({date, impressions:m.linkedin?m.linkedin.impressions:'', engRate:(m.linkedin&&m.linkedin.engagementRate!=null)?m.linkedin.engagementRate+'%':'', clicks:m.linkedin?m.linkedin.clicks:''}); });
-  const nz=v=>(v==null||v==='')?'':String(v);
   if(fb.length||li.length||A.social.length||(A.posts&&A.posts.length)){
     y=R.newPage(); y=R.title('Social Media Report',y+30);
     if(fb.length||li.length){
@@ -46093,8 +46134,9 @@ async function _mrBuildPdf(A){
   let cy=y+30;
   A.advisors.slice(0,3).forEach(a=>{ const cx=R.M+30; if(a.head){ let clipped=false; try{ doc.saveGraphicsState(); doc.circle(cx+55,cy+55,55,null); doc.clip(); doc.discardPath(); clipped=true; }catch(e){} R.img(a.head,cx,cy,110,110); if(clipped){ try{ doc.restoreGraphicsState(); }catch(e){} } } else { R.rrect(cx,cy,110,110,55,[220,224,228]); R.text(_mrFirstName(a.name).charAt(0).toUpperCase(),cx+55,cy+70,{size:40,bold:true,color:[255,255,255],align:'center'}); }
     const tx=cx+150, tw2=R.W-R.M-tx; let ty=cy+30;
-    R.text(a.name.toUpperCase(),tx+tw2/2,ty,{size:16,bold:true,align:'center'}); ty+=22;
-    if(a.designations||a.title){ R.text((a.designations||a.title).toUpperCase(),tx+tw2/2,ty,{size:13,bold:true,align:'center'}); ty+=20; }
+    const nameLine=a.name.toUpperCase()+(a.designations?', '+a.designations.toUpperCase().replace(/^,\s*/,''):'');
+    R.text(nameLine,tx+tw2/2,ty,{size:doc.getTextWidth(nameLine)>tw2-10?13:16,bold:true,align:'center'}); ty+=22;
+    if(a.title){ R.text(a.title.toUpperCase(),tx+tw2/2,ty,{size:13,bold:true,align:'center'}); ty+=20; }
     if(a.phone){ R.text(a.phone.toUpperCase(),tx+tw2/2,ty,{size:13,bold:true,align:'center'}); ty+=20; }
     if(a.email){ R.text(a.email.toUpperCase(),tx+tw2/2,ty,{size:13,bold:true,align:'center'}); }
     cy+=150; });
@@ -46176,6 +46218,228 @@ window._mrSendSelected=async function(){
   if(currentView==='monthlyReports') window._mrRenderRows();
 };
 /* ===== MREPORT_BLOCK_END ===== */
+/* =======================================================
+   📎 MONTHLY REPORT ASSETS — marker MRASSETS-20261007
+   Sign photo, QR code, website screenshot and website links live on the
+   deal (deals/{id}.reportSignPhotoUrl, reportQrUrl, reportWebsitePhotoUrl,
+   reportLinks[] {label,url}). They print in every monthly marketing report.
+   Nick creates & uploads them: the New Listing checklist carries a task for
+   it, and the Monthly Reports tab can assign one per listing.
+   ======================================================= */
+const MR_ASSETS_TASK_TITLE='📬 Monthly report assets — upload sign photo, QR code & website links';
+const MR_LINK_LABELS=['Property website (Buildout)','TheDirtDog.com','LoopNet','Crexi','LandWatch / Land.com','MLS','Other'];
+function _mrDealLinks(deal){ return (Array.isArray(deal&&deal.reportLinks)?deal.reportLinks:[]).filter(l=>l&&String(l.url||'').trim()).map(l=>({label:String(l.label||'Website').trim(), url:String(l.url).trim()})); }
+function _mrAssetsMissing(deal){ const m=[]; if(!deal.reportSignPhotoUrl) m.push('sign photo'); if(!deal.reportQrUrl) m.push('QR code'); if(!_mrDealLinks(deal).length) m.push('website links'); return m; }
+function _mrAssetsTaskFor(dealId){ return (typeof allTasks!=='undefined'?allTasks:[]).find(t=>t&&t.dealId===dealId&&t.status!=='complete'&&/monthly report assets/i.test(t.title||'')); }
+window._mrIsAssetsTask=function(t){ return !!(t && t.dealId && t.status!=='complete' && /monthly report assets/i.test(t.title||'')); };
+
+/* Deal-modal / editor summary block */
+window._mrAssetsBlock=function(deal){
+  if(!deal) return '';
+  const links=_mrDealLinks(deal), miss=_mrAssetsMissing(deal), task=_mrAssetsTaskFor(deal.id);
+  const thumb=(u,lbl)=>u?`<a href="${_mrEsc(u)}" target="_blank" rel="noopener" title="${_mrEsc(lbl)}"><img src="${_mrEsc(u)}" alt="${_mrEsc(lbl)}" style="width:64px;height:64px;object-fit:cover;border-radius:8px;border:1px solid var(--border)"></a>`:`<div title="${_mrEsc(lbl)} — missing" style="width:64px;height:64px;border-radius:8px;border:1px dashed #d1d5db;display:flex;align-items:center;justify-content:center;font-size:.6rem;color:#9ca3af;text-align:center;padding:2px">${_mrEsc(lbl)}<br>missing</div>`;
+  return `<div style="border:1px solid var(--border);border-radius:12px;padding:.6rem .8rem;background:var(--surface)">
+    <div style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap"><strong style="font-size:.85rem">📬 Monthly report assets</strong>
+      ${miss.length?`<span style="font-size:.72rem;color:#b45309;background:#fef3c7;border-radius:999px;padding:.1rem .5rem">Missing: ${_mrEsc(miss.join(', '))}</span>`:`<span style="font-size:.72rem;color:#047857;background:#d1fae5;border-radius:999px;padding:.1rem .5rem">✓ complete</span>`}
+      ${task?`<span class="mr-muted" style="font-size:.72rem">task open → ${_mrEsc(task.assignedToName||'Nick')}</span>`:''}
+      <span style="flex:1"></span>
+      <button class="prop-note-btn" style="font-size:.72rem" onclick="window._mrOpenAssets('${deal.id}')">✎ Edit</button>
+      ${miss.length&&!task?`<button class="prop-note-btn" style="font-size:.72rem" onclick="window._mrAssignAssets('${deal.id}',this)">→ Assign to Nick</button>`:''}
+    </div>
+    <div style="display:flex;gap:.6rem;align-items:flex-start;margin-top:.5rem;flex-wrap:wrap">
+      ${thumb(deal.reportSignPhotoUrl,'Sign photo')}${thumb(deal.reportQrUrl,'QR code')}${thumb(deal.reportWebsitePhotoUrl,'Website screenshot')}
+      <div style="font-size:.75rem;line-height:1.5;min-width:160px">${links.length?links.map(l=>`<div>🔗 <a href="${_mrEsc(l.url)}" target="_blank" rel="noopener" style="color:var(--brand-teal)">${_mrEsc(l.label)}</a></div>`).join(''):'<span class="mr-muted">No website links yet</span>'}</div>
+    </div></div>`;
+};
+function _mrRefreshAssetsBlocks(deal){
+  ['pdw-mrassets-block','mr-assets-block'].forEach(id=>{ const el=document.getElementById(id); if(el) el.innerHTML=window._mrAssetsBlock(deal); });
+  if(currentView==='monthlyReports' && window._mrRenderRows) window._mrRenderRows();
+}
+
+/* Assets editor (modal) — opened from the deal card, the task, or the report editor */
+window._mrOpenAssets=function(dealId, taskId){
+  const deal=(allDeals||[]).find(d=>d.id===dealId); if(!deal){ showToast('Deal not found','error'); return; }
+  document.getElementById('mr-assets-ov')?.remove();
+  const links=_mrDealLinks(deal); const rows=links.length?links:[{label:'Property website (Buildout)',url:''},{label:'TheDirtDog.com',url:''}];
+  const opts=l=>MR_LINK_LABELS.concat(MR_LINK_LABELS.includes(l)||!l?[]:[l]).map(o=>`<option ${o===l?'selected':''}>${_mrEsc(o)}</option>`).join('');
+  const pic=(key,lbl,hint,kind)=>`<div><span class="mr-lbl">${lbl}</span><div class="mr-row"><span id="mra-${kind}-thumb">${deal[key]?`<img class="mr-thumb" src="${_mrEsc(deal[key])}" alt="">`:''}</span><label class="mr-btn mr-btn-sm" style="cursor:pointer">📷 ${deal[key]?'Replace':'Add'}<input type="file" accept="image/*" style="display:none" onchange="window._mrAssetUpload('${dealId}','${kind}',this)"></label></div><div id="mra-${kind}-status" class="mr-muted">${deal[key]?'✓ on file':hint}</div></div>`;
+  const ov=document.createElement('div'); ov.className='mr-ov'; ov.id='mr-assets-ov';
+  ov.innerHTML=`<div class="mr-modal" style="width:min(820px,100%)" role="dialog" aria-label="Monthly report assets">
+    <div class="mr-modal-h"><h2>📬 Monthly report assets — ${_mrEsc(_mrDealName(deal))}</h2><span style="flex:1"></span><button class="mr-x" aria-label="Close" onclick="document.getElementById('mr-assets-ov').remove()">✕</button></div>
+    <div class="mr-modal-b">
+      <p class="mr-note" style="margin:0 0 .8rem">These print in every monthly marketing report for this listing: the sign photo on the Property Signage page, the QR code and website links on the Property Website page. Uploads save immediately.</p>
+      <div class="mr-grid3">
+        ${pic('reportSignPhotoUrl','Property sign photo','none yet — Signage page is skipped until added','sign')}
+        ${pic('reportQrUrl','QR code (as printed on the sign)','none yet — upload the QR image','qr')}
+        ${pic('reportWebsitePhotoUrl','Property website screenshot','optional — Buildout page screenshot','web')}
+      </div>
+      <div style="margin-top:1rem"><span class="mr-lbl">Website links</span>
+        <table class="mr-table mr-mini" id="mra-links"><thead><tr><th style="width:230px">Site</th><th>URL</th><th></th></tr></thead><tbody>
+          ${rows.map(r=>`<tr><td><select data-k="label" aria-label="Site">${opts(r.label)}</select></td><td><input data-k="url" value="${_mrEsc(r.url)}" placeholder="https://…" aria-label="URL" style="width:100%"></td><td><button class="mr-x" aria-label="Remove link" onclick="this.closest('tr').remove()">✕</button></td></tr>`).join('')}
+        </tbody></table>
+        <button class="mr-btn mr-btn-sm" style="margin-top:.4rem" onclick="window._mrAssetAddLink()">+ Add link</button>
+      </div>
+    </div>
+    <div class="mr-modal-f"><span class="mr-muted" id="mra-foot">${taskId?'Saving with all three in place completes the task.':''}</span><span style="flex:1"></span><button class="mr-btn" onclick="document.getElementById('mr-assets-ov').remove()">Cancel</button><button class="mr-btn mr-btn-primary" onclick="window._mrAssetsSave('${dealId}','${taskId||''}',this)">Save</button></div>
+  </div>`;
+  document.body.appendChild(ov); ov.addEventListener('click',e=>{ if(e.target===ov) ov.remove(); });
+};
+window._mrAssetAddLink=function(){ const t=document.getElementById('mra-links'); if(!t) return; const tr=t.tBodies[0].rows[0]; const clone=tr?tr.cloneNode(true):null; if(!clone) return; clone.querySelector('input').value=''; clone.querySelector('select').selectedIndex=0; t.tBodies[0].appendChild(clone); clone.querySelector('input').focus(); };
+window._mrAssetUpload=async function(dealId, kind, input){
+  const deal=(allDeals||[]).find(d=>d.id===dealId); const f=input.files&&input.files[0]; if(!deal||!f) return;
+  const key={sign:'reportSignPhotoUrl',qr:'reportQrUrl',web:'reportWebsitePhotoUrl'}[kind]; const lbl=document.getElementById('mra-'+kind+'-status'); if(lbl) lbl.textContent='Uploading…';
+  try{ const png=kind==='qr'; const blob=png?f:await _mrShrinkImage(f,1600,.85);
+    const url=await _mrUploadBlob('dealPhotos/'+dealId+'/report_'+kind+'_'+Date.now()+(png?'.png':'.jpg'), blob, png?(f.type||'image/png'):'image/jpeg');
+    await Store.updateDeal(dealId,{[key]:url, updatedAt:Date.now()}); deal[key]=url;
+    if(lbl) lbl.textContent='✓ on file'; const t=document.getElementById('mra-'+kind+'-thumb'); if(t) t.innerHTML=`<img class="mr-thumb" src="${_mrEsc(url)}" alt="">`;
+    const ed=window._mrState&&window._mrState.editor; if(ed&&ed.dealId===dealId){ if(kind==='sign') ed.signUrl=url; if(kind==='web') ed.webUrl=url; }
+    _mrRefreshAssetsBlocks(deal);
+  }catch(e){ console.error('[mr] asset',e); if(lbl) lbl.textContent='Upload failed'; showToast('Upload failed: '+e.message,'error'); }
+  input.value='';
+};
+window._mrAssetsSave=async function(dealId, taskId, btn){
+  const deal=(allDeals||[]).find(d=>d.id===dealId); if(!deal) return;
+  const t=document.getElementById('mra-links'); const links=t?[...t.tBodies[0].rows].map(tr=>({label:tr.querySelector('select').value, url:tr.querySelector('input').value.trim()})).filter(l=>l.url):[];
+  const bad=links.find(l=>!/^https?:\/\//i.test(l.url)); if(bad){ showToast('Links must start with http:// or https:// — '+bad.url,'warning'); return; }
+  const done=elcBusy(btn,'Saving…');
+  try{
+    await Store.updateDeal(dealId,{reportLinks:links, updatedAt:Date.now()}); deal.reportLinks=links;
+    const miss=_mrAssetsMissing(deal);
+    try{ await _dealLogActivity(dealId,'note',{body:'📬 Monthly report assets updated — '+(miss.length?'still missing: '+miss.join(', '):'sign photo, QR code and '+links.length+' website link'+(links.length===1?'':'s')+' on file'), source:'monthly-report-assets'}); }catch(e){}
+    const task=taskId?{id:taskId}:_mrAssetsTaskFor(dealId);
+    if(task&&!miss.length&&typeof toggleTask==='function'){ try{ await toggleTask(task.id,'complete'); }catch(e){ console.warn('[mr] assets task',e); } }
+    document.getElementById('mr-assets-ov')?.remove(); _mrRefreshAssetsBlocks(deal);
+    showToast(miss.length?'Saved — still missing: '+miss.join(', '):'📬 Report assets complete'+(task?' · task checked off':''), miss.length?'warning':'success', 5000);
+  }catch(e){ console.error('[mr] assets save',e); showToast('Could not save: '+e.message,'error'); }
+  finally{ done(); }
+};
+
+/* Assign the upload task to Nick — one listing, or every active listing missing something */
+function _mrNickProfile(){ const hit=Object.entries(allProfiles||{}).find(([,p])=>(p.email||'').toLowerCase()==='nick@thedirtdog.com'); return {uid:hit?hit[0]:null, name:hit?(hit[1].name||'Nick'):'Nick', email:'nick@thedirtdog.com'}; }
+async function _mrCreateAssetsTask(deal){
+  const miss=_mrAssetsMissing(deal); const nick=_mrNickProfile(); const due=new Date(); due.setDate(due.getDate()+5);
+  const addr=_mrDealAddr(deal); const links=_mrDealLinks(deal);
+  return Store.createTask({
+    title:MR_ASSETS_TASK_TITLE+' — '+(typeof _taskHeadlineName==='function'?_taskHeadlineName(deal):_mrDealName(deal)),
+    description:'The monthly marketing report for this listing needs the items below on the deal card. Open the deal → 📬 Monthly report assets → ✎ Edit (or click 📎 Upload assets on this task).\n\nProperty: '+addr+'\nAdvisor: '+(deal.advisorName||deal.advisorEmail||'')+'\n\n'+(deal.reportSignPhotoUrl?'☑':'□')+' Photo of the installed sign\n'+(deal.reportQrUrl?'☑':'□')+' QR code image (the one printed on the sign)\n'+(links.length?'☑':'□')+' Website links (Buildout property site, TheDirtDog.com, LoopNet, Crexi…)\n'+(deal.reportWebsitePhotoUrl?'☑':'□')+' Optional: screenshot of the Buildout property website\n\nStill missing: '+(miss.join(', ')||'nothing'),
+    assignedTo:nick.uid||nick.email, assignedToName:nick.name, assignedToEmail:nick.email,
+    dealId:deal.id, dealAddress:deal.propertyAddress||'', dueDate:due.toISOString().slice(0,10), status:'pending',
+    createdBy:(typeof currentUser!=='undefined'&&currentUser)?currentUser.uid:'system', createdByName:(typeof currentUser!=='undefined'&&currentUser)?(currentUser.name||'Monthly Reports'):'Monthly Reports', createdAt:Date.now()
+  });
+}
+window._mrAssignAssets=async function(dealId, btn){
+  const deal=(allDeals||[]).find(d=>d.id===dealId); if(!deal) return;
+  if(!_mrAssetsMissing(deal).length){ showToast('Nothing missing on '+_mrDealName(deal)+' — no task needed.','info'); return; }
+  if(_mrAssetsTaskFor(dealId)){ showToast('Nick already has an open task for this listing.','info'); return; }
+  const done=btn?elcBusy(btn,'Assigning…'):()=>{};
+  try{ await _mrCreateAssetsTask(deal); showToast('📬 Report-assets task sent to Nick for '+_mrDealName(deal),'success',5000); setTimeout(()=>_mrRefreshAssetsBlocks(deal),800); }
+  catch(e){ console.error('[mr] assign assets',e); showToast('Could not create the task: '+e.message,'error'); }
+  finally{ done(); }
+};
+window._mrAssignAllAssets=async function(btn){
+  const todo=_mrActiveDeals().filter(d=>_mrAssetsMissing(d).length && !_mrAssetsTaskFor(d.id));
+  if(!todo.length){ showToast('Every active listing either has its assets or already has a task with Nick.','info',5000); return; }
+  if(!(await elcConfirm('Create '+todo.length+' task'+(todo.length===1?'':'s')+' for Nick — one per active listing that is missing a sign photo, QR code or website links?',{title:'Assign to Nick', okLabel:'Create tasks', icon:'📬'}))) return;
+  const done=btn?elcBusy(btn,'Creating…'):()=>{}; let n=0;
+  try{ for(const d of todo){ try{ await _mrCreateAssetsTask(d); n++; }catch(e){ console.error('[mr] assign',d.id,e); } }
+    showToast(n+' task'+(n===1?'':'s')+' sent to Nick','success',6000); setTimeout(()=>{ if(window._mrRenderRows) window._mrRenderRows(); },1000); }
+  finally{ done(); }
+};
+/* ===== MRASSETS_BLOCK_END ===== */
+/* =======================================================
+   📧 MAILCHIMP E-BLASTS IN THE MONTHLY REPORT — marker MCREPORT-20261007
+   Every e-blast sent through Mailchimp during the report month is pulled
+   from the social worker (/mailchimp/campaigns — list, results, hero image),
+   matched to the listing by subject/title (address, street, project name,
+   city, acreage), and printed on the Email Report page as a card with the
+   campaign picture and its delivery results. The editor lets you confirm or
+   change the match; the choice is saved on the month's report doc as
+   emailCampaigns[] + emailCampaignsPicked.
+   ======================================================= */
+const MR_MC_STOP=new Set(['land','acres','acre','property','deal','road','street','county','florida','parcel','site','lots','commercial','residential','development','ranch','farm','north','south','east','west','drive','avenue','highway','listing','sale','with','from','the','and','for','zoned','zoning','vacant','offering','opportunity','price','reduced','new','just','listed']);
+function _mrMcTokens(s){ return String(s||'').toLowerCase().split(/[^a-z0-9]+/).filter(w=>w.length>=4 && !MR_MC_STOP.has(w)); }
+function _mrMcScore(deal, c){
+  const hay=' '+((c.subject||'')+' '+(c.title||'')+' '+(c.preview||'')).toLowerCase().replace(/[^a-z0-9.±]+/g,' ')+' ';
+  let s=0; const seen=new Set();
+  const addr=String(deal.propertyAddress||deal.address||'').toLowerCase();
+  const m=addr.match(/^\s*(\d{2,6})\s+([^,]+)/);
+  if(m){ if(hay.includes(' '+m[1]+' ')) s+=2.5; _mrMcTokens(m[2].replace(/\b(rd|st|ave|hwy|blvd|dr|ln|ct|pkwy|us|sr|cr|fl)\b\.?/g,' ')).forEach(w=>{ if(!seen.has(w)&&hay.includes(w)){ s+=1.5; seen.add(w); } }); }
+  _mrMcTokens(deal.projectName).forEach(w=>{ if(!seen.has(w)&&hay.includes(w)){ s+=1.5; seen.add(w); } });
+  const city=String(deal.city||(addr.split(',')[1]||'')).trim().toLowerCase().replace(/\s+fl.*$/,''); if(city.length>=4 && !seen.has(city) && hay.includes(city)){ s+=1; seen.add(city); }
+  const acres=Number(deal.acres||deal.acreage||0); if(acres>0){ const a=String(Math.round(acres*100)/100); if(hay.includes(' '+a+' ')||hay.includes(' '+a+'±')||hay.includes(a+' ')) s+=2; }
+  return s;
+}
+function _mrMcMatch(deal, campaigns){ return (campaigns||[]).filter(c=>_mrMcScore(deal,c)>=2.5); }
+function _mrMcSlim(c){ return {id:c.id, subject:c.subject||'', title:c.title||'', sendTime:c.sendTime||'', emailsSent:c.emailsSent||0, uniqueOpens:c.uniqueOpens||0, openRate:c.openRate||0, uniqueClicks:c.uniqueClicks||0, clickRate:c.clickRate||0, image:c.image||'', archiveUrl:c.archiveUrl||'', segment:c.segment||''}; }
+function _mrMcRow(c){ return {title:c.subject||c.title||'E-blast', date:_mrLocalDate(Date.parse(c.sendTime)||Date.now()), recipients:String(c.emailsSent||''), opens:String(c.uniqueOpens||''), clicks:String(c.uniqueClicks||'')}; }
+// All sent campaigns in the month — one worker call per month per session (shared by every listing's report).
+async function _mrMcCampaigns(ym){
+  const st=window._mrState; st.mc=st.mc||{};
+  if(!st.mc[ym]){ st.mc[ym]=(async()=>{ const rng=_mrMonthRange(ym); const r=await _spWorkerPost('/mailchimp/campaigns',{since:ym+'-01', until:_mrLocalDate(rng.end)}); return (r.campaigns||[]); })().catch(e=>{ delete st.mc[ym]; throw e; }); }
+  return st.mc[ym];
+}
+// What prints for this listing/month: the saved pick if one was made, otherwise the automatic match.
+async function _mrMcForReport(deal, ym, rep){
+  if(rep && rep.emailCampaignsPicked) return (rep.emailCampaigns||[]).map(_mrMcSlim);
+  try{ const all=await _mrMcCampaigns(ym); return _mrMcMatch(deal,all).map(_mrMcSlim); }
+  catch(e){ console.warn('[mr] mailchimp',e.message); return ((rep&&rep.emailCampaigns)||[]).map(_mrMcSlim); }
+}
+// Mailchimp-hosted images are fetched through the worker so the PDF canvas is not tainted.
+async function _mrMcImage(url){
+  if(!url) return null;
+  try{ const base=(_spCfg().workerUrl||'').replace(/\/+$/,''); const tok=await _mrIdToken();
+    const r=await fetch(base+'/mailchimp/image',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+tok},body:JSON.stringify({url})});
+    if(!r.ok) throw new Error('image proxy '+r.status); const b=await r.blob(); const o=URL.createObjectURL(b);
+    const im=await _mrImg(o,{maxPx:1200}); setTimeout(()=>URL.revokeObjectURL(o),5000); return im;
+  }catch(e){ console.warn('[mr] mc image',e.message); return null; }
+}
+/* ---- editor: summary + picker ---- */
+function _mrMcSummaryHtml(){
+  const ed=window._mrState.editor; if(!ed) return '';
+  const list=ed.emailCampaigns||[];
+  if(ed.mcError) return `<span class="mr-muted">Mailchimp not reachable — ${_mrEsc(ed.mcError)}. Rows typed above still print.</span>`;
+  if(!list.length) return `<span class="mr-muted">${ed.emailCampaignsPicked?'No Mailchimp campaigns chosen for this report.':'No Mailchimp e-blast matched this listing this month — use Choose to pick one by hand.'}</span>`;
+  return list.map(c=>`<div style="display:flex;gap:.5rem;align-items:center;border:1px solid var(--border);border-radius:10px;padding:.35rem .5rem;max-width:380px">${c.image?`<img class="mr-thumb" src="${_mrEsc(c.image)}" alt="" style="width:54px;height:54px;object-fit:cover">`:''}<div style="font-size:.75rem;line-height:1.3;min-width:0"><div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:290px" title="${_mrEsc(c.subject)}">${_mrEsc(c.subject||c.title)}</div><div class="mr-muted">${_mrEsc(_mrFmtDateLong(Date.parse(c.sendTime)||0))} · sent ${Number(c.emailsSent||0).toLocaleString()} · opened ${Number(c.uniqueOpens||0).toLocaleString()} (${c.openRate||0}%) · clicked ${Number(c.uniqueClicks||0).toLocaleString()} (${c.clickRate||0}%)</div>${c.archiveUrl?`<a href="${_mrEsc(c.archiveUrl)}" target="_blank" rel="noopener" style="color:var(--brand-teal)">View e-blast ↗</a>`:''}</div></div>`).join('')+`<div class="mr-muted" style="width:100%">${ed.emailCampaignsPicked?'Chosen by hand':'Matched automatically'} — printed as e-blast cards with the campaign picture and results.`+'</div>';
+}
+function _mrMcMergeRows(list){
+  const rows=_mrReadRows('mr-emails'); let added=0;
+  list.forEach(c=>{ const r=_mrMcRow(c); if(!rows.some(x=>x.date===r.date && (x.title||'').trim().toLowerCase()===(r.title||'').trim().toLowerCase())){ rows.push(r); added++; } });
+  if(added){ const wrap=document.getElementById('mr-emails-wrap'); if(wrap) wrap.innerHTML=_mrRowsTable('mr-emails',MR_EMAIL_COLS,rows,'Add e-blast'); }
+  return added;
+}
+// Called when the editor opens: auto-match (unless a pick was saved) and show the summary.
+window._mrMcAutoFill=async function(){
+  const ed=window._mrState.editor; if(!ed) return; const box=document.getElementById('mr-mc-summary'); if(!box) return;
+  if(ed.emailCampaignsPicked){ box.innerHTML=_mrMcSummaryHtml(); return; }
+  box.innerHTML='<span class="mr-muted">Checking Mailchimp for this month’s e-blasts…</span>';
+  try{ const all=await _mrMcCampaigns(ed.ym); if(window._mrState.editor!==ed) return; ed.emailCampaigns=_mrMcMatch(ed.deal,all).map(_mrMcSlim); ed.mcError=''; _mrMcMergeRows(ed.emailCampaigns); }
+  catch(e){ ed.mcError=e.message; }
+  box.innerHTML=_mrMcSummaryHtml();
+};
+window._mrOpenMcPicker=async function(btn){
+  const ed=window._mrState.editor; if(!ed) return; const done=elcBusy(btn,'Loading…'); let all=[];
+  try{ all=await _mrMcCampaigns(ed.ym); }catch(e){ done(); showToast('Mailchimp not reachable: '+e.message,'error',7000); return; }
+  done(); document.getElementById('mr-mc-ov')?.remove();
+  const chosen=new Set((ed.emailCampaigns||[]).map(c=>c.id)); const scored=all.map(c=>({c, s:_mrMcScore(ed.deal,c)})).sort((a,b)=>(b.s-a.s)||((b.c.sendTime||'').localeCompare(a.c.sendTime||'')));
+  const ov=document.createElement('div'); ov.className='mr-ov'; ov.id='mr-mc-ov';
+  ov.innerHTML=`<div class="mr-modal" style="width:min(860px,100%)" role="dialog" aria-label="Choose Mailchimp e-blasts">
+    <div class="mr-modal-h"><h2>📧 ${_mrEsc(_mrMonthLabel(ed.ym))} e-blasts — ${_mrEsc(_mrDealName(ed.deal))}</h2><span style="flex:1"></span><button class="mr-x" aria-label="Close" onclick="document.getElementById('mr-mc-ov').remove()">✕</button></div>
+    <div class="mr-modal-b">
+      <p class="mr-note" style="margin:0 0 .6rem">${all.length} campaign${all.length===1?'':'s'} went out through Mailchimp in ${_mrEsc(_mrMonthLabel(ed.ym))}. Tick the ones about this listing — likely matches are listed first and pre-ticked.</p>
+      ${all.length?`<div style="display:flex;flex-direction:column;gap:.4rem;max-height:52vh;overflow:auto">${scored.map(({c,s})=>`<label style="display:flex;gap:.6rem;align-items:center;border:1px solid var(--border);border-radius:10px;padding:.4rem .6rem;cursor:pointer;${s>=2.5?'background:rgba(79,195,201,.08)':''}"><input type="checkbox" class="mr-mc-pick" value="${_mrEsc(c.id)}" ${chosen.has(c.id)||(!ed.emailCampaignsPicked&&s>=2.5)?'checked':''}>${c.image?`<img src="${_mrEsc(c.image)}" alt="" style="width:64px;height:48px;object-fit:cover;border-radius:6px">`:`<div style="width:64px;height:48px;border-radius:6px;background:var(--bg)"></div>`}<div style="min-width:0;font-size:.8rem;line-height:1.35"><div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${_mrEsc(c.subject||c.title)}</div><div class="mr-muted">${_mrEsc(_mrFmtDateLong(Date.parse(c.sendTime)||0))} · ${Number(c.emailsSent||0).toLocaleString()} sent · ${c.openRate||0}% opened · ${c.clickRate||0}% clicked${c.segment?' · '+_mrEsc(c.segment):''}</div></div>${s>=2.5?'<span style="margin-left:auto;font-size:.7rem;color:#047857;background:#d1fae5;border-radius:999px;padding:.1rem .5rem;white-space:nowrap">likely match</span>':''}</label>`).join('')}</div>`:'<p class="mr-muted">Nothing was sent through Mailchimp this month.</p>'}
+    </div>
+    <div class="mr-modal-f"><span style="flex:1"></span><button class="mr-btn" onclick="document.getElementById('mr-mc-ov').remove()">Cancel</button><button class="mr-btn mr-btn-primary" onclick="window._mrMcApplyPick()">Use selected</button></div></div>`;
+  document.body.appendChild(ov); ov.addEventListener('click',e=>{ if(e.target===ov) ov.remove(); });
+  window._mrMcAll=all;
+};
+window._mrMcApplyPick=function(){
+  const ed=window._mrState.editor; if(!ed) return; const ids=new Set([...document.querySelectorAll('.mr-mc-pick:checked')].map(i=>i.value));
+  ed.emailCampaigns=(window._mrMcAll||[]).filter(c=>ids.has(c.id)).map(_mrMcSlim); ed.emailCampaignsPicked=true; ed.mcError='';
+  const added=_mrMcMergeRows(ed.emailCampaigns); document.getElementById('mr-mc-ov')?.remove();
+  const box=document.getElementById('mr-mc-summary'); if(box) box.innerHTML=_mrMcSummaryHtml();
+  showToast(ed.emailCampaigns.length+' e-blast'+(ed.emailCampaigns.length===1?'':'s')+' selected'+(added?' · '+added+' row'+(added===1?'':'s')+' added to the table':'')+' — save the draft to keep this','success',5000);
+};
+/* ===== MCREPORT_BLOCK_END ===== */
 
 /* =======================================================
    📣 SOCIAL POSTING FOR LISTINGS — marker SOCIAL-20261006
