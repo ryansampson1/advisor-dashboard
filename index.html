@@ -45170,7 +45170,7 @@ function _mrListingStart(d){ if(d.listingEffectiveDate) return new Date(d.listin
 function _mrDealPrice(d){ return Number(d.listedPrice||d.listPrice||d.askingPrice||d.purchasePrice||0); }
 function _mrIsSellerRep(d){ return (d.representation||'seller')!=='buyer'; }
 function _mrStageOf(d){ return (typeof STAGE_ALIAS!=='undefined' && STAGE_ALIAS[d.stage]) || d.stage; }
-function _mrIsActiveListing(d){ return MR_ACTIVE_STAGES.includes(_mrStageOf(d)) && _mrIsSellerRep(d) && d.dealType!=='lease'; }
+function _mrIsActiveListing(d){ return MR_ACTIVE_STAGES.includes(_mrStageOf(d)) && _mrIsSellerRep(d); }   // LEASEOK-20261008: a lease LISTING is reported like a sale; only buyer-rep is excluded
 function _mrFirstName(n){ return String(n||'').trim().split(/\s+/)[0]||''; }
 function _mrCanAccess(){
   if(!currentUser) return false;
@@ -45305,11 +45305,12 @@ async function _mrFetchActivities(dealId){
 }
 // Property history since the listing was signed, newest first. Mirrors what the
 // deal feed shows (structured activities + legacy "[when] what" note lines).
-function _mrHistoryRows(deal, activities, tasks){
+function _mrHistoryRows(deal, activities, tasks, opt){   // opt.includeHidden → editor view (hidden rows come back flagged)
   const since=_mrListingStart(deal);
   const rows=[];
   (activities||[]).forEach(a=>{
     const ts=a.createdAt||0; if(since && ts<since) return;
+    if(a.reportHidden && !(opt&&opt.includeHidden)) return;   // MWFIX-20261008: advisor hid/moved this entry — never prints
     if(a.source==='monthly-report') return;                  // never list the report mail itself
     /* MRNOTASKS-20261008: tasks and internal housekeeping never print for the owner — only emails, calls, meetings, notes, documents, stage moves and marketing */
     if(a.type==='task'||a.taskId||/^(monthly-report-assets|portal-import|contact-refresh)$/.test(a.source||'')) return;
@@ -45321,7 +45322,7 @@ function _mrHistoryRows(deal, activities, tasks){
     if(a.type==='stage_change') text='Stage: '+text;
     if(a.type==='attachment') text='Document: '+text;
     text=String(text).replace(/\s+/g,' ').trim(); if(!text) return;
-    rows.push({id:a.id, ts, date:_mrFmtDate(ts), type:(a.type||'note'), by:a.createdByName||'', text, subject:a.gmailSubject||'', raw:String(a.body||'').slice(0,1200)});
+    rows.push({id:a.id, ts, date:_mrFmtDate(ts), type:(a.type||'note'), by:a.createdByName||'', text, subject:a.gmailSubject||'', raw:String(a.body||'').slice(0,1200), hidden:!!a.reportHidden, movedTo:a.movedTo||'', auto:a.source==='mailwatch'||a.source==='mailwatch-reviewed', cat:a.mwCategory||'', threadId:a.gmailThreadId||''});
   });
   if(deal.notes){
     deal.notes.split('\n').filter(l=>/^\s*\[[^\]]+\]/.test(l)).forEach(line=>{
@@ -45509,9 +45510,11 @@ function viewMonthlyReports(){
     </div>
     <p class="mr-note" style="margin-top:.8rem">Reports are drafts until you click Send. Each one is emailed from the listing advisor’s mailbox, filed under the deal’s Attachments, and logged on the property’s history.</p>
     ${_mrSeesAll()&&window._sdPanelHtml?window._sdPanelHtml():''}
+    ${window._mwPanelHtml?window._mwPanelHtml():''}
   </div>`);
   _mrPreloadReports(ym, deals).then(()=>{ if(currentView==='monthlyReports') window._mrRenderRows(); if(window._mbRun) window._mbRun({silent:true}); });   // MCBLAST-20261007
   if(_mrSeesAll()&&window._sdLoad) setTimeout(()=>window._sdLoad(false),300);   // SOCIALDAILY-20261007
+  if(window._mwLoad) setTimeout(()=>window._mwLoad(true),400);   // MAILWATCH-20261008
 }
 window.viewMonthlyReports=viewMonthlyReports;
 window._mrRenderRows=function(){
@@ -45769,7 +45772,7 @@ window._mrOpenEditor=async function(dealId){
           ${[['siteVisits','TheDirtDog.com visits'],['uniqueVisitors','Unique visitors'],['docsViewed','Docs viewed'],['casSigned','CAs signed'],['gaSessions','Google sessions'],['totalCommercialViews','Total Commercial views'],['loopnetViews','LoopNet views'],['crexiViews','Crexi views'],['totalLeads','Total leads']].map(([k,l])=>`<div><label class="mr-lbl" for="mr-t-${k}">${l}</label><input id="mr-t-${k}" class="mr-input" style="width:100%" inputmode="numeric" value="${st.editor.traffic&&st.editor.traffic[k]!=null?_mrEsc(st.editor.traffic[k]):''}"></div>`).join('')}
         </div>
       </div>
-      <div class="mr-sec"><h3>8 · Property notes (emails as AI summaries · calls · meetings · notes — tasks never print)</h3><div id="mr-hist-summary" class="mr-note">Counting…</div></div>
+      <div class="mr-sec"><h3>8 · Property notes (emails as AI summaries · calls · meetings · notes — tasks never print)</h3><div id="mr-hist-summary" class="mr-note">Counting…</div><div id="mr-hist-list" style="margin-top:.5rem"></div></div>
       <div class="mr-sec"><h3>9 · Contact page</h3><div id="mr-ed-advcard">${_mrEditorAdvisorCardHtml(deal)}</div></div>
     </div>
     <div class="mr-modal-f">
@@ -45783,7 +45786,7 @@ window._mrOpenEditor=async function(dealId){
   document.body.appendChild(ov);
   if(window._mrMcAutoFill) window._mrMcAutoFill();   // MCREPORT-20261007
   // history counts (async)
-  Promise.all([_mrFetchActivities(dealId),_mrFetchTasks(dealId)]).then(([acts,tasks])=>{ const h=_mrHistoryRows(deal,acts,tasks); const el=document.getElementById('mr-hist-summary'); if(el) el.innerHTML=`<b>${h.history.length}</b> entries (${h.history.filter(r=>r.type==='email').length} emails · ${h.history.filter(r=>r.type==='call').length} calls · ${h.history.filter(r=>r.type==='meeting').length} meetings) since the listing started — emails print as one-line AI summaries; tasks are internal and never print.`; });
+  window._mrHistLoad(dealId);   // MWFIX-20261008
 };
 window._mrLetterMode=function(m){ const c=m==='custom'; const d=document.getElementById('mr-letter-default'), e=document.getElementById('mr-letter-custom'); if(d) d.style.display=c?'none':''; if(e) e.style.display=c?'':'none'; if(c){ const t=document.getElementById('mr-ed-letter'); if(t&&!t.value.trim()){ t.value=_mrLetterFor(window._mrState.editor?.ym||window._mrState.month)||''; } } };
 window._mrLetterCopyDefault=function(){ const t=document.getElementById('mr-ed-letter'); if(t) t.value=_mrLetterFor(window._mrState.editor?.ym||window._mrState.month)||''; };
@@ -46673,6 +46676,7 @@ window._mrOffersEditorHtml=function(deal, rep){
   const row=(o,i)=>`<div class="mr-offer" data-i="${i}" data-id="${_mrEsc(o.id||'')}" style="border:1px solid var(--border);border-radius:12px;padding:.7rem .8rem;margin-bottom:.6rem;background:var(--surface)">
     <div class="mr-row" style="justify-content:space-between;align-items:center;margin-bottom:.4rem"><label style="display:flex;gap:.4rem;align-items:center;font-weight:700"><input type="checkbox" data-k="reportInclude" ${o.reportInclude?'checked':''}> ${o.buyer?_mrEsc(o.buyer):'Offer '+(offers.length-i)} ${o.price?'· '+_mrFmtMoney(o.price):''}</label>
       <span class="mr-row" style="gap:.4rem">${o.fileUrl?`<a class="mr-btn mr-btn-sm" href="${_mrEsc(o.fileUrl)}" target="_blank" rel="noopener">📄 ${_mrEsc(o.fileName||'LOI')}</a><button class="mr-btn mr-btn-sm mr-btn-teal" onclick="window._mrOfferExtract(this,${i})">✨ Fill terms from the LOI</button>`:''}</span></div>
+    ${o.needsVerification?`<div class="mr-note" style="background:#fff7e0;border:1px solid #e8c766;border-radius:8px;padding:.35rem .55rem;margin-bottom:.45rem">⚠️ Created automatically from an email${o.gmailSubject?` (“${_mrEsc(o.gmailSubject)}”)`:''}. Check the price and terms against the offer, then save — saving marks it verified.</div>`:''}
     <div class="mr-grid3">
       <div><span class="mr-lbl">Buyer</span><input class="mr-input" data-k="buyer" value="${_mrEsc(o.buyer)}" placeholder="Buyer / entity"></div>
       <div><span class="mr-lbl">Offer price ($)</span><input class="mr-input" data-k="price" inputmode="numeric" value="${_mrEsc(o.price||'')}"></div>
@@ -46702,7 +46706,7 @@ window._mrOffersCollect=function(deal){
   rows.forEach(r=>{ const id=r.dataset.id; const l=lois.find(x=>x.id===id); if(!l) return;
     const v=k=>{ const el=r.querySelector('[data-k="'+k+'"]'); return el?(el.type==='checkbox'?el.checked:el.value.trim()):undefined; };
     const patch={ buyer:v('buyer'), price:v('price')===''?'':_mrNum(v('price')), status:v('status'), receivedAt:v('receivedAt'), deposit:v('deposit')===''?'':_mrNum(v('deposit')), estClose:v('estClose'), ddTerms:v('ddTerms'), buyerBroker:v('buyerBroker'), commissionPct:v('commissionPct')===''?'':_mrNum(v('commissionPct')), contingencies:v('contingencies'), reportNotes:v('notes'), reportInclude:v('reportInclude') };
-    Object.entries(patch).forEach(([k,val])=>{ if(val===undefined) return; if((l[k]??'')!==val){ l[k]=val; changed=true; } }); });
+    Object.entries(patch).forEach(([k,val])=>{ if(val===undefined) return; if((l[k]??'')!==val){ l[k]=val; changed=true; } }); if(l.needsVerification){ l.needsVerification=false; l.verifiedAt=Date.now(); changed=true; } });
   return changed?lois:null;
 };
 // ✨ pull the terms out of the LOI PDF with the firm's AI proxy
@@ -46789,7 +46793,7 @@ window._mrDrawOffers=function(R,doc,font,A,y){
 const MR_BLAST_TASK_TITLE='📧 Monthly e-blast';
 function _mbCfg(){ return (APP_CONFIG.mcBlast = APP_CONFIG.mcBlast || {enabled:true, dueDay:20, autoDay:25, autoResend:true}); }
 function _mbYm(){ return _mrLocalDate(Date.now()).slice(0,7); }
-function _mbEligible(d){ return _mrStageOf(d)==='Listing' && _mrIsSellerRep(d) && d.dealType!=='lease' && !d.archived; }
+function _mbEligible(d){ return _mrStageOf(d)==='Listing' && _mrIsSellerRep(d) && !d.archived; }
 window._mrIsBlastTask=function(t){ return !!(t && t.dealId && t.status!=='complete' && /monthly e-blast/i.test(t.title||'')); };
 function _mbTasksFor(dealId, ym){ return (typeof allTasks!=='undefined'?allTasks:[]).filter(t=>t&&t.dealId===dealId&&/monthly e-blast/i.test(t.title||'')&&(!ym||t.mcBlastMonth===ym)); }
 function _mbOpenTasksFor(dealId, ym){ return _mbTasksFor(dealId, ym).filter(t=>t.status!=='complete'); }
