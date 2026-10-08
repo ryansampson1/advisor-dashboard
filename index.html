@@ -46107,13 +46107,14 @@ async function _mrBuildPdf(A){
   /* ---- 3a½ · Offers & contract (OFFERS-20261007) ---- */
   if(window._mrDrawOffers) y=window._mrDrawOffers(R,doc,font,A,y);
   /* ---- 3b · Property website: Buildout screenshot, QR code and the links the property is listed under ---- */
-  if(A.web||A.qr||(A.links&&A.links.length)){
+  const _qrUrl=(!A.qr&&(A.links||[]).find(l=>_mrLinkHost(l.url)==='thedirtdog.com')||{}).url||''; A.qrUrl=_qrUrl;
+  if(A.web||A.qr||_qrUrl||(A.links&&A.links.length)){
     y=R.newPage(); y=R.title('Property Website',y+30);
     y=R.para('The Property’s dedicated marketing website and listing pages, as presented to prospective buyers.',R.M,y+4,R.W-2*R.M,{size:10.5})+12;
-    const hasBottom=!!(A.qr||(A.links&&A.links.length)); const bottomH=hasBottom?Math.max(A.qr?150:0, 36+Math.ceil((A.links||[]).length/2)*52):0;
+    const hasQr=!!(A.qr||_qrUrl); const hasBottom=!!(hasQr||(A.links&&A.links.length)); const bottomH=hasBottom?Math.max(hasQr?150:0, 36+Math.ceil((A.links||[]).length/2)*52):0;
     if(A.web){ const maxW=R.W-2*R.M, maxH=R.H-56-y-16-(hasBottom?bottomH+24:0); const s=Math.min(maxW/A.web.w,maxH/A.web.h); const w=A.web.w*s,h=A.web.h*s; const x=(R.W-w)/2; doc.setDrawColor(203,213,225); doc.setLineWidth(1); doc.rect(x,y,w,h,'S'); R.img(A.web,x,y,w,h); y+=h+24; }
     if(hasBottom){
-      const qrW=A.qr?130:0; const lx=R.M, lw=R.W-2*R.M-(qrW?qrW+30:0);
+      const qrW=hasQr?130:0; const lx=R.M, lw=R.W-2*R.M-(qrW?qrW+30:0);
       R.text('WHERE THE PROPERTY IS LISTED',lx,y+12,{size:9,bold:true,color:MR_GREY}); R.line(lx,y+18,lx+lw,y+18,MR_TEAL,1.5);
       /* PORTALLINKS-20261008: logo tiles — one clickable card per portal (favicon + site name + "View listing"), two columns */
       const links=A.links||[]; const cols=2, gap=8, tileH=44, tileW=(lw-gap*(cols-1))/cols; let ly=y+28;
@@ -46124,6 +46125,7 @@ async function _mrBuildPdf(A){
         doc.link(tx,ty,tileW,tileH,{url:l.url}); });
       ly+=Math.ceil(links.length/cols)*(tileH+gap);
       if(!(A.links||[]).length) R.text('Website links not yet added to the deal card.',lx,ly,{size:9,color:MR_GREY});
+      if(!A.qr&&_qrUrl&&window._mrQrMatrix){ const M=window._mrQrMatrix(_qrUrl); if(M){ const qx=R.W-R.M-qrW; doc.setDrawColor(226,232,240); doc.setLineWidth(1); doc.rect(qx-6,y-2,qrW+12,qrW+34,'S'); const quiet=2, n=M.length+quiet*2, cell=qrW/n; doc.setFillColor(0,0,0); for(let r=0;r<M.length;r++) for(let k=0;k<M.length;k++) if(M[r][k]) doc.rect(qx+(k+quiet)*cell,y+4+(r+quiet)*cell,cell+.15,cell+.15,'F'); doc.link(qx,y+4,qrW,qrW,{url:_qrUrl}); R.text('SCAN FOR THE PROPERTY WEBSITE',qx+qrW/2,y+qrW+22,{size:7,bold:true,color:MR_GREY,align:'center'}); } }
       if(A.qr){ const qx=R.W-R.M-qrW; doc.setDrawColor(226,232,240); doc.setLineWidth(1); doc.rect(qx-6,y-2,qrW+12,qrW+34,'S'); R.fit(A.qr,qx,y+4,qrW,qrW); R.text('SCAN FOR THE PROPERTY WEBSITE',qx+qrW/2,y+qrW+22,{size:7,bold:true,color:MR_GREY,align:'center'}); }
     }
   }
@@ -46145,7 +46147,7 @@ async function _mrBuildPdf(A){
       const x=R.M; doc.setDrawColor(226,232,240); doc.setLineWidth(1); doc.roundedRect(x,y,cw,h,6,6,'S');
       let cy=y+pad; R.rrect(x+pad,cy,46,18,9,MR_TEAL); R.text('E-BLAST',x+pad+23,cy+12.5,{size:7,bold:true,color:[255,255,255],align:'center'});
       subj.forEach((ln,k)=>R.text(ln,x+pad+56,cy+13+k*15,{size:11,bold:true})); cy+=subj.length*15+2;
-      R.text(when+(e.segment?' · '+e.segment:'')+' · via Mailchimp',x+pad,cy+10,{size:8,color:MR_GREY}); cy+=16;
+      R.text(when+(_mrCleanSeg(e.segment)?' · '+_mrCleanSeg(e.segment):'')+' · via Mailchimp',x+pad,cy+10,{size:8,color:MR_GREY}); cy+=16;
       if(e.img){ const s=Math.min(textW/e.img.w,imgH/e.img.h); const iw=e.img.w*s, ih=e.img.h*s; doc.setDrawColor(226,232,240); doc.rect(x+pad+(textW-iw)/2,cy,iw,ih,'S'); R.img(e.img,x+pad+(textW-iw)/2,cy,iw,ih); cy+=imgH+10; }
       R.text(stats,x+pad,cy+10,{size:8.5,bold:true,color:MR_INK});
       y+=h+14;
@@ -46323,6 +46325,8 @@ window._mrSendSelected=async function(){
   if(currentView==='monthlyReports') window._mrRenderRows();
 };
 /* ===== MREPORT_BLOCK_END ===== */
+
+function _mrCleanSeg(s){ s=String(s||''); if(/[<>]/.test(s)) return ''; return s.trim(); }   // QRAUTO-20261008: Mailchimp segment text can be raw HTML
 /* =======================================================
    📎 MONTHLY REPORT ASSETS — marker MRASSETS-20261007
    Sign photo, QR code, website screenshot and website links live on the
@@ -46564,7 +46568,7 @@ window._mrOpenMcPicker=async function(btn){
     <div class="mr-modal-h"><h2>📧 ${_mrEsc(_mrMonthLabel(ed.ym))} e-blasts — ${_mrEsc(_mrDealName(ed.deal))}</h2><span style="flex:1"></span><button class="mr-x" aria-label="Close" onclick="document.getElementById('mr-mc-ov').remove()">✕</button></div>
     <div class="mr-modal-b">
       <p class="mr-note" style="margin:0 0 .6rem">${all.length} campaign${all.length===1?'':'s'} went out through Mailchimp in ${_mrEsc(_mrMonthLabel(ed.ym))}. Tick the ones about this listing — likely matches are listed first and pre-ticked.</p>
-      ${all.length?`<div style="display:flex;flex-direction:column;gap:.4rem;max-height:52vh;overflow:auto">${scored.map(({c,s})=>`<label style="display:flex;gap:.6rem;align-items:center;border:1px solid var(--border);border-radius:10px;padding:.4rem .6rem;cursor:pointer;${s>=2.5?'background:rgba(79,195,201,.08)':''}"><input type="checkbox" class="mr-mc-pick" value="${_mrEsc(c.id)}" ${chosen.has(c.id)||(!ed.emailCampaignsPicked&&s>=2.5)?'checked':''}>${c.image?`<img src="${_mrEsc(c.image)}" alt="" style="width:64px;height:48px;object-fit:cover;border-radius:6px">`:`<div style="width:64px;height:48px;border-radius:6px;background:var(--bg)"></div>`}<div style="min-width:0;font-size:.8rem;line-height:1.35"><div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${_mrEsc(c.subject||c.title)}</div><div class="mr-muted">${_mrEsc(_mrFmtDateLong(Date.parse(c.sendTime)||0))} · ${Number(c.emailsSent||0).toLocaleString()} sent · ${c.openRate||0}% opened · ${c.clickRate||0}% clicked${c.segment?' · '+_mrEsc(c.segment):''}</div></div>${s>=2.5?'<span style="margin-left:auto;font-size:.7rem;color:#047857;background:#d1fae5;border-radius:999px;padding:.1rem .5rem;white-space:nowrap">likely match</span>':''}</label>`).join('')}</div>`:'<p class="mr-muted">Nothing was sent through Mailchimp this month.</p>'}
+      ${all.length?`<div style="display:flex;flex-direction:column;gap:.4rem;max-height:52vh;overflow:auto">${scored.map(({c,s})=>`<label style="display:flex;gap:.6rem;align-items:center;border:1px solid var(--border);border-radius:10px;padding:.4rem .6rem;cursor:pointer;${s>=2.5?'background:rgba(79,195,201,.08)':''}"><input type="checkbox" class="mr-mc-pick" value="${_mrEsc(c.id)}" ${chosen.has(c.id)||(!ed.emailCampaignsPicked&&s>=2.5)?'checked':''}>${c.image?`<img src="${_mrEsc(c.image)}" alt="" style="width:64px;height:48px;object-fit:cover;border-radius:6px">`:`<div style="width:64px;height:48px;border-radius:6px;background:var(--bg)"></div>`}<div style="min-width:0;font-size:.8rem;line-height:1.35"><div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${_mrEsc(c.subject||c.title)}</div><div class="mr-muted">${_mrEsc(_mrFmtDateLong(Date.parse(c.sendTime)||0))} · ${Number(c.emailsSent||0).toLocaleString()} sent · ${c.openRate||0}% opened · ${c.clickRate||0}% clicked${_mrCleanSeg(c.segment)?' · '+_mrEsc(_mrCleanSeg(c.segment)):''}</div></div>${s>=2.5?'<span style="margin-left:auto;font-size:.7rem;color:#047857;background:#d1fae5;border-radius:999px;padding:.1rem .5rem;white-space:nowrap">likely match</span>':''}</label>`).join('')}</div>`:'<p class="mr-muted">Nothing was sent through Mailchimp this month.</p>'}
     </div>
     <div class="mr-modal-f"><span style="flex:1"></span><button class="mr-btn" onclick="document.getElementById('mr-mc-ov').remove()">Cancel</button><button class="mr-btn mr-btn-primary" onclick="window._mrMcApplyPick()">Use selected</button></div></div>`;
   document.body.appendChild(ov); ov.addEventListener('click',e=>{ if(e.target===ov) ov.remove(); });
