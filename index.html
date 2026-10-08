@@ -45170,7 +45170,7 @@ function _mrListingStart(d){ if(d.listingEffectiveDate) return new Date(d.listin
 function _mrDealPrice(d){ return Number(d.listedPrice||d.listPrice||d.askingPrice||d.purchasePrice||0); }
 function _mrIsSellerRep(d){ return (d.representation||'seller')!=='buyer'; }
 function _mrStageOf(d){ return (typeof STAGE_ALIAS!=='undefined' && STAGE_ALIAS[d.stage]) || d.stage; }
-function _mrIsActiveListing(d){ return MR_ACTIVE_STAGES.includes(_mrStageOf(d)) && _mrIsSellerRep(d) && d.dealType!=='lease'; }
+function _mrIsActiveListing(d){ return MR_ACTIVE_STAGES.includes(_mrStageOf(d)) && _mrIsSellerRep(d); }   // LEASEOK-20261008: a lease LISTING is reported like a sale; only buyer-rep is excluded
 function _mrFirstName(n){ return String(n||'').trim().split(/\s+/)[0]||''; }
 function _mrCanAccess(){
   if(!currentUser) return false;
@@ -45305,20 +45305,26 @@ async function _mrFetchActivities(dealId){
 }
 // Property history since the listing was signed, newest first. Mirrors what the
 // deal feed shows (structured activities + legacy "[when] what" note lines).
-function _mrHistoryRows(deal, activities, tasks){
+function _mrHistoryRows(deal, activities, tasks, opt){   // opt.includeHidden → editor view (hidden rows come back flagged)
   const since=_mrListingStart(deal);
   const rows=[];
   (activities||[]).forEach(a=>{
     const ts=a.createdAt||0; if(since && ts<since) return;
+    if(a.reportHidden && !(opt&&opt.includeHidden)) return;   // MWFIX-20261008: advisor hid/moved this entry — never prints
     if(a.source==='monthly-report') return;                  // never list the report mail itself
+    /* MRNOTASKS-20261008: tasks and internal housekeeping never print for the owner — only emails, calls, meetings, notes, documents, stage moves and marketing */
+    if(a.type==='task'||a.taskId||/^(monthly-report-assets|portal-import|contact-refresh)$/.test(a.source||'')) return;
+    if(a.autoLogged&&/^(contact refresh|task:|✅|⚠️ fix listing|📧 monthly e-blast)/i.test(String(a.body||'').trim())) return;
     let text=a.body||'';
     if(a.type==='email') text=(a.gmailSubject?('Email: '+a.gmailSubject+(text?' — ':'')):'')+text;
+    const mwLab={om_sent:'OM / info sent',info_request:'Info requested',question:'Buyer question',offer:'Offer'}[a.mwCategory||''];   // MAILWATCH-20261008: auto-filed emails print as a labelled client-safe line, newest first
+    if(mwLab && a.mwSummary) text=mwLab+': '+a.mwSummary;
     if(a.type==='call') text='Call'+(a.callDuration?(' ('+a.callDuration+' min)'):'')+(text?': '+text:'');
     if(a.type==='meeting') text='Meeting'+(a.meetingTitle?(' — '+a.meetingTitle):'')+(text?': '+text:'');
     if(a.type==='stage_change') text='Stage: '+text;
     if(a.type==='attachment') text='Document: '+text;
     text=String(text).replace(/\s+/g,' ').trim(); if(!text) return;
-    rows.push({ts, date:_mrFmtDate(ts), type:(a.type||'note'), by:a.createdByName||'', text});
+    rows.push({id:a.id, ts, date:_mrFmtDate(ts), type:(a.type||'note'), by:a.createdByName||'', text, subject:a.gmailSubject||'', raw:String(a.body||'').slice(0,1200), mw:!!(mwLab&&a.mwSummary), hidden:!!a.reportHidden, movedTo:a.movedTo||'', auto:a.source==='mailwatch'||a.source==='mailwatch-reviewed', cat:a.mwCategory||'', threadId:a.gmailThreadId||''});
   });
   if(deal.notes){
     deal.notes.split('\n').filter(l=>/^\s*\[[^\]]+\]/.test(l)).forEach(line=>{
@@ -45493,25 +45499,30 @@ function viewMonthlyReports(){
       <div style="display:flex;align-items:center;gap:.6rem;padding:.7rem 1rem;border-bottom:1px solid var(--border);flex-wrap:wrap">
         <span class="mr-muted" id="mr-count">${deals.length} active seller-rep listing${deals.length===1?'':'s'}</span>
         <span style="flex:1"></span>
+        ${window._plImportBtnHtml?window._plImportBtnHtml():''}
         <button class="mr-btn mr-btn-sm" onclick="window._mrSelectAll(true)">Select all</button>
         <button class="mr-btn mr-btn-sm" onclick="window._mrSelectAll(false)">Clear</button>
         <button class="mr-btn mr-btn-sm" onclick="window._mrAssignAllAssets(this)" title="One task per active listing missing a sign photo, QR code or website links">📬 Assign missing assets to Nick</button>
         <button class="mr-btn mr-btn-primary mr-btn-sm" id="mr-send-selected" onclick="window._mrSendSelected()" ${sel.length?'':'disabled'}>📤 Send selected (${sel.length})</button>
       </div>
       <div style="overflow:auto"><table class="mr-table" aria-label="Active listings">
-        <thead><tr><th style="width:36px"><span class="sr-only">Select</span></th><th>Property</th><th>Advisor</th><th>Stage</th><th>Recipients</th><th>Assets</th><th>${_mrEsc(_mrMonthLabel(ym))} report</th><th style="text-align:right">Actions</th></tr></thead>
-        <tbody id="mr-rows"><tr><td colspan="8" class="mr-muted" style="padding:1.2rem">Loading…</td></tr></tbody>
+        <thead><tr><th style="width:36px"><span class="sr-only">Select</span></th><th>Property</th><th>Advisor</th><th>Stage</th><th>Recipients</th><th>Assets</th><th title="Mailchimp e-blast on this listing this month">E-blast</th><th>${_mrEsc(_mrMonthLabel(ym))} report</th><th style="text-align:right">Actions</th></tr></thead>
+        <tbody id="mr-rows"><tr><td colspan="9" class="mr-muted" style="padding:1.2rem">Loading…</td></tr></tbody>
       </table></div>
     </div>
     <p class="mr-note" style="margin-top:.8rem">Reports are drafts until you click Send. Each one is emailed from the listing advisor’s mailbox, filed under the deal’s Attachments, and logged on the property’s history.</p>
+    ${_mrSeesAll()&&window._sdPanelHtml?window._sdPanelHtml():''}
+    ${window._mwPanelHtml?window._mwPanelHtml():''}
   </div>`);
-  _mrPreloadReports(ym, deals).then(()=>{ if(currentView==='monthlyReports') window._mrRenderRows(); });
+  _mrPreloadReports(ym, deals).then(()=>{ if(currentView==='monthlyReports') window._mrRenderRows(); if(window._mbRun) window._mbRun({silent:true}); });   // MCBLAST-20261007
+  if(_mrSeesAll()&&window._sdLoad) setTimeout(()=>window._sdLoad(false),300);   // SOCIALDAILY-20261007
+  if(window._mwLoad) setTimeout(()=>window._mwLoad(true),400);   // MAILWATCH-20261008
 }
 window.viewMonthlyReports=viewMonthlyReports;
 window._mrRenderRows=function(){
   const st=window._mrState; const ym=st.month; const tb=document.getElementById('mr-rows'); if(!tb) return;
   const deals=_mrActiveDeals(); const cnt=document.getElementById('mr-count'); if(cnt) cnt.textContent=deals.length+' active seller-rep listing'+(deals.length===1?'':'s');
-  if(!deals.length){ tb.innerHTML=`<tr><td colspan="8" class="mr-muted" style="padding:1.2rem">No active seller-rep listings${st.search?' match your search':''}.</td></tr>`; return; }
+  if(!deals.length){ tb.innerHTML=`<tr><td colspan="9" class="mr-muted" style="padding:1.2rem">No active seller-rep listings${st.search?' match your search':''}.</td></tr>`; return; }
   tb.innerHTML=deals.map(d=>{
     const rep=st.reports[d.id+'|'+ym]||null; const recips=_mrRecipients(d);
     const ready=recips.length>0;
@@ -45522,6 +45533,7 @@ window._mrRenderRows=function(){
       <td><span class="mr-muted">${_mrEsc(_mrStageOf(d))}</span></td>
       <td>${recips.length?`<span title="${_mrEsc(recips.map(r=>r.email).join(', '))}">${recips.length} owner${recips.length===1?'':'s'}</span>`:`<span style="color:#b91c1c;font-weight:600">None</span>`}</td>
       <td>${(()=>{ const miss=(typeof _mrAssetsMissing==='function')?_mrAssetsMissing(d):[]; const task=(typeof _mrAssetsTaskFor==='function')?_mrAssetsTaskFor(d.id):null; return miss.length?`<span style="font-size:.72rem;color:#b45309;background:#fef3c7;border-radius:999px;padding:.1rem .5rem" title="Missing: ${_mrEsc(miss.join(', '))}">${miss.length} missing</span>${task?`<div class="mr-muted" style="font-size:.68rem">→ ${_mrEsc(task.assignedToName||'Nick')}</div>`:`<div><button class="mr-btn mr-btn-sm" style="font-size:.68rem;padding:.1rem .4rem" onclick="window._mrAssignAssets('${d.id}',this)">→ Nick</button></div>`}`:`<span style="font-size:.72rem;color:#047857;background:#d1fae5;border-radius:999px;padding:.1rem .5rem">✓</span>`; })()}</td>
+      <td>${window._mbCellHtml?window._mbCellHtml(d,ym):''}</td>
       <td>${_mrStatusChip(rep,d)}</td>
       <td style="text-align:right;white-space:nowrap">
         <button class="mr-btn mr-btn-sm" onclick="window._mrOpenEditor('${d.id}')">✏️ Edit</button>
@@ -45762,7 +45774,7 @@ window._mrOpenEditor=async function(dealId){
           ${[['siteVisits','TheDirtDog.com visits'],['uniqueVisitors','Unique visitors'],['docsViewed','Docs viewed'],['casSigned','CAs signed'],['gaSessions','Google sessions'],['totalCommercialViews','Total Commercial views'],['loopnetViews','LoopNet views'],['crexiViews','Crexi views'],['totalLeads','Total leads']].map(([k,l])=>`<div><label class="mr-lbl" for="mr-t-${k}">${l}</label><input id="mr-t-${k}" class="mr-input" style="width:100%" inputmode="numeric" value="${st.editor.traffic&&st.editor.traffic[k]!=null?_mrEsc(st.editor.traffic[k]):''}"></div>`).join('')}
         </div>
       </div>
-      <div class="mr-sec"><h3>8 · Property notes &amp; completed tasks</h3><div id="mr-hist-summary" class="mr-note">Counting…</div></div>
+      <div class="mr-sec"><h3>8 · Property notes (emails as AI summaries · calls · meetings · notes — tasks never print)</h3><div id="mr-hist-summary" class="mr-note">Counting…</div><div id="mr-hist-list" style="margin-top:.5rem"></div></div>
       <div class="mr-sec"><h3>9 · Contact page</h3><div id="mr-ed-advcard">${_mrEditorAdvisorCardHtml(deal)}</div></div>
     </div>
     <div class="mr-modal-f">
@@ -45776,7 +45788,7 @@ window._mrOpenEditor=async function(dealId){
   document.body.appendChild(ov);
   if(window._mrMcAutoFill) window._mrMcAutoFill();   // MCREPORT-20261007
   // history counts (async)
-  Promise.all([_mrFetchActivities(dealId),_mrFetchTasks(dealId)]).then(([acts,tasks])=>{ const h=_mrHistoryRows(deal,acts,tasks); const el=document.getElementById('mr-hist-summary'); if(el) el.innerHTML=`<b>${h.history.length}</b> history entries and <b>${h.tasks.length}</b> completed tasks since the listing started (${_mrFmtDateLong(_mrListingStart(deal))}) will print newest → oldest. Add or fix entries from the deal card’s Activity &amp; Notes.`; });
+  window._mrHistLoad(dealId);   // MWFIX-20261008
 };
 window._mrLetterMode=function(m){ const c=m==='custom'; const d=document.getElementById('mr-letter-default'), e=document.getElementById('mr-letter-custom'); if(d) d.style.display=c?'none':''; if(e) e.style.display=c?'':'none'; if(c){ const t=document.getElementById('mr-ed-letter'); if(t&&!t.value.trim()){ t.value=_mrLetterFor(window._mrState.editor?.ym||window._mrState.month)||''; } } };
 window._mrLetterCopyDefault=function(){ const t=document.getElementById('mr-ed-letter'); if(t) t.value=_mrLetterFor(window._mrState.editor?.ym||window._mrState.month)||''; };
@@ -45887,6 +45899,10 @@ window._mrAiDraft=async function(btn){
 };
 
 /* ---------- PDF generation (jsPDF + autotable, loaded on demand) ---------- */
+const MR_PORTAL_ICONS={"thedirtdog.com": "data:image/png;base64,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", "loopnet.com": "data:image/png;base64,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", "showcase.com": "data:image/png;base64,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", "landwatch.com": "data:image/png;base64,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", "land.com": "data:image/png;base64,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", "landandfarm.com": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAD60lEQVR42u1az4sjVRB+X71nMrPJZjPuwCgIsxf9A1bBdcCD4EH2ugie9CJ70dsyBy8LgkfFZdDLXvU/8D/wvMc9iKCMIAqRxdkhk6TTXVUeOtNJtn+kXzIz6UjXqfOj36vvVdX3ql49qKpZJKoKIH5mZgAggrlgEVUDUNakBYICACJCRGbdUqwGpRebmSe/VUD7WTWYOb3cGQCstaaSYq1NA0CZGKiy0CYqzSLJuk/da4MAWCIRmbcAsFlGSBi2joEaQA2gBrBeccVJqBrzAr/G38CTdjOHKvXiouk2nkYdM+dlb8+ePz/t9y1RAhIAi1xvtXa7Xa9E/+9eL/Lf7OPpOu3WzRvZ0zFztgVYxBJ9+d33j378YafbTRINZ+0/Jycf3b37+OHDMtVCXJQMR6MP7t//5Y/ja80t8TG4tfbZycmn9+59c3iYN11RDERRNAyCrSCYBTAMgiCM/BbSmP5wdDYKgGkOUxLAYDQKxmEcDN5BDMBaO+tg8UfyT5zsuXhF/2Q6gsknALeYPVQTN5t99mah+aFKvrXZ+wDm+XQZC1yF5C9zbDEyK7jQZasuagRGVZEDgFTZaBUtQMDpKDg6PHz3rTeDMLQ5jKzML+/sxP+vogu9cevW6/v7XiVYtQCMxmMRiffNAtULyHe9AJQAItIVDtHWSaMwsMCKSqzNAqJ6rdn44uio026zSMpHEEXRV59/dnD7tqhSNV0IwNPff2MRpFiSgH7/7M/eh5P9uKoxYNrb25mqxSHxknPVdaGJI+Ukpzp/flhdAJRDkURE5Xoo640BMxyPw4jTEIjobDCIShQPawMAY5hlf++VTqcjKRYCEATjm52OWXQU4NZIQYPx+OsHD94/eCdiTu/Eep4+FO9xywBQVVEVVbPQxAsKMFjnDEBZlVrJys0bgBrjrCWALqITFVdoktmQLNeldL7zOaJ/T09/PT4Oo6jAuKrGGH1tb6/TbuezocYrjcz1Llc9+wFgkRut1s9Pnhx8/Ikag9wywwAYBuFPj759787bIpd4draMC1nCeR2IAoIfqFzBsZ9bmkQW/oGupG11ien01Zy5uoU0WFwQlSyjMCNl6qyLARBfO4jFe/mB2ZsBLBKPk2RvCjDLBQAoqEedc9vN5nazuQQAAkKZ3lrYajTioab9XSAUXdEILIIwilzp43UvH1LVV3d3m42GqP7V60XMQEJfk6Pz3W73eqtV8mZNWqK84/UNEu8WkxcLJUya261aOZDrTn0NoAZQA6gEABbZLL35xRtbG0emyY5e7wMVAyDVDoZ0rFK6EKnsFUxmTpep/7vL33O/nb82C/JS7TM7+PRubuEi/gfhBB/PUXLzRAAAAABJRU5ErkJggg==", "totalcommercial.com": "data:image/png;base64,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", "crexi.com": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAEYklEQVR42u2azYscVRTFz3nvVfdMEhgRNUSzdi/+A0GIgtvoIu4VFBcuBBeKIKIL164EEQIRIbrRhSQySSBBCDG6iIkhiQliHCbM9/R0V1dXvXtc9HScjyTdmenpnpJ+i4auarre79337j3nUpSEMg+Hko8RwIOHyg5AwFRCgPacz003v/+r7oiosgGYBGA5tzcuLF+eb3kiWgm30L7E3c3DkcmZmWb0bpWqTACFiWntRis5enqmFbVzZ3ons5D3odWYXApv/TznSNOO1MydrQOFKTRXvrzDDy8teDKWsZDFaD6tfXw1++LaciCKfmfWna/EpJm5mL1zqX7y70Zw7C/DIKSESFhMi/ja+cXLC63g2MfEOiAtZKIvsvmCRyZnphtFHxPr4MRchAt580arevTsXMsEUOUCAFAIIaudXfSvn5t1hITth2HQcrow+HT52D98/5d5xz5UtyH4AQNctvLp1fTMVNNxu4p1CAACoUi4qTRuX2IMy5FRQMKSW8ryZaGRqd9JAA3EAW8eoR8yAQI8QZYqAgKiIMARnphvxl9nszJFgIAnAFxZyL++tfLVrdbzE/jhxf0Swd0NIIDAXGY/3ml8c6t+ZipthHEkY1VfkghEU3A8cbv+5mWhKURWYiNvl9gSbaHC4Ios5GkuRUB0Wy5N6uzJgR5iEiZEafsLz230IYdfyBxxfSmfbhRuS5Z/aACe/y3/2ens8Oml3+ay4BiFR+ofuSGtOmMyHjvr/XiFvzfCyz/NfXe77gmQvTvmIQCQKKr7XphoHjowFiUAuck1a9Np8cq55Q8uLbJNqN0HQIAQfXjv2eTUS/uf3hvaCYCgwQeYL7JPrturp2fuNgrfm1lzA157herBqj56bsI72rrUKZOizDcWvr3LQ6dmz0/3ZDjdUNJOvbhv9hXACOfrS9dqOnxy9sTtla7G/xEABMR+daMeKl0jnc/SJv3FmVZ/tpBJtqreOBjNbwAt7gnsA4AkRzpgqlG8e3Hx+M2V4AaheUT2cohDt9mD5M2l1ud/1I7/WZ8df/Kz6hAk5xYBBJA4dmPl7QsLNTeGTF7LFTdWGoD2uLLQqilJsrqAAtxtb1Z0BxgPjrGIEnflWyGulxSkodj1UV9oBDACGAGMAEYAZQEgttrX6kFKkKBEgSTXFOXOV9JER0obpkAJEtf4QuI+P1v1yjIK7BgmEuhNAHQHKExKKhGChKR6r/cUTUoqRStF4guLSKq5pesESFKBmQD4jtWSkFRa1tz0CCipRtk9nyYJSaWXPlfoYiKJiYo74PPgQMcM6WOVve2b+wKfUjo2ToMcXFONJ6rJ6uIBe4J7JombYoKC+cE9fsP1QOz3eaW6JjpSZD5RqdybxgM3SNc2WG7IzUgCMLNq8G2jVwhZYa7jzswUHKuduZnQjEZSEtdsBUkEx8K63VGYsii33uhJSpxLuh1Slv3d6Z7a69qQMNZeb8e387l2YfXgvyMf9oj7Put/G4HSF7J/ATZHSJ67QwtCAAAAAElFTkSuQmCC", "costar.com": "data:image/png;base64,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"};
+const MR_PORTAL_NAMES={'thedirtdog.com':'TheDirtDog.com','loopnet.com':'LoopNet','showcase.com':'CoStar','costar.com':'CoStar','landwatch.com':'LandWatch','land.com':'Land.com','landandfarm.com':'Land And Farm','totalcommercial.com':'TotalCommercial','crexi.com':'Crexi','buildout.com':'Property website'};
+function _mrLinkHost(u){ try{ return new URL(u).host.replace(/^www\./,'').toLowerCase(); }catch(e){ return ''; } }
+function _mrLinkTitle(l,host){ const lab=String(l.label||'').trim(); if(lab&&!/^(website|other)$/i.test(lab)) return lab.replace(/^LandWatch \/ Land\.com$/,'LandWatch / Land.com'); return MR_PORTAL_NAMES[host]||host||'Website'; }
 function _mrLoadScript(src){ return new Promise((res,rej)=>{ if(document.querySelector('script[src="'+src+'"]')) return res(); const s=document.createElement('script'); s.src=src; s.onload=res; s.onerror=()=>rej(new Error('Could not load '+src)); document.head.appendChild(s); }); }
 async function _mrLoadLibs(){
   if(!(window.jspdf&&window.jspdf.jsPDF)) await _mrLoadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js');
@@ -45941,6 +45957,8 @@ function _mrPdfRenderer(doc, font){
     R.text('Page '+R.page,34,y+23,{size:12,bold:true,color:[255,255,255]});
     R.text(R.footerText,R.W-40,y+23,{size:12,bold:true,color:[255,255,255],align:'right'}); };
   R.newPage=()=>{ doc.addPage(); R.page++; R.footer(); return R.M+16; };
+  /* MRLAYOUT-20261008: sections share a page when there is room (top / bottom halves) instead of always starting a new page */
+  R.section=(t,y,need)=>{ if(y!=null && (R.H-56-y)>=need){ const yy=y+26; R.text(t,R.M,yy,{size:20,bold:true,color:MR_INK}); const w=doc.getTextWidth(t); R.line(R.M+w+12,yy-7,R.W,yy-7,MR_INK,0.9); return yy+18; } return R.title(t,R.newPage()+30); };
   R.title=(t,y)=>{ R.text(t,R.M,y,{size:28,bold:true,color:MR_INK}); const w=doc.getTextWidth(t); R.line(R.M+w+14,y-9,R.W,y-9,MR_INK,0.9); return y+26; };
   R.para=(s,x,y,w,o)=>{ o=o||{}; doc.setFont(font,o.bold?'bold':'normal'); doc.setFontSize(o.size||10.5); doc.setTextColor(...(o.color||MR_INK)); const lines=doc.splitTextToSize(String(s||''),w); const lh=(o.size||10.5)*(o.lh||1.4); lines.forEach((ln,i)=>doc.text(ln,x,y+i*lh)); return y+lines.length*lh; };
   R.table=(opts)=>{ const {contHeading, ...rest}=opts; const base={ theme:'plain', styles:{font, fontSize:9.5, textColor:MR_INK, cellPadding:{top:5,bottom:5,left:6,right:6}, lineColor:MR_LINE, lineWidth:{bottom:0.8}, overflow:'linebreak'},
@@ -45960,8 +45978,10 @@ function _mrMonthPosts(deal, ym){
   const rng=_mrMonthRange(ym); const groups=new Map();
   (deal.socialPosts||[]).filter(p=>p&&p.at>=rng.start&&p.at<rng.end).sort((a,b)=>(b.at||0)-(a.at||0)).forEach(p=>{
     const key=(p.message||'')+'|'+(p.imageUrl||'')+'|'+Math.round((p.at||0)/120000);   // same caption+photo within 2 min
-    let g=groups.get(key); if(!g){ g={at:p.at, message:p.message||'', imageUrl:p.imageUrl||'', link:p.link||'', byName:p.byName||'', platforms:[], ids:[], urls:{}}; groups.set(key,g); }
+    let g=groups.get(key); if(!g){ g={at:p.at, message:p.message||'', imageUrl:p.imageUrl||'', link:p.link||'', byName:p.byName||'', platforms:[], ids:[], urls:{}, stored:{}, comments:[], reason:p.reason||''}; groups.set(key,g); }
     if(!g.platforms.includes(p.platform)) g.platforms.push(p.platform); if(p.id) g.ids.push({platform:p.platform,id:p.id}); if(p.url) g.urls[p.platform]=p.url;
+    // SOCIALDAILY-20261007: the 24-hour results and comments the cron saved on the post
+    if(p.metrics) g.stored[p.platform]=p.metrics; (p.comments||[]).forEach(c=>{ if(c&&c.message) g.comments.push({platform:p.platform, name:c.name||'', message:c.message, at:c.at||''}); });
   });
   const order={facebook:0,linkedin:1}; const out=[...groups.values()]; out.forEach(g=>g.platforms.sort((a,b)=>(order[a]??9)-(order[b]??9))); return out;
 }
@@ -45971,8 +45991,52 @@ async function _mrPostMetrics(groups){
   try{ const m=await Promise.race([_spWorkerPost('/metrics',{posts:ids}), new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')),9000))]);
     (m.metrics||[]).forEach(x=>{ const g=groups.find(g=>g.ids.some(i=>i.id===x.id)); if(!g) return; (g.metrics=g.metrics||{})[x.platform]={reach:x.reach, impressions:x.impressions, interactions:x.interactions, clicks:x.clicks, engagementRate:x.engagementRate}; });
   }catch(e){ console.warn('[mr] post metrics',e.message); }
+  groups.forEach(g=>{ Object.entries(g.stored||{}).forEach(([pl,m])=>{ g.metrics=g.metrics||{}; if(!g.metrics[pl]) g.metrics[pl]=m; }); });
 }
 // Gather everything the PDF needs for one deal/month.
+/* MRNOTASKS-20261008: e-mails print as a one-line AI summary (client-safe), cached on the month's report doc as emailSummaries{activityId:text} */
+async function _mrSummarizeEmails(deal, ym, rep, rows){
+  const emails=rows.filter(r=>r.type==='email'&&!r.mw); if(!emails.length) return;
+  const cache=Object.assign({}, rep.emailSummaries||{}); const todo=emails.filter(r=>r.id&&!cache[r.id]).slice(0,60);
+  if(todo.length&&typeof leadAI==='function'){
+    const sys='You summarize e-mail correspondence for a property owner\'s monthly marketing report from a Florida land brokerage (Eshenbaugh Land Company). For each e-mail write ONE neutral, client-safe sentence (max 22 words) saying who wrote and what it concerned — e.g. "Buyer\'s broker asked for the survey and wetlands report." Never mention tasks, internal staff instructions, commission, pricing strategy, or anything that would embarrass the firm or the owner. Return ONLY JSON: {"<id>":"<sentence>", ...}.';
+    for(let i=0;i<todo.length;i+=25){ const chunk=todo.slice(i,i+25);
+      const user=chunk.map(r=>'ID '+r.id+'\nSubject: '+(r.subject||'')+'\nFrom/by: '+(r.by||'')+'\nText: '+String(r.raw||r.text).replace(/\s+/g,' ').slice(0,700)).join('\n\n');
+      try{ const txt=await leadAI(sys,user,1800); const m=String(txt||'').match(/\{[\s\S]*\}/); const j=m?JSON.parse(m[0]):{}; chunk.forEach(r=>{ const v=j[r.id]; if(v&&typeof v==='string') cache[r.id]=v.trim().slice(0,220); }); }
+      catch(e){ console.warn('[mr] email summary chunk',e); } }
+    const fresh=Object.keys(cache).length-Object.keys(rep.emailSummaries||{}).length;
+    if(fresh>0){ try{ await _mrSaveReport(deal.id, ym, {emailSummaries:cache}); rep.emailSummaries=cache; }catch(e){ console.warn('[mr] save summaries',e); } }
+  }
+  emails.forEach(r=>{ const sum=cache[r.id]; if(sum) r.text='Email: '+sum; else if(r.subject) r.text='Email: '+r.subject; });
+}
+/* COMPANIES-20261008: "Companies reached" — the e-blast audience rolled up from recipient e-mail DOMAINS to company names (never people).
+   Source: the social worker's /mailchimp/recipients (domain counts only). Name = CRM company on that domain > Mailchimp COMPANY field > AI-cleaned domain.
+   Cached on the month's report doc (rep.companiesReached) keyed by campaign ids, so re-building a report doesn't re-query. */
+function _mrCoKey(n){ return String(n||'').toLowerCase().replace(/&/g,' and ').replace(/[^a-z0-9 ]+/g,' ').replace(/\b(llc|l l c|inc|incorporated|corp|corporation|co|company|ltd|lp|llp|pllc|pa|p a)\b/g,' ').replace(/\s+/g,' ').trim(); }
+function _mrDomainLabel(d){ const parts=String(d||'').split('.'); const core=(parts.length>2&&/^(co|com|org|net)$/.test(parts[parts.length-2])?parts[parts.length-3]:parts[parts.length-2])||parts[0]||''; return core.split(/[-_]/).map(w=>w.charAt(0).toUpperCase()+w.slice(1)).join(' '); }
+async function _mrCompaniesReached(deal, ym, rep, emails){
+  const ids=[...new Set((emails||[]).map(e=>e&&e.id).filter(Boolean))]; if(!ids.length||typeof _spWorkerPost!=='function') return null;
+  const key=ids.slice().sort().join(',');
+  const hit=rep&&rep.companiesReached; if(hit&&hit.key===key&&Array.isArray(hit.names)) return hit;
+  let r; try{ r=await Promise.race([_spWorkerPost('/mailchimp/recipients',{campaignIds:ids}), new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')),25000))]); }
+  catch(e){ console.warn('[mr] companies reached',e.message); return (hit&&Array.isArray(hit.names))?hit:null; }
+  const domains=(r&&r.domains)||[]; if(!domains.length&&!(r&&r.individuals)) return null;
+  const crm=new Map();   // domain -> {company:count}
+  (typeof allContacts!=='undefined'?allContacts:[]||[]).forEach(x=>{ const co=String(x.company||'').trim(); if(!co) return; [x.email,x.email2].forEach(em=>{ const m=String(em||'').toLowerCase().match(/@([^@\s]+)$/); if(!m) return; const o=crm.get(m[1])||{}; o[co]=(o[co]||0)+1; crm.set(m[1],o); }); });
+  const named=new Map(); const unknown=[];
+  domains.forEach(d=>{ const o=crm.get(d.domain); const co=(o&&Object.entries(o).sort((a,b)=>b[1]-a[1])[0][0])||d.company||''; if(co) named.set(d.domain,co); else unknown.push(d.domain); });
+  if(unknown.length&&typeof leadAI==='function'){
+    const sys='You turn e-mail domains into company names for a real-estate brokerage report. For each domain give the company\'s proper name if you are confident it is a well-known firm (e.g. cbre.com -> CBRE, lennar.com -> Lennar); otherwise just title-case the main word(s) of the domain (e.g. smithlandgroup.com -> Smithland Group). Never invent facts. Reply with ONLY a JSON object {"domain":"Company Name"}.';
+    for(let i=0;i<unknown.length;i+=80){ const chunk=unknown.slice(i,i+80);
+      try{ const txt=await leadAI(sys,chunk.join('\n'),2400); const m=String(txt||'').match(/\{[\s\S]*\}/); const j=m?JSON.parse(m[0]):{}; chunk.forEach(d=>{ const v=j[d]; if(v&&typeof v==='string'&&v.trim().length<=60) named.set(d,v.trim()); }); }
+      catch(e){ console.warn('[mr] company names',e.message); } } }
+  unknown.forEach(d=>{ if(!named.has(d)) named.set(d,_mrDomainLabel(d)); });
+  const byKey=new Map(); domains.forEach(d=>{ const nm=named.get(d.domain)||_mrDomainLabel(d.domain); const k=_mrCoKey(nm)||d.domain; if(!byKey.has(k)) byKey.set(k,{name:nm,count:0}); byKey.get(k).count+=d.count; });
+  const names=[...byKey.values()].sort((a,b)=>a.name.localeCompare(b.name,'en',{sensitivity:'base'})).map(x=>x.name);
+  const out={key, at:Date.now(), names, recipients:r.recipients||0, individuals:r.individuals||0};
+  try{ await _mrSaveReport(deal.id, ym, {companiesReached:out}); if(rep) rep.companiesReached=out; }catch(e){ console.warn('[mr] save companies',e); }
+  return out;
+}
 async function _mrAssemble(deal, ym){
   const rep=(await _mrLoadReport(deal.id,ym))||{};
   const posts=_mrMonthPosts(deal,ym); const postUrls=new Set(posts.map(p=>p.imageUrl).filter(Boolean));
@@ -45980,8 +46044,10 @@ async function _mrAssemble(deal, ym){
   posts.forEach((p,i)=>p.img=postImgs[i]);
   const emails=(typeof _mrMcForReport==='function')?await _mrMcForReport(deal,ym,rep):[];   // MCREPORT-20261007
   const emailImgs=await Promise.all(emails.map(e=>_mrMcImage(e.image))); emails.forEach((e,i)=>e.img=emailImgs[i]);
+  let companies=null; try{ companies=await _mrCompaniesReached(deal, ym, rep, emails); }catch(e){ console.warn('[mr] companies',e); }   // COMPANIES-20261008
   const [acts,tasks]=await Promise.all([_mrFetchActivities(deal.id),_mrFetchTasks(deal.id)]);
   const h=_mrHistoryRows(deal,acts,tasks);
+  try{ await _mrSummarizeEmails(deal, ym, rep, h.history); }catch(e){ console.warn('[mr] email summaries',e); }   // MRNOTASKS-20261008
   const cfg=_mrCfg(); const L=_mrLetters()[ym]||{};
   const advisors=_mrAdvisorsOf(deal);
   const [hero,logo,sign,web,qr,shotE,social,heads]=await Promise.all([
@@ -45997,7 +46063,7 @@ async function _mrAssemble(deal, ym){
   advisors.forEach((a,i)=>a.head=heads[i]);
   const custom=rep.letterMode==='custom' && String(rep.letterBody||'').trim();
   return { deal, ym, rep, history:h.history, tasks:h.tasks, letter:custom?rep.letterBody:(L.body||''), signature:custom?(rep.letterSignature||((advisors[0]||{}).name||'')+' — Eshenbaugh Land Company'):(L.signature||cfg.letterSignature||'Ryan Sampson, ALC, CCIM — Managing Partner / Broker of Record'), letterCustom:!!custom, about:cfg.about||MR_DEFAULT_ABOUT,
-    firmAddress:cfg.firmAddress||'304 S. Willow Ave, Tampa, FL 33606', firmWebsite:cfg.firmWebsite||'WWW.THEDIRTDOG.COM', advisors, hero, logo, sign, web, qr, links:(typeof _mrDealLinks==='function'?_mrDealLinks(deal):[]), shotE, social:(social||[]).filter(Boolean), posts, emails,
+    firmAddress:cfg.firmAddress||'304 S. Willow Ave, Tampa, FL 33606', firmWebsite:cfg.firmWebsite||'WWW.THEDIRTDOG.COM', advisors, hero, logo, sign, web, qr, links:(typeof _mrDealLinks==='function'?_mrDealLinks(deal):[]), shotE, social:(social||[]).filter(Boolean), posts, emails, companies,
     preparedFor:rep.preparedFor||_mrOwnerLabel(deal), traffic:rep.traffic||{} };
 }
 async function _mrBuildPdf(A){
@@ -46074,28 +46140,41 @@ async function _mrBuildPdf(A){
     R.text(t[0],cx+12,cy+22,{size:8,bold:true,color:[255,255,255]});
     R.text(t[1],cx+12,cy+68,{size:30,bold:true,color:[255,255,255]});
     R.text(R.split(t[2],tw-24,8),cx+12,cy+90,{size:8,color:[255,240,240],lh:1.25}); });
+  if(tiles.length) y+=6+Math.ceil(tiles.length/3)*(th+gap);
   /* ---- 3a½ · Offers & contract (OFFERS-20261007) ---- */
   if(window._mrDrawOffers) y=window._mrDrawOffers(R,doc,font,A,y);
   /* ---- 3b · Property website: Buildout screenshot, QR code and the links the property is listed under ---- */
-  if(A.web||A.qr||(A.links&&A.links.length)){
-    y=R.newPage(); y=R.title('Property Website',y+30);
-    y=R.para('The Property’s dedicated marketing website and listing pages, as presented to prospective buyers.',R.M,y+4,R.W-2*R.M,{size:10.5})+12;
-    const hasBottom=!!(A.qr||(A.links&&A.links.length)); const bottomH=hasBottom?Math.max(A.qr?150:0, 30+(A.links||[]).length*18):0;
-    if(A.web){ const maxW=R.W-2*R.M, maxH=R.H-56-y-16-(hasBottom?bottomH+24:0); const s=Math.min(maxW/A.web.w,maxH/A.web.h); const w=A.web.w*s,h=A.web.h*s; const x=(R.W-w)/2; doc.setDrawColor(203,213,225); doc.setLineWidth(1); doc.rect(x,y,w,h,'S'); R.img(A.web,x,y,w,h); y+=h+24; }
+  const _qrUrl=(!A.qr&&(A.links||[]).find(l=>_mrLinkHost(l.url)==='thedirtdog.com')||{}).url||''; A.qrUrl=_qrUrl;
+  if(A.web||A.qr||_qrUrl||(A.links&&A.links.length)){
+    y=R.section('Property Website',y,A.sign?320:(A.web?320:190));
+    y=R.para('The Property’s dedicated marketing website and listing pages, as presented to prospective buyers.',R.M,y+2,R.W-2*R.M,{size:10})+8;
+    const hasQr=!!(A.qr||_qrUrl); const hasBottom=!!(hasQr||(A.links&&A.links.length)); const bottomH=hasBottom?Math.max(hasQr?150:0, 36+Math.ceil((A.links||[]).length/2)*52):0;
+    if(A.web){ const maxW=R.W-2*R.M, maxH=Math.min(R.H-56-y-16-(hasBottom?bottomH+24:0), A.sign?165:9999); const s=Math.min(maxW/A.web.w,maxH/A.web.h); const w=A.web.w*s,h=A.web.h*s; const x=(R.W-w)/2; doc.setDrawColor(203,213,225); doc.setLineWidth(1); doc.rect(x,y,w,h,'S'); R.img(A.web,x,y,w,h); y+=h+24; }
     if(hasBottom){
-      const qrW=A.qr?130:0; const lx=R.M, lw=R.W-2*R.M-(qrW?qrW+30:0);
+      const qrW=hasQr?130:0; const lx=R.M, lw=R.W-2*R.M-(qrW?qrW+30:0);
       R.text('WHERE THE PROPERTY IS LISTED',lx,y+12,{size:9,bold:true,color:MR_GREY}); R.line(lx,y+18,lx+lw,y+18,MR_TEAL,1.5);
-      let ly=y+36;
-      (A.links||[]).forEach(l=>{ R.text(l.label,lx,ly,{size:10,bold:true}); const lab=doc.getTextWidth(l.label)+8; doc.setFont(font,'normal'); doc.setFontSize(9); doc.setTextColor(...MR_TEAL); const txt=doc.splitTextToSize(l.url,lw-lab)[0]; doc.textWithLink(txt,lx+lab,ly,{url:l.url}); ly+=18; });
+      /* PORTALLINKS-20261008: logo tiles — one clickable card per portal (favicon + site name + "View listing"), two columns */
+      const links=A.links||[]; const cols=2, gap=8, tileH=44, tileW=(lw-gap*(cols-1))/cols; let ly=y+28;
+      links.forEach((l,i)=>{ const c=i%cols, r=Math.floor(i/cols); const tx=lx+c*(tileW+gap), ty=ly+r*(tileH+gap); const host=_mrLinkHost(l.url); const icon=MR_PORTAL_ICONS[host];
+        doc.setFillColor(248,250,252); doc.setDrawColor(226,232,240); doc.setLineWidth(.8); doc.roundedRect(tx,ty,tileW,tileH,6,6,'FD');
+        if(icon){ try{ doc.addImage(icon,'PNG',tx+9,ty+9,26,26); }catch(e){} } else { doc.setFillColor(...MR_TEAL); doc.circle(tx+22,ty+22,13,'F'); R.text((host||'?').slice(0,1).toUpperCase(),tx+22,ty+27,{size:13,bold:true,color:[255,255,255],align:'center'}); }
+        R.text(_mrLinkTitle(l,host),tx+44,ty+19,{size:10,bold:true}); R.text('View listing  ›',tx+44,ty+33,{size:8.5,color:MR_TEAL});
+        doc.link(tx,ty,tileW,tileH,{url:l.url}); });
+      ly+=Math.ceil(links.length/cols)*(tileH+gap);
       if(!(A.links||[]).length) R.text('Website links not yet added to the deal card.',lx,ly,{size:9,color:MR_GREY});
+      if(!A.qr&&_qrUrl&&window._mrQrMatrix){ const M=window._mrQrMatrix(_qrUrl); if(M){ const qx=R.W-R.M-qrW; doc.setDrawColor(226,232,240); doc.setLineWidth(1); doc.rect(qx-6,y-2,qrW+12,qrW+34,'S'); const quiet=2, n=M.length+quiet*2, cell=qrW/n; doc.setFillColor(0,0,0); for(let r=0;r<M.length;r++) for(let k=0;k<M.length;k++) if(M[r][k]) doc.rect(qx+(k+quiet)*cell,y+4+(r+quiet)*cell,cell+.15,cell+.15,'F'); doc.link(qx,y+4,qrW,qrW,{url:_qrUrl}); R.text('SCAN FOR THE PROPERTY WEBSITE',qx+qrW/2,y+qrW+22,{size:7,bold:true,color:MR_GREY,align:'center'}); } }
       if(A.qr){ const qx=R.W-R.M-qrW; doc.setDrawColor(226,232,240); doc.setLineWidth(1); doc.rect(qx-6,y-2,qrW+12,qrW+34,'S'); R.fit(A.qr,qx,y+4,qrW,qrW); R.text('SCAN FOR THE PROPERTY WEBSITE',qx+qrW/2,y+qrW+22,{size:7,bold:true,color:MR_GREY,align:'center'}); }
+      y=Math.max(ly+4, hasQr?y+qrW+40:0);
     }
   }
   /* ---- 3c · Signage ---- */
-  if(A.sign){ y=R.newPage(); y=R.title('Property Signage',y+30); const maxW=R.W-2*R.M-60, maxH=R.H-60-y-50; const s=Math.min(maxW/A.sign.w,maxH/A.sign.h); const w=A.sign.w*s,h=A.sign.h*s; const x=(R.W-w)/2, yy=y+40; doc.setDrawColor(20,20,20); doc.setLineWidth(3); doc.rect(x,yy,w,h,'S'); R.img(A.sign,x,yy,w,h); }
+  const _sc=(A.deal.signCallsByMonth||{})[A.ym], _scN=_sc&&Number(_sc.calls)>0?Number(_sc.calls):0;   // TELZIO-20261008
+  if(A.sign||_scN){ y=R.section('Property Signage',y,A.sign?185:70);
+    if(_scN){ const t=_scN+(_scN===1?' call':' calls')+' from the sign this month'+(_sc.ext?'  (sign extension '+_sc.ext+')':''); R.text(t,R.M,y+6,{size:12,bold:true,color:MR_INK}); y+=26; }
+    if(A.sign){ const maxW=R.W-2*R.M-60, maxH=Math.min(R.H-60-y-30,420); const s=Math.min(maxW/A.sign.w,maxH/A.sign.h); const w=A.sign.w*s,h=A.sign.h*s; const x=(R.W-w)/2, yy=y+8; doc.setDrawColor(20,20,20); doc.setLineWidth(3); doc.rect(x,yy,w,h,'S'); R.img(A.sign,x,yy,w,h); y=yy+h+18; } }
   /* ---- 4 · Email report: results table + one card per Mailchimp e-blast (picture + delivery results) ---- */
   if(eb.length||A.shotE||(A.emails&&A.emails.length)){
-    y=R.newPage(); y=R.title('Email Report',y+30);
+    y=R.section('Email Report',y,300);
     y=R.para('E-mail campaigns sent to our buyer, broker and investor lists featuring the Property during '+_mrMonthLabel(A.ym)+'.',R.M,y+4,R.W-2*R.M,{size:10.5})+8;
     if(eb.length){ y=R.table({startY:y+6, head:[['Title','Date Sent','Recipients','Opens','Clicks']], body:eb.map(r=>[r.title||'',_mrFmtDate(r.date),nz(r.recipients),nz(r.opens),nz(r.clicks)]), columnStyles:{0:{cellWidth:230}}, contHeading:'Email Report (cont.)'})+18; }
     const cw=R.W-2*R.M, pad=12, textW=cw-2*pad;
@@ -46109,11 +46188,28 @@ async function _mrBuildPdf(A){
       const x=R.M; doc.setDrawColor(226,232,240); doc.setLineWidth(1); doc.roundedRect(x,y,cw,h,6,6,'S');
       let cy=y+pad; R.rrect(x+pad,cy,46,18,9,MR_TEAL); R.text('E-BLAST',x+pad+23,cy+12.5,{size:7,bold:true,color:[255,255,255],align:'center'});
       subj.forEach((ln,k)=>R.text(ln,x+pad+56,cy+13+k*15,{size:11,bold:true})); cy+=subj.length*15+2;
-      R.text(when+(e.segment?' · '+e.segment:'')+' · via Mailchimp',x+pad,cy+10,{size:8,color:MR_GREY}); cy+=16;
+      R.text(when+(_mrCleanSeg(e.segment)?' · '+_mrCleanSeg(e.segment):'')+' · via Mailchimp',x+pad,cy+10,{size:8,color:MR_GREY}); cy+=16;
       if(e.img){ const s=Math.min(textW/e.img.w,imgH/e.img.h); const iw=e.img.w*s, ih=e.img.h*s; doc.setDrawColor(226,232,240); doc.rect(x+pad+(textW-iw)/2,cy,iw,ih,'S'); R.img(e.img,x+pad+(textW-iw)/2,cy,iw,ih); cy+=imgH+10; }
       R.text(stats,x+pad,cy+10,{size:8.5,bold:true,color:MR_INK});
       y+=h+14;
     });
+    /* COMPANIES-20261008 — companies the e-blast reached (names only, alphabetical, no duplicates) */
+    if(A.companies&&A.companies.names&&A.companies.names.length){
+      const names=A.companies.names.slice(0,300), more=A.companies.names.length-names.length, cw2=R.W-2*R.M, cols=3, gap=14, colW=(cw2-gap*(cols-1))/cols, lh=12.5;
+      const intro='The listing was e-mailed to '+A.companies.names.length+' compan'+(A.companies.names.length===1?'y':'ies')+(A.companies.individuals?' plus '+A.companies.individuals+' independent buyer, broker and investor accounts':'')+' — one entry per company, however many people there received it.';
+      const introLines=R.split(intro,cw2,9.5);
+      if(y+40+introLines.length*13+lh*4>R.H-56){ y=R.newPage(); R.text('Email Report (cont.)',R.M,y+10,{size:16,bold:true}); y+=30; }
+      R.text('COMPANIES REACHED',R.M,y+12,{size:9,bold:true,color:MR_GREY}); R.line(R.M,y+18,R.W-R.M,y+18,MR_TEAL,1.5); y+=30;
+      introLines.forEach((ln,k)=>R.text(ln,R.M,y+10+k*13,{size:9.5,color:MR_GREY})); y+=introLines.length*13+8;
+      let idx=0;
+      while(idx<names.length){
+        let rows=Math.floor((R.H-56-y)/lh); if(rows<4){ y=R.newPage(); R.text('Email Report (cont.)',R.M,y+10,{size:16,bold:true}); y+=30; rows=Math.floor((R.H-56-y)/lh); }
+        const take=Math.min(names.length-idx, rows*cols), per=Math.ceil(take/cols);
+        for(let k=0;k<take;k++){ const col=Math.floor(k/per), row=k%per; const nm=R.split(names[idx+k],colW-4,8.5)[0]||''; R.text(nm,R.M+col*(colW+gap),y+9+row*lh,{size:8.5}); }
+        y+=per*lh+6; idx+=take;
+      }
+      if(more>0){ R.text('+ '+more+' additional compan'+(more===1?'y':'ies'),R.M,y+10,{size:8.5,color:MR_GREY}); y+=18; }
+    }
     if(A.shotE){ const maxH=R.H-56-y-10; if(maxH<160){ y=R.newPage(); R.text('Email Report (cont.)',R.M,y+10,{size:16,bold:true}); y+=30; } R.fit(A.shotE,R.M+40,y,R.W-2*R.M-80,R.H-56-y-10); }
   }
   /* ---- 5 · Social media ---- */
@@ -46123,7 +46219,7 @@ async function _mrBuildPdf(A){
     if(p.platforms.includes('facebook') && !fb.some(r=>r.date===date)) fb.push({date, reach:m.facebook?m.facebook.reach:'', interactions:m.facebook?m.facebook.interactions:'', clicks:m.facebook?m.facebook.clicks:''});
     if(p.platforms.includes('linkedin') && !li.some(r=>r.date===date)) li.push({date, impressions:m.linkedin?m.linkedin.impressions:'', engRate:(m.linkedin&&m.linkedin.engagementRate!=null)?m.linkedin.engagementRate+'%':'', clicks:m.linkedin?m.linkedin.clicks:''}); });
   if(fb.length||li.length||A.social.length||(A.posts&&A.posts.length)){
-    y=R.newPage(); y=R.title('Social Media Report',y+30);
+    y=R.section('Social Media Report',y,300);
     if(fb.length||li.length){
       const colW=(R.W-2*R.M-24)/2; const xl=R.M, xr=R.M+colW+24; const top=y+10;
       R.text('Facebook',xl+colW/2,top+14,{size:20,bold:true,align:'center'}); R.text('LinkedIn',xr+colW/2,top+14,{size:20,bold:true,align:'center'});
@@ -46140,19 +46236,24 @@ async function _mrBuildPdf(A){
     if(cards.length){
       const cw=R.W-2*R.M, pad=12, textW=cw-2*pad, maxImgH=230, lineH=12.5;
       cards.forEach((p,i)=>{
-        const lines=R.split(p.message||'',textW,9); const shown=lines.slice(0,10); if(lines.length>10) shown[9]=shown[9].replace(/\s*\S*$/,'')+' …';
+        const lines=R.split(p.message||'',textW,9); const shown=lines.slice(0,18); if(lines.length>18) shown[17]=shown[17].replace(/\s*\S*$/,'')+' …';
         const imgH=p.img?Math.min(maxImgH,p.img.h*(textW/p.img.w)):0;
         const m=p.metrics||{}; const stats=[];
         if(m.facebook){ stats.push('Facebook — reach '+nz(m.facebook.reach)+' · interactions '+nz(m.facebook.interactions)+' · link clicks '+nz(m.facebook.clicks)); }
         if(m.linkedin){ stats.push('LinkedIn — impressions '+nz(m.linkedin.impressions)+(m.linkedin.engagementRate!=null?' · engagement '+m.linkedin.engagementRate+'%':'')+' · clicks '+nz(m.linkedin.clicks)); }
-        const h=pad+34+shown.length*lineH+(imgH?imgH+10:0)+(stats.length?stats.length*12+6:0)+22+pad;
+        const eng=[m.facebook,m.linkedin].filter(Boolean).reduce((o,x)=>({likes:(o.likes||0)+(+x.likes||0), comments:(o.comments||0)+(+x.comments||0), shares:(o.shares||0)+(+x.shares||0)}),{});
+        if(eng.likes||eng.comments||eng.shares) stats.push('Likes '+(eng.likes||0)+' · Comments '+(eng.comments||0)+' · Shares '+(eng.shares||0)+' (24 hours after posting)');
+        const comments=(p.comments||[]).slice(0,4).map(c=>{ const who=(c.name||'Someone')+': '; const ln=R.split(who+c.message.replace(/\s+/g,' '),textW-10,8.5); return ln.slice(0,2); });
+        const cH=comments.length?comments.reduce((a,l)=>a+l.length*11,0)+16:0;
+        const h=pad+34+shown.length*lineH+(imgH?imgH+10:0)+(stats.length?stats.length*12+6:0)+cH+30+pad;
         if(y+h>R.H-56){ y=R.newPage(); R.text('Social Media Posts (cont.)',R.M,y+10,{size:16,bold:true}); y+=30; }
         if(i===0 && y>R.M+40) { R.text('Posts',R.M,y+6,{size:16,bold:true}); y+=18; }
         const x=R.M; doc.setDrawColor(226,232,240); doc.setLineWidth(1); doc.roundedRect(x,y,cw,h,6,6,'S');
         // header: avatar + page name + date · platforms
         let cy=y+pad; doc.setFillColor(...MR_RED); doc.circle(x+pad+14,cy+14,14,'F'); R.text('E',x+pad+14,cy+19,{size:13,bold:true,color:[255,255,255],align:'center'});
         R.text('Eshenbaugh Land Company',x+pad+36,cy+11,{size:10,bold:true});
-        R.text(_mrFmtDateLong(p.at)+' · '+p.platforms.map(q=>q==='facebook'?'Facebook':q==='linkedin'?'LinkedIn':q).join(' + ')+(p.byName?' · posted by '+p.byName:''),x+pad+36,cy+24,{size:8,color:MR_GREY});
+        const reasonLabel={new:'New listing',price:'Price reduced',back:'Back on the market',renewed:'Listing extended',expiring:'Expiring soon',nooffer:'Available',rotation:'Available'}[p.reason]||'';
+        R.text(_mrFmtDateLong(p.at)+' · '+p.platforms.map(q=>q==='facebook'?'Facebook':q==='linkedin'?'LinkedIn':q).join(' + ')+(p.byName?' · posted by '+p.byName:'')+(reasonLabel?' · '+reasonLabel:''),x+pad+36,cy+24,{size:8,color:MR_GREY});
         cy+=34;
         // caption
         doc.setFont(font,'normal'); doc.setFontSize(9); doc.setTextColor(...MR_INK); shown.forEach((ln,k)=>doc.text(ln,x+pad,cy+9+k*lineH)); cy+=shown.length*lineH;
@@ -46160,6 +46261,8 @@ async function _mrBuildPdf(A){
         if(p.img){ cy+=4; const w=textW, hh=imgH; const s=Math.min(w/p.img.w,hh/p.img.h); const iw=p.img.w*s, ih=p.img.h*s; R.img(p.img,x+pad+(w-iw)/2,cy,iw,ih); cy+=hh+6; }
         // results
         if(stats.length){ stats.forEach((t,k)=>R.text(t,x+pad,cy+9+k*12,{size:8,color:MR_INK})); cy+=stats.length*12+6; }
+        // comments (saved 24 h after the post)
+        if(comments.length){ R.text('Comments',x+pad,cy+9,{size:8,bold:true,color:MR_GREY}); cy+=12; comments.forEach(ls=>{ doc.setFillColor(243,244,246); doc.roundedRect(x+pad,cy,textW,ls.length*11+4,4,4,'F'); ls.forEach((ln,k)=>R.text(ln,x+pad+5,cy+9+k*11,{size:8.5,color:MR_INK})); cy+=ls.length*11+4+4; }); }
         R.line(x+pad,cy+2,x+cw-pad,cy+2,[226,232,240],0.8);
         R.text('Like          Comment          Share',x+pad,cy+15,{size:8,color:MR_GREY});
         y+=h+14;
@@ -46174,18 +46277,19 @@ async function _mrBuildPdf(A){
         doc.setDrawColor(226,232,240); doc.setLineWidth(1); doc.rect(x+(colW-w)/2,y,w,h,'S'); R.img(im,x+(colW-w)/2,y,w,h);
         col++; if(col===2){ col=0; y+=cellH+gap; }
       });
+      if(col===1) y+=cellH+gap;
     }
   }
   /* ---- 8 · Property notes ---- */
-  y=R.newPage(); y=R.title('Property Notes',y+30);
-  y=R.para('The following is the activity and history logged on the Property since the listing was signed'+(since?' ('+_mrFmtDateLong(since)+')':'')+', newest first.',R.M,y+4,R.W-2*R.M,{size:10.5})+10;
+  y=R.section('Property Notes',y,170);
+  y=R.para('Correspondence, calls, meetings, notes and marketing activity logged on the Property since the listing was signed'+(since?' ('+_mrFmtDateLong(since)+')':'')+', newest first.',R.M,y+4,R.W-2*R.M,{size:10.5})+10;
   if(A.history.length){ y=R.table({startY:y, head:[['Date','Type','By','Note']], body:A.history.map(r=>[r.date, r.type.replace('_',' '), r.by, r.text.length>420?r.text.slice(0,417)+'…':r.text]), columnStyles:{0:{cellWidth:56},1:{cellWidth:56},2:{cellWidth:86}}, styles:{font,fontSize:8.5,textColor:MR_INK,cellPadding:4,lineColor:MR_LINE,lineWidth:{bottom:0.8},overflow:'linebreak'}, contHeading:'Property Notes (cont.)'})+18; }
   else { y=R.para('No history has been logged on this property yet.',R.M,y,R.W-2*R.M,{size:10.5,color:MR_GREY})+18; }
-  if(A.tasks.length){ if(y>R.H-160){ y=R.newPage()+30; } R.text('Completed Tasks',R.M,y+6,{size:16,bold:true}); y=R.table({startY:y+16, head:[['Completed','Task','Completed by']], body:A.tasks.map(t=>[t.date,t.title,t.by]), columnStyles:{0:{cellWidth:70},2:{cellWidth:110}}, styles:{font,fontSize:8.5,textColor:MR_INK,cellPadding:4,lineColor:MR_LINE,lineWidth:{bottom:0.8}}, contHeading:'Completed Tasks (cont.)'}); }
+  if(false&&A.tasks.length){ /* MRNOTASKS-20261008: tasks are internal and never print */ if(y>R.H-160){ y=R.newPage()+30; } R.text('Completed Tasks',R.M,y+6,{size:16,bold:true}); y=R.table({startY:y+16, head:[['Completed','Task','Completed by']], body:A.tasks.map(t=>[t.date,t.title,t.by]), columnStyles:{0:{cellWidth:70},2:{cellWidth:110}}, styles:{font,fontSize:8.5,textColor:MR_INK,cellPadding:4,lineColor:MR_LINE,lineWidth:{bottom:0.8}}, contHeading:'Completed Tasks (cont.)'}); }
   /* ---- 9 · Leads & website activity ---- */
   const stats=[['TheDirtDog.com visits',T.siteVisits],['Unique visitors',T.uniqueVisitors],['Docs viewed',T.docsViewed],['CAs signed',T.casSigned],['Google sessions',T.gaSessions],['Total Commercial views',T.totalCommercialViews],['LoopNet views',T.loopnetViews],['Crexi views',T.crexiViews]].filter(s=>s[1]!=null&&s[1]!=='');
   if(act.length||stats.length){
-    y=R.newPage(); y=R.title('Leads and Website Activity',y+30);
+    y=R.section('Leads and Website Activity',y,170);
     y=R.para('The following inquiries are a result of our property’s website traffic and listing-service exposure during '+_mrMonthLabel(A.ym)+'. Each named individual has requested further information.',R.M,y+4,R.W-2*R.M,{size:10.5})+8;
     if(stats.length){ const bw=(R.W-2*R.M-3*10)/4; stats.slice(0,8).forEach((s,i)=>{ const cx=R.M+(i%4)*(bw+10), cy=y+Math.floor(i/4)*58; R.rect(cx,cy,bw,50,MR_RED); R.text(String(s[1]),cx+10,cy+34,{size:18,bold:true,color:[255,255,255]}); R.text(s[0].toUpperCase(),cx+10,cy+14,{size:6.5,bold:true,color:[255,230,230]}); }); y+=Math.ceil(Math.min(stats.length,8)/4)*58+8; }
     if(act.length) R.table({startY:y, head:[['Performed At','Performed By','Email','Company','Role','Activity']], body:act.map(a=>[a.at,a.by,a.email,a.company,a.role,a.activity]), styles:{font,fontSize:7,textColor:MR_INK,cellPadding:2.5,lineColor:[203,213,225],lineWidth:0.4,overflow:'linebreak'}, headStyles:{fillColor:[229,231,235],textColor:MR_INK,fontStyle:'bold',fontSize:7.5,lineWidth:0.4,lineColor:[203,213,225]}, alternateRowStyles:{fillColor:[248,250,252]}, columnStyles:{0:{cellWidth:84},1:{cellWidth:74},2:{cellWidth:112},3:{cellWidth:78},4:{cellWidth:54}}, theme:'grid', contHeading:'Leads and Website Activity (cont.)'});
@@ -46280,6 +46384,8 @@ window._mrSendSelected=async function(){
   if(currentView==='monthlyReports') window._mrRenderRows();
 };
 /* ===== MREPORT_BLOCK_END ===== */
+
+function _mrCleanSeg(s){ s=String(s||''); if(/[<>]/.test(s)) return ''; return s.trim(); }   // QRAUTO-20261008: Mailchimp segment text can be raw HTML
 /* =======================================================
    📎 MONTHLY REPORT ASSETS — marker MRASSETS-20261007
    Sign photo, QR code, website screenshot and website links live on the
@@ -46289,7 +46395,7 @@ window._mrSendSelected=async function(){
    it, and the Monthly Reports tab can assign one per listing.
    ======================================================= */
 const MR_ASSETS_TASK_TITLE='📬 Monthly report assets — upload sign photo, QR code & website links';
-const MR_LINK_LABELS=['Property website (Buildout)','TheDirtDog.com','LoopNet','Crexi','LandWatch / Land.com','MLS','Other'];
+const MR_LINK_LABELS=['Property website (Buildout)','TheDirtDog.com','LoopNet','CoStar','Crexi','LandWatch / Land.com','LandAndFarm','TotalCommercial','MLS','Other'];
 function _mrDealLinks(deal){ return (Array.isArray(deal&&deal.reportLinks)?deal.reportLinks:[]).filter(l=>l&&String(l.url||'').trim()).map(l=>({label:String(l.label||'Website').trim(), url:String(l.url).trim()})); }
 function _mrAssetsMissing(deal){ const m=[]; if(!deal.reportSignPhotoUrl) m.push('sign photo'); if(!deal.reportQrUrl) m.push('QR code'); if(!_mrDealLinks(deal).length) m.push('website links'); return m; }
 function _mrAssetsTaskFor(dealId){ return (typeof allTasks!=='undefined'?allTasks:[]).find(t=>t&&t.dealId===dealId&&t.status!=='complete'&&/monthly report assets/i.test(t.title||'')); }
@@ -46412,27 +46518,55 @@ window._mrAssignAllAssets=async function(btn){
    📧 MAILCHIMP E-BLASTS IN THE MONTHLY REPORT — marker MCREPORT-20261007
    Every e-blast sent through Mailchimp during the report month is pulled
    from the social worker (/mailchimp/campaigns — list, results, hero image),
-   matched to the listing by subject/title (address, street, project name,
-   city, acreage), and printed on the Email Report page as a card with the
+   matched to the listing by its BODY text + subject (street number, street,
+   project name, city/zip, parcel numbers, acreage — MCMATCH-20261007), and printed on the Email Report page as a card with the
    campaign picture and its delivery results. The editor lets you confirm or
    change the match; the choice is saved on the month's report doc as
    emailCampaigns[] + emailCampaignsPicked.
    ======================================================= */
-const MR_MC_STOP=new Set(['land','acres','acre','property','deal','road','street','county','florida','parcel','site','lots','commercial','residential','development','ranch','farm','north','south','east','west','drive','avenue','highway','listing','sale','with','from','the','and','for','zoned','zoning','vacant','offering','opportunity','price','reduced','new','just','listed']);
+const MR_MC_STOP=new Set(['land','acres','acre','property','deal','road','street','county','florida','parcel','site','lots','commercial','residential','development','ranch','farm','north','south','east','west','drive','avenue','highway','listing','sale','with','from','the','and','for','zoned','zoning','vacant','offering','opportunity','price','reduced','new','just','listed','high','school','condo','home','homes','units','entitled','mixed','retail','industrial','multifamily','office','corner','frontage','minutes','available','under','contract','pending','closed','sold','assemblage','outparcel','pad','pads','tract','groves','grove','lake','lakes','creek','river','springs','hill','hills','park','point','pointe','estates','village','center','plaza','crossing','crossings','county','city','blvd','boulevard','pkwy','parkway','trail','loop','lane','court','circle','terrace','place','way']);
 function _mrMcTokens(s){ return String(s||'').toLowerCase().split(/[^a-z0-9]+/).filter(w=>w.length>=4 && !MR_MC_STOP.has(w)); }
-function _mrMcScore(deal, c){
-  const hay=' '+((c.subject||'')+' '+(c.title||'')+' '+(c.preview||'')).toLowerCase().replace(/[^a-z0-9.±]+/g,' ')+' ';
-  let s=0; const seen=new Set();
-  const addr=String(deal.propertyAddress||deal.address||'').toLowerCase();
-  const m=addr.match(/^\s*(\d{2,6})\s+([^,]+)/);
-  if(m){ if(hay.includes(' '+m[1]+' ')) s+=2.5; _mrMcTokens(m[2].replace(/\b(rd|st|ave|hwy|blvd|dr|ln|ct|pkwy|us|sr|cr|fl)\b\.?/g,' ')).forEach(w=>{ if(!seen.has(w)&&hay.includes(w)){ s+=1.5; seen.add(w); } }); }
-  _mrMcTokens(deal.projectName).forEach(w=>{ if(!seen.has(w)&&hay.includes(w)){ s+=1.5; seen.add(w); } });
-  const city=String(deal.city||(addr.split(',')[1]||'')).trim().toLowerCase().replace(/\s+fl.*$/,''); if(city.length>=4 && !seen.has(city) && hay.includes(city)){ s+=1; seen.add(city); }
-  const acres=Number(deal.acres||deal.acreage||0); if(acres>0){ const a=String(Math.round(acres*100)/100); if(hay.includes(' '+a+' ')||hay.includes(' '+a+'±')||hay.includes(a+' ')) s+=2; }
-  return s;
+function _mrMcNorm(s){ return ' '+String(s||'').toLowerCase().replace(/[^a-z0-9.±]+/g,' ')+' '; }
+// Street words of an address line: "11400 US Highway 19 N" → ["11400"? no — the number is scored separately] ["19"] ; "Cortez Blvd" → ["cortez"]
+function _mrMcStreetWords(line){ return String(line||'').toLowerCase().replace(/\b(rd|st|ave|hwy|blvd|dr|ln|ct|pkwy|us|sr|cr|fl|n|s|e|w|ne|nw|se|sw|road|street|avenue|highway|boulevard|drive|lane|court|parkway|north|south|east|west|county)\b\.?/g,' ').split(/[^a-z0-9]+/).filter(w=>w.length>=3 && !/^\d{1,2}$/.test(w) && !MR_MC_STOP.has(w)); }
+/* Score how well an e-blast matches a listing. The HEAD (subject / title / preview) is what the
+   advisor wrote about the property; the BODY (worker's bodyText) is the full e-blast and always
+   carries the property address, zip, parcel numbers and the listing link, so it is the primary
+   evidence. Returns {s, strong}: strong = address-level evidence (street number, street name,
+   parcel/folio, decimal acreage, or 2+ project-name words) — a match needs s ≥ 2.5 AND strong. */
+function _mrMcScoreDetail(deal, c){
+  const head=_mrMcNorm((c.subject||'')+' '+(c.title||'')+' '+(c.preview||''));
+  const body=_mrMcNorm(c.bodyText||''); const hay=head+body;
+  const bodyDigits=' '+String(c.bodyText||'').replace(/[^0-9]+/g,' ')+' ';
+  let s=0, strong=false; const seen=new Set();
+  const addr=String(deal.propertyAddress||deal.address||''); const first=addr.split(',')[0]||'';
+  // street number
+  const num=(first.match(/^\s*(\d{2,6})\b/)||[])[1];
+  if(num && hay.includes(' '+num+' ')){ s+=2.5; strong=true; }
+  // street / road words (with or without a number)
+  _mrMcStreetWords(first.replace(/^\s*\d{2,6}\b/,'')).forEach(w=>{ if(seen.has(w)) return; if(head.includes(' '+w+' ')){ s+=1.5; strong=true; seen.add(w); } else if(body.includes(' '+w+' ')){ s+=1; strong=true; seen.add(w); } });
+  // project name words
+  let nameHits=0;
+  _mrMcTokens(deal.projectName).forEach(w=>{ if(seen.has(w)) return; if(head.includes(' '+w+' ')){ s+=1.5; nameHits++; seen.add(w); } else if(body.includes(' '+w+' ')){ s+=0.75; nameHits++; seen.add(w); } });
+  if(nameHits>=2) strong=true;
+  // city and zip
+  const rest=addr.split(',').slice(1).join(' '); let city=String(deal.city||'').toLowerCase().trim();
+  if(!city){ const m=rest.match(/^\s*([a-z .'-]+?)\s*,?\s*(fl|florida)?\b/i); city=(m&&m[1]||'').toLowerCase().trim(); }
+  city=city.replace(/\s+fl.*$/,'').trim();
+  if(city.length>=4 && !seen.has(city)){ if(head.includes(' '+city+' ')) s+=1; else if(body.includes(' '+city+' ')) s+=0.5; seen.add(city); }
+  const zip=(addr.match(/\b(3[0-4]\d{3})\b/)||[])[1]; if(zip && body.includes(' '+zip+' ')) s+=1;
+  // parcel / folio numbers (digits only, 8+ digits)
+  const ids=[].concat(deal.parcelIds||[], deal.folioNumber||[], deal.parcelId||[]).map(x=>String(x||'').replace(/[^0-9]/g,'')).filter(x=>x.length>=8);
+  if(ids.some(x=>bodyDigits.includes(' '+x+' ')||String(c.bodyText||'').replace(/[^0-9]/g,'').includes(x))){ s+=3; strong=true; }
+  // acreage — decimal acreage is specific ("18.85±"), whole numbers are not
+  const acres=Number(deal.acres||deal.acreage||0);
+  if(acres>0){ const a=String(Math.round(acres*100)/100); const hit=hay.includes(' '+a+' ')||hay.includes(' '+a+'±')||hay.includes(' '+a+'± ');
+    if(hit){ if(a.includes('.')){ s+=2; strong=true; } else s+=1; } }
+  return {s, strong};
 }
+function _mrMcScore(deal, c){ const d=_mrMcScoreDetail(deal,c); return d.strong ? d.s : Math.min(d.s, 2.4); }
 function _mrMcMatch(deal, campaigns){ return (campaigns||[]).filter(c=>_mrMcScore(deal,c)>=2.5); }
-function _mrMcSlim(c){ return {id:c.id, subject:c.subject||'', title:c.title||'', sendTime:c.sendTime||'', emailsSent:c.emailsSent||0, uniqueOpens:c.uniqueOpens||0, openRate:c.openRate||0, uniqueClicks:c.uniqueClicks||0, clickRate:c.clickRate||0, image:c.image||'', archiveUrl:c.archiveUrl||'', segment:c.segment||''}; }
+function _mrMcSlim(c){ return {id:c.id, subject:c.subject||'', title:c.title||'', sendTime:c.sendTime||'', emailsSent:c.emailsSent||0, uniqueOpens:c.uniqueOpens||0, openRate:c.openRate||0, uniqueClicks:c.uniqueClicks||0, clickRate:c.clickRate||0, image:c.image||'', archiveUrl:c.archiveUrl||'', segment:c.segment||'', listName:c.listName||''}; }
 function _mrMcRow(c){ return {title:c.subject||c.title||'E-blast', date:_mrLocalDate(Date.parse(c.sendTime)||Date.now()), recipients:String(c.emailsSent||''), opens:String(c.uniqueOpens||''), clicks:String(c.uniqueClicks||'')}; }
 // All sent campaigns in the month — one worker call per month per session (shared by every listing's report).
 async function _mrMcCampaigns(ym){
@@ -46442,9 +46576,14 @@ async function _mrMcCampaigns(ym){
 }
 // What prints for this listing/month: the saved pick if one was made, otherwise the automatic match.
 async function _mrMcForReport(deal, ym, rep){
-  if(rep && rep.emailCampaignsPicked) return (rep.emailCampaigns||[]).map(_mrMcSlim);
-  try{ const all=await _mrMcCampaigns(ym); return _mrMcMatch(deal,all).map(_mrMcSlim); }
-  catch(e){ console.warn('[mr] mailchimp',e.message); return ((rep&&rep.emailCampaigns)||[]).map(_mrMcSlim); }
+  let base, fresh=[];
+  if(rep && rep.emailCampaignsPicked) base=(rep.emailCampaigns||[]).map(_mrMcSlim);
+  else { try{ fresh=await _mrMcCampaigns(ym); base=_mrMcMatch(deal,fresh).map(_mrMcSlim); } catch(e){ console.warn('[mr] mailchimp',e.message); base=((rep&&rep.emailCampaigns)||[]).map(_mrMcSlim); } }
+  // E-blasts sent from Terra are pinned on the report doc (MCBLAST-20261007) — always included, with fresh results when Mailchimp has them.
+  const pinned=(rep&&Array.isArray(rep.emailCampaignsPinned))?rep.emailCampaignsPinned:[];
+  if(pinned.length){ if(!fresh.length){ try{ fresh=await _mrMcCampaigns(ym); }catch(_){ } }
+    pinned.forEach(p=>{ if(!p||!p.id||base.some(b=>b.id===p.id)) return; const f=fresh.find(c=>c.id===p.id); base.push(f?_mrMcSlim(f):_mrMcSlim(p)); }); }
+  return base;
 }
 // Mailchimp-hosted images are fetched through the worker so the PDF canvas is not tainted.
 async function _mrMcImage(url){
@@ -46488,7 +46627,7 @@ window._mrOpenMcPicker=async function(btn){
     <div class="mr-modal-h"><h2>📧 ${_mrEsc(_mrMonthLabel(ed.ym))} e-blasts — ${_mrEsc(_mrDealName(ed.deal))}</h2><span style="flex:1"></span><button class="mr-x" aria-label="Close" onclick="document.getElementById('mr-mc-ov').remove()">✕</button></div>
     <div class="mr-modal-b">
       <p class="mr-note" style="margin:0 0 .6rem">${all.length} campaign${all.length===1?'':'s'} went out through Mailchimp in ${_mrEsc(_mrMonthLabel(ed.ym))}. Tick the ones about this listing — likely matches are listed first and pre-ticked.</p>
-      ${all.length?`<div style="display:flex;flex-direction:column;gap:.4rem;max-height:52vh;overflow:auto">${scored.map(({c,s})=>`<label style="display:flex;gap:.6rem;align-items:center;border:1px solid var(--border);border-radius:10px;padding:.4rem .6rem;cursor:pointer;${s>=2.5?'background:rgba(79,195,201,.08)':''}"><input type="checkbox" class="mr-mc-pick" value="${_mrEsc(c.id)}" ${chosen.has(c.id)||(!ed.emailCampaignsPicked&&s>=2.5)?'checked':''}>${c.image?`<img src="${_mrEsc(c.image)}" alt="" style="width:64px;height:48px;object-fit:cover;border-radius:6px">`:`<div style="width:64px;height:48px;border-radius:6px;background:var(--bg)"></div>`}<div style="min-width:0;font-size:.8rem;line-height:1.35"><div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${_mrEsc(c.subject||c.title)}</div><div class="mr-muted">${_mrEsc(_mrFmtDateLong(Date.parse(c.sendTime)||0))} · ${Number(c.emailsSent||0).toLocaleString()} sent · ${c.openRate||0}% opened · ${c.clickRate||0}% clicked${c.segment?' · '+_mrEsc(c.segment):''}</div></div>${s>=2.5?'<span style="margin-left:auto;font-size:.7rem;color:#047857;background:#d1fae5;border-radius:999px;padding:.1rem .5rem;white-space:nowrap">likely match</span>':''}</label>`).join('')}</div>`:'<p class="mr-muted">Nothing was sent through Mailchimp this month.</p>'}
+      ${all.length?`<div style="display:flex;flex-direction:column;gap:.4rem;max-height:52vh;overflow:auto">${scored.map(({c,s})=>`<label style="display:flex;gap:.6rem;align-items:center;border:1px solid var(--border);border-radius:10px;padding:.4rem .6rem;cursor:pointer;${s>=2.5?'background:rgba(79,195,201,.08)':''}"><input type="checkbox" class="mr-mc-pick" value="${_mrEsc(c.id)}" ${chosen.has(c.id)||(!ed.emailCampaignsPicked&&s>=2.5)?'checked':''}>${c.image?`<img src="${_mrEsc(c.image)}" alt="" style="width:64px;height:48px;object-fit:cover;border-radius:6px">`:`<div style="width:64px;height:48px;border-radius:6px;background:var(--bg)"></div>`}<div style="min-width:0;font-size:.8rem;line-height:1.35"><div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${_mrEsc(c.subject||c.title)}</div><div class="mr-muted">${_mrEsc(_mrFmtDateLong(Date.parse(c.sendTime)||0))} · ${Number(c.emailsSent||0).toLocaleString()} sent · ${c.openRate||0}% opened · ${c.clickRate||0}% clicked${_mrCleanSeg(c.segment)?' · '+_mrEsc(_mrCleanSeg(c.segment)):''}</div></div>${s>=2.5?'<span style="margin-left:auto;font-size:.7rem;color:#047857;background:#d1fae5;border-radius:999px;padding:.1rem .5rem;white-space:nowrap">likely match</span>':''}</label>`).join('')}</div>`:'<p class="mr-muted">Nothing was sent through Mailchimp this month.</p>'}
     </div>
     <div class="mr-modal-f"><span style="flex:1"></span><button class="mr-btn" onclick="document.getElementById('mr-mc-ov').remove()">Cancel</button><button class="mr-btn mr-btn-primary" onclick="window._mrMcApplyPick()">Use selected</button></div></div>`;
   document.body.appendChild(ov); ov.addEventListener('click',e=>{ if(e.target===ov) ov.remove(); });
@@ -46547,6 +46686,7 @@ window._mrOffersEditorHtml=function(deal, rep){
   const row=(o,i)=>`<div class="mr-offer" data-i="${i}" data-id="${_mrEsc(o.id||'')}" style="border:1px solid var(--border);border-radius:12px;padding:.7rem .8rem;margin-bottom:.6rem;background:var(--surface)">
     <div class="mr-row" style="justify-content:space-between;align-items:center;margin-bottom:.4rem"><label style="display:flex;gap:.4rem;align-items:center;font-weight:700"><input type="checkbox" data-k="reportInclude" ${o.reportInclude?'checked':''}> ${o.buyer?_mrEsc(o.buyer):'Offer '+(offers.length-i)} ${o.price?'· '+_mrFmtMoney(o.price):''}</label>
       <span class="mr-row" style="gap:.4rem">${o.fileUrl?`<a class="mr-btn mr-btn-sm" href="${_mrEsc(o.fileUrl)}" target="_blank" rel="noopener">📄 ${_mrEsc(o.fileName||'LOI')}</a><button class="mr-btn mr-btn-sm mr-btn-teal" onclick="window._mrOfferExtract(this,${i})">✨ Fill terms from the LOI</button>`:''}</span></div>
+    ${o.needsVerification?`<div class="mr-note" style="background:#fff7e0;border:1px solid #e8c766;border-radius:8px;padding:.35rem .55rem;margin-bottom:.45rem">⚠️ Created automatically from an email${o.gmailSubject?` (“${_mrEsc(o.gmailSubject)}”)`:''}. Check the price and terms against the offer, then save — saving marks it verified.</div>`:''}
     <div class="mr-grid3">
       <div><span class="mr-lbl">Buyer</span><input class="mr-input" data-k="buyer" value="${_mrEsc(o.buyer)}" placeholder="Buyer / entity"></div>
       <div><span class="mr-lbl">Offer price ($)</span><input class="mr-input" data-k="price" inputmode="numeric" value="${_mrEsc(o.price||'')}"></div>
@@ -46576,7 +46716,7 @@ window._mrOffersCollect=function(deal){
   rows.forEach(r=>{ const id=r.dataset.id; const l=lois.find(x=>x.id===id); if(!l) return;
     const v=k=>{ const el=r.querySelector('[data-k="'+k+'"]'); return el?(el.type==='checkbox'?el.checked:el.value.trim()):undefined; };
     const patch={ buyer:v('buyer'), price:v('price')===''?'':_mrNum(v('price')), status:v('status'), receivedAt:v('receivedAt'), deposit:v('deposit')===''?'':_mrNum(v('deposit')), estClose:v('estClose'), ddTerms:v('ddTerms'), buyerBroker:v('buyerBroker'), commissionPct:v('commissionPct')===''?'':_mrNum(v('commissionPct')), contingencies:v('contingencies'), reportNotes:v('notes'), reportInclude:v('reportInclude') };
-    Object.entries(patch).forEach(([k,val])=>{ if(val===undefined) return; if((l[k]??'')!==val){ l[k]=val; changed=true; } }); });
+    Object.entries(patch).forEach(([k,val])=>{ if(val===undefined) return; if((l[k]??'')!==val){ l[k]=val; changed=true; } }); if(l.needsVerification){ l.needsVerification=false; l.verifiedAt=Date.now(); changed=true; } });
   return changed?lois:null;
 };
 // ✨ pull the terms out of the LOI PDF with the firm's AI proxy
@@ -46640,6 +46780,417 @@ window._mrDrawOffers=function(R,doc,font,A,y){
   return y;
 };
 /* ===== OFFERS_BLOCK_END ===== */
+/* =======================================================
+   📧 MONTHLY E-BLAST GUARANTEE — marker MCBLAST-20261007
+   Every listing still in the Listing column (no LOI — an LOI moves the card
+   to the LOI column) gets at least one Mailchimp e-blast each month, so the
+   Monthly Marketing Report always has an Email Report page.
+     • Runner (_mbRun): on the Monthly Reports tab and ~20 s after an admin /
+       staff login. For each eligible listing with no e-blast matched this
+       month → one task for Nick and one for the listing advisor (due the
+       20th; either completes both). Once an e-blast is found or sent, the
+       tasks close themselves. From the 25th, if a prior e-blast exists for
+       the listing, Terra resends it to the same audience automatically
+       ("Still Available: …") — APP_CONFIG.mcBlast.autoResend.
+     • Composer (_mbOpen): resend a prior e-blast to the same groups (Mailchimp
+       replicate → retitle → test / schedule / send), or build a new one from
+       the deal card (audience segments/tags, AI-drafted copy, hero photo,
+       advisor block) through the social worker.
+     • Whatever is sent is pinned to that month's report doc
+       (monthlyReports/{ym}.emailCampaignsPinned[]) and logged on the deal
+       (deal.mcBlastLog[ym]) and its history.
+   ======================================================= */
+const MR_BLAST_TASK_TITLE='📧 Monthly e-blast';
+function _mbCfg(){ return (APP_CONFIG.mcBlast = APP_CONFIG.mcBlast || {enabled:true, dueDay:20, autoDay:25, autoResend:true}); }
+function _mbYm(){ return _mrLocalDate(Date.now()).slice(0,7); }
+function _mbEligible(d){ return _mrStageOf(d)==='Listing' && _mrIsSellerRep(d) && !d.archived; }
+window._mrIsBlastTask=function(t){ return !!(t && t.dealId && t.status!=='complete' && /monthly e-blast/i.test(t.title||'')); };
+function _mbTasksFor(dealId, ym){ return (typeof allTasks!=='undefined'?allTasks:[]).filter(t=>t&&t.dealId===dealId&&/monthly e-blast/i.test(t.title||'')&&(!ym||t.mcBlastMonth===ym)); }
+function _mbOpenTasksFor(dealId, ym){ return _mbTasksFor(dealId, ym).filter(t=>t.status!=='complete'); }
+function _mbLog(d, ym){ return (d.mcBlastLog&&d.mcBlastLog[ym])||null; }
+function _mbSlim(c){ return {id:c.id||'', subject:c.subject||'', title:c.title||'', sendTime:c.sendTime||'', emailsSent:c.emailsSent||c.recipientCount||0, uniqueOpens:c.uniqueOpens||0, openRate:c.openRate||0, uniqueClicks:c.uniqueClicks||0, clickRate:c.clickRate||0, image:c.image||'', archiveUrl:c.archiveUrl||'', segment:c.segment||'', listName:c.listName||''}; }
+
+/* ---- status for one listing / month ---- */
+async function _mbStatus(deal, ym, force){
+  const st=window._mrState; st.mb=st.mb||{}; const key=deal.id+'|'+ym;
+  if(st.mb[key] && !force && !st.mb[key].error) return st.mb[key];
+  const rep=await _mrLoadReport(deal.id, ym);
+  let sent=[], error='';
+  try{ sent=await _mrMcForReport(deal, ym, rep); }catch(e){ error=e.message; }
+  const log=_mbLog(deal, ym);
+  if(log && log.campaignId && !sent.some(c=>c.id===log.campaignId)) sent=[{id:log.campaignId, subject:log.subject||'', sendTime:log.sentAt?new Date(log.sentAt).toISOString():'', emailsSent:log.recipientCount||0, segment:log.segment||'', listName:log.listName||'', archiveUrl:log.archiveUrl||'', image:'', pending:true}, ...sent];
+  st.mb[key]={sent, log, error, at:Date.now(), tasks:_mbOpenTasksFor(deal.id, ym)};
+  return st.mb[key];
+}
+/* ---- prior e-blasts for a listing (last 6 months, matched on body text) ---- */
+async function _mbPrior(deal, force){
+  const st=window._mrState; st.mbPrior=st.mbPrior||{};
+  if(st.mbPrior[deal.id] && !force) return st.mbPrior[deal.id];
+  const months=[]; const now=new Date(); for(let i=0;i<6;i++){ const d=new Date(now.getFullYear(), now.getMonth()-i, 1); months.push(d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')); }
+  const lists=await Promise.all(months.map(ym=>_mrMcCampaigns(ym).catch(()=>[])));
+  const seen=new Set(); const out=[];
+  lists.flat().forEach(c=>{ if(seen.has(c.id)) return; if(_mrMcScore(deal,c)>=2.5){ seen.add(c.id); out.push(c); } });
+  Object.values(deal.mcBlastLog||{}).forEach(l=>{ if(l&&l.campaignId&&!seen.has(l.campaignId)){ seen.add(l.campaignId); out.push({id:l.campaignId, subject:l.subject||'', sendTime:l.sentAt?new Date(l.sentAt).toISOString():'', segment:l.segment||'', listName:l.listName||'', archiveUrl:l.archiveUrl||'', emailsSent:l.recipientCount||0}); } });
+  out.sort((a,b)=>(b.sendTime||'').localeCompare(a.sendTime||''));
+  st.mbPrior[deal.id]=out; return out;
+}
+/* ---- tasks ---- */
+function _mbDueDate(ym){ const [y,m]=ym.split('-').map(Number); const cfg=_mbCfg(); let due=new Date(y,m-1,cfg.dueDay||20); const soon=new Date(); soon.setDate(soon.getDate()+2); if(due<soon) due=soon; return _mrLocalDate(due.getTime()); }
+async function _mbCreateTasks(deal, ym){
+  const nick=_mrNickProfile(); const adv=_mrAdvisorsOf(deal)[0]||{};
+  const owners=[{uid:nick.uid||nick.email, name:nick.name, email:nick.email}];
+  if(adv.email && adv.email!==nick.email) owners.push({uid:deal.advisorUid||adv.uid||adv.email, name:adv.name||deal.advisorName||'', email:adv.email});
+  const title=MR_BLAST_TASK_TITLE+' — '+(typeof _taskHeadlineName==='function'?_taskHeadlineName(deal):_mrDealName(deal))+' ('+_mrMonthLabel(ym)+')';
+  const desc='No Mailchimp e-blast has gone out on this listing in '+_mrMonthLabel(ym)+'. Every active listing needs at least one e-blast a month so the owner’s Monthly Marketing Report has an Email Report page.\n\nProperty: '+_mrDealAddr(deal)+'\nAdvisor: '+(deal.advisorName||deal.advisorEmail||'')+'\n\nClick 📧 Compose e-blast on this task (or on the deal card) to resend the last e-blast to the same groups, or build a new one and pick the audience. Either Nick or the advisor sending it completes both tasks.'+(_mbCfg().autoResend!==false?'\n\nIf nothing goes out by the '+(_mbCfg().autoDay||25)+'th and a prior e-blast exists, Terra resends it to the same groups automatically.':'');
+  const ids=[];
+  for(const o of owners){
+    ids.push(await Store.createTask({ title, description:desc, assignedTo:o.uid, assignedToName:o.name, assignedToEmail:o.email, dealId:deal.id, dealAddress:deal.propertyAddress||'', dueDate:_mbDueDate(ym), status:'pending', mcBlastMonth:ym,
+      createdBy:(typeof currentUser!=='undefined'&&currentUser)?currentUser.uid:'system', createdByName:'Monthly Reports', createdAt:Date.now() }));
+  }
+  return ids;
+}
+async function _mbCloseTasks(dealId, ym){ for(const t of _mbOpenTasksFor(dealId, ym)){ try{ await window.toggleTask(t.id,'complete'); }catch(e){ console.warn('[mb] close task',e); } } }
+
+/* ---- record a send: deal log + pin on the month's report + history + tasks ---- */
+async function _mbRecordSent(deal, ym, campaign, mode, extra){
+  const now=Date.now(); const slim=_mbSlim(campaign); const log={...(deal.mcBlastLog||{})};
+  log[ym]={...(log[ym]||{}), campaignId:campaign.id, subject:campaign.subject||'', sentAt:now, mode, status:campaign.status||mode, by:currentUser?.uid||'', byName:currentUser?.name||'', segment:campaign.segment||'', listName:campaign.listName||'', archiveUrl:campaign.archiveUrl||'', editUrl:campaign.editUrl||'', recipientCount:campaign.recipientCount||0, scheduleAt:(extra&&extra.scheduleAt)||'', replicatedFrom:(extra&&extra.replicatedFrom)||''};
+  await Store.updateDeal(deal.id,{mcBlastLog:log, updatedAt:now}); deal.mcBlastLog=log;
+  try{ const rep=await _mrLoadReport(deal.id, ym); const pinned=((rep&&rep.emailCampaignsPinned)||[]).filter(c=>c.id!==slim.id); pinned.push(slim); await _mrSaveReport(deal.id, ym, {emailCampaignsPinned:pinned}); }catch(e){ console.warn('[mb] pin',e); }
+  try{ await window._dealLogActivity(deal.id,'note',{ body:'📧 '+(mode==='auto'?'Terra automatically resent':mode==='schedule'?'Scheduled':'Sent')+' a Mailchimp e-blast: “'+(campaign.subject||'')+'” → '+(campaign.listName||'audience')+(campaign.segment?' · '+campaign.segment:'')+(campaign.recipientCount?' ('+campaign.recipientCount.toLocaleString()+' recipients)':'')+(campaign.archiveUrl?' '+campaign.archiveUrl:''), source:'mailchimp-blast', autoLogged:true }); }catch(e){ console.warn('[mb] log',e); }
+  await _mbCloseTasks(deal.id, ym);
+  const st=window._mrState; if(st&&st.mb) delete st.mb[deal.id+'|'+ym]; if(st&&st.mbPrior) delete st.mbPrior[deal.id];
+}
+
+/* ---- the runner ---- */
+window._mbRun=async function(opts){
+  opts=opts||{}; const cfg=_mbCfg(); if(cfg.enabled===false) return;
+  if(!currentUser || !(currentUser.isAdmin||currentUser.isSuperAdmin||currentUser.isStaff||currentUser.isOfficeManager)) return;   // one runner role → no duplicate tasks
+  const st=window._mrState; if(!st) return; if(st.mbRunning) return; st.mbRunning=true;
+  const ym=_mbYm(); const day=new Date().getDate(); const result={created:0, closed:0, auto:0, autoSkipped:[], errors:[]};
+  try{
+    const deals=(allDeals||[]).filter(_mbEligible);
+    try{ await _mrMcCampaigns(ym); }catch(e){ result.errors.push('Mailchimp: '+e.message); st.mbRunning=false; if(!opts.silent) showToast('E-blast check skipped — '+e.message,'warning'); return result; }
+    for(const d of deals){
+      try{
+        const s=await _mbStatus(d, ym, true);
+        const open=_mbOpenTasksFor(d.id, ym);
+        if(s.sent.length){ if(open.length){ await _mbCloseTasks(d.id, ym); result.closed++; } continue; }
+        if(!_mbTasksFor(d.id, ym).length){ await _mbCreateTasks(d, ym); result.created++; continue; }
+        if(open.length && day>=(cfg.autoDay||25) && cfg.autoResend!==false && !(s.log&&s.log.autoAttemptedAt)){
+          const prior=await _mbPrior(d); const last=prior.find(c=>c.id);
+          const log={...(d.mcBlastLog||{})}; log[ym]={...(log[ym]||{}), autoAttemptedAt:Date.now()};
+          if(!last){ log[ym].autoSkipped='no prior e-blast'; await Store.updateDeal(d.id,{mcBlastLog:log}); d.mcBlastLog=log; result.autoSkipped.push(_mrDealName(d)); continue; }
+          await Store.updateDeal(d.id,{mcBlastLog:log}); d.mcBlastLog=log;   // mark first so two runners never double-send
+          const subject=/^still available/i.test(last.subject||'')?last.subject:('Still Available: '+(last.subject||_mrDealName(d)));
+          const r=await _spWorkerPost('/mailchimp/replicate',{campaignId:last.id, subject, mode:'send'});
+          await _mbRecordSent(d, ym, r.campaign, 'auto', {replicatedFrom:last.id}); result.auto++;
+        }
+      }catch(e){ console.error('[mb]',d.id,e); result.errors.push(_mrDealName(d)+': '+e.message); }
+    }
+  } finally { st.mbRunning=false; st.mbLastRun={at:Date.now(), ym, ...result}; }
+  if(!opts.silent){ const bits=[]; if(result.created) bits.push(result.created+' listing'+(result.created===1?'':'s')+' → e-blast tasks created'); if(result.closed) bits.push(result.closed+' task'+(result.closed===1?'':'s')+' closed (e-blast found)'); if(result.auto) bits.push(result.auto+' resent automatically'); if(result.autoSkipped.length) bits.push(result.autoSkipped.length+' could not auto-resend (no prior e-blast)'); if(result.errors.length) bits.push(result.errors.length+' error'+(result.errors.length===1?'':'s')); showToast(bits.length?bits.join(' · '):'Every active listing already has an e-blast this month ✓', result.errors.length?'warning':'success', 7000); }
+  if(currentView==='monthlyReports' && window._mrRenderRows) window._mrRenderRows();
+  return result;
+};
+setTimeout(()=>{ try{ if(typeof _mrCanAccess==='function' && _mrCanAccess()) window._mbRun({silent:true}); }catch(_){} }, 20000);
+
+/* ---- Monthly Reports table cell + deal-card block ---- */
+window._mbCellHtml=function(d, ym){
+  if(!_mbEligible(d)) return `<span class="mr-muted" style="font-size:.72rem">—</span>`;
+  const st=window._mrState; st.mb=st.mb||{}; const s=st.mb[d.id+'|'+ym];
+  if(!s){ _mbStatus(d, ym).then(()=>{ const cell=document.getElementById('mb-cell-'+d.id); if(cell) cell.outerHTML=window._mbCellHtml(d, ym); }); return `<span id="mb-cell-${d.id}" class="mr-muted" style="font-size:.72rem">…</span>`; }
+  const open=_mbOpenTasksFor(d.id, ym);
+  if(s.sent.length){ const c=s.sent[0]; return `<span id="mb-cell-${d.id}"><span style="font-size:.72rem;color:#047857;background:#d1fae5;border-radius:999px;padding:.1rem .5rem" title="${_mrEsc((c.subject||'')+(c.sendTime?' · '+_mrFmtDate(c.sendTime):''))}">✓ ${s.sent.length}${c.pending?' (scheduled)':''}</span></span>`; }
+  return `<span id="mb-cell-${d.id}"><span style="font-size:.72rem;color:#b45309;background:#fef3c7;border-radius:999px;padding:.1rem .5rem" title="No e-blast matched to this listing in ${_mrEsc(_mrMonthLabel(ym))}">none</span>${open.length?`<div class="mr-muted" style="font-size:.68rem">→ ${_mrEsc([...new Set(open.map(t=>_mrFirstName(t.assignedToName)||'?'))].join(' & '))}</div>`:''}<div><button class="mr-btn mr-btn-sm" style="font-size:.68rem;padding:.1rem .4rem" onclick="window._mbOpen('${d.id}')">📧 Send</button></div></span>`;
+};
+window._mbMarketingBlock=function(deal){
+  if(!deal || !_mbEligible(deal)) return '';
+  const ym=_mbYm(); const log=_mbLog(deal, ym); const open=_mbOpenTasksFor(deal.id, ym);
+  const prior=Object.values(deal.mcBlastLog||{}).filter(l=>l&&l.campaignId).length;
+  return `<div style="display:flex;flex-wrap:wrap;gap:.4rem;align-items:center">
+    <button class="prop-note-btn" onclick="window._mbOpen('${deal.id}')" title="Resend the last e-blast to the same groups, or build a new one">📧 E-blast</button>
+    <span style="font-size:.7rem;color:#6E7480">${log&&log.campaignId?`${_mrMonthLabel(ym)}: ${log.mode==='auto'?'auto-resent':log.mode==='schedule'?'scheduled':'sent'} ${_mrFmtDate(log.sentAt)}${log.archiveUrl?` · <a href="${_mrEsc(log.archiveUrl)}" target="_blank" rel="noopener" style="color:#0A66C2;font-weight:600">view</a>`:''}`:(open.length?`${_mrMonthLabel(ym)}: task open → ${_mrEsc([...new Set(open.map(t=>_mrFirstName(t.assignedToName)))].join(' & '))}`:`${_mrMonthLabel(ym)}: not checked yet`)}${prior?' · '+prior+' sent from Terra':''}</span>
+  </div>`;
+};
+
+/* ---- composer ---- */
+function _mbAdvisorFor(deal){ const a=_mrAdvisorsOf(deal)[0]||{}; return {name:a.name||deal.advisorName||'', email:a.email||(deal.advisorEmail||'').toLowerCase(), phone:a.phone||'', designations:a.designations||'', title:a.title||'', headshot:a.headshotUrl||''}; }
+function _mbDefaultCopy(deal){
+  const price=_mrDealPrice(deal); const bits=[];
+  if(deal.acreage) bits.push(Number(deal.acreage).toLocaleString('en-US',{maximumFractionDigits:2})+'± acres'); if(deal.county) bits.push(deal.county+' County'); if(deal.zoning) bits.push('zoned '+deal.zoning); if(deal.landType) bits.push(deal.landType);
+  return { subject:(deal.acreage?Number(deal.acreage).toLocaleString('en-US',{maximumFractionDigits:2})+'± Acres':_mrDealName(deal))+(deal.county?' in '+deal.county+' County':'')+(price?' — '+_mrFmtMoney(price):''),
+    previewText:_mrDealAddr(deal), headline:_mrDealName(deal), body:'Still available: '+_mrDealName(deal)+(bits.length?' — '+bits.join(', '):'')+'. Contact us for the offering memorandum, survey and due-diligence materials.', bullets:bits };
+}
+async function _mbAiCopy(deal){
+  const adv=_mbAdvisorFor(deal);
+  const sys='You write e-mail marketing for Eshenbaugh Land Company, a Florida land brokerage. Return ONLY a JSON object with keys: subject (≤ 70 chars, concrete, no clickbait), previewText (≤ 90 chars), headline (≤ 60 chars), body (2 short paragraphs, 50-90 words total, plain text, only facts given, no invented numbers), bullets (3-5 short facts/selling points, strings). No markdown.';
+  const user='Property: '+_mrDealName(deal)+'\nAddress: '+_mrDealAddr(deal)+'\nAcreage: '+(deal.acreage||'n/a')+'\nCounty: '+(deal.county||'n/a')+'\nZoning: '+(deal.zoning||'n/a')+'\nFuture land use: '+(deal.futureLandUse||deal.flu||'n/a')+'\nLand type: '+(deal.landType||'n/a')+'\nAsking price: '+(_mrFmtMoney(_mrDealPrice(deal))||'call for details')+'\nHighlights / notes: '+String(deal.highlights||deal.description||deal.notes||'').replace(/\s+/g,' ').slice(0,700)+'\nAdvisor: '+adv.name;
+  const txt=await leadAI(sys,user,700); const m=String(txt||'').match(/\{[\s\S]*\}/); if(!m) throw new Error('AI did not return JSON'); const j=JSON.parse(m[0]);
+  return { subject:String(j.subject||'').trim(), previewText:String(j.previewText||'').trim(), headline:String(j.headline||'').trim(), body:String(j.body||'').trim(), bullets:Array.isArray(j.bullets)?j.bullets.map(x=>String(x).trim()).filter(Boolean):[] };
+}
+function _mbWhenDefault(){ const d=new Date(Date.now()+60*60*1000); d.setMinutes(0,0,0); d.setHours(d.getHours()+1); return _mrLocalDate(d.getTime())+'T'+String(d.getHours()).padStart(2,'0')+':00'; }
+function _mbModeHtml(prefix){
+  return `<div class="mr-row" style="gap:.9rem;flex-wrap:wrap;margin-top:.5rem">
+    <label style="cursor:pointer"><input type="radio" name="${prefix}-mode" value="test" checked> Send me a test first</label>
+    <label style="cursor:pointer"><input type="radio" name="${prefix}-mode" value="send"> Send now</label>
+    <label style="cursor:pointer"><input type="radio" name="${prefix}-mode" value="schedule"> Schedule <input type="datetime-local" id="${prefix}-when" class="mr-input" style="width:auto" value="${_mbWhenDefault()}"></label>
+  </div>`;
+}
+window._mbOpen=async function(dealId, taskId){
+  const deal=(allDeals||[]).find(d=>d.id===dealId); if(!deal){ showToast('Deal not found','error'); return; }
+  _mrInjectStyles(); document.getElementById('mb-ov')?.remove();
+  const ym=_mbYm(); const adv=_mbAdvisorFor(deal); const photos=(typeof _spPhotoCandidates==='function')?_spPhotoCandidates(deal):[]; const link=(typeof _spLinkFor==='function')?_spLinkFor(deal):'https://www.thedirtdog.com';
+  const copy=_mbDefaultCopy(deal);
+  window._mbState={dealId, deal, ym, taskId:taskId||'', adv, hero:photos[0]?photos[0].url:'', link, prior:null, audience:null, draftId:'', draftKind:'', busy:false};
+  const ov=document.createElement('div'); ov.className='mr-ov fixed inset-0 flex items-center justify-center'; ov.id='mb-ov';
+  ov.innerHTML=`<div class="mr-modal" style="width:min(980px,100%)" role="dialog" aria-label="Monthly e-blast">
+    <div class="mr-modal-h"><div style="min-width:0"><h2>📧 E-blast — ${_mrEsc(_mrDealName(deal))}</h2><div class="mr-muted" id="mb-status">Checking ${_mrEsc(_mrMonthLabel(ym))} and prior e-blasts…</div></div><span style="flex:1"></span><button class="mr-x" aria-label="Close" onclick="window._mbClose()">✕</button></div>
+    <div class="mr-modal-b" style="display:grid;gap:1rem">
+      <div class="mr-sec"><h3>Resend a prior e-blast to the same groups</h3><div id="mb-prior" class="mr-muted">Loading…</div></div>
+      <div class="mr-sec"><h3>Or build a new e-blast</h3>
+        <div class="mr-grid2" style="align-items:start">
+          <div style="display:grid;gap:.6rem">
+            <div><div class="mr-lbl">Audience <span class="mr-note">(tags / saved segments — pick one or more)</span></div><div id="mb-aud" class="mr-muted">Loading audiences…</div></div>
+            <div class="mr-row" style="justify-content:space-between"><span class="mr-note">From ${_mrEsc(adv.name||'Eshenbaugh Land Company')}${adv.email?' · '+_mrEsc(adv.email):''}</span><button class="mr-btn mr-btn-sm" onclick="window._mbDraft(this)">✨ AI draft</button></div>
+            <label class="mr-lbl">Subject<input id="mb-subject" class="mr-input" style="width:100%" value="${_mrEsc(copy.subject)}" oninput="window._mbPreview()"></label>
+            <label class="mr-lbl">Preview text<input id="mb-preview" class="mr-input" style="width:100%" value="${_mrEsc(copy.previewText)}"></label>
+            <label class="mr-lbl">Headline<input id="mb-headline" class="mr-input" style="width:100%" value="${_mrEsc(copy.headline)}" oninput="window._mbPreview()"></label>
+            <label class="mr-lbl">Price line<input id="mb-price" class="mr-input" style="width:100%" value="${_mrEsc(_mrFmtMoney(_mrDealPrice(deal)))}" oninput="window._mbPreview()"></label>
+            <label class="mr-lbl">Body<textarea id="mb-body" class="mr-textarea" style="min-height:110px" oninput="window._mbPreview()">${_mrEsc(copy.body)}</textarea></label>
+            <label class="mr-lbl">Bullets <span class="mr-note">(one per line)</span><textarea id="mb-bullets" class="mr-textarea" style="min-height:80px" oninput="window._mbPreview()">${_mrEsc(copy.bullets.join('\n'))}</textarea></label>
+            <label class="mr-lbl">Link<input id="mb-link" class="mr-input" style="width:100%" value="${_mrEsc(link)}" oninput="window._mbPreview()"></label>
+            <div><div class="mr-lbl">Photo</div><div class="mr-row" style="gap:.5rem">${photos.map((p,i)=>`<label title="${_mrEsc(p.label)}" style="cursor:pointer;position:relative"><input type="radio" name="mb-photo" value="${_mrEsc(p.url)}" ${i===0?'checked':''} onchange="window._mbState.hero=this.value;window._mbPreview()" style="position:absolute;top:4px;left:4px"><img class="mr-thumb" src="${_mrEsc(p.url)}" alt=""></label>`).join('')||'<span class="mr-note">No photo on the deal card yet — add one in 📬 Monthly report assets.</span>'}</div></div>
+            ${_mbModeHtml('mb')}
+            <div class="mr-row" style="gap:.5rem;margin-top:.3rem"><button class="mr-btn mr-btn-primary" id="mb-create-btn" onclick="window._mbCreate(this)">📧 Build & send</button><span class="mr-note" id="mb-create-note"></span></div>
+          </div>
+          <div style="position:sticky;top:0"><div class="mr-lbl">Preview</div><div id="mb-pv" style="border:1px solid var(--line,#e5e7eb);border-radius:8px;overflow:hidden;background:#f3f4f6;padding:10px"></div></div>
+        </div>
+      </div>
+      <p class="mr-note">Whatever you send here is pinned to the ${_mrEsc(_mrMonthLabel(ym))} Monthly Marketing Report for this listing and logged on the deal’s history.</p>
+    </div>
+    <div class="mr-modal-f"><span class="mr-note" id="mb-foot"></span><span style="flex:1"></span><button class="mr-btn" onclick="window._mbClose()">Close</button></div>
+  </div>`;
+  document.body.appendChild(ov); window._mbPreview();
+  _mbStatus(deal, ym).then(s=>{ const el=document.getElementById('mb-status'); if(!el||!window._mbState) return; el.textContent=s.sent.length?(_mrMonthLabel(ym)+': '+s.sent.length+' e-blast'+(s.sent.length===1?'':'s')+' already on this listing ✓ — '+(s.sent[0].subject||'')):(_mrMonthLabel(ym)+': no e-blast yet on this listing.'); });
+  _mbPrior(deal).then(prior=>{ const st=window._mbState; if(!st) return; st.prior=prior; const box=document.getElementById('mb-prior'); if(!box) return;
+    if(!prior.length){ box.innerHTML='<span class="mr-muted">No e-blast about this listing in the last 6 months — build a new one below.</span>'; return; }
+    box.className=''; box.innerHTML=prior.slice(0,6).map((c,i)=>`<div class="mr-row" style="gap:.7rem;align-items:flex-start;padding:.45rem 0;border-top:${i?'1px solid var(--line,#e5e7eb)':'0'}">
+      ${c.image?`<img class="mr-thumb" src="${_mrEsc(c.image)}" alt="" style="width:88px;height:56px">`:`<div class="mr-thumb" style="width:88px;height:56px"></div>`}
+      <div style="flex:1;min-width:0"><div style="font-weight:700">${_mrEsc(c.subject||c.title||'E-blast')}</div><div class="mr-muted" style="font-size:.72rem">${_mrEsc(_mrFmtDate(c.sendTime))} · ${_mrEsc(c.listName||'')}${c.segment?' · '+_mrEsc(c.segment):''}${c.emailsSent?' · '+Number(c.emailsSent).toLocaleString()+' sent':''}${c.uniqueOpens?' · '+Number(c.uniqueOpens).toLocaleString()+' opened ('+c.openRate+'%)':''}${c.uniqueClicks?' · '+c.uniqueClicks+' clicked':''}${c.archiveUrl?` · <a href="${_mrEsc(c.archiveUrl)}" target="_blank" rel="noopener" style="color:#0A66C2">view ↗</a>`:''}</div></div>
+      <button class="mr-btn mr-btn-sm" onclick="window._mbResendForm('${_mrEsc(c.id)}')">↻ Resend to same groups</button></div>`).join('')+'<div id="mb-rs"></div>';
+  }).catch(e=>{ const box=document.getElementById('mb-prior'); if(box) box.textContent='Could not load prior e-blasts: '+e.message; });
+  _spWorkerPost('/mailchimp/audience',{}).then(a=>{ const st=window._mbState; if(!st) return; st.audience=a; const box=document.getElementById('mb-aud'); if(!box) return;
+    const lists=a.lists||[]; const segs=a.segments||[]; if(!lists.length){ box.textContent='No Mailchimp audience found.'; return; }
+    box.className=''; box.innerHTML=(lists.length>1?`<select id="mb-list" class="mr-input" style="width:100%;margin-bottom:.4rem" onchange="window._mbAudienceList()">${lists.map(l=>`<option value="${_mrEsc(l.id)}">${_mrEsc(l.name)} (${Number(l.memberCount).toLocaleString()})</option>`).join('')}</select>`:`<input type="hidden" id="mb-list" value="${_mrEsc(lists[0].id)}"><div class="mr-note" style="margin-bottom:.3rem">${_mrEsc(lists[0].name)} · ${Number(lists[0].memberCount).toLocaleString()} contacts</div>`)+
+      `<div id="mb-segs" style="max-height:170px;overflow:auto;border:1px solid var(--line,#e5e7eb);border-radius:6px;padding:.4rem .5rem;display:grid;gap:.2rem"></div><div class="mr-note" style="margin-top:.25rem">Nothing ticked = the whole audience.</div>`;
+    window._mbAudienceList(); });
+};
+window._mbAudienceList=function(){ const st=window._mbState; if(!st||!st.audience) return; const listId=document.getElementById('mb-list')?.value; const segs=(st.audience.segments||[]).filter(s=>s.listId===listId); const box=document.getElementById('mb-segs'); if(!box) return;
+  box.innerHTML=segs.length?segs.map(s=>`<label style="cursor:pointer;font-size:.8rem"><input type="checkbox" class="mb-seg" value="${s.id}"> ${_mrEsc(s.name)} <span class="mr-muted">(${Number(s.memberCount).toLocaleString()}${s.type==='saved'?' · segment':''})</span></label>`).join(''):'<span class="mr-muted">No tags or segments on this audience.</span>'; };
+window._mbClose=function(){ document.getElementById('mb-ov')?.remove(); window._mbState=null; };
+window._mbPreview=function(){
+  const st=window._mbState; if(!st) return; const pv=document.getElementById('mb-pv'); if(!pv) return;
+  const v=id=>document.getElementById(id)?.value||'';
+  const bullets=v('mb-bullets').split('\n').map(x=>x.trim()).filter(Boolean);
+  pv.innerHTML=`<div style="background:#fff;border-radius:8px;overflow:hidden;font-family:Arial,sans-serif;font-size:13px;color:#1F2933"><div style="background:#DA291C;color:#fff;padding:8px 12px;font-size:10px;letter-spacing:.1em;text-transform:uppercase;font-weight:700">Available Land · Eshenbaugh Land Company</div>${st.hero?`<img src="${_mrEsc(st.hero)}" style="width:100%;display:block">`:''}<div style="padding:12px"><div style="font-family:Georgia,serif;font-size:18px;font-weight:700">${_mrEsc(v('mb-headline'))}</div><div style="color:#6E7480;font-size:12px;margin-top:3px">${_mrEsc(_mrDealAddr(st.deal))}</div>${v('mb-price')?`<div style="color:#DA291C;font-weight:700;font-size:15px;margin-top:6px">${_mrEsc(v('mb-price'))}</div>`:''}<p style="margin:10px 0 0;line-height:1.45;white-space:pre-wrap">${_mrEsc(v('mb-body'))}</p>${bullets.length?`<ul style="margin:8px 0 0;padding-left:18px">${bullets.map(b=>`<li>${_mrEsc(b)}</li>`).join('')}</ul>`:''}<div style="margin-top:12px"><span style="background:#DA291C;color:#fff;padding:7px 12px;border-radius:5px;font-weight:700;font-size:12px">View the listing →</span></div><div style="margin-top:12px;font-size:12px"><b>${_mrEsc(st.adv.name||'Eshenbaugh Land Company')}</b>${st.adv.designations?', '+_mrEsc(st.adv.designations):''}${st.adv.phone?'<br>'+_mrEsc(st.adv.phone):''}</div></div></div>`;
+};
+window._mbDraft=async function(btn){
+  const st=window._mbState; if(!st) return; const done=elcBusy(btn,'Drafting…');
+  try{ const c=await _mbAiCopy(st.deal); const set=(id,val)=>{ const el=document.getElementById(id); if(el&&val) el.value=val; }; set('mb-subject',c.subject); set('mb-preview',c.previewText); set('mb-headline',c.headline); set('mb-body',c.body); if(c.bullets.length) set('mb-bullets',c.bullets.join('\n')); window._mbPreview(); }
+  catch(e){ showToast('AI draft failed: '+e.message,'error'); } finally{ done(); }
+};
+function _mbModeOf(prefix){ const mode=document.querySelector(`input[name="${prefix}-mode"]:checked`)?.value||'test'; const whenEl=document.getElementById(prefix+'-when'); let scheduleAt=''; if(mode==='schedule'){ const w=whenEl?.value; if(!w) throw new Error('Pick a date and time to schedule.'); const d=new Date(w); if(isNaN(d)||d.getTime()<Date.now()+5*60*1000) throw new Error('Schedule time must be in the future.'); scheduleAt=d.toISOString(); } return {mode, scheduleAt}; }
+async function _mbConfirmSend(mode, scheduleAt, what, audience){
+  if(mode==='test') return true;
+  return elcConfirm((mode==='send'?'Send ':'Schedule ')+what+' to '+audience+(mode==='schedule'?' for '+new Date(scheduleAt).toLocaleString():'')+'?\n\nThis goes out from Mailchimp to real recipients.',{title:mode==='send'?'Send e-blast now':'Schedule e-blast', okLabel:mode==='send'?'Send now':'Schedule', icon:'📧'});
+}
+async function _mbAfterDelivery(r, mode, extra){
+  const st=window._mbState; if(!st) return;
+  if(mode==='test'){ st.draftId=r.campaign.id; showToast('Test sent to '+(r.to||[]).join(', ')+'. Check your inbox, then send or schedule it.','success',8000); const note=document.getElementById(st.draftKind==='resend'?'mb-rs-note':'mb-create-note'); if(note) note.innerHTML=`Test sent ✓ · <a href="${_mrEsc(r.campaign.editUrl||'#')}" target="_blank" rel="noopener" style="color:#0A66C2">open in Mailchimp ↗</a>`; return; }
+  await _mbRecordSent(st.deal, st.ym, r.campaign, mode, {...(extra||{}), scheduleAt:r.scheduleAt||''});
+  showToast((mode==='send'?'Sent':'Scheduled')+' ✓ “'+(r.campaign.subject||'')+'” → '+(r.campaign.listName||'audience')+(r.campaign.segment?' · '+r.campaign.segment:''),'success',8000, r.campaign.archiveUrl?{label:'View',onClick:()=>window.open(r.campaign.archiveUrl,'_blank','noopener')}:null);
+  window._mbClose();
+  try{ if(currentView==='monthlyReports'&&window._mrRenderRows) window._mrRenderRows(); const blk=document.getElementById('pdw-mcblast-block'); if(blk) blk.innerHTML=window._mbMarketingBlock(st.deal); if(typeof renderCurrentView==='function') renderCurrentView(); }catch(_){}
+}
+window._mbResendForm=function(campaignId){
+  const st=window._mbState; if(!st) return; const c=(st.prior||[]).find(x=>x.id===campaignId); if(!c) return; st.draftId=''; st.draftKind='resend'; st.resendOf=campaignId;
+  const box=document.getElementById('mb-rs'); if(!box) return;
+  const subject=/^still available/i.test(c.subject||'')?c.subject:('Still Available: '+(c.subject||_mrDealName(st.deal)));
+  box.innerHTML=`<div style="margin-top:.6rem;padding:.7rem;border:1px solid var(--line,#e5e7eb);border-radius:8px;background:var(--bg-2,#f9fafb)"><div style="font-weight:700;margin-bottom:.4rem">↻ Resend “${_mrEsc(c.subject||'')}” → ${_mrEsc(c.listName||'audience')}${c.segment?' · '+_mrEsc(c.segment):''}</div>
+    <label class="mr-lbl">Subject<input id="mb-rs-subject" class="mr-input" style="width:100%" value="${_mrEsc(subject)}"></label>
+    <label class="mr-lbl" style="margin-top:.4rem">Preview text<input id="mb-rs-preview" class="mr-input" style="width:100%" value="${_mrEsc(c.preview||'')}" placeholder="(keeps the original)"></label>
+    ${_mbModeHtml('mb-rs')}
+    <div class="mr-row" style="gap:.5rem;margin-top:.5rem"><button class="mr-btn mr-btn-primary" onclick="window._mbResend(this)">↻ Resend</button><span class="mr-note" id="mb-rs-note">Same audience and design; only the subject/preview change.</span></div></div>`;
+  box.scrollIntoView({block:'nearest'});
+};
+window._mbResend=async function(btn){
+  const st=window._mbState; if(!st||st.busy) return;
+  try{
+    const {mode, scheduleAt}=_mbModeOf('mb-rs'); const subject=(document.getElementById('mb-rs-subject')?.value||'').trim(); if(!subject) throw new Error('Subject is required.');
+    const prior=(st.prior||[]).find(x=>x.id===st.resendOf)||{};
+    if(!(await _mbConfirmSend(mode, scheduleAt, 'the e-blast', (prior.listName||'the same audience')+(prior.segment?' · '+prior.segment:'')))) return;
+    st.busy=true; const done=elcBusy(btn, mode==='test'?'Sending test…':mode==='send'?'Sending…':'Scheduling…');
+    try{
+      const body={subject, previewText:document.getElementById('mb-rs-preview')?.value||undefined, mode, scheduleAt, testEmails:[currentUser?.email].filter(Boolean)};
+      const r= st.draftId ? await _spWorkerPost('/mailchimp/send',{campaignId:st.draftId, ...body}) : await _spWorkerPost('/mailchimp/replicate',{campaignId:st.resendOf, ...body});
+      await _mbAfterDelivery(r, mode, {replicatedFrom:st.resendOf});
+    } finally { st.busy=false; done(); }
+  }catch(e){ console.error('[mb] resend',e); showToast(e.message,'error',8000); }
+};
+window._mbCreate=async function(btn){
+  const st=window._mbState; if(!st||st.busy) return;
+  try{
+    const {mode, scheduleAt}=_mbModeOf('mb'); const v=id=>(document.getElementById(id)?.value||'').trim();
+    const subject=v('mb-subject'); if(!subject) throw new Error('Subject is required.');
+    const listId=v('mb-list'); if(!listId) throw new Error('Audience not loaded yet.');
+    const segmentIds=[...document.querySelectorAll('.mb-seg:checked')].map(x=>Number(x.value)); const segNames=[...document.querySelectorAll('.mb-seg:checked')].map(x=>x.parentElement.textContent.trim().replace(/\s*\(.*$/,''));
+    const listName=(st.audience.lists.find(l=>l.id===listId)||{}).name||'audience';
+    if(!(await _mbConfirmSend(mode, scheduleAt, '“'+subject+'”', segNames.length?listName+' · '+segNames.join(', '):'the whole '+listName+' audience'))) return;
+    st.busy=true; const done=elcBusy(btn, mode==='test'?'Sending test…':mode==='send'?'Sending…':'Scheduling…');
+    try{
+      const d=st.deal; const facts=[]; if(d.acreage) facts.push({label:'Acres',value:Number(d.acreage).toLocaleString('en-US',{maximumFractionDigits:2})+'±'}); if(d.county) facts.push({label:'County',value:d.county}); if(d.zoning) facts.push({label:'Zoning',value:d.zoning}); if(d.futureLandUse||d.flu) facts.push({label:'Future land use',value:d.futureLandUse||d.flu});
+      const content={kicker:'Available Land', hero:st.hero, headline:v('mb-headline'), address:_mrDealAddr(d), price:v('mb-price'), facts:facts.slice(0,4), body:v('mb-body'), bullets:v('mb-bullets').split('\n').map(x=>x.trim()).filter(Boolean), link:v('mb-link'), linkLabel:'View the listing', advisor:st.adv};
+      const body={listId, segmentIds, subject, previewText:v('mb-preview'), fromName:st.adv.name||'Eshenbaugh Land Company', replyTo:st.adv.email||'', title:'Terra e-blast '+_mrLocalDate(Date.now())+' — '+_mrDealName(d), mode, scheduleAt, testEmails:[currentUser?.email].filter(Boolean), content};
+      st.draftKind='create';
+      const r= st.draftId ? await _spWorkerPost('/mailchimp/send',{campaignId:st.draftId, subject, previewText:v('mb-preview'), mode, scheduleAt, testEmails:body.testEmails}) : await _spWorkerPost('/mailchimp/create',body);
+      await _mbAfterDelivery(r, mode, {});
+    } finally { st.busy=false; done(); }
+  }catch(e){ console.error('[mb] create',e); showToast(e.message,'error',8000); }
+};
+/* ===== MCBLAST_BLOCK_END ===== */
+/* =======================================================
+   📣 DAILY LISTING POST — Terra side — marker SOCIALDAILY-20261007
+   The social worker's cron posts one available listing per connected
+   platform every morning at 9:00 AM Eastern (see worker.js SOCIALDAILY).
+   Terra shows the plan on the 📬 Monthly Reports tab: what posts today /
+   tomorrow and why, the next listings in line, yesterday's results, and
+   buttons to post now or re-pull results. Posts land in deal.socialPosts
+   with auto:true + reason, and print on the report's Social Media page
+   with their 24-hour results and comments.
+   ======================================================= */
+const SD_REASON_LABEL={new:'New listing',price:'Price reduced',back:'Back on the market',renewed:'Listing renewed / extended',expiring:'Listing expiring soon',nooffer:'No offers yet',rotation:'Available (rotation)'};
+window._sdPanelHtml=function(){
+  return `<div class="mr-sec" id="sd-panel" style="margin-top:.8rem"><div class="mr-row" style="justify-content:space-between;align-items:center;gap:.6rem;flex-wrap:wrap">
+    <h3 style="margin:0">📣 Daily listing post <span class="mr-note">— one listing per platform, every morning at 9:00 AM ET</span></h3>
+    <div class="mr-row" style="gap:.4rem"><button class="mr-btn mr-btn-sm" onclick="window._sdLoad(true,this)">↻ Refresh</button>${currentUser&&(currentUser.isAdmin||currentUser.isSuperAdmin)?`<button class="mr-btn mr-btn-sm" onclick="window._sdPostNow(this)" title="Post today's pick right now instead of waiting for 9 AM">📣 Post now</button><button class="mr-btn mr-btn-sm" onclick="window._sdPullMetrics(this)" title="Pull reach, likes and comments for posts older than 24 hours">📊 Pull results</button>`:''}</div>
+  </div><div id="sd-body" class="mr-muted" style="margin-top:.4rem">Loading today’s plan…</div></div>`;
+};
+window._sdLoad=async function(force, btn){
+  const box=document.getElementById('sd-body'); if(!box) return; const done=btn?elcBusy(btn,'…'):()=>{};
+  try{
+    const st=window._mrState; if(force||!st.sdPlan||Date.now()-(st.sdPlanAt||0)>5*60*1000){ st.sdPlan=await _spWorkerPost('/daily/preview',{}); st.sdPlanAt=Date.now(); }
+    const plan=st.sdPlan; const live=plan.platformsLive||[];
+    const name=pl=>pl==='facebook'?'Facebook':'LinkedIn';
+    const rows=live.map(pl=>{ const p=plan.picks[pl]; const sk=plan.skipped[pl];
+      if(sk) return `<div style="padding:.4rem 0;border-top:1px solid var(--line,#e5e7eb)"><b>${name(pl)}</b> — <span class="mr-muted">${_mrEsc(sk)}</span></div>`;
+      const deal=(allDeals||[]).find(d=>d.id===p.dealId);
+      return `<div style="padding:.5rem 0;border-top:1px solid var(--line,#e5e7eb);display:flex;gap:.7rem;align-items:flex-start">
+        ${p.imageUrl?`<img class="mr-thumb" src="${_mrEsc(p.imageUrl)}" alt="" style="width:96px;height:62px">`:`<div class="mr-thumb" style="width:96px;height:62px"></div>`}
+        <div style="flex:1;min-width:0"><div><b>${name(pl)}</b> → <a href="#" onclick="event.preventDefault();${deal?`window.openPropertyDetail&&window.openPropertyDetail('${deal.id}')`:''}" style="font-weight:700;color:#0A66C2">${_mrEsc(p.name)}</a> <span style="font-size:.72rem;color:#b45309;background:#fef3c7;border-radius:999px;padding:.1rem .5rem">${_mrEsc(SD_REASON_LABEL[p.reason]||p.reasonLabel||'')}</span> <span class="mr-muted">· ${p.candidates} eligible</span></div>
+          <pre style="white-space:pre-wrap;font:inherit;font-size:.78rem;margin:.3rem 0 0;color:var(--text-2,#4b5563);max-height:92px;overflow:auto">${_mrEsc(p.message)}</pre>
+          ${p.next&&p.next.length?`<div class="mr-note" style="margin-top:.3rem">Next in line: ${p.next.map(n=>_mrEsc(n.name)+' ('+_mrEsc(SD_REASON_LABEL[n.reason]||n.reason)+')').join(' · ')}</div>`:''}</div></div>`; }).join('');
+    const nowET=new Date().toLocaleString('en-US',{timeZone:'America/New_York',hour:'numeric',minute:'2-digit'});
+    box.className=''; box.innerHTML=(live.length?`<div class="mr-note">Plan for <b>${_mrEsc(plan.ymd)}</b> (${_mrEsc(nowET)} ET). Platforms connected: ${live.map(name).join(' + ')}${live.length<2?' — LinkedIn joins the rotation once its API approval lands':''}. Rules: one post per platform per day · each property at most once a month · platforms alternate month to month · priority new → price cut → back on market → renewed → expiring → no offers → rotation.</div>`:'<div class="mr-note">No platform connected yet — connect Facebook / LinkedIn in the social worker.</div>')+rows+_sdRecentHtml();
+  }catch(e){ box.textContent='Daily post plan unavailable: '+e.message; }
+  finally{ done(); }
+};
+function _sdRecentHtml(){
+  const cut=Date.now()-8*86400000; const items=[];
+  (allDeals||[]).forEach(d=>(d.socialPosts||[]).forEach(p=>{ if(p&&p.auto&&p.at>=cut) items.push({d,p}); }));
+  if(!items.length) return '';
+  items.sort((a,b)=>b.p.at-a.p.at);
+  return `<div style="margin-top:.6rem"><div class="mr-lbl">Last 7 days</div>${items.slice(0,10).map(({d,p})=>{ const m=p.metrics||{}; return `<div class="mr-row" style="gap:.5rem;font-size:.78rem;padding:.2rem 0;flex-wrap:wrap"><span class="mr-muted">${_mrEsc(_mrFmtDate(p.at))}</span> <b>${p.platform==='facebook'?'Facebook':'LinkedIn'}</b> ${_mrEsc(_mrDealName(d))} <span class="mr-muted">(${_mrEsc(SD_REASON_LABEL[p.reason]||'')})</span>${p.url?` <a href="${_mrEsc(p.url)}" target="_blank" rel="noopener" style="color:#0A66C2">view ↗</a>`:''} ${p.metricsAt?`<span class="mr-muted">· reach ${m.reach??m.impressions??'–'} · likes ${m.likes??0} · comments ${(p.comments||[]).length} · clicks ${m.clicks??'–'}</span>`:'<span class="mr-muted">· results in 24 h</span>'}</div>`; }).join('')}</div>`;
+}
+window._sdPostNow=async function(btn){
+  const st=window._mrState; const plan=st.sdPlan; const picks=plan?Object.entries(plan.picks||{}):[];
+  if(!picks.length){ showToast('Nothing to post — every platform is either done for today or has no eligible listing.','info',6000); return; }
+  if(!(await elcConfirm('Post now?\n\n'+picks.map(([pl,p])=>(pl==='facebook'?'Facebook':'LinkedIn')+': '+p.name+' ('+(SD_REASON_LABEL[p.reason]||p.reason)+')').join('\n')+'\n\nThis goes live on the firm’s page(s) immediately and counts as today’s post.',{title:'Daily listing post',okLabel:'Post now',icon:'📣'}))) return;
+  const done=elcBusy(btn,'Posting…');
+  try{ const r=await _spWorkerPost('/daily/run',{force:true}); const res=r.results||{}; const okp=Object.entries(res).filter(([,v])=>v.ok).map(([k])=>k==='facebook'?'Facebook':'LinkedIn'); const bad=Object.entries(res).filter(([,v])=>!v.ok).map(([k,v])=>k+': '+v.error);
+    showToast((okp.length?'Posted to '+okp.join(' + ')+' ✓':'Nothing posted')+(bad.length?' · '+bad.join(' · '):''), bad.length?'warning':'success', 8000);
+    st.sdPlan=null; setTimeout(()=>window._sdLoad(true),1500); }
+  catch(e){ showToast('Post failed: '+e.message,'error',8000); }
+  finally{ done(); }
+};
+window._sdPullMetrics=async function(btn){
+  const done=elcBusy(btn,'Pulling…');
+  try{ const r=await _spWorkerPost('/daily/metrics',{}); showToast((r.updated||[]).length+' post'+((r.updated||[]).length===1?'':'s')+' updated with results','success'); setTimeout(()=>window._sdLoad(true),1500); }
+  catch(e){ showToast('Could not pull results: '+e.message,'error'); }
+  finally{ done(); }
+};
+/* ===== SOCIALDAILY_BLOCK_END ===== */
+/* =======================================================
+   🔗 PORTAL LINKS IMPORT — marker PORTALLINKS-20261008
+   Fills deal.reportLinks[] ("WHERE THE PROPERTY IS LISTED" on the monthly
+   report's Property Website page) from a review file built by
+   mreport_patch/portal_links/build_links.py, which matches every active
+   listing to its page on thedirtdog.com, LoopNet, CoStar (showcase.com),
+   LandWatch / Land.com, LandAndFarm and TotalCommercial. Admins pick the
+   file on the 📬 Monthly Reports tab, review the matches (high-confidence
+   rows are pre-checked, medium ones are not) and press Apply. Links already
+   on the deal for the same site are replaced; everything else is kept.
+   ======================================================= */
+const PL_HOST_LABEL={'thedirtdog.com':'TheDirtDog.com','loopnet.com':'LoopNet','showcase.com':'CoStar','landwatch.com':'LandWatch / Land.com','land.com':'LandWatch / Land.com','landandfarm.com':'LandAndFarm','totalcommercial.com':'TotalCommercial','crexi.com':'Crexi'};
+function _plHost(u){ try{ return new URL(u).host.replace(/^www\./,'').toLowerCase(); }catch(e){ return ''; } }
+function _plLabel(l){ return l.label||PL_HOST_LABEL[_plHost(l.url)]||'Website'; }
+window._plImportBtnHtml=function(){ return (currentUser&&(currentUser.isAdmin||currentUser.isSuperAdmin))?`<button class="mr-btn mr-btn-sm" onclick="window._plPick()" title="Import the portal-links review file (portal_links.json) and fill each listing's website links">🔗 Import portal links</button>`:''; };
+window._plPick=function(){
+  const inp=document.createElement('input'); inp.type='file'; inp.accept='.json,application/json';
+  inp.onchange=async()=>{ const f=inp.files&&inp.files[0]; if(!f) return; try{ const data=JSON.parse(await f.text()); window._plReview(data); }catch(e){ showToast('Could not read that file: '+e.message,'error'); } };
+  inp.click();
+};
+window._plReview=function(data){
+  const rows=(data&&Array.isArray(data.deals)?data.deals:[]).map(r=>{ const deal=(allDeals||[]).find(d=>d.id===r.id); return Object.assign({},r,{deal, existing:deal?_mrDealLinks(deal):[]}); });
+  if(!rows.length){ showToast('No listings in that file.','warning'); return; }
+  window._plState={rows};
+  document.getElementById('pl-ov')?.remove();
+  const ov=document.createElement('div'); ov.id='pl-ov'; ov.style.cssText='position:fixed;inset:0;background:rgba(15,23,42,.55);z-index:9999;display:flex;align-items:center;justify-content:center;padding:1rem';
+  const nHigh=rows.filter(r=>r.deal&&r.conf==='high').length;
+  ov.innerHTML=`<div style="background:var(--surface,#fff);color:var(--text,#111);border-radius:14px;max-width:1100px;width:100%;max-height:92vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.3)">
+    <div style="padding:.9rem 1.1rem;border-bottom:1px solid var(--border,#e5e7eb);display:flex;align-items:center;gap:.6rem;flex-wrap:wrap">
+      <strong style="font-size:1rem">🔗 Portal links — review &amp; apply</strong>
+      <span class="mr-muted" style="font-size:.78rem">${rows.length} listings matched${data.generatedAt?' · built '+_mrEsc(String(data.generatedAt).slice(0,10)):''} · <b>${nHigh}</b> high-confidence pre-checked, the rest need a look (open the links to verify)</span>
+      <span style="flex:1"></span>
+      <button class="mr-btn mr-btn-sm" onclick="window._plCheck('high')">High only</button><button class="mr-btn mr-btn-sm" onclick="window._plCheck('all')">All</button><button class="mr-btn mr-btn-sm" onclick="window._plCheck('none')">None</button>
+      <button class="mr-btn mr-btn-sm" onclick="document.getElementById('pl-ov').remove()">✕ Close</button>
+    </div>
+    <div style="overflow:auto;flex:1;padding:.4rem 1.1rem">
+      <table style="width:100%;border-collapse:collapse;font-size:.78rem"><thead><tr style="text-align:left;color:#6b7280"><th style="padding:.3rem"></th><th style="padding:.3rem">Terra listing</th><th style="padding:.3rem">Matched website listing</th><th style="padding:.3rem">Links found (click to verify)</th><th style="padding:.3rem">On deal now</th></tr></thead>
+      <tbody>${rows.map((r,i)=>`<tr style="border-top:1px solid var(--border,#eee);${r.deal?'':'opacity:.45'}">
+        <td style="padding:.3rem"><input type="checkbox" id="pl-ck-${i}" ${r.deal&&r.conf==='high'?'checked':''} ${r.deal?'':'disabled'}></td>
+        <td style="padding:.3rem"><b>${_mrEsc(r.deal?_mrDealName(r.deal):(r.name||'')+' (not in Terra)')}</b><div class="mr-muted">${_mrEsc(r.deal?(r.deal.address||r.deal.propertyAddress||''):r.address||'')}</div></td>
+        <td style="padding:.3rem">${r.siteName?_mrEsc(r.siteName):'<span class="mr-muted">— not on thedirtdog.com —</span>'} <span style="font-size:.68rem;border-radius:999px;padding:.05rem .4rem;${r.conf==='high'?'background:#d1fae5;color:#047857':'background:#fef3c7;color:#b45309'}">${r.conf==='high'?'high':'check'}</span></td>
+        <td style="padding:.3rem">${(r.links||[]).map(l=>`<a href="${_mrEsc(l.url)}" target="_blank" rel="noopener" style="display:inline-block;margin:.1rem .25rem .1rem 0;padding:.1rem .45rem;border:1px solid #cbd5e1;border-radius:999px;color:#0A66C2;text-decoration:none">${_mrEsc(_plLabel(l))} ↗</a>`).join('')}</td>
+        <td style="padding:.3rem" class="mr-muted">${r.existing.length?r.existing.map(l=>_mrEsc(_plLabel(l))).join(', '):'none'}</td></tr>`).join('')}</tbody></table>
+    </div>
+    <div style="padding:.8rem 1.1rem;border-top:1px solid var(--border,#e5e7eb);display:flex;align-items:center;gap:.8rem"><span id="pl-status" class="mr-muted" style="flex:1;font-size:.8rem">Checked rows get their links written to the deal card; links for the same site are replaced, other links are kept.</span><button class="mr-btn" onclick="window._plApply(this)">✅ Apply checked links</button></div>
+  </div>`;
+  document.body.appendChild(ov);
+};
+window._plCheck=function(mode){ (window._plState.rows||[]).forEach((r,i)=>{ const c=document.getElementById('pl-ck-'+i); if(!c||c.disabled) return; c.checked=mode==='all'||(mode==='high'&&r.conf==='high'); }); };
+window._plMerge=function(existing,incoming){
+  const inc=(incoming||[]).filter(l=>l&&/^https?:\/\//i.test(l.url||'')).map(l=>({label:_plLabel(l),url:String(l.url).trim()}));
+  const hosts=new Set(inc.map(l=>_plHost(l.url)));
+  const keep=(existing||[]).filter(l=>!hosts.has(_plHost(l.url)));
+  const order=u=>{ const h=_plHost(u); return h==='thedirtdog.com'?0:h==='loopnet.com'?1:h==='showcase.com'?2:h==='crexi.com'?3:h==='landwatch.com'?4:h==='landandfarm.com'?5:h==='totalcommercial.com'?6:9; };
+  return inc.concat(keep).sort((a,b)=>order(a.url)-order(b.url));
+};
+window._plApply=async function(btn){
+  const rows=(window._plState&&window._plState.rows)||[]; const picked=rows.map((r,i)=>({r,i})).filter(({r,i})=>{ const c=document.getElementById('pl-ck-'+i); return r.deal&&c&&c.checked; });
+  if(!picked.length){ showToast('Nothing checked.','info'); return; }
+  if(!(await elcConfirm('Write website links to '+picked.length+' listing'+(picked.length===1?'':'s')+'?\n\nThey print on the monthly report’s Property Website page under “Where the property is listed”.',{title:'Apply portal links',okLabel:'Apply',icon:'🔗'}))) return;
+  const done=elcBusy(btn,'Applying…'); const st=document.getElementById('pl-status'); let ok=0, fail=0;
+  for(const {r} of picked){
+    try{ const links=window._plMerge(_mrDealLinks(r.deal), r.links); await Store.updateDeal(r.deal.id,{reportLinks:links, reportLinksAuto:{at:Date.now(), source:'portal-import', conf:r.conf||''}, updatedAt:Date.now()}); r.deal.reportLinks=links; ok++; }
+    catch(e){ console.warn('[pl]',r.deal.id,e); fail++; }
+    if(st) st.textContent='Applied '+ok+' of '+picked.length+(fail?' · '+fail+' failed':'')+'…';
+  }
+  done(); showToast('🔗 Links written to '+ok+' listing'+(ok===1?'':'s')+(fail?' · '+fail+' failed':''), fail?'warning':'success', 7000);
+  if(st) st.textContent='Done — '+ok+' updated'+(fail?', '+fail+' failed':'')+'. Close this window; the links show in each deal’s 📬 Monthly report assets block.';
+  try{ (allDeals||[]).forEach(d=>{ if(picked.some(p=>p.r.deal===d)&&typeof _mrRefreshAssetsBlocks==='function') _mrRefreshAssetsBlocks(d); }); }catch(e){}
+};
+/* ===== PORTALLINKS_BLOCK_END ===== */
 
 /* =======================================================
    📣 SOCIAL POSTING FOR LISTINGS — marker SOCIAL-20261006
