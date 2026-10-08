@@ -45493,6 +45493,7 @@ function viewMonthlyReports(){
       <div style="display:flex;align-items:center;gap:.6rem;padding:.7rem 1rem;border-bottom:1px solid var(--border);flex-wrap:wrap">
         <span class="mr-muted" id="mr-count">${deals.length} active seller-rep listing${deals.length===1?'':'s'}</span>
         <span style="flex:1"></span>
+        ${window._plImportBtnHtml?window._plImportBtnHtml():''}
         <button class="mr-btn mr-btn-sm" onclick="window._mrSelectAll(true)">Select all</button>
         <button class="mr-btn mr-btn-sm" onclick="window._mrSelectAll(false)">Clear</button>
         <button class="mr-btn mr-btn-sm" onclick="window._mrAssignAllAssets(this)" title="One task per active listing missing a sign photo, QR code or website links">📬 Assign missing assets to Nick</button>
@@ -46302,7 +46303,7 @@ window._mrSendSelected=async function(){
    it, and the Monthly Reports tab can assign one per listing.
    ======================================================= */
 const MR_ASSETS_TASK_TITLE='📬 Monthly report assets — upload sign photo, QR code & website links';
-const MR_LINK_LABELS=['Property website (Buildout)','TheDirtDog.com','LoopNet','Crexi','LandWatch / Land.com','MLS','Other'];
+const MR_LINK_LABELS=['Property website (Buildout)','TheDirtDog.com','LoopNet','CoStar','Crexi','LandWatch / Land.com','LandAndFarm','TotalCommercial','MLS','Other'];
 function _mrDealLinks(deal){ return (Array.isArray(deal&&deal.reportLinks)?deal.reportLinks:[]).filter(l=>l&&String(l.url||'').trim()).map(l=>({label:String(l.label||'Website').trim(), url:String(l.url).trim()})); }
 function _mrAssetsMissing(deal){ const m=[]; if(!deal.reportSignPhotoUrl) m.push('sign photo'); if(!deal.reportQrUrl) m.push('QR code'); if(!_mrDealLinks(deal).length) m.push('website links'); return m; }
 function _mrAssetsTaskFor(dealId){ return (typeof allTasks!=='undefined'?allTasks:[]).find(t=>t&&t.dealId===dealId&&t.status!=='complete'&&/monthly report assets/i.test(t.title||'')); }
@@ -47026,6 +47027,77 @@ window._sdPullMetrics=async function(btn){
   finally{ done(); }
 };
 /* ===== SOCIALDAILY_BLOCK_END ===== */
+/* =======================================================
+   🔗 PORTAL LINKS IMPORT — marker PORTALLINKS-20261008
+   Fills deal.reportLinks[] ("WHERE THE PROPERTY IS LISTED" on the monthly
+   report's Property Website page) from a review file built by
+   mreport_patch/portal_links/build_links.py, which matches every active
+   listing to its page on thedirtdog.com, LoopNet, CoStar (showcase.com),
+   LandWatch / Land.com, LandAndFarm and TotalCommercial. Admins pick the
+   file on the 📬 Monthly Reports tab, review the matches (high-confidence
+   rows are pre-checked, medium ones are not) and press Apply. Links already
+   on the deal for the same site are replaced; everything else is kept.
+   ======================================================= */
+const PL_HOST_LABEL={'thedirtdog.com':'TheDirtDog.com','loopnet.com':'LoopNet','showcase.com':'CoStar','landwatch.com':'LandWatch / Land.com','land.com':'LandWatch / Land.com','landandfarm.com':'LandAndFarm','totalcommercial.com':'TotalCommercial','crexi.com':'Crexi'};
+function _plHost(u){ try{ return new URL(u).host.replace(/^www\./,'').toLowerCase(); }catch(e){ return ''; } }
+function _plLabel(l){ return l.label||PL_HOST_LABEL[_plHost(l.url)]||'Website'; }
+window._plImportBtnHtml=function(){ return (currentUser&&(currentUser.isAdmin||currentUser.isSuperAdmin))?`<button class="mr-btn mr-btn-sm" onclick="window._plPick()" title="Import the portal-links review file (portal_links.json) and fill each listing's website links">🔗 Import portal links</button>`:''; };
+window._plPick=function(){
+  const inp=document.createElement('input'); inp.type='file'; inp.accept='.json,application/json';
+  inp.onchange=async()=>{ const f=inp.files&&inp.files[0]; if(!f) return; try{ const data=JSON.parse(await f.text()); window._plReview(data); }catch(e){ showToast('Could not read that file: '+e.message,'error'); } };
+  inp.click();
+};
+window._plReview=function(data){
+  const rows=(data&&Array.isArray(data.deals)?data.deals:[]).map(r=>{ const deal=(allDeals||[]).find(d=>d.id===r.id); return Object.assign({},r,{deal, existing:deal?_mrDealLinks(deal):[]}); });
+  if(!rows.length){ showToast('No listings in that file.','warning'); return; }
+  window._plState={rows};
+  document.getElementById('pl-ov')?.remove();
+  const ov=document.createElement('div'); ov.id='pl-ov'; ov.style.cssText='position:fixed;inset:0;background:rgba(15,23,42,.55);z-index:9999;display:flex;align-items:center;justify-content:center;padding:1rem';
+  const nHigh=rows.filter(r=>r.deal&&r.conf==='high').length;
+  ov.innerHTML=`<div style="background:var(--surface,#fff);color:var(--text,#111);border-radius:14px;max-width:1100px;width:100%;max-height:92vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.3)">
+    <div style="padding:.9rem 1.1rem;border-bottom:1px solid var(--border,#e5e7eb);display:flex;align-items:center;gap:.6rem;flex-wrap:wrap">
+      <strong style="font-size:1rem">🔗 Portal links — review &amp; apply</strong>
+      <span class="mr-muted" style="font-size:.78rem">${rows.length} listings matched${data.generatedAt?' · built '+_mrEsc(String(data.generatedAt).slice(0,10)):''} · <b>${nHigh}</b> high-confidence pre-checked, the rest need a look (open the links to verify)</span>
+      <span style="flex:1"></span>
+      <button class="mr-btn mr-btn-sm" onclick="window._plCheck('high')">High only</button><button class="mr-btn mr-btn-sm" onclick="window._plCheck('all')">All</button><button class="mr-btn mr-btn-sm" onclick="window._plCheck('none')">None</button>
+      <button class="mr-btn mr-btn-sm" onclick="document.getElementById('pl-ov').remove()">✕ Close</button>
+    </div>
+    <div style="overflow:auto;flex:1;padding:.4rem 1.1rem">
+      <table style="width:100%;border-collapse:collapse;font-size:.78rem"><thead><tr style="text-align:left;color:#6b7280"><th style="padding:.3rem"></th><th style="padding:.3rem">Terra listing</th><th style="padding:.3rem">Matched website listing</th><th style="padding:.3rem">Links found (click to verify)</th><th style="padding:.3rem">On deal now</th></tr></thead>
+      <tbody>${rows.map((r,i)=>`<tr style="border-top:1px solid var(--border,#eee);${r.deal?'':'opacity:.45'}">
+        <td style="padding:.3rem"><input type="checkbox" id="pl-ck-${i}" ${r.deal&&r.conf==='high'?'checked':''} ${r.deal?'':'disabled'}></td>
+        <td style="padding:.3rem"><b>${_mrEsc(r.deal?_mrDealName(r.deal):(r.name||'')+' (not in Terra)')}</b><div class="mr-muted">${_mrEsc(r.deal?(r.deal.address||r.deal.propertyAddress||''):r.address||'')}</div></td>
+        <td style="padding:.3rem">${r.siteName?_mrEsc(r.siteName):'<span class="mr-muted">— not on thedirtdog.com —</span>'} <span style="font-size:.68rem;border-radius:999px;padding:.05rem .4rem;${r.conf==='high'?'background:#d1fae5;color:#047857':'background:#fef3c7;color:#b45309'}">${r.conf==='high'?'high':'check'}</span></td>
+        <td style="padding:.3rem">${(r.links||[]).map(l=>`<a href="${_mrEsc(l.url)}" target="_blank" rel="noopener" style="display:inline-block;margin:.1rem .25rem .1rem 0;padding:.1rem .45rem;border:1px solid #cbd5e1;border-radius:999px;color:#0A66C2;text-decoration:none">${_mrEsc(_plLabel(l))} ↗</a>`).join('')}</td>
+        <td style="padding:.3rem" class="mr-muted">${r.existing.length?r.existing.map(l=>_mrEsc(_plLabel(l))).join(', '):'none'}</td></tr>`).join('')}</tbody></table>
+    </div>
+    <div style="padding:.8rem 1.1rem;border-top:1px solid var(--border,#e5e7eb);display:flex;align-items:center;gap:.8rem"><span id="pl-status" class="mr-muted" style="flex:1;font-size:.8rem">Checked rows get their links written to the deal card; links for the same site are replaced, other links are kept.</span><button class="mr-btn" onclick="window._plApply(this)">✅ Apply checked links</button></div>
+  </div>`;
+  document.body.appendChild(ov);
+};
+window._plCheck=function(mode){ (window._plState.rows||[]).forEach((r,i)=>{ const c=document.getElementById('pl-ck-'+i); if(!c||c.disabled) return; c.checked=mode==='all'||(mode==='high'&&r.conf==='high'); }); };
+window._plMerge=function(existing,incoming){
+  const inc=(incoming||[]).filter(l=>l&&/^https?:\/\//i.test(l.url||'')).map(l=>({label:_plLabel(l),url:String(l.url).trim()}));
+  const hosts=new Set(inc.map(l=>_plHost(l.url)));
+  const keep=(existing||[]).filter(l=>!hosts.has(_plHost(l.url)));
+  const order=u=>{ const h=_plHost(u); return h==='thedirtdog.com'?0:h==='loopnet.com'?1:h==='showcase.com'?2:h==='crexi.com'?3:h==='landwatch.com'?4:h==='landandfarm.com'?5:h==='totalcommercial.com'?6:9; };
+  return inc.concat(keep).sort((a,b)=>order(a.url)-order(b.url));
+};
+window._plApply=async function(btn){
+  const rows=(window._plState&&window._plState.rows)||[]; const picked=rows.map((r,i)=>({r,i})).filter(({r,i})=>{ const c=document.getElementById('pl-ck-'+i); return r.deal&&c&&c.checked; });
+  if(!picked.length){ showToast('Nothing checked.','info'); return; }
+  if(!(await elcConfirm('Write website links to '+picked.length+' listing'+(picked.length===1?'':'s')+'?\n\nThey print on the monthly report’s Property Website page under “Where the property is listed”.',{title:'Apply portal links',okLabel:'Apply',icon:'🔗'}))) return;
+  const done=elcBusy(btn,'Applying…'); const st=document.getElementById('pl-status'); let ok=0, fail=0;
+  for(const {r} of picked){
+    try{ const links=window._plMerge(_mrDealLinks(r.deal), r.links); await Store.updateDeal(r.deal.id,{reportLinks:links, reportLinksAuto:{at:Date.now(), source:'portal-import', conf:r.conf||''}, updatedAt:Date.now()}); r.deal.reportLinks=links; ok++; }
+    catch(e){ console.warn('[pl]',r.deal.id,e); fail++; }
+    if(st) st.textContent='Applied '+ok+' of '+picked.length+(fail?' · '+fail+' failed':'')+'…';
+  }
+  done(); showToast('🔗 Links written to '+ok+' listing'+(ok===1?'':'s')+(fail?' · '+fail+' failed':''), fail?'warning':'success', 7000);
+  if(st) st.textContent='Done — '+ok+' updated'+(fail?', '+fail+' failed':'')+'. Close this window; the links show in each deal’s 📬 Monthly report assets block.';
+  try{ (allDeals||[]).forEach(d=>{ if(picked.some(p=>p.r.deal===d)&&typeof _mrRefreshAssetsBlocks==='function') _mrRefreshAssetsBlocks(d); }); }catch(e){}
+};
+/* ===== PORTALLINKS_BLOCK_END ===== */
 
 /* =======================================================
    📣 SOCIAL POSTING FOR LISTINGS — marker SOCIAL-20261006
