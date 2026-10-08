@@ -45311,6 +45311,9 @@ function _mrHistoryRows(deal, activities, tasks){
   (activities||[]).forEach(a=>{
     const ts=a.createdAt||0; if(since && ts<since) return;
     if(a.source==='monthly-report') return;                  // never list the report mail itself
+    /* MRNOTASKS-20261008: tasks and internal housekeeping never print for the owner — only emails, calls, meetings, notes, documents, stage moves and marketing */
+    if(a.type==='task'||a.taskId||/^(monthly-report-assets|portal-import|contact-refresh)$/.test(a.source||'')) return;
+    if(a.autoLogged&&/^(contact refresh|task:|✅|⚠️ fix listing|📧 monthly e-blast)/i.test(String(a.body||'').trim())) return;
     let text=a.body||'';
     if(a.type==='email') text=(a.gmailSubject?('Email: '+a.gmailSubject+(text?' — ':'')):'')+text;
     if(a.type==='call') text='Call'+(a.callDuration?(' ('+a.callDuration+' min)'):'')+(text?': '+text:'');
@@ -45318,7 +45321,7 @@ function _mrHistoryRows(deal, activities, tasks){
     if(a.type==='stage_change') text='Stage: '+text;
     if(a.type==='attachment') text='Document: '+text;
     text=String(text).replace(/\s+/g,' ').trim(); if(!text) return;
-    rows.push({ts, date:_mrFmtDate(ts), type:(a.type||'note'), by:a.createdByName||'', text});
+    rows.push({id:a.id, ts, date:_mrFmtDate(ts), type:(a.type||'note'), by:a.createdByName||'', text, subject:a.gmailSubject||'', raw:String(a.body||'').slice(0,1200)});
   });
   if(deal.notes){
     deal.notes.split('\n').filter(l=>/^\s*\[[^\]]+\]/.test(l)).forEach(line=>{
@@ -45766,7 +45769,7 @@ window._mrOpenEditor=async function(dealId){
           ${[['siteVisits','TheDirtDog.com visits'],['uniqueVisitors','Unique visitors'],['docsViewed','Docs viewed'],['casSigned','CAs signed'],['gaSessions','Google sessions'],['totalCommercialViews','Total Commercial views'],['loopnetViews','LoopNet views'],['crexiViews','Crexi views'],['totalLeads','Total leads']].map(([k,l])=>`<div><label class="mr-lbl" for="mr-t-${k}">${l}</label><input id="mr-t-${k}" class="mr-input" style="width:100%" inputmode="numeric" value="${st.editor.traffic&&st.editor.traffic[k]!=null?_mrEsc(st.editor.traffic[k]):''}"></div>`).join('')}
         </div>
       </div>
-      <div class="mr-sec"><h3>8 · Property notes &amp; completed tasks</h3><div id="mr-hist-summary" class="mr-note">Counting…</div></div>
+      <div class="mr-sec"><h3>8 · Property notes (emails as AI summaries · calls · meetings · notes — tasks never print)</h3><div id="mr-hist-summary" class="mr-note">Counting…</div></div>
       <div class="mr-sec"><h3>9 · Contact page</h3><div id="mr-ed-advcard">${_mrEditorAdvisorCardHtml(deal)}</div></div>
     </div>
     <div class="mr-modal-f">
@@ -45780,7 +45783,7 @@ window._mrOpenEditor=async function(dealId){
   document.body.appendChild(ov);
   if(window._mrMcAutoFill) window._mrMcAutoFill();   // MCREPORT-20261007
   // history counts (async)
-  Promise.all([_mrFetchActivities(dealId),_mrFetchTasks(dealId)]).then(([acts,tasks])=>{ const h=_mrHistoryRows(deal,acts,tasks); const el=document.getElementById('mr-hist-summary'); if(el) el.innerHTML=`<b>${h.history.length}</b> history entries and <b>${h.tasks.length}</b> completed tasks since the listing started (${_mrFmtDateLong(_mrListingStart(deal))}) will print newest → oldest. Add or fix entries from the deal card’s Activity &amp; Notes.`; });
+  Promise.all([_mrFetchActivities(dealId),_mrFetchTasks(dealId)]).then(([acts,tasks])=>{ const h=_mrHistoryRows(deal,acts,tasks); const el=document.getElementById('mr-hist-summary'); if(el) el.innerHTML=`<b>${h.history.length}</b> entries (${h.history.filter(r=>r.type==='email').length} emails · ${h.history.filter(r=>r.type==='call').length} calls · ${h.history.filter(r=>r.type==='meeting').length} meetings) since the listing started — emails print as one-line AI summaries; tasks are internal and never print.`; });
 };
 window._mrLetterMode=function(m){ const c=m==='custom'; const d=document.getElementById('mr-letter-default'), e=document.getElementById('mr-letter-custom'); if(d) d.style.display=c?'none':''; if(e) e.style.display=c?'':'none'; if(c){ const t=document.getElementById('mr-ed-letter'); if(t&&!t.value.trim()){ t.value=_mrLetterFor(window._mrState.editor?.ym||window._mrState.month)||''; } } };
 window._mrLetterCopyDefault=function(){ const t=document.getElementById('mr-ed-letter'); if(t) t.value=_mrLetterFor(window._mrState.editor?.ym||window._mrState.month)||''; };
@@ -45984,6 +45987,21 @@ async function _mrPostMetrics(groups){
   groups.forEach(g=>{ Object.entries(g.stored||{}).forEach(([pl,m])=>{ g.metrics=g.metrics||{}; if(!g.metrics[pl]) g.metrics[pl]=m; }); });
 }
 // Gather everything the PDF needs for one deal/month.
+/* MRNOTASKS-20261008: e-mails print as a one-line AI summary (client-safe), cached on the month's report doc as emailSummaries{activityId:text} */
+async function _mrSummarizeEmails(deal, ym, rep, rows){
+  const emails=rows.filter(r=>r.type==='email'); if(!emails.length) return;
+  const cache=Object.assign({}, rep.emailSummaries||{}); const todo=emails.filter(r=>r.id&&!cache[r.id]).slice(0,60);
+  if(todo.length&&typeof leadAI==='function'){
+    const sys='You summarize e-mail correspondence for a property owner\'s monthly marketing report from a Florida land brokerage (Eshenbaugh Land Company). For each e-mail write ONE neutral, client-safe sentence (max 22 words) saying who wrote and what it concerned — e.g. "Buyer\'s broker asked for the survey and wetlands report." Never mention tasks, internal staff instructions, commission, pricing strategy, or anything that would embarrass the firm or the owner. Return ONLY JSON: {"<id>":"<sentence>", ...}.';
+    for(let i=0;i<todo.length;i+=25){ const chunk=todo.slice(i,i+25);
+      const user=chunk.map(r=>'ID '+r.id+'\nSubject: '+(r.subject||'')+'\nFrom/by: '+(r.by||'')+'\nText: '+String(r.raw||r.text).replace(/\s+/g,' ').slice(0,700)).join('\n\n');
+      try{ const txt=await leadAI(sys,user,1800); const m=String(txt||'').match(/\{[\s\S]*\}/); const j=m?JSON.parse(m[0]):{}; chunk.forEach(r=>{ const v=j[r.id]; if(v&&typeof v==='string') cache[r.id]=v.trim().slice(0,220); }); }
+      catch(e){ console.warn('[mr] email summary chunk',e); } }
+    const fresh=Object.keys(cache).length-Object.keys(rep.emailSummaries||{}).length;
+    if(fresh>0){ try{ await _mrSaveReport(deal.id, ym, {emailSummaries:cache}); rep.emailSummaries=cache; }catch(e){ console.warn('[mr] save summaries',e); } }
+  }
+  emails.forEach(r=>{ const sum=cache[r.id]; if(sum) r.text='Email: '+sum; else if(r.subject) r.text='Email: '+r.subject; });
+}
 async function _mrAssemble(deal, ym){
   const rep=(await _mrLoadReport(deal.id,ym))||{};
   const posts=_mrMonthPosts(deal,ym); const postUrls=new Set(posts.map(p=>p.imageUrl).filter(Boolean));
@@ -45993,6 +46011,7 @@ async function _mrAssemble(deal, ym){
   const emailImgs=await Promise.all(emails.map(e=>_mrMcImage(e.image))); emails.forEach((e,i)=>e.img=emailImgs[i]);
   const [acts,tasks]=await Promise.all([_mrFetchActivities(deal.id),_mrFetchTasks(deal.id)]);
   const h=_mrHistoryRows(deal,acts,tasks);
+  try{ await _mrSummarizeEmails(deal, ym, rep, h.history); }catch(e){ console.warn('[mr] email summaries',e); }   // MRNOTASKS-20261008
   const cfg=_mrCfg(); const L=_mrLetters()[ym]||{};
   const advisors=_mrAdvisorsOf(deal);
   const [hero,logo,sign,web,qr,shotE,social,heads]=await Promise.all([
@@ -46202,10 +46221,10 @@ async function _mrBuildPdf(A){
   }
   /* ---- 8 · Property notes ---- */
   y=R.newPage(); y=R.title('Property Notes',y+30);
-  y=R.para('The following is the activity and history logged on the Property since the listing was signed'+(since?' ('+_mrFmtDateLong(since)+')':'')+', newest first.',R.M,y+4,R.W-2*R.M,{size:10.5})+10;
+  y=R.para('Correspondence, calls, meetings, notes and marketing activity logged on the Property since the listing was signed'+(since?' ('+_mrFmtDateLong(since)+')':'')+', newest first.',R.M,y+4,R.W-2*R.M,{size:10.5})+10;
   if(A.history.length){ y=R.table({startY:y, head:[['Date','Type','By','Note']], body:A.history.map(r=>[r.date, r.type.replace('_',' '), r.by, r.text.length>420?r.text.slice(0,417)+'…':r.text]), columnStyles:{0:{cellWidth:56},1:{cellWidth:56},2:{cellWidth:86}}, styles:{font,fontSize:8.5,textColor:MR_INK,cellPadding:4,lineColor:MR_LINE,lineWidth:{bottom:0.8},overflow:'linebreak'}, contHeading:'Property Notes (cont.)'})+18; }
   else { y=R.para('No history has been logged on this property yet.',R.M,y,R.W-2*R.M,{size:10.5,color:MR_GREY})+18; }
-  if(A.tasks.length){ if(y>R.H-160){ y=R.newPage()+30; } R.text('Completed Tasks',R.M,y+6,{size:16,bold:true}); y=R.table({startY:y+16, head:[['Completed','Task','Completed by']], body:A.tasks.map(t=>[t.date,t.title,t.by]), columnStyles:{0:{cellWidth:70},2:{cellWidth:110}}, styles:{font,fontSize:8.5,textColor:MR_INK,cellPadding:4,lineColor:MR_LINE,lineWidth:{bottom:0.8}}, contHeading:'Completed Tasks (cont.)'}); }
+  if(false&&A.tasks.length){ /* MRNOTASKS-20261008: tasks are internal and never print */ if(y>R.H-160){ y=R.newPage()+30; } R.text('Completed Tasks',R.M,y+6,{size:16,bold:true}); y=R.table({startY:y+16, head:[['Completed','Task','Completed by']], body:A.tasks.map(t=>[t.date,t.title,t.by]), columnStyles:{0:{cellWidth:70},2:{cellWidth:110}}, styles:{font,fontSize:8.5,textColor:MR_INK,cellPadding:4,lineColor:MR_LINE,lineWidth:{bottom:0.8}}, contHeading:'Completed Tasks (cont.)'}); }
   /* ---- 9 · Leads & website activity ---- */
   const stats=[['TheDirtDog.com visits',T.siteVisits],['Unique visitors',T.uniqueVisitors],['Docs viewed',T.docsViewed],['CAs signed',T.casSigned],['Google sessions',T.gaSessions],['Total Commercial views',T.totalCommercialViews],['LoopNet views',T.loopnetViews],['Crexi views',T.crexiViews]].filter(s=>s[1]!=null&&s[1]!=='');
   if(act.length||stats.length){
