@@ -45317,12 +45317,14 @@ function _mrHistoryRows(deal, activities, tasks, opt){   // opt.includeHidden �
     if(a.autoLogged&&/^(contact refresh|task:|✅|⚠️ fix listing|📧 monthly e-blast)/i.test(String(a.body||'').trim())) return;
     let text=a.body||'';
     if(a.type==='email') text=(a.gmailSubject?('Email: '+a.gmailSubject+(text?' — ':'')):'')+text;
+    const mwLab={om_sent:'OM / info sent',info_request:'Info requested',question:'Buyer question',offer:'Offer'}[a.mwCategory||''];   // MAILWATCH-20261008: auto-filed emails print as a labelled client-safe line, newest first
+    if(mwLab && a.mwSummary) text=mwLab+': '+a.mwSummary;
     if(a.type==='call') text='Call'+(a.callDuration?(' ('+a.callDuration+' min)'):'')+(text?': '+text:'');
     if(a.type==='meeting') text='Meeting'+(a.meetingTitle?(' — '+a.meetingTitle):'')+(text?': '+text:'');
     if(a.type==='stage_change') text='Stage: '+text;
     if(a.type==='attachment') text='Document: '+text;
     text=String(text).replace(/\s+/g,' ').trim(); if(!text) return;
-    rows.push({id:a.id, ts, date:_mrFmtDate(ts), type:(a.type||'note'), by:a.createdByName||'', text, subject:a.gmailSubject||'', raw:String(a.body||'').slice(0,1200), hidden:!!a.reportHidden, movedTo:a.movedTo||'', auto:a.source==='mailwatch'||a.source==='mailwatch-reviewed', cat:a.mwCategory||'', threadId:a.gmailThreadId||''});
+    rows.push({id:a.id, ts, date:_mrFmtDate(ts), type:(a.type||'note'), by:a.createdByName||'', text, subject:a.gmailSubject||'', raw:String(a.body||'').slice(0,1200), mw:!!(mwLab&&a.mwSummary), hidden:!!a.reportHidden, movedTo:a.movedTo||'', auto:a.source==='mailwatch'||a.source==='mailwatch-reviewed', cat:a.mwCategory||'', threadId:a.gmailThreadId||''});
   });
   if(deal.notes){
     deal.notes.split('\n').filter(l=>/^\s*\[[^\]]+\]/.test(l)).forEach(line=>{
@@ -45992,7 +45994,7 @@ async function _mrPostMetrics(groups){
 // Gather everything the PDF needs for one deal/month.
 /* MRNOTASKS-20261008: e-mails print as a one-line AI summary (client-safe), cached on the month's report doc as emailSummaries{activityId:text} */
 async function _mrSummarizeEmails(deal, ym, rep, rows){
-  const emails=rows.filter(r=>r.type==='email'); if(!emails.length) return;
+  const emails=rows.filter(r=>r.type==='email'&&!r.mw); if(!emails.length) return;
   const cache=Object.assign({}, rep.emailSummaries||{}); const todo=emails.filter(r=>r.id&&!cache[r.id]).slice(0,60);
   if(todo.length&&typeof leadAI==='function'){
     const sys='You summarize e-mail correspondence for a property owner\'s monthly marketing report from a Florida land brokerage (Eshenbaugh Land Company). For each e-mail write ONE neutral, client-safe sentence (max 22 words) saying who wrote and what it concerned — e.g. "Buyer\'s broker asked for the survey and wetlands report." Never mention tasks, internal staff instructions, commission, pricing strategy, or anything that would embarrass the firm or the owner. Return ONLY JSON: {"<id>":"<sentence>", ...}.';
