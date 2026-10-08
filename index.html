@@ -46002,6 +46002,34 @@ async function _mrSummarizeEmails(deal, ym, rep, rows){
   }
   emails.forEach(r=>{ const sum=cache[r.id]; if(sum) r.text='Email: '+sum; else if(r.subject) r.text='Email: '+r.subject; });
 }
+/* COMPANIES-20261008: "Companies reached" — the e-blast audience rolled up from recipient e-mail DOMAINS to company names (never people).
+   Source: the social worker's /mailchimp/recipients (domain counts only). Name = CRM company on that domain > Mailchimp COMPANY field > AI-cleaned domain.
+   Cached on the month's report doc (rep.companiesReached) keyed by campaign ids, so re-building a report doesn't re-query. */
+function _mrCoKey(n){ return String(n||'').toLowerCase().replace(/&/g,' and ').replace(/[^a-z0-9 ]+/g,' ').replace(/\b(llc|l l c|inc|incorporated|corp|corporation|co|company|ltd|lp|llp|pllc|pa|p a)\b/g,' ').replace(/\s+/g,' ').trim(); }
+function _mrDomainLabel(d){ const parts=String(d||'').split('.'); const core=(parts.length>2&&/^(co|com|org|net)$/.test(parts[parts.length-2])?parts[parts.length-3]:parts[parts.length-2])||parts[0]||''; return core.split(/[-_]/).map(w=>w.charAt(0).toUpperCase()+w.slice(1)).join(' '); }
+async function _mrCompaniesReached(deal, ym, rep, emails){
+  const ids=[...new Set((emails||[]).map(e=>e&&e.id).filter(Boolean))]; if(!ids.length||typeof _spWorkerPost!=='function') return null;
+  const key=ids.slice().sort().join(',');
+  const hit=rep&&rep.companiesReached; if(hit&&hit.key===key&&Array.isArray(hit.names)) return hit;
+  let r; try{ r=await Promise.race([_spWorkerPost('/mailchimp/recipients',{campaignIds:ids}), new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')),25000))]); }
+  catch(e){ console.warn('[mr] companies reached',e.message); return (hit&&Array.isArray(hit.names))?hit:null; }
+  const domains=(r&&r.domains)||[]; if(!domains.length&&!(r&&r.individuals)) return null;
+  const crm=new Map();   // domain -> {company:count}
+  (typeof allContacts!=='undefined'?allContacts:[]||[]).forEach(x=>{ const co=String(x.company||'').trim(); if(!co) return; [x.email,x.email2].forEach(em=>{ const m=String(em||'').toLowerCase().match(/@([^@\s]+)$/); if(!m) return; const o=crm.get(m[1])||{}; o[co]=(o[co]||0)+1; crm.set(m[1],o); }); });
+  const named=new Map(); const unknown=[];
+  domains.forEach(d=>{ const o=crm.get(d.domain); const co=(o&&Object.entries(o).sort((a,b)=>b[1]-a[1])[0][0])||d.company||''; if(co) named.set(d.domain,co); else unknown.push(d.domain); });
+  if(unknown.length&&typeof leadAI==='function'){
+    const sys='You turn e-mail domains into company names for a real-estate brokerage report. For each domain give the company\'s proper name if you are confident it is a well-known firm (e.g. cbre.com -> CBRE, lennar.com -> Lennar); otherwise just title-case the main word(s) of the domain (e.g. smithlandgroup.com -> Smithland Group). Never invent facts. Reply with ONLY a JSON object {"domain":"Company Name"}.';
+    for(let i=0;i<unknown.length;i+=80){ const chunk=unknown.slice(i,i+80);
+      try{ const txt=await leadAI(sys,chunk.join('\n'),2400); const m=String(txt||'').match(/\{[\s\S]*\}/); const j=m?JSON.parse(m[0]):{}; chunk.forEach(d=>{ const v=j[d]; if(v&&typeof v==='string'&&v.trim().length<=60) named.set(d,v.trim()); }); }
+      catch(e){ console.warn('[mr] company names',e.message); } } }
+  unknown.forEach(d=>{ if(!named.has(d)) named.set(d,_mrDomainLabel(d)); });
+  const byKey=new Map(); domains.forEach(d=>{ const nm=named.get(d.domain)||_mrDomainLabel(d.domain); const k=_mrCoKey(nm)||d.domain; if(!byKey.has(k)) byKey.set(k,{name:nm,count:0}); byKey.get(k).count+=d.count; });
+  const names=[...byKey.values()].sort((a,b)=>a.name.localeCompare(b.name,'en',{sensitivity:'base'})).map(x=>x.name);
+  const out={key, at:Date.now(), names, recipients:r.recipients||0, individuals:r.individuals||0};
+  try{ await _mrSaveReport(deal.id, ym, {companiesReached:out}); if(rep) rep.companiesReached=out; }catch(e){ console.warn('[mr] save companies',e); }
+  return out;
+}
 async function _mrAssemble(deal, ym){
   const rep=(await _mrLoadReport(deal.id,ym))||{};
   const posts=_mrMonthPosts(deal,ym); const postUrls=new Set(posts.map(p=>p.imageUrl).filter(Boolean));
@@ -46009,6 +46037,7 @@ async function _mrAssemble(deal, ym){
   posts.forEach((p,i)=>p.img=postImgs[i]);
   const emails=(typeof _mrMcForReport==='function')?await _mrMcForReport(deal,ym,rep):[];   // MCREPORT-20261007
   const emailImgs=await Promise.all(emails.map(e=>_mrMcImage(e.image))); emails.forEach((e,i)=>e.img=emailImgs[i]);
+  let companies=null; try{ companies=await _mrCompaniesReached(deal, ym, rep, emails); }catch(e){ console.warn('[mr] companies',e); }   // COMPANIES-20261008
   const [acts,tasks]=await Promise.all([_mrFetchActivities(deal.id),_mrFetchTasks(deal.id)]);
   const h=_mrHistoryRows(deal,acts,tasks);
   try{ await _mrSummarizeEmails(deal, ym, rep, h.history); }catch(e){ console.warn('[mr] email summaries',e); }   // MRNOTASKS-20261008
@@ -46027,7 +46056,7 @@ async function _mrAssemble(deal, ym){
   advisors.forEach((a,i)=>a.head=heads[i]);
   const custom=rep.letterMode==='custom' && String(rep.letterBody||'').trim();
   return { deal, ym, rep, history:h.history, tasks:h.tasks, letter:custom?rep.letterBody:(L.body||''), signature:custom?(rep.letterSignature||((advisors[0]||{}).name||'')+' — Eshenbaugh Land Company'):(L.signature||cfg.letterSignature||'Ryan Sampson, ALC, CCIM — Managing Partner / Broker of Record'), letterCustom:!!custom, about:cfg.about||MR_DEFAULT_ABOUT,
-    firmAddress:cfg.firmAddress||'304 S. Willow Ave, Tampa, FL 33606', firmWebsite:cfg.firmWebsite||'WWW.THEDIRTDOG.COM', advisors, hero, logo, sign, web, qr, links:(typeof _mrDealLinks==='function'?_mrDealLinks(deal):[]), shotE, social:(social||[]).filter(Boolean), posts, emails,
+    firmAddress:cfg.firmAddress||'304 S. Willow Ave, Tampa, FL 33606', firmWebsite:cfg.firmWebsite||'WWW.THEDIRTDOG.COM', advisors, hero, logo, sign, web, qr, links:(typeof _mrDealLinks==='function'?_mrDealLinks(deal):[]), shotE, social:(social||[]).filter(Boolean), posts, emails, companies,
     preparedFor:rep.preparedFor||_mrOwnerLabel(deal), traffic:rep.traffic||{} };
 }
 async function _mrBuildPdf(A){
@@ -46152,6 +46181,23 @@ async function _mrBuildPdf(A){
       R.text(stats,x+pad,cy+10,{size:8.5,bold:true,color:MR_INK});
       y+=h+14;
     });
+    /* COMPANIES-20261008 — companies the e-blast reached (names only, alphabetical, no duplicates) */
+    if(A.companies&&A.companies.names&&A.companies.names.length){
+      const names=A.companies.names.slice(0,300), more=A.companies.names.length-names.length, cw2=R.W-2*R.M, cols=3, gap=14, colW=(cw2-gap*(cols-1))/cols, lh=12.5;
+      const intro='The listing was e-mailed to '+A.companies.names.length+' compan'+(A.companies.names.length===1?'y':'ies')+(A.companies.individuals?' plus '+A.companies.individuals+' independent buyer, broker and investor accounts':'')+' — one entry per company, however many people there received it.';
+      const introLines=R.split(intro,cw2,9.5);
+      if(y+40+introLines.length*13+lh*4>R.H-56){ y=R.newPage(); R.text('Email Report (cont.)',R.M,y+10,{size:16,bold:true}); y+=30; }
+      R.text('COMPANIES REACHED',R.M,y+12,{size:9,bold:true,color:MR_GREY}); R.line(R.M,y+18,R.W-R.M,y+18,MR_TEAL,1.5); y+=30;
+      introLines.forEach((ln,k)=>R.text(ln,R.M,y+10+k*13,{size:9.5,color:MR_GREY})); y+=introLines.length*13+8;
+      let idx=0;
+      while(idx<names.length){
+        let rows=Math.floor((R.H-56-y)/lh); if(rows<4){ y=R.newPage(); R.text('Email Report (cont.)',R.M,y+10,{size:16,bold:true}); y+=30; rows=Math.floor((R.H-56-y)/lh); }
+        const take=Math.min(names.length-idx, rows*cols), per=Math.ceil(take/cols);
+        for(let k=0;k<take;k++){ const col=Math.floor(k/per), row=k%per; const nm=R.split(names[idx+k],colW-4,8.5)[0]||''; R.text(nm,R.M+col*(colW+gap),y+9+row*lh,{size:8.5}); }
+        y+=per*lh+6; idx+=take;
+      }
+      if(more>0){ R.text('+ '+more+' additional compan'+(more===1?'y':'ies'),R.M,y+10,{size:8.5,color:MR_GREY}); y+=18; }
+    }
     if(A.shotE){ const maxH=R.H-56-y-10; if(maxH<160){ y=R.newPage(); R.text('Email Report (cont.)',R.M,y+10,{size:16,bold:true}); y+=30; } R.fit(A.shotE,R.M+40,y,R.W-2*R.M-80,R.H-56-y-10); }
   }
   /* ---- 5 · Social media ---- */
