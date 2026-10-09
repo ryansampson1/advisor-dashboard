@@ -2284,7 +2284,7 @@ html.dark .deal-search-empty{ color:#A6ADBA !important; }
    ======================================================= */
 const APP_CONFIG = {
   // Agreements tab — docx->PDF worker URL (deploy agreements-worker, then paste)
-  agreements: { pdfProxyUrl: '' },
+  agreements: { pdfProxyUrl: 'https://elc-agreements-worker.dirtdog.workers.dev' },   // AGPDF-20261008 — live once agreements-worker is deployed
   // 📬 Monthly Owner Reports (MREPORT-20261006). access: 'owner' | 'admins' | 'all' — overridden from eos/settings.monthlyReports
   monthlyReports: { access: 'owner', workerUrl: 'https://elc-report-worker.dirtdog.workers.dev' },
   social: { workerUrl: 'https://elc-social-worker.dirtdog.workers.dev', defaultLink: 'https://www.thedirtdog.com' },   // SOCIAL-20261006-hooks
@@ -45607,6 +45607,7 @@ function viewMonthlyReports(){
     </div>
     <p class="mr-note" style="margin-top:.8rem">Reports are drafts until you click Send. Each one is emailed from the listing advisor’s mailbox, filed under the deal’s Attachments, and logged on the property’s history.</p>
     ${_mrSeesAll()&&window._sdPanelHtml?window._sdPanelHtml():''}
+    ${_mrSeesAll()&&window._psPanelHtml?window._psPanelHtml():''}
     ${window._mwPanelHtml?window._mwPanelHtml():''}
   </div>`);
   _mrPreloadReports(ym, deals).then(()=>{ if(currentView==='monthlyReports') window._mrRenderRows(); if(window._mbRun) window._mbRun({silent:true}); });   // MCBLAST-20261007
@@ -47192,7 +47193,7 @@ window._sdLoad=async function(force, btn){
 };
 function _sdRecentHtml(){
   const cut=Date.now()-8*86400000; const items=[];
-  (allDeals||[]).forEach(d=>(d.socialPosts||[]).forEach(p=>{ if(p&&p.auto&&p.at>=cut) items.push({d,p}); }));
+  (allDeals||[]).forEach(d=>(d.socialPosts||[]).forEach(p=>{ if(p&&(p.auto||p.imported)&&p.at>=cut) items.push({d,p}); }));
   if(!items.length) return '';
   items.sort((a,b)=>b.p.at-a.p.at);
   return `<div style="margin-top:.6rem"><div class="mr-lbl">Last 7 days</div>${items.slice(0,10).map(({d,p})=>{ const m=p.metrics||{}; return `<div class="mr-row" style="gap:.5rem;font-size:.78rem;padding:.2rem 0;flex-wrap:wrap"><span class="mr-muted">${_mrEsc(_mrFmtDate(p.at))}</span> <b>${p.platform==='facebook'?'Facebook':'LinkedIn'}</b> ${_mrEsc(_mrDealName(d))} <span class="mr-muted">(${_mrEsc(SD_REASON_LABEL[p.reason]||'')})</span>${p.url?` <a href="${_mrEsc(p.url)}" target="_blank" rel="noopener" style="color:#0A66C2">view ↗</a>`:''} ${p.metricsAt?`<span class="mr-muted">· reach ${m.reach??m.impressions??'–'} · likes ${m.likes??0} · comments ${(p.comments||[]).length} · clicks ${m.clicks??'–'}</span>`:'<span class="mr-muted">· results in 24 h</span>'}</div>`; }).join('')}</div>`;
@@ -47215,6 +47216,70 @@ window._sdPullMetrics=async function(btn){
   finally{ done(); }
 };
 /* ===== SOCIALDAILY_BLOCK_END ===== */
+/* =======================================================
+   📥 FACEBOOK PAGE POST IMPORT (Terra side) — marker PAGESYNC-20261009
+   Every post the team publishes on the ELC Facebook Page is imported by the
+   social worker (cron, several times a day) and filed on the listing it is
+   about (deal.socialPosts[] with imported:true), so it prints on that listing's
+   Monthly Marketing Report with its photo, results and comments.
+   This panel (📬 Monthly Reports) shows the last import, lets an admin run it
+   now / backfill older months, and lists posts the worker could not match with
+   confidence so they can be assigned to a listing — or ignored — in one click.
+   ======================================================= */
+window._psState=window._psState||{list:null};
+window._psPanelHtml=function(){
+  setTimeout(()=>{ try{ window._psLoad&&window._psLoad(); }catch(_){} },600);
+  const adm=currentUser&&(currentUser.isAdmin||currentUser.isSuperAdmin);
+  return `<div class="mr-sec" id="ps-panel" style="margin-top:.8rem"><div class="mr-row" style="justify-content:space-between;align-items:center;gap:.6rem;flex-wrap:wrap">
+    <h3 style="margin:0">📥 Facebook Page posts <span class="mr-note">— every post on the firm’s Page is filed on its listing’s report</span></h3>
+    <div class="mr-row" style="gap:.4rem"><button class="mr-btn mr-btn-sm" onclick="window._psSync(this,45)" title="Read the Page’s posts from the last 45 days and file any new ones on their listings">↻ Import Page posts now</button>${adm?`<button class="mr-btn mr-btn-sm" onclick="window._psSync(this,100)" title="Go back 100 days (use once to catch up earlier months)">Backfill 100 days</button>`:''}</div>
+  </div><div id="ps-body" class="mr-muted" style="margin-top:.4rem">Checking the Page…</div></div>`;
+};
+window._psDealOptions=function(cands){
+  const seen=new Set(); const opt=(id,label)=>{ if(seen.has(id)) return ''; seen.add(id); return `<option value="${_mrEsc(id)}">${_mrEsc(label)}</option>`; };
+  let h='<option value="">— choose listing —</option>';
+  (cands||[]).forEach(c=>{ const d=(allDeals||[]).find(x=>x.id===c.dealId); if(d) h+=opt(d.id,'★ '+_mrDealName(d)+(c.why?' ('+c.why+')':'')); });
+  (allDeals||[]).filter(d=>d&&!d.archived&&!d.deleted&&(d.representation||'seller')!=='buyer'&&/listing|loi|contract/i.test(String(d.stage||''))).sort((a,b)=>_mrDealName(a).localeCompare(_mrDealName(b))).forEach(d=>{ h+=opt(d.id,_mrDealName(d)+(_mrDealAddr(d)?' — '+_mrDealAddr(d):'')); });
+  return h;
+};
+window._psLoad=async function(force){
+  const box=document.getElementById('ps-body'); if(!box) return;
+  try{
+    const r=await _spWorkerPost('/pagesync/list',{}); window._psState.list=r; const un=r.unmatched||[];
+    const last=r.lastRunAt?new Date(r.lastRunAt).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}):'never';
+    box.className=''; box.innerHTML=`<div class="mr-note">Last import: <b>${_mrEsc(last)}</b>${r.lastRunAt?' · '+(r.lastImported||0)+' new post'+((r.lastImported||0)===1?'':'s')+' filed':''}. Runs automatically about 5 times a day; posts are matched on street address, the property’s own web link, or project name + acreage/price.</div>`+
+      (un.length?`<div style="margin-top:.5rem"><div class="mr-lbl">⚠ ${un.length} post${un.length===1?'':'s'} to assign</div>${un.map((u,i)=>`<div style="padding:.5rem 0;border-top:1px solid var(--line,#e5e7eb);display:flex;gap:.7rem;align-items:flex-start;flex-wrap:wrap">
+        ${u.image?`<img class="mr-thumb" src="${_mrEsc(u.image)}" alt="" style="width:96px;height:62px;object-fit:cover">`:''}
+        <div style="flex:1;min-width:220px"><div class="mr-muted" style="font-size:.72rem">${_mrEsc(_mrFmtDate(u.at))} · <a href="${_mrEsc(u.url)}" target="_blank" rel="noopener" style="color:#0A66C2">Open on Facebook ↗</a></div>
+          <div style="font-size:.8rem;margin:.15rem 0">${_mrEsc(u.snippet||'(photo only)')}</div>
+          <div class="mr-row" style="gap:.4rem;flex-wrap:wrap"><select id="ps-sel-${i}" style="max-width:340px;font-size:.78rem">${window._psDealOptions(u.candidates)}</select>
+          <button class="mr-btn mr-btn-sm" onclick="window._psAssign(${i},this)">Assign</button><button class="mr-btn mr-btn-sm" onclick="window._psIgnore(${i},this)" title="Not about one listing (event, market update…) — don’t put it on any report">Ignore</button></div></div></div>`).join('')}</div>`:'<div class="mr-note" style="margin-top:.3rem">✓ Nothing waiting — every post is filed on a listing.</div>');
+  }catch(e){ box.className='mr-muted'; box.textContent='Page-post import unavailable: '+e.message; }
+};
+window._psSync=async function(btn,days){
+  const done=elcBusy(btn,'Importing…');
+  try{ const r=await _spWorkerPost('/pagesync/run',{days}); const n=(r.imported||[]).length, u=(r.unmatched||[]).length;
+    showToast('Scanned '+r.scanned+' Page post'+(r.scanned===1?'':'s')+' · '+n+' filed on listings'+(u?' · '+u+' need a listing assigned':'')+' · '+(r.alreadyLogged||0)+' already logged', u?'warning':'success', 9000);
+    setTimeout(()=>window._psLoad(true),800); try{ if(typeof renderCurrentView==='function') setTimeout(renderCurrentView,1500); }catch(_){}
+  }catch(e){ showToast('Page-post import failed: '+e.message,'error',9000); }
+  finally{ done(); }
+};
+window._psAssign=async function(i,btn){
+  const u=((window._psState.list||{}).unmatched||[])[i]; const sel=document.getElementById('ps-sel-'+i); if(!u||!sel||!sel.value){ showToast('Pick the listing this post is about','warning'); return; }
+  const done=elcBusy(btn,'…');
+  try{ const r=await _spWorkerPost('/pagesync/assign',{postId:u.postId,dealId:sel.value}); showToast('Filed on '+(r.name||'the listing')+' ✓','success'); window._psLoad(true); }
+  catch(e){ showToast('Could not assign: '+e.message,'error',8000); }
+  finally{ done(); }
+};
+window._psIgnore=async function(i,btn){
+  const u=((window._psState.list||{}).unmatched||[])[i]; if(!u) return;
+  if(!(await elcConfirm('Ignore this post?\n\nIt will not appear on any listing’s report.',{title:'Ignore Page post',okLabel:'Ignore'}))) return;
+  const done=elcBusy(btn,'…');
+  try{ await _spWorkerPost('/pagesync/assign',{postId:u.postId,ignore:true}); window._psLoad(true); }
+  catch(e){ showToast('Could not ignore: '+e.message,'error'); }
+  finally{ done(); }
+};
+/* ===== PAGESYNC_BLOCK_END ===== */
 /* =======================================================
    🔗 PORTAL LINKS IMPORT — marker PORTALLINKS-20261008
    Fills deal.reportLinks[] ("WHERE THE PROPERTY IS LISTED" on the monthly
