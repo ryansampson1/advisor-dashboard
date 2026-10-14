@@ -9669,7 +9669,7 @@ window.toggleStaffView = () => {
 window.toggleAdminView = () => {
   adminViewAsAdvisor = !adminViewAsAdvisor;
   if(adminViewAsAdvisor) staffViewMode = false; // advisor view overrides staff view
-  const advisorTabs = ['board','tasks','calendar','commissions','eos','comps'];
+  const advisorTabs = ['board','tasks','commissions','eos','comps'];   // ADVHIDE-20261014: calendar removed
   if(adminViewAsAdvisor && !advisorTabs.includes(currentView)) currentView = 'board';
   renderShell();
   renderCurrentView();
@@ -11323,6 +11323,10 @@ function setContent(html){ const el=document.getElementById('main-content'); if(
 
 // Role-filtered nav list. Used by the desktop sidebar AND the mobile bottom bar /
 // "More" sheet so every device shows the same tabs for the current view. MOBVIEW-20260915
+// ADVHIDE-20261014 — tabs not in use yet: hidden in Advisor View for everyone (plain advisors,
+// office managers, admins viewing as advisor). Admin view and staff view are unchanged.
+const ADVISOR_VIEW_HIDDEN_TABS = ['leads','buyers','calendar','inbox','drive'];
+window.ADVISOR_VIEW_HIDDEN_TABS = ADVISOR_VIEW_HIDDEN_TABS;
 function buildNavItems(){
   if(!currentUser) return [];
   const isAdmin=currentUser.isAdmin;
@@ -11332,6 +11336,7 @@ function buildNavItems(){
     return [
       {id:'board',         label:'📋 Deals',         always:true},
       {id:'tasks',         label:'✅ Tasks',          always:true},
+      {id:'logCall',       label:'📞 Log Call',        advisor:true, admin:true, manager:true},   // LOGCALL-20261014
       {id:'calendar',      label:'📅 Calendar',       advisor:true},
       {id:'dashboard',     label:'📊 Financials',    admin:true, manager:true},
       {id:'itr',           label:'📈 ITR',           admin:true},
@@ -11371,6 +11376,7 @@ function buildNavItems(){
         if(n.crm){ const cfg=APP_CONFIG.crm||{}; return cfg.enabled||((cfg.betaEmails||[]).includes(currentUser?.email)); }
         return false;
       }
+      if(!effectiveAdmin && ADVISOR_VIEW_HIDDEN_TABS.includes(n.id)) return false;   // ADVHIDE-20261014
       if(n.reports) return _mrNavVisible(effectiveAdmin);   // MREPORT-20261006
       if(n.always) return true;
       if(n.advisor && (!effectiveAdmin || adminViewAsAdvisor)) return true;
@@ -11532,6 +11538,8 @@ window.switchView = id => {
   payViewAdvisorUid = null; payViewAdvisorName = '';
   // Leaving the My Office view exits the admin "view as office manager" preview.
   if(id!=='officeOverview') adminPreviewOffice = null;
+  // ADVHIDE-20261014 — a notification button can't open a tab hidden in this view
+  try{ if(ADVISOR_VIEW_HIDDEN_TABS.includes(id) && !buildNavItems().some(n=>n.id===id)) id='board'; }catch(e){}
   currentView=id;
   if(id==='hr') { localStorage.setItem('hr_headlines_seen', Date.now()); _updateNavBadges(); }
   // Calendar tab: now rendered in-app as an interactive embedded grid
@@ -12169,7 +12177,7 @@ window.agCommSync = agCommSync;
 
 function renderCurrentView(){
   window._elcScoreCache?.clear();   // elc-v443: week scores are memoised per paint
-  const map={exportContacts:viewExportContacts,board:viewBoard,tasks:viewTasks,calendar:viewCalendar,dashboard:viewDashboard,itr:viewITR,projection:viewProjection,
+  const map={logCall:viewLogCall,exportContacts:viewExportContacts,board:viewBoard,tasks:viewTasks,calendar:viewCalendar,dashboard:viewDashboard,itr:viewITR,projection:viewProjection,
     commissions:viewMyCommissions,
     bio:viewAdvisorBio,   // ADVBIO-20261006
     splits:viewSplits,automations:viewAutomations,users:viewUsers,leaderboard:viewLeaderboard,
@@ -19594,6 +19602,8 @@ window._dealLogActivity = async (dealId, type, data = {}) => {
     ...( data.rfcId        ? {rfcId: data.rfcId, gmailSubject: data.gmailSubject||'', gmailFrom: data.gmailFrom||'', gmailDate: data.gmailDate||''} : {} ),
     ...( data.source       ? {source: data.source} : {} ),
     ...( data.aiSummary    ? {aiSummary: true} : {} ),
+    ...( data.contactId    ? {contactId: data.contactId, contactName: data.contactName||''} : {} ),   // LOGCALL-20261014
+    ...( data.reportHidden ? {reportHidden: true} : {} ),   // LOGCALL-20261014: 'keep off the owner report'
   };
   // Write to deal sub-collection
   const _actRef = await addDoc(collection(_fbDb, 'deals', dealId, 'activities'), activity);
@@ -26529,6 +26539,240 @@ window.exportGroupCSV = () => {
   setTimeout(()=>URL.revokeObjectURL(url), 1000);
   showToast('Exported ' + rows.length + ' contact' + (rows.length!==1?'s':'') + ' from ' + g.name, 'success');
 };
+
+/* =======================================================
+   VIEW: 📞 LOG CALL / MEETING  (LOGCALL-20261014)
+   One place to log a call or meeting:
+   • Property (optional) → written to deals/{id}/activities through _dealLogActivity,
+     so it prints in that listing's Monthly Marketing Report and earns Prospects/Calls credit.
+   • Caller (optional) → an existing CRM contact, or a new one created here. The entry is
+     added to the contact's timeline. The contact is NOT added to the deal's linkedDeals,
+     because linked contacts become owner-report recipient candidates (_mrRecipientCandidates).
+   At least one of property / caller is required.
+   ======================================================= */
+const _lcEsc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+window._lc = window._lc || { type:'call', dealId:'', contactId:'', newContact:false, recent:[] };
+function _lcDealLabel(d){ return d ? (d.projectName || d.propertyAddress || d.address || 'Untitled property') : ''; }
+function _lcContactLabel(c){ if(!c) return ''; const n=[c.firstName,c.lastName].filter(Boolean).join(' '); return n || c.company || c.email || c.phone || 'Unnamed contact'; }
+const _LC_CLOSED = /sold|closed|dead|cancel|lost|expired|fell/i;
+function _lcDeals(){
+  return (visibleDeals()||[]).slice().sort((a,b)=>{
+    const ca=_LC_CLOSED.test(a.stage||'')?1:0, cb=_LC_CLOSED.test(b.stage||'')?1:0;
+    return ca-cb || _lcDealLabel(a).localeCompare(_lcDealLabel(b));
+  });
+}
+function viewLogCall(){
+  bootCRM();   // the caller search needs allContacts
+  const s = window._lc;
+  const today = window._elcLocalDateStr();
+  const deal = s.dealId ? (allDeals||[]).find(d=>d.id===s.dealId) : null;
+  const ct   = s.contactId ? (allContacts||[]).find(c=>c.id===s.contactId) : null;
+  const inp  = 'border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-200 w-full text-gray-800 bg-white';
+  const lbl  = 'text-xs font-semibold text-gray-500 uppercase tracking-wide';
+  const isCall = s.type==='call';
+  setContent(`
+    <div class="mb-6">
+      <h2 class="text-xl font-bold text-gray-800">📞 Log Call / Meeting</h2>
+      <p class="text-sm text-gray-500 mt-0.5">Record a call or meeting, tie it to a property for its Monthly Report, and link the caller in the CRM.</p>
+    </div>
+    <div class="bg-white rounded-2xl border p-4 mb-4" style="max-width:760px">
+      <div role="radiogroup" aria-label="Entry type" class="flex gap-2 mb-4">
+        <button type="button" role="radio" aria-checked="${isCall}" onclick="window._lcSetType('call')"
+          class="px-4 py-2 rounded-lg text-sm font-semibold border ${isCall?'brand-btn':'text-gray-700 bg-white'}" style="min-height:44px">📞 Call</button>
+        <button type="button" role="radio" aria-checked="${!isCall}" onclick="window._lcSetType('meeting')"
+          class="px-4 py-2 rounded-lg text-sm font-semibold border ${!isCall?'brand-btn':'text-gray-700 bg-white'}" style="min-height:44px">🤝 Meeting</button>
+      </div>
+
+      <div class="grid gap-3 mb-4" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr))">
+        <label class="flex flex-col gap-1"><span class="${lbl}">Date</span>
+          <input id="lc-date" type="date" value="${_lcEsc(s.date||today)}" max="${today}" class="${inp}" style="min-height:44px"/></label>
+        ${isCall ? `
+        <label class="flex flex-col gap-1"><span class="${lbl}">Duration (min)</span>
+          <input id="lc-dur" type="number" min="1" inputmode="numeric" placeholder="e.g. 15" value="${_lcEsc(s.dur||'')}" class="${inp}" style="min-height:44px"/></label>` : `
+        <label class="flex flex-col gap-1"><span class="${lbl}">Meeting title</span>
+          <input id="lc-title" type="text" placeholder="e.g. Site visit with buyer" value="${_lcEsc(s.title||'')}" class="${inp}" style="min-height:44px"/></label>`}
+      </div>
+
+      <div class="mb-4">
+        <span class="${lbl}">Property <span class="normal-case font-normal text-gray-500">— shows on its Monthly Report</span></span>
+        ${deal ? `
+          <div class="flex items-center gap-2 mt-1 p-2 border rounded-lg bg-gray-50">
+            <span class="text-sm font-semibold text-gray-800 flex-1">🏞 ${_lcEsc(_lcDealLabel(deal))} <span class="text-xs font-normal text-gray-500">· ${_lcEsc(deal.stage||'')}</span></span>
+            <button type="button" onclick="window._lcPickDeal('')" aria-label="Remove property" class="text-sm text-gray-600 px-3 border rounded-lg bg-white" style="min-height:44px">✕</button>
+          </div>` : `
+          <input id="lc-deal-q" type="search" autocomplete="off" placeholder="Search your properties… (leave blank for a call not tied to a property)"
+            oninput="window._lcDealSearch(this.value)" class="${inp} mt-1" style="min-height:44px"/>
+          <div id="lc-deal-results" class="mt-1"></div>`}
+      </div>
+
+      <div class="mb-4">
+        <span class="${lbl}">${isCall?'Caller':'Who you met'} <span class="normal-case font-normal text-gray-500">— added to their CRM timeline</span></span>
+        ${ct ? `
+          <div class="flex items-center gap-2 mt-1 p-2 border rounded-lg bg-gray-50">
+            <span class="text-sm font-semibold text-gray-800 flex-1">👤 ${_lcEsc(_lcContactLabel(ct))}${ct.company?` <span class="text-xs font-normal text-gray-500">· ${_lcEsc(ct.company)}</span>`:''}</span>
+            <button type="button" onclick="window._lcPickContact('')" aria-label="Remove contact" class="text-sm text-gray-600 px-3 border rounded-lg bg-white" style="min-height:44px">✕</button>
+          </div>` : s.newContact ? `
+          <div class="mt-1 p-3 border rounded-lg bg-gray-50">
+            <div class="grid gap-2" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr))">
+              <input id="lc-nc-first" placeholder="First name" class="${inp}" style="min-height:44px"/>
+              <input id="lc-nc-last" placeholder="Last name" class="${inp}" style="min-height:44px"/>
+              <input id="lc-nc-company" placeholder="Company" class="${inp}" style="min-height:44px"/>
+              <input id="lc-nc-phone" type="tel" placeholder="Phone" class="${inp}" style="min-height:44px"/>
+              <input id="lc-nc-email" type="email" placeholder="Email" class="${inp}" style="min-height:44px"/>
+            </div>
+            <div class="flex items-center justify-between mt-2">
+              <span class="text-xs text-gray-500">Saved to the CRM when you save this ${isCall?'call':'meeting'}. If the email or name is already in the CRM, the existing contact is used.</span>
+              <button type="button" onclick="window._lcNewContact(false)" class="text-sm text-gray-600 underline px-2" style="min-height:44px">Cancel</button>
+            </div>
+          </div>` : `
+          <input id="lc-ct-q" type="search" autocomplete="off" placeholder="Search CRM by name, company, email or phone…"
+            oninput="window._lcContactSearch(this.value)" class="${inp} mt-1" style="min-height:44px"/>
+          <div id="lc-ct-results" class="mt-1"></div>
+          <button type="button" onclick="window._lcNewContact(true)" class="text-sm font-semibold text-blue-700 mt-1 px-1" style="min-height:44px">➕ New contact — add to CRM</button>`}
+      </div>
+
+      <label class="flex flex-col gap-1 mb-2"><span class="${lbl}">${isCall?'What was discussed':'Meeting notes'}</span>
+        <textarea id="lc-body" rows="4" placeholder="${isCall?'e.g. Builder wants 60 lots, asked for the survey and utility letters…':'Notes from the meeting…'}" class="${inp}" style="resize:vertical">${_lcEsc(s.body||'')}</textarea></label>
+      <div class="flex items-center gap-3 flex-wrap mb-4">
+        ${window._micBtn('lc-body')}
+        <label class="flex items-center gap-2 text-sm text-gray-700" style="min-height:44px">
+          <input id="lc-private" type="checkbox" ${s.priv?'checked':''} style="width:18px;height:18px"/> Keep off the owner's Monthly Report
+        </label>
+      </div>
+      <button type="button" id="lc-save" onclick="window._lcSave(this)" class="brand-btn px-5 py-2 rounded-lg text-sm font-semibold w-full" style="min-height:48px">
+        Save ${isCall?'call':'meeting'}</button>
+    </div>
+
+    ${s.recent.length ? `
+    <div style="max-width:760px">
+      <div class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Logged this session</div>
+      <div class="bg-white rounded-2xl border divide-y divide-gray-100">
+        ${s.recent.map(r=>`
+          <div class="px-4 py-3 flex items-start gap-3">
+            <span class="text-lg">${r.type==='call'?'📞':'🤝'}</span>
+            <div class="flex-1 min-w-0">
+              <div class="text-sm font-semibold text-gray-800">${_lcEsc(r.date)}${r.deal?` · ${_lcEsc(r.deal)}`:''}${r.contact?` · ${_lcEsc(r.contact)}`:''}</div>
+              <div class="text-sm text-gray-600 truncate">${_lcEsc(r.body||'(no notes)')}</div>
+            </div>
+            ${r.dealId?`<button type="button" onclick="openPropertyDetail('${_lcEsc(r.dealId)}')" class="text-xs text-blue-700 font-semibold px-2" style="min-height:44px">Open property</button>`:''}
+          </div>`).join('')}
+      </div>
+    </div>` : ''}
+  `);
+}
+// Keep whatever was typed when the view re-renders (type toggle, pick/unpick).
+function _lcCapture(){
+  const s=window._lc, v=id=>{ const el=document.getElementById(id); return el?el.value:undefined; };
+  if(v('lc-date')!==undefined) s.date=v('lc-date');
+  if(v('lc-dur')!==undefined) s.dur=v('lc-dur');
+  if(v('lc-title')!==undefined) s.title=v('lc-title');
+  if(v('lc-body')!==undefined) s.body=v('lc-body');
+  const p=document.getElementById('lc-private'); if(p) s.priv=p.checked;
+}
+window._lcSetType = t => { _lcCapture(); window._lc.type = t==='meeting'?'meeting':'call'; viewLogCall(); };
+window._lcPickDeal = id => { _lcCapture(); window._lc.dealId = id||''; viewLogCall(); };
+window._lcPickContact = id => { _lcCapture(); window._lc.contactId = id||''; window._lc.newContact=false; viewLogCall(); };
+window._lcNewContact = on => { _lcCapture(); window._lc.newContact = !!on; viewLogCall(); setTimeout(()=>document.getElementById('lc-nc-first')?.focus(),0); };
+window._lcDealSearch = q => {
+  const box=document.getElementById('lc-deal-results'); if(!box) return;
+  q=String(q||'').toLowerCase().trim();
+  if(!q){ box.innerHTML=''; return; }
+  const hits=_lcDeals().filter(d=>[d.projectName,d.propertyAddress,d.address,d.city,d.county,d.parcelId,d.seller].some(x=>String(x||'').toLowerCase().includes(q))).slice(0,8);
+  box.innerHTML = hits.length ? `<div class="border rounded-lg divide-y divide-gray-100 bg-white">${hits.map(d=>`
+      <button type="button" onclick="window._lcPickDeal('${_lcEsc(d.id)}')" class="w-full text-left px-3 py-2 hover:bg-gray-50" style="min-height:44px">
+        <span class="text-sm font-semibold text-gray-800">${_lcEsc(_lcDealLabel(d))}</span>
+        <span class="text-xs text-gray-500"> · ${_lcEsc(d.stage||'')}${d.propertyAddress&&d.projectName?' · '+_lcEsc(d.propertyAddress):''}</span>
+      </button>`).join('')}</div>`
+    : `<div class="text-sm text-gray-500 px-1 py-2">No property matches “${_lcEsc(q)}”.</div>`;
+};
+window._lcContactSearch = q => {
+  const box=document.getElementById('lc-ct-results'); if(!box) return;
+  q=String(q||'').toLowerCase().trim();
+  if(q.length<2){ box.innerHTML=''; return; }
+  const qd=q.replace(/\D/g,'');
+  const hits=(allContacts||[]).filter(c=>{
+    const hay=[c.firstName,c.lastName,[c.firstName,c.lastName].filter(Boolean).join(' '),c.company,c.email,c.email2].map(x=>String(x||'').toLowerCase());
+    if(hay.some(x=>x.includes(q))) return true;
+    return qd.length>=4 && String(c.phone||'').replace(/\D/g,'').includes(qd);
+  }).slice(0,8);
+  box.innerHTML = hits.length ? `<div class="border rounded-lg divide-y divide-gray-100 bg-white">${hits.map(c=>`
+      <button type="button" onclick="window._lcPickContact('${_lcEsc(c.id)}')" class="w-full text-left px-3 py-2 hover:bg-gray-50" style="min-height:44px">
+        <span class="text-sm font-semibold text-gray-800">${_lcEsc(_lcContactLabel(c))}</span>
+        <span class="text-xs text-gray-500">${c.company?' · '+_lcEsc(c.company):''}${c.phone?' · '+_lcEsc(c.phone):''}${c.email?' · '+_lcEsc(c.email):''}</span>
+      </button>`).join('')}</div>`
+    : `<div class="text-sm text-gray-500 px-1 py-2">Not in the CRM yet — use “➕ New contact”.</div>`;
+};
+window._lcSave = async btn => {
+  _lcCapture();
+  const s=window._lc;
+  const isCall=s.type==='call';
+  const date=s.date||window._elcLocalDateStr();
+  const body=String(s.body||'').trim();
+  if(date>window._elcLocalDateStr()){ elcAlert('The date can’t be in the future.'); return; }
+  // New contact fields (read before any re-render)
+  let nc=null;
+  if(s.newContact && !s.contactId){
+    const g=id=>String(document.getElementById(id)?.value||'').trim();
+    nc={first:g('lc-nc-first'), last:g('lc-nc-last'), company:g('lc-nc-company'), phone:g('lc-nc-phone'), email:g('lc-nc-email').toLowerCase()};
+    if(!nc.first && !nc.last && !nc.company && !nc.email && !nc.phone) nc=null;
+  }
+  if(!s.dealId && !s.contactId && !nc){ elcAlert('Pick a property, a caller, or both, so the '+(isCall?'call':'meeting')+' has somewhere to live.'); return; }
+  if(!body && !s.dealId){ elcAlert('Add a few words about what was discussed.'); return; }
+  const restore = typeof elcBusy==='function' ? elcBusy(btn,'Saving…') : ()=>{};
+  try{
+    const {collection, addDoc} = _fbFns;
+    // 1. Resolve the contact — existing pick, an existing match for the typed details, or a new CRM record
+    let contactId=s.contactId||'', contact=contactId?(allContacts||[]).find(c=>c.id===contactId):null;
+    if(!contactId && nc){
+      const fullName=[nc.first,nc.last].filter(Boolean).join(' ');
+      const match=_crmFindContact(nc.email, fullName);
+      if(match){ contact=match; contactId=match.id; }
+      else{
+        const data={ firstName:nc.first, lastName:nc.last, email:nc.email, phone:nc.phone, company:nc.company,
+          source:isCall?'Logged call':'Logged meeting', groups:[], linkedDeals:[],
+          createdAt:Date.now(), updatedAt:Date.now(), createdBy:currentUser?.uid||'',
+          ...(nc.email && APP_CONFIG.mailchimp?.listId ? {mailchimpPendingSync:true} : {}) };
+        const ref=await addDoc(collection(_fbDb,'contacts'), data);
+        contact={id:ref.id, ...data}; contactId=ref.id;
+        if(!(allContacts||[]).some(c=>c.id===ref.id)) allContacts.push(contact);
+      }
+    }
+    const contactName=_lcContactLabel(contact);
+    const deal=s.dealId?(allDeals||[]).find(d=>d.id===s.dealId):null;
+    const typeData = isCall ? {callDate:date, ...(s.dur?{callDuration:String(s.dur)}:{})}
+                            : {meetingDate:date, ...(String(s.title||'').trim()?{meetingTitle:String(s.title).trim()}:{})};
+    // 2. Property history (prints on the Monthly Report; _dealLogActivity also credits the call)
+    if(deal){
+      await window._dealLogActivity(deal.id, s.type, { ...typeData, body,
+        source:'log-call-tab',
+        ...(contactId?{contactId, contactName}:{}),
+        ...(s.priv?{reportHidden:true}:{}) });
+    }
+    // 3. Contact timeline. Skip when the contact is already linked to the deal — _dealLogActivity cross-logged it.
+    if(contactId && !(deal && (contact?.linkedDeals||[]).includes(deal.id))){
+      let ts=Date.now(), back=false;
+      if(date!==window._elcLocalDateStr()){ const t=new Date(date+'T12:00:00').getTime(); if(!isNaN(t)){ ts=t; back=true; } }
+      await window._crmLogActivity(contactId, s.type, { ...typeData,
+        body: deal ? `[${_lcDealLabel(deal)}] ${body}` : body,
+        ...(back?{backdated:true, createdAt:ts}:{}),
+        ...(deal?{_fromDeal:true}:{}) });   // with a property the call was already credited on the deal entry
+    }
+    try{ window.logUserActivity && window.logUserActivity(isCall?'call_logged':'meeting_logged',
+      `Logged ${isCall?'call':'meeting'}${deal?' on '+_lcDealLabel(deal):''}${contactName?' with '+contactName:''}`,
+      {dealId:deal?.id||'', contactId}); }catch(_){}
+    s.recent.unshift({type:s.type, date, deal:deal?_lcDealLabel(deal):'', dealId:deal?.id||'', contact:contactName, body});
+    s.recent=s.recent.slice(0,10);
+    // Clear the form, keep the type
+    Object.assign(s,{dealId:'', contactId:'', newContact:false, body:'', dur:'', title:'', date:'', priv:false});
+    showToast(`${isCall?'📞 Call':'🤝 Meeting'} logged${deal?' on '+_lcDealLabel(deal):''}${contactName?' · '+contactName:''}`,'success');
+    viewLogCall();
+  }catch(e){
+    console.error('[logCall] save failed', e);
+    showToast('Could not save — '+(e?.message||e),'error');
+  }finally{ try{ restore(); }catch(_){} }
+};
+window.viewLogCall = viewLogCall;
+/* end LOGCALL-20261014 */
 
 function viewExportContacts(){
   bootCRM();   // Export may be the first CRM-backed screen a staff user opens
