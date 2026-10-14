@@ -20268,7 +20268,7 @@ window.logUserActivity = async function(type, description, meta={}) {
 /* ── EOS CALL CREDIT — elc-v432 (marker: CALLPTS-20260819) ────────────────────
    Every outgoing call logged in the app (deal drawer 📞, CRM property card 📞,
    CRM contact panel 📞) earns the person who logged it the same scorecard
-   points as adding a prospect (5 pts). Credits live on the caller's
+   points as adding a prospect (5 pts) — 1 pt from Oct 12 2026 (CALL1PT-20261014). Credits live on the caller's
    advisorProfiles doc as callLog:[{id,ts,label}]:
    - id    = the Firestore activity doc id, so edits/deletes stay in sync
    - ts    = createdAt of the activity (noon-local when the call was backdated),
@@ -20279,6 +20279,15 @@ window.logUserActivity = async function(type, description, meta={}) {
    days are pruned on write (trailing-12-week history only needs 84 days). */
 window._elcCallsInWindow = (uid, s, e) =>
   ((allProfiles[uid]?.callLog) || []).filter(c => (c.ts||0) >= s && (c.ts||0) <= e);
+/* CALL1PT-20261014 — Ryan: a logged call is worth 1 pt (was 5, same as a prospect).
+   Effective the week starting Mon Oct 12 2026. Calls dated earlier keep 5 pts so
+   locked history and Q3 grades don't move (no SCORECARD_VER bump needed — the
+   cutover is a Monday, so every week is entirely on one side of it).
+   backfill_scorehistory.js carries the same rule. */
+window._ELC_CALL_1PT_FROM = new Date(2026,9,12).getTime();
+window._elcCallPts    = c => (((c&&c.ts)||0) >= window._ELC_CALL_1PT_FROM) ? 1 : 5;
+window._elcCallPtsSum = arr => (arr||[]).reduce((s,c)=>s+window._elcCallPts(c),0);
+window._elcCallTipLbl = arr => 'Prospects 5 pts · Calls '+((arr&&arr.length&&window._elcCallPts(arr[0])===5)?'5 pts':'1 pt')+' each';
 window._elcCreditCall = async (activityId, ts, label) => {
   const u = currentUser?.uid;
   if (!u || !activityId) return;
@@ -20591,7 +20600,7 @@ window._elcWeekScoreRaw = (uid, wS, wE, wKey) => {
   const netEv = wi.networkEvent||'', drPr = wi.driveProperties||'';
 
   const pts_w = [wQPct>=10?10:0, Math.max(0,20-overdueInWk*2),
-    pPts+caN.length*5, lPts, prPts, lstPts, cPts, netEv==='yes'?10:0, drPr==='yes'?10:0];
+    pPts+window._elcCallPtsSum(caN), lPts, prPts, lstPts, cPts, netEv==='yes'?10:0, drPr==='yes'?10:0];
   const score = Math.round(pts_w.reduce((a,b)=>a+b,0));
 
   /* `pts` is returned so no renderer ever has to re-index the array by hand —
@@ -33881,7 +33890,7 @@ function viewOfficeOverview(){
       </table>
       </div>
       <div class="px-5 py-2.5 border-t bg-gray-50 text-xs text-gray-400">
-        A+ ≥ 100 · A ≥ 90 · B ≥ 80 · C ≥ 70 · Contracts = 30pts · Listings = 20pts · LOIs = 10pts each offer · Proposals = 10pts · Prospects/Calls = 5pts each · Open Tasks = 20pts (−2 per overdue) · Network Event &amp; Site Visit = 10pts each
+        A+ ≥ 100 · A ≥ 90 · B ≥ 80 · C ≥ 70 · Contracts = 30pts · Listings = 20pts · LOIs = 10pts each offer · Proposals = 10pts · Prospects = 5pts · Calls = 1pt each · Open Tasks = 20pts (−2 per overdue) · Network Event &amp; Site Visit = 10pts each
       </div>
     </div>`;
 
@@ -34626,7 +34635,7 @@ function viewEOS(sub='rocks'){
                               return _nm(d)+_suf(_c<_p ? fmt$(_c)+' (1/'+_elcDealAdvisorCount(d)+' of '+fmt$(_p)+')' : fmt$(_p)); }));
       const overdueTip  = window._scTipHtml('Overdue tasks · −2 pts each',
                             det.overdueTasks.map(t=>window._scEsc(t.title||'Untitled')+_suf('due '+t.dueDate)));
-      const prospectTip = window._scTipHtml('Prospects & Calls · 5 pts each',
+      const prospectTip = window._scTipHtml(window._elcCallTipLbl(callsPW),
                             [...det.prospectDeals.map(_nm), ...callsPW.map(c=>'📞 '+window._scEsc(c.label||'Call'))]);
       const loiTip      = window._scTipHtml('LOIs · 10 pts each',
                             det.loiRows.map(x=>_nm(x.d)+(x.n>1?_suf(x.n+' offers'):'')));
@@ -34770,7 +34779,7 @@ function viewEOS(sub='rocks'){
           </div>
         </td>
         ${cell(openTasks, null, pts[1], overdueTip)}
-        ${cell((prospects+callsPW.length) + (pts[2]!==(prospects+callsPW.length)*5?' ('+Math.round(pts[2]*10)/10+'pts)':''), pts[2]>0?1:null, pts[2], prospectTip)}
+        ${cell((prospects+callsPW.length) + (pts[2]!==(prospects*5+window._elcCallPtsSum(callsPW))?' ('+Math.round(pts[2]*10)/10+'pts)':''), pts[2]>0?1:null, pts[2], prospectTip)}
         ${cell(newLOIs + (loiPts!==newLOIs*10?' ('+Math.round(loiPts*10)/10+'pts)':''), loiPts>0?1:null, pts[3], loiTip)}
         ${cell(newProps + (propPts!==newProps*10?' ('+Math.round(propPts*10)/10+'pts)':''), propPts>0?1:null, pts[4], propTip)}
         ${cell(newListings + (listingPts!==newListings*20?' ('+Math.round(listingPts*10)/10+'pts)':''), listingPts>0?1:null, pts[5], listTip)}
@@ -34957,7 +34966,7 @@ function viewEOS(sub='rocks'){
                 <th class="px-3 pb-2 text-center text-xs text-gray-400 font-normal">A+≥100 A≥90 B≥80 C≥70</th>
                 <th class="px-3 pb-2 text-center text-xs text-gray-400 font-normal">≥10% = 10pts</th>
                 <th class="px-3 pb-2 text-center text-xs text-gray-400 font-normal">20 − 2 per overdue</th>
-                <th class="px-3 pb-2 text-center text-xs text-gray-400 font-normal">5pts each</th>
+                <th class="px-3 pb-2 text-center text-xs text-gray-400 font-normal">5pts · call 1pt</th>
                 <th class="px-3 pb-2 text-center text-xs text-gray-400 font-normal">10pts each</th>
                 <th class="px-3 pb-2 text-center text-xs text-gray-400 font-normal">10pts each</th>
                 <th class="px-3 pb-2 text-center text-xs text-gray-400 font-normal">20pts each</th>
@@ -34974,7 +34983,7 @@ function viewEOS(sub='rocks'){
           </table>
         </div>
         <div class="px-6 py-3 border-t bg-gray-50 flex flex-wrap gap-5 text-xs text-gray-400">
-          <span>Open Tasks = 20pts (−2 per overdue) · Contracts = 30pts · Listings = 20pts · LOIs = 10pts · Proposals = 10pts · Prospects/Calls = 5pts each (calls reset every Monday) · split on co-advisor deals</span>
+          <span>Open Tasks = 20pts (−2 per overdue) · Contracts = 30pts · Listings = 20pts · LOIs = 10pts · Proposals = 10pts · Prospects = 5pts · Calls = 1pt each (calls reset every Monday) · split on co-advisor deals</span>
           <span><span style="color:#059669;font-weight:700">●</span> Green = target met</span>
           <span><span style="color:#DA291C;font-weight:700">●</span> Red = below target</span>
           <span>Network Event &amp; Property Visit: advisors self-report weekly · Locks Sunday 9pm</span>
@@ -35195,7 +35204,7 @@ function viewEOS(sub='rocks'){
         </div>
         <div class="px-6 py-3 border-t bg-gray-50 text-xs text-gray-400 flex flex-wrap gap-4">
           <span>Score uses same formula as current week</span>
-          <span>Open Tasks = 20pts (−2 per overdue) · Contracts = 30pts · LOIs = 10pts · Listings = 20pts · Props = 10pts · Prospects/Calls = 5pts each</span>
+          <span>Open Tasks = 20pts (−2 per overdue) · Contracts = 30pts · LOIs = 10pts · Listings = 20pts · Props = 10pts · Prospects = 5pts · Calls = 1pt each</span>
           <span>Network Event &amp; Property Visit pulled from saved weekly inputs</span>
         </div>
       </div>`;
@@ -36435,7 +36444,7 @@ function viewEOS(sub='rocks'){
       const _csuf=t=>" <span style='opacity:.6'>· "+window._scEsc(t)+"</span>";
       const _tQ =window._scTipHtml('Q'+_qn+' Goal volume',_dt.qDeals.map(d=>_cnm(d)+_csuf(fmt$(d.purchasePrice||d.contractPrice||0))));
       const _tOd=window._scTipHtml('Overdue tasks · −2 pts each',_dt.overdueTasks.map(t=>window._scEsc(t.title||'Untitled')+_csuf('due '+t.dueDate)));
-      const _tPr=window._scTipHtml('Prospects & Calls · 5 pts each',[..._dt.prospectDeals.map(_cnm),..._ca.map(c=>'📞 '+window._scEsc(c.label||'Call'))]);
+      const _tPr=window._scTipHtml(window._elcCallTipLbl(_ca),[..._dt.prospectDeals.map(_cnm),..._ca.map(c=>'📞 '+window._scEsc(c.label||'Call'))]);
       const _tLo=window._scTipHtml('LOIs · 10 pts each',_dt.loiRows.map(x=>_cnm(x.d)+(x.n>1?_csuf(x.n+' offers'):'')));
       const _tPo=window._scTipHtml('Proposals · 10 pts each',_dt.propDeals.map(_cnm));
       const _tLi=window._scTipHtml('Listings · 20 pts each',_dt.lstDeals.map(_cnm));
