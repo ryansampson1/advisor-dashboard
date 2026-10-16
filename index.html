@@ -20545,6 +20545,17 @@ window._elcRowFresh = (row, docVer) =>
    Report Card alone asks for ~19 advisors x 4 quarters of weeks in a single
    paint — each call filtering every deal and task. Cleared at the top of
    renderCurrentView() so a re-render after any data change always recomputes. */
+/* SCGUARD-20261016 — never LOCK a week before the data it scores has loaded.
+   Chris Bowers' Jul 13 – Sep 28 weeks were frozen as blank 20-point rows
+   (no deals, no tasks, no weekly inputs) because his trailing-12 history
+   rendered — and locked all 12 ended weeks — while allDeals / allTasks /
+   allProfiles were still empty. A locked row is never recomputed, so one
+   early paint wrote a quarter of F's. Display may still compute live from
+   partial data (it redraws when the snapshots land); only the lock is gated. */
+window._elcScoreDataReady = uid =>
+  Array.isArray(allDeals) && allDeals.length > 0 &&
+  Array.isArray(allTasks) && allTasks.length > 0 &&
+  !!(allProfiles && allProfiles[uid]);
 window._elcScoreCache = new Map();
 window._elcWeekScore = (uid, wS, wE, wKey) => {
   const _ck = uid+'|'+wS+'|'+wE;
@@ -20668,7 +20679,7 @@ window._elcSweepScoreHistory = async () => {
   try{
     if(!currentUser?.isAdmin) return;              // rules would reject the write
     if(window._elcSweepDone) return;
-    if(!allDeals?.length || !Object.keys(allProfiles||{}).length) return;
+    if(!allDeals?.length || !allTasks?.length || !Object.keys(allProfiles||{}).length) return;   // SCGUARD-20261016
     window._elcSweepDone = true;
 
     const SCORECARD_VER = window._ELC_SCORECARD_VER;
@@ -35082,7 +35093,7 @@ function viewEOS(sub='rocks'){
             const taskScore33 = pwTotal===0?33:Math.round(doneTasks/pwTotal*33);
             const openScore34 = openTasks===0?34:(doneTasks===0?0:Math.round(doneTasks/(doneTasks+openTasks)*34));
             score = rockScore+taskScore33+openScore34;
-            if(wE < _nowMs){ _myHist[wKey] = {score, doneTasks, v:SCORECARD_VER}; _histDirty = true; }
+            if(wE < _nowMs && window._elcScoreDataReady(uid)){ _myHist[wKey] = {score, doneTasks, v:SCORECARD_VER}; _histDirty = true; }   // SCGUARD-20261016
           }
           const grade = weekGrade(score);
           return `<tr class="border-b border-gray-100 ${isCurr?'bg-blue-50/40':'hover:bg-gray-50'} transition-colors">
@@ -35161,7 +35172,7 @@ function viewEOS(sub='rocks'){
           // Lock this week once it has fully ended. NOTE: this only lands for
           // admins — Firestore denies eos/* writes to everyone else. It is a
           // best-effort freeze, never what the display depends on.
-          if(wE < _nowMs){
+          if(wE < _nowMs && window._elcScoreDataReady(uid)){   // SCGUARD-20261016
             _myHist[wKey] = {score, wQPct, pLen, lLen, prLen, lstLen, cLen, netEv, drPr, doneT, openT, caN, v:SCORECARD_VER};
             _histDirty = true;
           }
