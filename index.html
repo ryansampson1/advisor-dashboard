@@ -12227,7 +12227,7 @@ window.renderCurrentView = (...a) => renderCurrentView(...a);
 window._CMP = {
   staleDays: 14, redDays: 30, minCalls: 10, lateBizDays: 5, target: 90, ladder: 75,
   checks: [
-    {id:'deals_current', label:'Deal cards current',          short:'Stale deals',     w:20},
+    {id:'deals_current', label:'Listings current',            short:'Stale listings',  w:20},
     {id:'fields',        label:'Required fields complete',    short:'Missing fields',  w:15},
     {id:'offers',        label:'Offers & contracts on file',  short:'Offer/contract',  w:15},
     {id:'calls',         label:'Calls logged (last week)',    short:'Calls',           w:10},
@@ -12246,6 +12246,8 @@ const _CMP_CT_RE     = /due.?diligence|under.?contract|rezoning|permitting|^clos
 const _cmpStage = d => String((typeof STAGE_ALIAS!=='undefined' && STAGE_ALIAS[d.stage]) || d.stage || '').trim();
 window._cmpIsActive = d => !!d && !d.deleted && !d.archived
   && !isLostStage(d.stage||'') && !isWonStage(d.stage||'') && _CMP_ACTIVE_RE.test(_cmpStage(d));
+// COMPLYLST-20261016 — only a card in the Listing column can be stale (not LOI / Signed LOI / under contract / closing).
+window._cmpIsStaleCandidate = d => window._cmpIsActive(d) && /^listing$/i.test(_cmpStage(d));
 const _cmpEsc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 const _cmpName = d => d.projectName || d.propertyAddress || d.address || 'Unnamed deal';
 const _cmpDay = 864e5;
@@ -12282,7 +12284,7 @@ window._cmpLoadActs = async (deals) => {
 // Warm the cache for whatever the user can see, then repaint once.
 window._cmpWarm = async (deals) => {
   try {
-    const list = (deals || (typeof visibleDeals==='function' ? visibleDeals() : allDeals) || []).filter(window._cmpIsActive);
+    const list = (deals || (typeof visibleDeals==='function' ? visibleDeals() : allDeals) || []).filter(window._cmpIsStaleCandidate);
     const changed = await window._cmpLoadActs(list);
     if (changed && typeof scheduleReRender==='function') scheduleReRender('compliance');
   } catch(e){ console.warn('[compliance] warm failed', e); }
@@ -12352,18 +12354,19 @@ window._cmpEval = (uid, nowTs) => {
   };
 
   // 1. Deal cards current
-  const unknown = deals.filter(d => !window._cmpActKnown(d));
+  const listings = deals.filter(window._cmpIsStaleCandidate);   // COMPLYLST-20261016
+  const unknown = listings.filter(d => !window._cmpActKnown(d));
   if (unknown.length) res.loading = true;
-  const stale = deals.filter(d => window._cmpActKnown(d) && (now - window._cmpLastTouch(d)) > C.staleDays*_cmpDay)
+  const stale = listings.filter(d => window._cmpActKnown(d) && (now - window._cmpLastTouch(d)) > C.staleDays*_cmpDay)
     .map(d => ({kind:'deal', id:d.id, label:_cmpName(d), note: Math.floor((now - window._cmpLastTouch(d))/_cmpDay)+' days since last activity'}));
-  add('deals_current', role!=='staff' && deals.length>0, stale.length===0, stale,
-      deals.length ? `${deals.length} active deal${deals.length===1?'':'s'}` : '');
+  add('deals_current', role!=='staff' && listings.length>0, stale.length===0, stale,
+      listings.length ? `${listings.length} active listing${listings.length===1?'':'s'} · deals under contract or with an LOI are never stale` : '');
 
   // 2. Required fields
   const miss = [];
   deals.forEach(d => {
     let m = [];
-    try { m = getStageRequiredFields(d.stage||'', d).map(f => f.label || f.id); } catch(e){}
+    try { m = getStageRequiredFields(d.stage||'', d).filter(f => !(f.id==='sf-rezone-expiration' && d.rezoneExpiration)).map(f => f.label || f.id); } catch(e){}   // rezoning expiration has no carry-forward getter
     if (!(d.acreage || d.acres)) m.push('Acreage');
     if (!d.county) m.push('County');
     if (m.length) miss.push({kind:'deal', id:d.id, label:_cmpName(d), note:'Missing: '+m.join(', ')});
@@ -12450,7 +12453,7 @@ window._cmpSweep = async () => {
     const lastWk = window._elcWeekWindow(Date.now() - 7*_cmpDay);
     const hist = window._cmpHistory();
     if (hist[lastWk.wKey]) return;
-    await window._cmpLoadActs(allDeals.filter(window._cmpIsActive));
+    await window._cmpLoadActs(allDeals.filter(window._cmpIsStaleCandidate));
     const rows = {};
     window._cmpRoster().forEach(r => {
       const e = window._cmpEval(r.uid);
@@ -12528,11 +12531,11 @@ window._elcHygieneCardHtml = (uid) => {
 /* ⏳ stale chip on a deal card */
 window._cmpStaleChip = d => {
   try {
-    if (!window._cmpVisible() || !window._cmpIsActive(d) || !window._cmpActKnown(d)) return '';   // COMPLYADMIN-20261016
+    if (!window._cmpVisible() || !window._cmpIsStaleCandidate(d) || !window._cmpActKnown(d)) return '';   // COMPLYADMIN-20261016
     const days = Math.floor((Date.now() - window._cmpLastTouch(d)) / _cmpDay);
     if (days <= window._CMP.staleDays) return '';
     const red = days > window._CMP.redDays;
-    return `<div style="margin-top:2px"><span class="cmp-stale ${red?'is-red':''}" title="No note, call, email, offer or stage change on this card in ${days} days. Terra Compliance expects activity at least every ${window._CMP.staleDays} days.">⏳ ${days}d no activity</span></div>`;
+    return `<div style="margin-top:2px"><span class="cmp-stale ${red?'is-red':''}" title="No note, call, email, offer or stage change on this listing in ${days} days. Terra Compliance expects activity on a listing at least every ${window._CMP.staleDays} days.">⏳ ${days}d no activity</span></div>`;
   } catch(e) { return ''; }
 };
 
@@ -12552,7 +12555,7 @@ function viewCompliance(){
   if (!window._cmpViewWarm) {
     window._cmpViewWarm = true;
     (async () => {
-      const a = await window._cmpLoadActs(allDeals.filter(window._cmpIsActive));
+      const a = await window._cmpLoadActs(allDeals.filter(window._cmpIsStaleCandidate));
       const t = await window._cmpLoadTasks(roster.map(r => r.uid));
       if ((a || t) && currentView === 'compliance') viewCompliance();
     })();
@@ -12608,7 +12611,7 @@ function viewCompliance(){
         ${tile('Under 75', nBad, 'L-10 issue', '#b91c1c')}
       </div>
       ${evals.length ? `<div class="cmp-list">${rows}</div>` : '<p class="text-sm text-gray-500">No one to score yet.</p>'}
-      <p class="cmp-skip" style="margin-top:1rem">Checks and weights: deal cards current 20 · required fields 15 · offers & contracts 15 · tasks 15 · calls 10 · self-report 10 · rocks 5 · Time Off 5 · bio 5. A check that doesn't apply to someone is left out of their score. Frozen weekly scores appear in the trend once an admin opens Terra after each week ends. This is separate from the EOS scorecard.</p>
+      <p class="cmp-skip" style="margin-top:1rem">Checks and weights: listings current 20 · required fields 15 · offers & contracts 15 · tasks 15 · calls 10 · self-report 10 · rocks 5 · Time Off 5 · bio 5. A check that doesn't apply to someone is left out of their score. Frozen weekly scores appear in the trend once an admin opens Terra after each week ends. This is separate from the EOS scorecard.</p>
     </div>`);
 }
 window.viewCompliance = viewCompliance;
