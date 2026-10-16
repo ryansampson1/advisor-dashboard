@@ -9139,6 +9139,35 @@ function _dnmGuard(dOrId, what){
 function _dnmShow(d){ return !!d && ((d.representation||'seller')!=='buyer') && (d.doNotMarket || !(typeof isWonStage==='function' && isWonStage(d.stage||'')) && !(typeof isLostStage==='function' && isLostStage(d.stage||''))); }
 function _dnmOpenMarketingTasks(dealId){ return ((typeof allTasks!=='undefined' && allTasks) || []).filter(t=>t && t.dealId===dealId && t.status!=='complete' && _dnmIsMarketingTitle(t.title)); }
 window._dnmIsMarketingTitle=_dnmIsMarketingTitle; window._dnmOn=_dnmOn; window._dnmGuard=_dnmGuard; window._dnmBlocksTask=_dnmBlocksTask;
+// DNMNOTIFY-20261016 — checking Do Not Market on an existing deal tells Krissy to
+// pull it from every website and Nick to cancel/halt any marketing in flight.
+window._dnmNotifyStaff = async function(dealId){
+  const deal=_dnmDeal(dealId); if(!deal) return 0;
+  const already=((typeof allTasks!=='undefined'&&allTasks)||[]).some(t=>t&&t.dealId===dealId&&t.source==='dnm'&&t.status!=='complete');
+  if(already) return 0;
+  const nm=deal.projectName||deal.propertyAddress||'Property';
+  const who=(currentUser&&currentUser.name)||'An advisor';
+  const day=new Date(); day.setDate(day.getDate()+1);
+  const due=day.getFullYear()+'-'+String(day.getMonth()+1).padStart(2,'0')+'-'+String(day.getDate()).padStart(2,'0');
+  const when=new Date().toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+  const specs=[
+    { token:_TA.KRISSY, title:'🚫 Remove from all websites — '+nm+' (DO NOT MARKET)',
+      description: who+' marked this property DO NOT MARKET on '+when+'.\n\nTake it down everywhere it is listed: thedirtdog.com / Buildout, LoopNet, CoStar, Crexi, Land.com, LandAndFarm, MLS and any other portal, and remove it from the Land Listings Report / Available Land.\n\nTerra will not create any new website or marketing tasks for this property while the box is checked.' },
+    { token:_TA.NICK, title:'🛑 Cancel or halt all marketing — '+nm+' (DO NOT MARKET)',
+      description: who+' marked this property DO NOT MARKET on '+when+'.\n\nCancel or pause anything scheduled or in progress: Mailchimp e-blasts, social posts, direct mail, sign orders, drone/photo shoots and marketing-group sends. Do not start new marketing on this property.\n\nTerra has already stopped its own auto-posts and e-blast reminders for it.' },
+  ];
+  let n=0;
+  for(const sp of specs){
+    const a=_taResolveAssignee(sp.token, deal);
+    const obj={ title:sp.title, description:sp.description, ...a, dealId, dealAddress:deal.propertyAddress||'', dealName:deal.projectName||'',
+      dueDate:due, status:'pending', source:'dnm', dnmAllow:true, auto:true,
+      createdBy:currentUser?.uid||'system', createdByName:'Do Not Market', createdAt:Date.now() };
+    try{ const id=await Store.createTask(obj); if(id){ if(!allTasks.find(t=>t.id===id)) allTasks.push({...obj,id}); n++; } }
+    catch(e){ console.warn('[DNM] notify task failed', sp.token, e); }
+  }
+  if(n) showToast('📨 Krissy and Nick notified to pull '+nm+' from websites and halt marketing', 'success', 5000);
+  return n;
+};
 // Remove open marketing tasks + take the listing website offline (used by the form save path).
 window._dnmCleanup = async function(dealId, opts){
   opts=opts||{}; const deal=_dnmDeal(dealId); if(!deal) return {removed:0, failed:[]};
@@ -9162,6 +9191,7 @@ window._dnmToggle = async function(dealId, el){
     const parts=['Terra will not post '+nm+' to social media, send e-blasts or list it on websites, and won’t create those tasks for anyone.'];
     if(open.length) parts.push(open.length+' open marketing task'+(open.length===1?'':'s')+' will be removed: '+open.map(t=>t.title).slice(0,6).join('; ')+(open.length>6?'; …':'')+'.');
     if(live) parts.push('Its listing website will be taken offline.');
+    parts.push('Krissy will get a task to remove it from all websites, and Nick a task to cancel or halt any marketing in progress.');   // DNMNOTIFY-20261016
     const ok = await elcConfirm(parts.join(' '), {title:'Do not market this property?', okLabel:'Do not market', danger:true});
     if(!ok){ el.checked=false; return; }
   }
@@ -9182,6 +9212,7 @@ window._dnmToggle = async function(dealId, el){
     try{ if(_fbDb && _fbFns){ const {collection,addDoc}=_fbFns; await addDoc(collection(_fbDb,'deals',dealId,'activities'), {
       type:'note', body: on ? ('🚫 Marked DO NOT MARKET'+(removed?' — removed '+removed+' marketing task'+(removed===1?'':'s'):'')+(live&&!failed.includes('listing website')?'; listing website taken offline':'')) : '✅ DO NOT MARKET turned off — marketing allowed again',
       source:'dnm', reportHidden:true, createdAt:Date.now(), createdBy:currentUser?.uid||'', createdByName:currentUser?.name||'' }); } }catch(e){ console.warn('[DNM] activity', e); }
+    if(on && window._dnmNotifyStaff) await window._dnmNotifyStaff(dealId);   // DNMNOTIFY-20261016
     if(on) showToast('🚫 '+nm+' marked DO NOT MARKET'+(removed?' · '+removed+' marketing task'+(removed===1?'':'s')+' removed':''), 'success', 5000);
     else showToast('✅ Marketing is back on for '+nm+'. Use ⚡ Task Automation on the card to add marketing tasks.', 'success', 6000);
     if(failed.length) showToast('Couldn’t remove: '+failed.join('; ')+' — an admin needs to delete '+(failed.length===1?'it':'them')+'.', 'warning', 9000);
@@ -39171,7 +39202,7 @@ window.handleDealSubmit = async ev => {
     if(!!data.doNotMarket!==_dnmWas){ data.doNotMarketAt=Date.now(); data.doNotMarketBy=currentUser?.uid||''; data.doNotMarketByName=currentUser?.name||''; }
     await Store.updateDeal(id,data);
     Object.assign(existing,data);
-    if(data.doNotMarket && !_dnmWas && window._dnmCleanup) window._dnmCleanup(id, {toast:true});   // remove open marketing tasks + take the listing site offline
+    if(data.doNotMarket && !_dnmWas && window._dnmCleanup) window._dnmCleanup(id, {toast:true}).then(()=>window._dnmNotifyStaff&&window._dnmNotifyStaff(id));   // DNMNOTIFY-20261016   // remove open marketing tasks + take the listing site offline
     if(_parcelDupMatch) _notifyParcelOwner(_parcelDupMatch, existing);   // warn + notify original advisor
     // ── Apply a drop position captured from a drag-to-stage move ──
     if(oldStage!==stage && window._pendingDropOrder){
