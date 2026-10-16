@@ -46272,6 +46272,7 @@ function _mrStatusChip(rep, d){
   const recips=_mrRecipients(d).length;
   if(rep&&rep.status==='sent') return `<span class="mr-chip mr-chip-sent" title="Sent ${_mrFmtDate(rep.sentAt)} by ${_mrEsc(rep.sentByName||'')}">✓ Sent ${_mrFmtDate(rep.sentAt)}</span>`;
   if(!recips) return `<span class="mr-chip mr-chip-warn">No recipients</span>`;
+  if(rep&&rep.approval) return `<span class="mr-chip mr-chip-sent" title="Approved ${_mrFmtDate(rep.approval.at)} by ${_mrEsc(rep.approval.byName||'')} — re-checked at send">✅ Approved</span>`;   // MCVERIFY-20261016
   if(rep&&rep.updatedAt) return `<span class="mr-chip mr-chip-draft">Draft</span>`;
   return `<span class="mr-chip mr-chip-new">Not started</span>`;
 }
@@ -46403,6 +46404,7 @@ window._mrRenderRows=function(){
       <td>${_mrStatusChip(rep,d)}</td>
       <td style="text-align:right;white-space:nowrap">
         <button class="mr-btn mr-btn-sm" onclick="window._mrOpenEditor('${d.id}')">✏️ Edit</button>
+        <button class="mr-btn mr-btn-sm" onclick="window._mrReview('${d.id}')">🔍 Review</button>
         <button class="mr-btn mr-btn-sm" onclick="window._mrPreview('${d.id}')">👁 Preview</button>
         <button class="mr-btn mr-btn-sm mr-btn-teal" onclick="window._mrSendOne('${d.id}')" ${ready?'':'disabled'}>${rep&&rep.status==='sent'?'↻ Resend':'📤 Send'}</button>
       </td></tr>`; }).join('');
@@ -46648,6 +46650,7 @@ window._mrOpenEditor=async function(dealId){
       <button class="mr-btn" onclick="window._mrCloseEditor()">Close</button>
       <button class="mr-btn" onclick="window._mrSaveEditor(this)">💾 Save draft</button>
       <button class="mr-btn" onclick="window._mrSaveEditor(this).then(ok=>ok&&window._mrPreview('${deal.id}'))">👁 Preview PDF</button>
+      <button class="mr-btn" onclick="window._mrSaveEditor(this).then(ok=>ok&&window._mrReview('${deal.id}'))">🔍 Review &amp; approve</button>
       <button class="mr-btn mr-btn-primary" onclick="window._mrSaveEditor(this).then(ok=>ok&&window._mrSendOne('${deal.id}'))">📤 Send report</button>
     </div>
   </div>`;
@@ -47192,7 +47195,11 @@ async function _mrSendDeal(deal, ym, opts){
   const recips=_mrRecipients(deal); if(!recips.length) throw new Error('No recipients on '+_mrDealName(deal));
   if(!_mrLetterFor(ym) && !_mrHasCustomLetter(deal.id,ym)) throw new Error('The '+_mrMonthLabel(ym)+' status update letter hasn’t been written yet (write one for this owner in ✏️ Edit, or the firm letter).');
   const advs=_mrAdvisorsOf(deal); const from=advs[0]||{}; if(!/@thedirtdog\.com$/i.test(from.email||'')) throw new Error('Listing advisor on '+_mrDealName(deal)+' has no @thedirtdog.com email to send from.');
-  const A=await _mrAssemble(deal,ym); const doc=await _mrBuildPdf(A);
+  const A=await _mrAssemble(deal,ym);
+  const pf=await _mrPreflight(A);   // MCVERIFY-20261016: nothing goes to an owner unless every check passes and the report is approved as-is
+  if(pf.blocks.length) throw new Error('Report check failed — '+pf.blocks[0].msg+(pf.blocks.length>1?' (+'+(pf.blocks.length-1)+' more)':'')+' Open 🔍 Review.');
+  if(!_mrApprovalOk(A.rep,pf.fp)) throw new Error((A.rep&&A.rep.approval?'The report changed after it was approved':'Not approved yet')+' — open 🔍 Review & approve.');
+  const doc=await _mrBuildPdf(A);
   const blob=doc.output('blob'); const b64=_mrB64(await blob.arrayBuffer());
   const fileName=(_mrMonthLabel(ym)+' Monthly Report - '+_mrDealAddr(deal).split(',')[0]).replace(/[^A-Za-z0-9 _.-]+/g,'')+'.pdf';
   // 1 · file on the deal
@@ -47217,6 +47224,7 @@ window._mrSendOne=async function(dealId){
   const ym=window._mrState.month||_mrPrevMonth(); const recips=_mrRecipients(deal);
   if(!recips.length){ showToast('Add recipients first (✏️ Edit)','warning'); return; }
   if(!_mrLetterFor(ym) && !_mrHasCustomLetter(deal.id,ym)){ showToast('Write the '+_mrMonthLabel(ym)+' letter first (firm letter, or your own in ✏️ Edit)','warning'); return; }
+  const _rp=window._mrState.reports[dealId+'|'+ym]; if(!(_rp&&_rp.approval)){ showToast('Review & approve this report before sending','warning',5000); window._mrReview(dealId); return; }   // MCVERIFY-20261016
   const from=_mrAdvisorsOf(deal)[0]||{};
   const ok=await elcConfirm('Send the '+_mrMonthLabel(ym)+' report for '+_mrDealName(deal)+' to:\n\n'+recips.map(r=>'• '+(r.name?r.name+' — ':'')+r.email).join('\n')+'\n\nFrom: '+(from.email||'?')+' (advisor is Cc’d)',{title:'Send monthly report',okLabel:'Send now'});
   if(!ok) return;
@@ -47230,7 +47238,8 @@ window._mrSendSelected=async function(){
   if(!deals.length){ showToast('Select at least one listing with recipients','warning'); return; }
   if(!_mrLetterFor(ym) && !deals.every(d=>_mrHasCustomLetter(d.id,ym))){ showToast('Write the '+_mrMonthLabel(ym)+' firm letter first (or your own letter on each selected listing)','warning'); return; }
   const already=deals.filter(d=>(st.reports[d.id+'|'+ym]||{}).status==='sent');
-  const ok=await elcConfirm('Send '+deals.length+' '+_mrMonthLabel(ym)+' report'+(deals.length===1?'':'s')+' now?'+(already.length?('\n\n'+already.length+' of these were already sent this month and will be re-sent.'):'')+'\n\nEach goes from its listing advisor’s mailbox to the owners picked on that listing.',{title:'Send selected reports',okLabel:'Send '+deals.length});
+  const unappr=deals.filter(d=>!((st.reports[d.id+'|'+ym]||{}).approval));   // MCVERIFY-20261016
+  const ok=await elcConfirm('Send '+deals.length+' '+_mrMonthLabel(ym)+' report'+(deals.length===1?'':'s')+' now?'+(already.length?('\n\n'+already.length+' of these were already sent this month and will be re-sent.'):'')+(unappr.length?('\n\n'+unappr.length+' are not approved yet and will be skipped — only approved, unchanged reports go out.'):'')+'\n\nEach goes from its listing advisor’s mailbox to the owners picked on that listing.',{title:'Send selected reports',okLabel:'Send '+deals.length});
   if(!ok) return;
   if(st.sending) return; st.sending=true;
   const ov=document.createElement('div'); ov.className='mr-ov fixed inset-0 flex items-center justify-center'; ov.id='mr-bulk-ov';
@@ -47400,10 +47409,11 @@ function _mrMcStreetWords(line){ return String(line||'').toLowerCase().replace(/
    carries the property address, zip, parcel numbers and the listing link, so it is the primary
    evidence. Returns {s, strong}: strong = address-level evidence (street number, street name,
    parcel/folio, decimal acreage, or 2+ project-name words) — a match needs s ≥ 2.5 AND strong. */
-function _mrMcScoreDetail(deal, c){
+function _mrMcScoreDetail(deal, c, opt){
   const head=_mrMcNorm((c.subject||'')+' '+(c.title||'')+' '+(c.preview||''));
-  const body=_mrMcNorm(c.bodyText||''); const hay=head+body;
-  const bodyDigits=' '+String(c.bodyText||'').replace(/[^0-9]+/g,' ')+' ';
+  const src=(opt&&opt.full)?String(c.bodyText||''):_mrMcPrimaryText(c);   // MCVERIFY-20261016: featured property only, not the cross-promo footer
+  const body=_mrMcNorm(src); const hay=head+body;
+  const bodyDigits=' '+src.replace(/[^0-9]+/g,' ')+' ';
   let s=0, strong=false; const seen=new Set();
   const addr=String(deal.propertyAddress||deal.address||''); const first=addr.split(',')[0]||'';
   // street number
@@ -47423,15 +47433,190 @@ function _mrMcScoreDetail(deal, c){
   const zip=(addr.match(/\b(3[0-4]\d{3})\b/)||[])[1]; if(zip && body.includes(' '+zip+' ')) s+=1;
   // parcel / folio numbers (digits only, 8+ digits)
   const ids=[].concat(deal.parcelIds||[], deal.folioNumber||[], deal.parcelId||[]).map(x=>String(x||'').replace(/[^0-9]/g,'')).filter(x=>x.length>=8);
-  if(ids.some(x=>bodyDigits.includes(' '+x+' ')||String(c.bodyText||'').replace(/[^0-9]/g,'').includes(x))){ s+=3; strong=true; }
+  if(ids.some(x=>bodyDigits.includes(' '+x+' ')||src.replace(/[^0-9]/g,'').includes(x))){ s+=3; strong=true; }
   // acreage — decimal acreage is specific ("18.85±"), whole numbers are not
   const acres=Number(deal.acres||deal.acreage||0);
   if(acres>0){ const a=String(Math.round(acres*100)/100); const hit=hay.includes(' '+a+' ')||hay.includes(' '+a+'±')||hay.includes(' '+a+'± ');
     if(hit){ if(a.includes('.')){ s+=2; strong=true; } else s+=1; } }
   return {s, strong};
 }
-function _mrMcScore(deal, c){ const d=_mrMcScoreDetail(deal,c); return d.strong ? d.s : Math.min(d.s, 2.4); }
-function _mrMcMatch(deal, campaigns){ return (campaigns||[]).filter(c=>_mrMcScore(deal,c)>=2.5); }
+/* _mrMcScore / _mrMcMatch now live in the MCVERIFY block below (verdict-based) */
+/* =======================================================
+   🔍 REPORT CHECK + APPROVAL — marker MCVERIFY-20261016
+   Why: the Sept 2026 Palm River report printed the 3.66± ac New Port Richey
+   e-blast because that e-blast's footer ("More available land") featured
+   5207 Palm River Rd. The matcher read the whole body, so a cross-promo
+   block counted as address-level evidence. Across Sept, 97 of 153 automatic
+   e-blast matches were cross-promo or contradicted the listing.
+   Now: (1) only the e-blast's FEATURED property counts (subject/title/preview
+   + body up to the first cross-promo heading); (2) a match is vetoed when the
+   e-blast's own acreage or county contradicts the deal card; (3) every report
+   has to pass 🔍 Review & approve (blocking checks + a named approval stamped
+   with a fingerprint of the content) before it can be sent, one or in bulk.
+   ======================================================= */
+const MR_MC_PROMO_RE=/(?:^|\n)\s*(more available land|more available properties|more (?:land|properties|listings)(?: for sale| available)?|other (?:available )?(?:listings|properties|land)|featured (?:listings|properties)|also available|you may also like|additional listings|recent listings|new listings from|more from eshenbaugh)\b/i;
+function _mrMcPrimaryText(c){ const t=String((c&&c.bodyText)||''); const m=t.match(MR_MC_PROMO_RE); return m? t.slice(0,m.index) : t; }
+function _mrMcPromoOnly(c){ return String((c&&c.bodyText)||'').length>_mrMcPrimaryText(c).length; }
+/* _mrNum(v) is the shared number parser defined earlier in the Monthly Reports block */
+function _mrMcFacts(text){
+  const t=String(text||''); const acres=[], counties=[];
+  t.replace(/(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)\s*(?:±|\+\/-|\+-)?\s*(?:-|–)?\s*(?:gross\s+|net\s+|usable\s+)?(?:ac\b|acres?\b)/gi,(m,a)=>{ const n=_mrNum(a); if(n>0) acres.push(n); return m; });
+  t.replace(/\b([A-Z][a-z]+(?: [A-Z][a-z]+)?) County\b/g,(m,a)=>{ const k=a.toLowerCase().replace(/^(?:in|of|the|unincorporated)\s+/,''); if(k && !/^(the|this|of|in|unincorporated)$/.test(k)) counties.push(k); return m; });
+  const zm=t.match(/\bzon(?:ing|ed)\b[\s:·\-–]*([A-Z]{1,4}[A-Z0-9]*(?:-\d+[A-Z]?)?)/); 
+  return {acres, counties:[...new Set(counties)], zoning:zm?zm[1]:''};
+}
+function _mrDealAcres(deal){ const a=_mrNum(String((deal&&(deal.acres||deal.acreage))||'').replace(/[^0-9.,]/g,'')); return a>0?a:0; }
+function _mrDealCounty(deal){ return String((deal&&deal.county)||'').toLowerCase().replace(/\s*county\s*$/,'').trim(); }
+function _mrDealCity(deal){ let c=String((deal&&deal.city)||'').toLowerCase().trim();
+  if(!c){ const ms=[...String((deal&&(deal.propertyAddress||deal.address))||'').matchAll(/([A-Za-z .'’-]+),\s*(?:FL|Florida)\b/gi)]; if(ms.length) c=ms[ms.length-1][1].toLowerCase().trim(); }
+  c=c.replace(/\s+(fl|florida)\b.*$/,'').trim(); return (c.length>=3 && !/county/.test(c))?c:''; }
+function _mrKnownCities(){ const st=window._mrState||{}; const n=(typeof allDeals!=='undefined'&&allDeals)?allDeals.length:0;
+  if(!st._cities||st._citiesN!==n){ const set=new Set(); ((typeof allDeals!=='undefined'&&allDeals)||[]).forEach(d=>{ const c=_mrDealCity(d); if(c){ set.add(c); const t=c.split(/\s+/); if(t.length>2) set.add(t.slice(-2).join(' ')); set.add(t[t.length-1]); } }); st._cities=set; st._citiesN=n; }
+  return st._cities; }
+function _mrCap(s){ return String(s||'').replace(/\b\w/g,x=>x.toUpperCase()); }
+function _mrAcresClose(x, da){ const tol=Math.max(da*0.06, Number.isInteger(da)?1:0.05); return Math.abs(x-da)<=tol; }
+/* Contradictions between what a piece of marketing says it is selling and the deal card. */
+function _mrMcConflicts(deal, c){
+  const head=[(c&&c.subject)||'',(c&&c.title)||'',(c&&c.preview)||''].join(' \n'); const prim=_mrMcPrimaryText(c);
+  const fh=_mrMcFacts(head), fp=_mrMcFacts(prim); const out=[];
+  // the featured acreage is what the subject line says; only when the subject has none do the body's first figures count
+  const da=_mrDealAcres(deal); const cand=fh.acres.length?fh.acres:fp.acres.slice(0,2); const ea=cand[0]||0;
+  if(da && ea && !cand.some(x=>_mrAcresClose(x,da))) out.push(ea+'± ac in the e-blast vs '+da+' ac on the listing');
+  // city named in the subject ("… in Wesley Chapel, FL") vs the listing's city
+  const hc=((c&&c.subject)||'').match(/\bin\s+((?:[A-Z][A-Za-z.'’]+ ?){1,3}?)(?:,\s*(?:FL|Florida)\b|\s*$|\s+[|—–-])/); const hcity=hc&&hc[1]&&!/^(the|a|an)$/i.test(hc[1].trim())?hc[1].trim():'';
+  const dcity=_mrDealCity(deal);
+  if(hcity && dcity){ const a=hcity.toLowerCase(), b=dcity; const place=(String(deal.propertyAddress||deal.address||'')+' '+String(deal.projectName||'')).toLowerCase();
+    const words=a.replace(/^(downtown|north|south|east|west|greater)\s+/,'').split(/\s+/).filter(w=>w.length>=4);
+    const known=_mrKnownCities().has(a.replace(/^(downtown|greater)\s+/,''));
+    if(known && words.length && !words.some(w=>b.includes(w)||place.includes(w))) out.push(hcity+' in the e-blast vs '+_mrCap(b)+' on the listing'); }
+  const dc=_mrDealCounty(deal); const cs=[...fp.counties,...fh.counties]; const ec=cs[0]||'';
+  if(dc && ec && !cs.some(x=>x===dc||x.endsWith(' '+dc)||dc.endsWith(' '+x))) out.push(_mrCap(ec)+' County in the e-blast vs '+_mrCap(dc)+' County on the listing');
+  return out;
+}
+function _mrMcConfirmed(rep, id){ return !!(rep && rep.mcConfirmed && rep.mcConfirmed[id]); }
+/* Full verdict for one campaign against one listing. status: match | conflict | promo | none */
+function _mrMcVerdict(deal, c){
+  const d=_mrMcScoreDetail(deal,c); const score=d.strong?d.s:Math.min(d.s,2.4);
+  const conflicts=_mrMcConflicts(deal,c);
+  let status='none';
+  if(score>=2.5) status=conflicts.length?'conflict':'match';
+  else if(_mrMcPromoOnly(c)){ const f=_mrMcScoreDetail(deal,c,{full:true}); if(f.strong && f.s>=2.5) status='promo'; }
+  return {score, conflicts, status, facts:_mrMcFacts([(c.subject||''),(c.title||''),_mrMcPrimaryText(c)].join('\n'))};
+}
+function _mrMcScore(deal, c){ const v=_mrMcVerdict(deal,c); return v.status==='match'?v.score:Math.min(v.score,2.4); }
+function _mrMcMatch(deal, campaigns){ return (campaigns||[]).filter(c=>_mrMcVerdict(deal,c).status==='match'); }
+/* Campaigns that the old whole-body matcher would have taken — shown in the editor as "not included, and why". */
+function _mrMcNearMisses(deal, campaigns){
+  return (campaigns||[]).map(c=>({c, v:_mrMcVerdict(deal,c)})).filter(x=>x.v.status==='conflict'||x.v.status==='promo');
+}
+function _mrMcWhyHtml(deal, c){
+  const v=_mrMcVerdict(deal,c); const f=v.facts; const bits=[];
+  if(f.acres[0]) bits.push(f.acres[0]+'± ac'); if(f.counties[0]) bits.push(_mrCap(f.counties[0])+' County'); if(f.zoning) bits.push(f.zoning);
+  const facts=bits.length?`<div class="mr-muted" style="font-size:.7rem">Featured: ${_mrEsc(bits.join(' · '))}</div>`:'';
+  if(v.status==='conflict') return facts+`<div style="font-size:.7rem;color:#b91c1c;font-weight:600">⛔ Doesn’t match this listing — ${_mrEsc(v.conflicts.join('; '))}</div>`;
+  if(v.status==='promo') return facts+`<div style="font-size:.7rem;color:#b45309;font-weight:600">⚠ This listing is only in the e-blast’s “More available land” footer — it was about another property</div>`;
+  return facts;
+}
+/* ---------- the check ---------- */
+function _mrHash(s){ let h=5381; s=String(s||''); for(let i=0;i<s.length;i++) h=((h<<5)+h+s.charCodeAt(i))|0; return (h>>>0).toString(36); }
+function _mrFingerprint(A){
+  const d=A.deal||{};
+  return _mrHash(JSON.stringify({e:(A.emails||[]).map(e=>e.id).sort(), p:(A.posts||[]).map(p=>(p.ids||[]).map(i=>i.id).join('+')||_mrHash(p.message)).sort(), l:A.letter||'', s:A.signature||'', a:_mrDealAcres(d), c:_mrDealCounty(d), z:String(d.zoning||''), n:(A.history||[]).map(h=>h.id||h.text).join('|'), o:(d.lois||[]).length, to:_mrRecipients(d).map(r=>r.email).sort()}));
+}
+async function _mrPreflight(A){
+  const deal=A.deal, rep=A.rep||{}; const items=[]; const add=(sec,level,msg,extra)=>items.push({sec,level,msg,...(extra||{})});
+  // 1 · the listing's own facts — the yardstick for everything else
+  const da=_mrDealAcres(deal), dc=_mrDealCounty(deal), dz=String(deal.zoning||'').trim();
+  if(!da) add('Listing facts','block','Acreage is blank on the deal card — Terra can’t check the e-blasts and posts against it.',{fix:'facts'});
+  if(!dc) add('Listing facts','block','County is blank on the deal card.',{fix:'facts'});
+  if(!dz) add('Listing facts','warn','Zoning is blank on the deal card.',{fix:'facts'});
+  if(da&&dc) add('Listing facts','ok',da+' ac · '+_mrCap(dc)+' County'+(dz?' · '+dz:'')+' · '+_mrDealAddr(deal));
+  // 2 · e-blasts
+  const emails=A.emails||[]; const pinnedIds=new Set(((rep.emailCampaignsPinned)||[]).map(p=>p.id));
+  let fresh=[]; if(emails.length){ try{ fresh=await _mrMcCampaigns(A.ym); }catch(e){ add('E-blasts','warn','Mailchimp not reachable ('+e.message+') — e-blasts checked on subject line only.'); } }
+  if(!emails.length) add('E-blasts','warn','No e-blast on this report for '+_mrMonthLabel(A.ym)+'.');
+  emails.forEach(e=>{
+    const full=fresh.find(c=>c.id===e.id)||e; const v=_mrMcVerdict(deal,full); const ok=_mrMcConfirmed(rep,e.id);
+    const label='“'+(e.subject||e.title||'E-blast')+'” ('+_mrFmtDate(Date.parse(e.sendTime)||0)+')';
+    if(ok) add('E-blasts','ok',label+' — confirmed same property by '+(rep.mcConfirmed[e.id].byName||'')+'.');
+    else if(v.conflicts.length) add('E-blasts','block',label+' — '+v.conflicts.join('; ')+'.',{fix:'mc', id:e.id});
+    else if(full.bodyText && v.status!=='match' && !pinnedIds.has(e.id)) add('E-blasts','block',label+' — doesn’t name this property'+(v.status==='promo'?' (it only appears in the “More available land” footer)':'')+'.',{fix:'mc', id:e.id});
+    else add('E-blasts','ok',label+(v.facts.acres[0]?' — '+v.facts.acres[0]+'± ac':'')+(v.facts.counties[0]?' · '+_mrCap(v.facts.counties[0])+' County':''));
+  });
+  // 3 · social posts
+  (A.posts||[]).forEach(p=>{ const v=_mrMcConflicts(deal,{subject:'',bodyText:p.message||''}); const label=_mrFmtDate(p.at)+' '+(p.platforms||[]).join('/')+' post';
+    if(v.length) add('Social posts','block',label+' — '+v.join('; ').replace(/e-blast/g,'post')+'.'); else add('Social posts','ok',label); });
+  // 4 · status letter
+  const L=String(A.letter||'');
+  if(!L.trim()) add('Status letter','block','No status letter for '+_mrMonthLabel(A.ym)+'.');
+  else { const blanks=(L.match(/\[[^\]\n]{2,160}\]/g)||[]); if(blanks.length) add('Status letter','block','Letter still has '+blanks.length+' template blank'+(blanks.length===1?'':'s')+' — e.g. '+blanks.slice(0,2).join('  ')+'.'); else add('Status letter','ok',A.letterCustom?'Custom letter':'Firm letter'); }
+  // 5 · recipients + photos
+  const rc=_mrRecipients(deal); if(!rc.length) add('Recipients','block','No owners picked to receive this report.'); else add('Recipients','ok',rc.map(r=>r.name||r.email).join(', '));
+  if(!A.hero) add('Photos','block','No parcel photo on the cover.');
+  if(!A.sign) add('Photos','warn','No sign photo.');
+  // 6 · notes — listed so the reviewer scans them
+  add('Property notes','ok',(A.history||[]).length+' entries print — scan them below; hide any that aren’t about this property in ✏️ Edit.');
+  const blocks=items.filter(i=>i.level==='block');
+  return {items, blocks, warns:items.filter(i=>i.level==='warn'), fp:_mrFingerprint(A)};
+}
+function _mrApprovalOk(rep, fp){ return !!(rep && rep.approval && rep.approval.fp===fp); }
+/* ---------- 🔍 Review & approve modal ---------- */
+window._mrReview=async function(dealId){
+  const deal=(allDeals||[]).find(d=>d.id===dealId); if(!deal) return;
+  const ym=window._mrState.month||_mrPrevMonth();
+  document.getElementById('mr-rv-ov')?.remove();
+  const ov=document.createElement('div'); ov.className='mr-ov fixed inset-0 flex items-center justify-center'; ov.id='mr-rv-ov';
+  ov.innerHTML=`<div class="mr-modal" style="width:min(820px,100%)" role="dialog" aria-label="Review and approve report"><div class="mr-modal-h"><h2>🔍 Review &amp; approve — ${_mrEsc(_mrDealName(deal))}</h2><span style="flex:1"></span><button class="mr-x" aria-label="Close" onclick="document.getElementById('mr-rv-ov').remove()">✕</button></div><div class="mr-modal-b" id="mr-rv-body"><p class="mr-muted">Building the ${_mrEsc(_mrMonthLabel(ym))} report and checking every section against the listing…</p></div><div class="mr-modal-f" id="mr-rv-foot"></div></div>`;
+  document.body.appendChild(ov); ov.addEventListener('click',e=>{ if(e.target===ov) ov.remove(); });
+  let A, pf;
+  try{ delete window._mrState.reports[deal.id+'|'+ym]; A=await _mrAssemble(deal,ym); pf=await _mrPreflight(A); }
+  catch(e){ document.getElementById('mr-rv-body').innerHTML=`<p style="color:#b91c1c">Couldn’t build the report: ${_mrEsc(e.message)}</p>`; return; }
+  window._mrState.review={dealId, ym, A, pf};
+  const icon={ok:'✅',warn:'⚠️',block:'⛔'}; const secs=[...new Set(pf.items.map(i=>i.sec))];
+  const rep=A.rep||{}; const approved=_mrApprovalOk(rep,pf.fp);
+  const factsForm=pf.items.some(i=>i.fix==='facts')?`<div style="border:1px solid #fecaca;background:rgba(254,226,226,.35);border-radius:10px;padding:.6rem .7rem;margin:.2rem 0 .8rem"><div style="font-weight:700;font-size:.82rem;margin-bottom:.35rem">Fill in the listing facts (saved to the deal card)</div><div class="mr-row" style="gap:.5rem;flex-wrap:wrap"><label class="mr-note">Acres <input id="mr-rv-ac" class="mr-input" style="width:90px" inputmode="decimal" value="${_mrEsc(deal.acreage||deal.acres||'')}"></label><label class="mr-note">County <input id="mr-rv-co" class="mr-input" style="width:140px" value="${_mrEsc(deal.county||'')}"></label><label class="mr-note">Zoning <input id="mr-rv-zo" class="mr-input" style="width:110px" value="${_mrEsc(deal.zoning||'')}"></label><button class="mr-btn mr-btn-sm mr-btn-primary" onclick="window._mrReviewSaveFacts(this)">Save &amp; re-check</button></div></div>`:'';
+  const rows=secs.map(s=>`<div style="margin:.15rem 0 .7rem"><div style="font-weight:700;font-size:.8rem;text-transform:uppercase;letter-spacing:.03em;color:var(--muted,#6b7280);margin-bottom:.25rem">${_mrEsc(s)}</div>${pf.items.filter(i=>i.sec===s).map(i=>`<div style="display:flex;gap:.5rem;align-items:flex-start;padding:.3rem .45rem;border-radius:8px;${i.level==='block'?'background:rgba(254,226,226,.45)':i.level==='warn'?'background:rgba(254,243,199,.45)':''}"><span aria-hidden="true">${icon[i.level]}</span><div style="flex:1;font-size:.82rem;line-height:1.35">${_mrEsc(i.msg)}</div>${i.fix==='mc'?`<div style="display:flex;gap:.3rem;flex-shrink:0"><button class="mr-btn mr-btn-sm" onclick="window._mrReviewDropMc('${_mrEsc(i.id)}',this)">Remove from report</button><button class="mr-btn mr-btn-sm" title="Only if the deal card is wrong — records your name" onclick="window._mrReviewConfirmMc('${_mrEsc(i.id)}',this)">It is this property</button></div>`:''}</div>`).join('')}</div>`).join('');
+  const notes=(A.history||[]).slice(0,40).map(h=>`<div style="font-size:.74rem;line-height:1.3;padding:.15rem 0;border-bottom:1px solid var(--border)"><span class="mr-muted">${_mrEsc(h.date)} · ${_mrEsc(h.type)}</span> ${_mrEsc(String(h.text).slice(0,220))}</div>`).join('');
+  document.getElementById('mr-rv-body').innerHTML=`${pf.blocks.length?`<div style="background:#fee2e2;color:#991b1b;border-radius:10px;padding:.55rem .7rem;font-weight:600;font-size:.85rem;margin-bottom:.7rem">${pf.blocks.length} problem${pf.blocks.length===1?'':'s'} must be fixed before this report can be approved or sent.</div>`:approved?`<div style="background:#dcfce7;color:#166534;border-radius:10px;padding:.55rem .7rem;font-weight:600;font-size:.85rem;margin-bottom:.7rem">Approved by ${_mrEsc(rep.approval.byName||'')} ${_mrEsc(_mrFmtDate(rep.approval.at))} — nothing has changed since.</div>`:`<div style="background:#e0f2fe;color:#075985;border-radius:10px;padding:.55rem .7rem;font-weight:600;font-size:.85rem;margin-bottom:.7rem">All checks pass. Open the PDF, read it, then approve.</div>`}${factsForm}${rows}${notes?`<details style="margin-top:.3rem"><summary style="cursor:pointer;font-size:.8rem;font-weight:600">Property notes that will print (${(A.history||[]).length})</summary><div style="max-height:30vh;overflow:auto;margin-top:.3rem">${notes}</div></details>`:''}`;
+  document.getElementById('mr-rv-foot').innerHTML=`<span class="mr-muted" style="flex:1;font-size:.75rem">Any later change to the e-blasts, posts, letter, notes, owners or listing facts clears the approval.</span><button class="mr-btn" onclick="window._mrReviewPdf(this)">👁 Open PDF</button><button class="mr-btn mr-btn-primary" ${pf.blocks.length?'disabled title="Fix the ⛔ items first"':''} onclick="window._mrReviewApprove(this)">${approved?'✓ Approved':'✅ Approve report'}</button>`;
+};
+window._mrReviewPdf=async function(btn){ const r=window._mrState.review; if(!r) return; const done=elcBusy(btn,'Building…'); try{ const doc=await _mrBuildPdf(r.A); const w=window.open(doc.output('bloburl'),'_blank'); if(!w) showToast('Pop-up blocked — allow pop-ups for Terra','warning',6000); }catch(e){ showToast('Preview failed: '+e.message,'error',6000); } finally{ done(); } };
+window._mrReviewApprove=async function(btn){
+  const r=window._mrState.review; if(!r||r.pf.blocks.length) return; const done=elcBusy(btn,'Saving…');
+  try{ await _mrSaveReport(r.dealId, r.ym, {approval:{at:Date.now(), by:currentUser?.uid||'', byName:currentUser?.name||currentUser?.email||'', fp:r.pf.fp}}); showToast('Report approved ✓','success'); document.getElementById('mr-rv-ov')?.remove(); if(currentView==='monthlyReports') window._mrRenderRows(); }
+  catch(e){ showToast('Couldn’t save the approval: '+e.message,'error',6000); } finally{ done(); }
+};
+window._mrReviewSaveFacts=async function(btn){
+  const r=window._mrState.review; if(!r) return; const deal=(allDeals||[]).find(d=>d.id===r.dealId); if(!deal) return;
+  const ac=String(document.getElementById('mr-rv-ac')?.value||'').trim(), co=String(document.getElementById('mr-rv-co')?.value||'').trim().replace(/\s*county\s*$/i,''), zo=String(document.getElementById('mr-rv-zo')?.value||'').trim();
+  if(ac && !(_mrNum(ac.replace(/[^0-9.,]/g,''))>0)){ showToast('Acres must be a number','warning'); return; }
+  const patch={updatedAt:Date.now()}; if(ac) patch.acreage=ac; if(co) patch.county=co; if(zo) patch.zoning=zo;
+  const done=elcBusy(btn,'Saving…');
+  try{ await Store.updateDeal(deal.id,patch); Object.assign(deal,patch); done(); window._mrReview(deal.id); }
+  catch(e){ done(); showToast('Save failed: '+e.message,'error',6000); }
+};
+window._mrReviewDropMc=async function(id, btn){
+  const r=window._mrState.review; if(!r) return; const done=elcBusy(btn,'Removing…');
+  try{ const rep=(await _mrLoadReport(r.dealId,r.ym))||{}; const keep=(r.A.emails||[]).filter(e=>e.id!==id).map(_mrMcSlim);
+    const pinned=((rep.emailCampaignsPinned)||[]).filter(p=>p.id!==id);
+    await _mrSaveReport(r.dealId, r.ym, {emailCampaigns:keep, emailCampaignsPicked:true, emailCampaignsPinned:pinned});
+    done(); window._mrReview(r.dealId); }
+  catch(e){ done(); showToast('Couldn’t remove it: '+e.message,'error',6000); }
+};
+window._mrReviewConfirmMc=async function(id, btn){
+  const r=window._mrState.review; if(!r) return;
+  const ok=await elcConfirm('Only confirm if this e-blast really is about '+_mrDealName((allDeals||[]).find(d=>d.id===r.dealId)||{})+' and the deal card is what’s wrong — fix the deal card too. Your name is recorded on the report.',{title:'Same property?',okLabel:'Yes, same property'}); if(!ok) return;
+  const done=elcBusy(btn,'Saving…');
+  try{ const rep=(await _mrLoadReport(r.dealId,r.ym))||{}; const m={...(rep.mcConfirmed||{})}; m[id]={at:Date.now(), by:currentUser?.uid||'', byName:currentUser?.name||currentUser?.email||''};
+    await _mrSaveReport(r.dealId, r.ym, {mcConfirmed:m}); done(); window._mrReview(r.dealId); }
+  catch(e){ done(); showToast('Couldn’t save: '+e.message,'error',6000); }
+};
+function _mrMcNearHtml(ed){
+  const n=(ed&&ed.mcReview)||[]; if(!n.length) return '';
+  return `<div style="flex-basis:100%;border:1px dashed #fca5a5;border-radius:10px;padding:.4rem .55rem;margin-top:.3rem;font-size:.74rem;line-height:1.35"><div style="font-weight:700;color:#b91c1c">Not included — ${n.length} e-blast${n.length===1?'':'s'} mention this listing but are about another property</div>${n.map(({c,v})=>`<div style="margin-top:.2rem"><b>${_mrEsc(c.subject||c.title)}</b> <span class="mr-muted">(${_mrEsc(_mrFmtDate(Date.parse(c.sendTime)||0))})</span> — ${v.status==='promo'?'listed only in its “More available land” footer':_mrEsc(v.conflicts.join('; '))}</div>`).join('')}</div>`;
+}
+/* ===== MCVERIFY_BLOCK_END ===== */
+
 function _mrMcSlim(c){ return {id:c.id, subject:c.subject||'', title:c.title||'', sendTime:c.sendTime||'', emailsSent:c.emailsSent||0, uniqueOpens:c.uniqueOpens||0, openRate:c.openRate||0, uniqueClicks:c.uniqueClicks||0, clickRate:c.clickRate||0, image:c.image||'', archiveUrl:c.archiveUrl||'', segment:c.segment||'', listName:c.listName||''}; }
 function _mrMcRow(c){ return {title:c.subject||c.title||'E-blast', date:_mrLocalDate(Date.parse(c.sendTime)||Date.now()), recipients:String(c.emailsSent||''), opens:String(c.uniqueOpens||''), clicks:String(c.uniqueClicks||'')}; }
 // All sent campaigns in the month — one worker call per month per session (shared by every listing's report).
@@ -47479,9 +47664,9 @@ window._mrMcAutoFill=async function(){
   const ed=window._mrState.editor; if(!ed) return; const box=document.getElementById('mr-mc-summary'); if(!box) return;
   if(ed.emailCampaignsPicked){ box.innerHTML=_mrMcSummaryHtml(); return; }
   box.innerHTML='<span class="mr-muted">Checking Mailchimp for this month’s e-blasts…</span>';
-  try{ const all=await _mrMcCampaigns(ed.ym); if(window._mrState.editor!==ed) return; ed.emailCampaigns=_mrMcMatch(ed.deal,all).map(_mrMcSlim); ed.mcError=''; _mrMcMergeRows(ed.emailCampaigns); }
+  try{ const all=await _mrMcCampaigns(ed.ym); if(window._mrState.editor!==ed) return; ed.emailCampaigns=_mrMcMatch(ed.deal,all).map(_mrMcSlim); ed.mcReview=_mrMcNearMisses(ed.deal,all); ed.mcError=''; _mrMcMergeRows(ed.emailCampaigns); }
   catch(e){ ed.mcError=e.message; }
-  box.innerHTML=_mrMcSummaryHtml();
+  box.innerHTML=_mrMcSummaryHtml()+_mrMcNearHtml(ed);   // MCVERIFY-20261016
 };
 window._mrOpenMcPicker=async function(btn){
   const ed=window._mrState.editor; if(!ed) return; const done=elcBusy(btn,'Loading…'); let all=[];
@@ -47493,7 +47678,7 @@ window._mrOpenMcPicker=async function(btn){
     <div class="mr-modal-h"><h2>📧 ${_mrEsc(_mrMonthLabel(ed.ym))} e-blasts — ${_mrEsc(_mrDealName(ed.deal))}</h2><span style="flex:1"></span><button class="mr-x" aria-label="Close" onclick="document.getElementById('mr-mc-ov').remove()">✕</button></div>
     <div class="mr-modal-b">
       <p class="mr-note" style="margin:0 0 .6rem">${all.length} campaign${all.length===1?'':'s'} went out through Mailchimp in ${_mrEsc(_mrMonthLabel(ed.ym))}. Tick the ones about this listing — likely matches are listed first and pre-ticked.</p>
-      ${all.length?`<div style="display:flex;flex-direction:column;gap:.4rem;max-height:52vh;overflow:auto">${scored.map(({c,s})=>`<label style="display:flex;gap:.6rem;align-items:center;border:1px solid var(--border);border-radius:10px;padding:.4rem .6rem;cursor:pointer;${s>=2.5?'background:rgba(79,195,201,.08)':''}"><input type="checkbox" class="mr-mc-pick" value="${_mrEsc(c.id)}" ${chosen.has(c.id)||(!ed.emailCampaignsPicked&&s>=2.5)?'checked':''}>${c.image?`<img src="${_mrEsc(c.image)}" alt="" style="width:64px;height:48px;object-fit:cover;border-radius:6px">`:`<div style="width:64px;height:48px;border-radius:6px;background:var(--bg)"></div>`}<div style="min-width:0;font-size:.8rem;line-height:1.35"><div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${_mrEsc(c.subject||c.title)}</div><div class="mr-muted">${_mrEsc(_mrFmtDateLong(Date.parse(c.sendTime)||0))} · ${Number(c.emailsSent||0).toLocaleString()} sent · ${c.openRate||0}% opened · ${c.clickRate||0}% clicked${_mrCleanSeg(c.segment)?' · '+_mrEsc(_mrCleanSeg(c.segment)):''}</div></div>${s>=2.5?'<span style="margin-left:auto;font-size:.7rem;color:#047857;background:#d1fae5;border-radius:999px;padding:.1rem .5rem;white-space:nowrap">likely match</span>':''}</label>`).join('')}</div>`:'<p class="mr-muted">Nothing was sent through Mailchimp this month.</p>'}
+      ${all.length?`<div style="display:flex;flex-direction:column;gap:.4rem;max-height:52vh;overflow:auto">${scored.map(({c,s})=>`<label style="display:flex;gap:.6rem;align-items:center;border:1px solid var(--border);border-radius:10px;padding:.4rem .6rem;cursor:pointer;${s>=2.5?'background:rgba(79,195,201,.08)':''}"><input type="checkbox" class="mr-mc-pick" value="${_mrEsc(c.id)}" ${chosen.has(c.id)||(!ed.emailCampaignsPicked&&s>=2.5)?'checked':''}>${c.image?`<img src="${_mrEsc(c.image)}" alt="" style="width:64px;height:48px;object-fit:cover;border-radius:6px">`:`<div style="width:64px;height:48px;border-radius:6px;background:var(--bg)"></div>`}<div style="min-width:0;font-size:.8rem;line-height:1.35"><div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${_mrEsc(c.subject||c.title)}</div><div class="mr-muted">${_mrEsc(_mrFmtDateLong(Date.parse(c.sendTime)||0))} · ${Number(c.emailsSent||0).toLocaleString()} sent · ${c.openRate||0}% opened · ${c.clickRate||0}% clicked${_mrCleanSeg(c.segment)?' · '+_mrEsc(_mrCleanSeg(c.segment)):''}</div>${_mrMcWhyHtml(ed.deal,c)}</div>${s>=2.5?'<span style="margin-left:auto;font-size:.7rem;color:#047857;background:#d1fae5;border-radius:999px;padding:.1rem .5rem;white-space:nowrap">likely match</span>':''}</label>`).join('')}</div>`:'<p class="mr-muted">Nothing was sent through Mailchimp this month.</p>'}
     </div>
     <div class="mr-modal-f"><span style="flex:1"></span><button class="mr-btn" onclick="document.getElementById('mr-mc-ov').remove()">Cancel</button><button class="mr-btn mr-btn-primary" onclick="window._mrMcApplyPick()">Use selected</button></div></div>`;
   document.body.appendChild(ov); ov.addEventListener('click',e=>{ if(e.target===ov) ov.remove(); });
