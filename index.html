@@ -25373,7 +25373,7 @@ function viewTasks(){
           ${t.assignedTo!==uid&&t.createdBy===uid&&!isAdmin?`<span class="text-xs bg-purple-50 text-purple-600 px-1.5 rounded">delegated</span>`:''}
         </div>
       </div>
-      ${canManage(t)?`<button onclick="openTaskModal('${t.id}')" class="text-gray-300 hover:text-blue-500 text-base shrink-0">✏️</button>`:''}
+      <button onclick="openTaskModal('${t.id}',null,${canManage(t)?'false':'true'})" class="text-gray-300 hover:text-blue-500 text-base shrink-0" title="${canManage(t)?'Edit task':'Change due date'}" aria-label="${canManage(t)?'Edit task':'Change due date'}">✏️</button><!-- TASKDUE-20261016: every user can change the due date on any task they see -->
       ${canManage(t)?`<button onclick="deleteTask('${t.id}')" class="text-gray-200 hover:text-red-500 text-sm shrink-0 mt-0.5">✕</button>`:''}
     </div>`;
 
@@ -30826,8 +30826,12 @@ window._micBtn = (targetId, opts={}) => {
   return `<button type="button" onclick="event.stopPropagation();window._toggleDictation('${targetId}',this)" title="Dictate" class="dict-mic" style="background:#fff;border:1px solid #d1d5db;border-radius:.5rem;padding:${pad};font-size:${fs};font-weight:600;color:#374151;cursor:pointer;white-space:nowrap">🎤 Dictate</button>`;
 };
 
-window.openTaskModal = (id, presetDealId) => {
+window.openTaskModal = (id, presetDealId, dueOnly) => {
   editingTaskId = id||null;
+  // TASKDUE-20261016 (Ryan): the ✏️ on the Tasks tab lets EVERY user change the due date of any task they
+  // can see — including tasks from automations and the Terra daily post. If they couldn't otherwise manage
+  // the task, the modal opens in due-date-only mode (title, notes, project and assignee locked; no Delete).
+  window._tmDueOnly = !!(id && dueOnly);
   const advisors = getAssignableUsers(); // include staff — anyone can be assigned a task
   const t = id ? allTasks.find(x=>x.id===id) : null;
   const _selDealId = (t && t.dealId) || presetDealId || '';
@@ -30893,11 +30897,19 @@ window.openTaskModal = (id, presetDealId) => {
       </div>
     </div>`;
   document.body.appendChild(modal);
+  if(window._tmDueOnly){   // TASKDUE-20261016
+    ['tm-title','tm-desc','tm-deal','tm-assignee'].forEach(fid=>{ const el=document.getElementById(fid); if(el){ el.disabled=true; el.style.background='#f3f4f6'; el.style.cursor='not-allowed'; } });
+    modal.querySelectorAll('button[onclick^="deleteTask"]').forEach(b=>b.remove());
+    const h=modal.querySelector('h2'); if(h) h.textContent='Change Due Date';
+    const sb=modal.querySelector('button[onclick="saveTask()"]'); if(sb) sb.textContent='Save Due Date';
+    const due=document.getElementById('tm-due');
+    if(due){ const n=document.createElement('p'); n.className='text-xs text-gray-600 mt-3'; n.textContent=(t&&(t.createdByName==='Automation'||t.createdByName==='Terra daily post'||t.createdBy==='system')?'This task was created automatically. ':'')+'You can change its due date; the rest of the task is set by whoever created it.'; due.closest('.grid')?.after(n); setTimeout(()=>{ try{ due.focus(); }catch(_){} },50); }
+  }
 };
 
 window.saveTask = async () => {
   const title = document.getElementById('tm-title')?.value.trim();
-  if(!title){ showToast('Title is required','error'); return; }
+  if(!title && !window._tmDueOnly){ showToast('Title is required','error'); return; }
   const sel   = document.getElementById('tm-assignee');
   const assignedTo   = sel?.value;
   const assignedToName = sel?.options[sel.selectedIndex]?.dataset.name || assignedTo;
@@ -30905,6 +30917,19 @@ window.saveTask = async () => {
   const _dueEx   = editingTaskId ? (allTasks||[]).find(t=>t.id===editingTaskId) : null;
   const dueDate  = _dueRaw ? _elcRollDue(_dueRaw, _dueEx && _dueEx.dueRoll) : null;
   if(_dueRaw && dueDate!==_dueRaw){ try{ showToast('📅 '+_dueRaw+' is a weekend/holiday — due date moved to '+new Date(dueDate+'T12:00:00').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'}),'info'); }catch(_){} }
+  if(window._tmDueOnly && editingTaskId){   // TASKDUE-20261016 — write only the due date
+    const _btn=document.querySelector('#task-modal button[onclick="saveTask()"]'); const _restore=window.elcBusy?window.elcBusy(_btn,'Saving…'):null;
+    const dd={ dueDate, updatedAt: Date.now() };
+    try{
+      await Store.updateTask(editingTaskId, dd);
+      const i=allTasks.findIndex(t=>t.id===editingTaskId); if(i>=0) allTasks[i]={...allTasks[i],...dd};
+      window._tmDueOnly=false; document.getElementById('task-modal')?.remove();
+      showToast(dueDate?'Due date set to '+new Date(dueDate+'T12:00:00').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'})+' ✓':'Due date cleared ✓','success');
+      if(document.getElementById('prop-detail-drawer')?.classList.contains('open')){ if(window._pdwDealId) window._taRenderDealTasks?.(window._pdwDealId); } else { viewTasks(); }
+    } catch(err){ console.error('[saveTask due-only]',err); showToast('Could not change the due date — try again','error'); }
+    finally{ try{ _restore&&_restore(); }catch(_){} }
+    return;
+  }
   const description = document.getElementById('tm-desc')?.value.trim()||'';
   const dealSel  = document.getElementById('tm-deal');
   const dealId   = dealSel?.value || '';
@@ -42420,6 +42445,8 @@ function dlInjectStyles() {
   .dl-genform>.ag-sub,.dl-genform>.ag-fieldlabel,.dl-genform>.ag-actions,.dl-genform>.ag-out,.dl-genform>.ag-fld:has(textarea),.dl-genform>.ag-stub{grid-column:1/-1}
   @media(max-width:640px){.dl-genform{grid-template-columns:minmax(0,1fr)}}
   .dl-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+  .dl-propbox{margin-top:10px;padding:12px;border:1px solid #00b2a9;border-radius:10px;background:rgba(0,178,169,.06)}
+  .dl-propstatus{font-size:.8rem;color:var(--text-2);margin-top:6px;min-height:1em}
   .dl-empty{padding:28px;text-align:center;color:var(--text-3);border:1px dashed var(--border,#e5e7eb);border-radius:12px;background:var(--surface-1,#fff)}
   .dl-mark{background:rgba(0,178,169,.2);color:inherit;border-radius:3px}
   .dl-wiz{background:var(--surface-1,#fff);border-radius:14px;max-width:560px;width:100%;padding:20px;border:1px solid var(--border,#e5e7eb);max-height:90vh;overflow:auto}
@@ -42549,8 +42576,14 @@ function dlRenderDetail() {
     ${f.replaces ? `<h4>Replaces</h4><p style="color:var(--text-2);font-size:.8rem">${dlEsc(f.replaces)}</p>` : ''}
     <div class="dl-actions">
       <button class="dl-btn primary" onclick="dlOpenGenerator('${f.code}')">⚙️ Generate</button>
+      ${t && agB64(t) ? `<button class="dl-btn primary" id="dl-propbtn" aria-expanded="false" aria-controls="dl-propbox" onclick="dlPropToggle()">🏠 Generate from property</button>` : ''}
       <button class="dl-btn" onclick="dlDownloadBlank('${f.code}', this)">⬇️ Printable blank (Word)</button>
-    </div>`;
+    </div>
+    ${t && agB64(t) ? `<div id="dl-propbox" class="dl-propbox" hidden>
+      <label class="ag-fieldlabel" for="dl-propsel" style="margin:0 0 6px;display:block">Pick a property — Terra fills the form from its deal card and downloads the Word doc</label>
+      <select id="dl-propsel" class="ag-select" style="width:100%;font-size:16px;min-height:44px" onchange="dlGenFromProperty('${f.code}', this.value, this)">${dlPropOptions()}</select>
+      <div id="dl-propstatus" class="dl-propstatus" aria-live="polite"></div>
+    </div>` : ''}`;   // DOCGENPROP-20261016
 }
 function dlSelect(code) {
   dlState.sel = code;
@@ -42676,6 +42709,90 @@ function dlWizPick(i) {
 }
 function dlWizBack() { dlWizStack.pop(); dlWizDraw(); }
 /* ===== end DOCLIB-20261015 ===== */
+
+// ── DOCGENPROP-20261016 — "Generate from property" ──────────────────────────
+// Pick a property card → open the generator already filled from that deal →
+// build the Word doc immediately and download it. Required fields that the deal
+// card doesn't hold print as fill-in lines (the advisor finishes them in Word, or
+// on the still-open form, then Generate again for PDF / e-sign).
+function dlPropLabel(d) {
+  const n = String(d.projectName || '').trim(), a = String(d.propertyAddress || d.address || '').trim();
+  return (n && a && n.toLowerCase() !== a.toLowerCase()) ? n + ' — ' + a : (n || a || d.id);
+}
+function dlPropDeals() {
+  const deals = (typeof allDeals !== 'undefined' ? allDeals : []) || [];
+  return deals.filter(d => d && !d.deleted && !d.archived && (!currentUser || currentUser.isAdmin || currentUser.isOfficeManager
+    || (typeof isDealAdvisor === 'function' ? isDealAdvisor(d, currentUser.uid) : d.advisorUid === currentUser.uid)));
+}
+function dlPropOptions() {
+  const list = dlPropDeals();
+  if (!list.length) return '<option value="">No properties on your board yet</option>';
+  const order = ['Listing', 'LOI', 'Signed LOI/Contract Drafting', 'Due Diligence (Under Contract)', 'Closing', 'Prospect', 'Buyer Opportunities', 'Closed Won', 'Closed Lost'];
+  const groups = {};
+  list.forEach(d => { const g = d.stage || 'Other'; (groups[g] = groups[g] || []).push(d); });
+  const keys = Object.keys(groups).sort((a, b) => {
+    const ia = order.indexOf(a), ib = order.indexOf(b);
+    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || a.localeCompare(b);
+  });
+  return '<option value="">— Choose a property (' + list.length + ') —</option>' + keys.map(g =>
+    '<optgroup label="' + agEsc(g) + '">' + groups[g].slice().sort((a, b) => dlPropLabel(a).localeCompare(dlPropLabel(b)))
+      .map(d => '<option value="' + agEsc(d.id) + '">' + agEsc(dlPropLabel(d)) + '</option>').join('') + '</optgroup>').join('');
+}
+function dlPropToggle() {
+  const box = document.getElementById('dl-propbox'), btn = document.getElementById('dl-propbtn');
+  if (!box) return;
+  box.hidden = !box.hidden;
+  if (btn) btn.setAttribute('aria-expanded', String(!box.hidden));
+  if (!box.hidden) { const sel = document.getElementById('dl-propsel'); if (sel) sel.focus(); }
+}
+// Deal-card fields the library forms don't map on their own.
+function dlPropExtraPrefill(code, deal) {
+  const set = (key, val) => { const el = document.getElementById('ag-f-' + key); if (el && !String(el.value || '').trim() && val) el.value = val; };
+  const today = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+  if (/^CA-ERS-/.test(code)) {
+    if (deal.listingExpiration && deal.listingExpiration > today) set('expiration_date', deal.listingExpiration);
+    if (deal.listingEffectiveDate) set('effective_date', deal.listingEffectiveDate);
+  }
+  if (code === 'CP-02' && deal.listingExpiration) set('expiration_date', deal.listingExpiration);
+}
+async function dlGenFromProperty(code, dealId, sel) {
+  if (!dealId) return;
+  const deal = dlPropDeals().find(d => d.id === dealId);
+  const status = document.getElementById('dl-propstatus');
+  if (!deal) { showToast('Couldn’t find that property', 'warning'); return; }
+  if (typeof JSZip === 'undefined') { showToast('Still loading — try again in a moment', 'warning'); return; }
+  if (sel) sel.disabled = true;
+  if (status) status.textContent = 'Filling from ' + dlPropLabel(deal) + '…';
+  try {
+    dlOpenGenerator(code, dealId);            // renders the form + applies the deal prefill
+    dlPropExtraPrefill(code, deal);
+    const t = agTmpl();
+    const vals = agCollectValues();
+    const keyed = t.fields.filter(x => x.key && x.type !== 'heading');
+    const filled = keyed.filter(x => vals[x.key] && String(vals[x.key]).trim());
+    const missing = agValidate(vals);
+    const { blob, fileName } = await agBuildDocx();
+    agState.docxBlob = blob; agState.pdfBlob = null;
+    const wb = document.getElementById('ag-dl-word'); if (wb) wb.disabled = false;
+    agDownload('word');
+    const out = document.getElementById('ag-out');
+    if (out) {
+      out.classList.remove('hidden');
+      out.innerHTML = '✅ <b>' + agEsc(fileName) + '</b> downloaded — ' + filled.length + ' of ' + keyed.length + ' fields filled from <b>' + agEsc(dlPropLabel(deal)) + '</b>.'
+        + (missing.length ? '<br><span style="color:#b45309">Left as fill-in lines: ' + agEsc(missing.join(', ')) + '.</span> Finish them in Word, or fill them here and press Generate for the PDF / e-sign.'
+                          : ' Edit it in Word if needed, or press Generate here for the PDF / e-sign.');
+      out.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+    showToast('Word doc ready — ' + filled.length + ' fields filled from the property', 'success');
+  } catch (e) {
+    console.error('[doclib] generate from property', e);
+    showToast('Couldn’t generate: ' + (e.message || e), 'error', 6000);
+    if (sel && document.body.contains(sel)) sel.disabled = false;
+    if (status && document.body.contains(status)) status.textContent = '';
+  }
+}
+/* ===== end DOCGENPROP-20261016 ===== */
+
 
 
 function viewAutomationDocs(activeFolder){   // DOCLIB-20261015 — formerly viewDocuments (admin uploads with URLs)
@@ -42900,7 +43017,7 @@ window.deleteAutomationDoc = async (docId, storagePath) => {
   } catch(e){ showToast('Delete failed: '+e.message,'error'); }
 };
 
-window.viewDocuments = viewDocuments;
+window.viewDocuments = viewDocuments; window.dlPropToggle = dlPropToggle; window.dlGenFromProperty = dlGenFromProperty;   // DOCGENPROP-20261016
 window.viewAutomationDocs = viewAutomationDocs; window.dlSearch = dlSearch; window.dlSetFolder = dlSetFolder; window.dlSetSide = dlSetSide; window.dlSelect = dlSelect; window.dlOpenGenerator = dlOpenGenerator; window.dlDownloadBlank = dlDownloadBlank; window.dlWizOpen = dlWizOpen; window.dlWizClose = dlWizClose; window.dlWizPick = dlWizPick; window.dlWizBack = dlWizBack;   // DOCLIB-20261015
 
 // Expose EOS sub-navigation globally (called from inline onclick inside setContent)
