@@ -150,13 +150,15 @@ window.DIRTDOG_CONFIG = {
     { id: "bio-andrew",      title: "Bio Andrew",      url: "", types: [], autoTypes: [] }
   ],
 
-  /* ---- Property Valuation video (flyover + AI voiceover) --------------- */
+  /* ---- Property Valuation video (five ~10s beats + AI voiceover) ------- */
   // Powers the "Property Valuation" card in the proposal builder. The advisor
-  // types a short valuation narration and clicks a spot on the map; the builder
-  // renders a cinematic flyover of that location, speaks the narration with a
-  // deep "cowboy" voice, records it to an iPhone-friendly H.264 MP4, uploads it
-  // to Firebase Storage and attaches it to the proposal as the Property
-  // Valuation video.
+  // fills five beats — Property Overview, Strengths, Challenges, Comparable
+  // Sales, Market Value & List Price — each with its own short script and the
+  // details its B-roll is drawn from (parcel outline on an aerial, strength
+  // cards, challenge rows, comp cards, value card). The builder speaks each
+  // script with a deep "cowboy" voice (or the advisor records it), plays each
+  // beat's B-roll for exactly as long as its voiceover, records an MP4, uploads
+  // it to Firebase Storage and fills the proposal's "Whats My Land Worth" slot.
   valuation: {
     // Google Maps API key (a normal browser key, referrer-restricted to
     // terra.dirtdog.com). Enable "Maps Static API" on the same Cloud project.
@@ -178,10 +180,8 @@ window.DIRTDOG_CONFIG = {
     pitch: -4.0,
     rate: 0.88,
 
-    // Flyover render defaults.
-    defaultStyle: "satellite",   // "satellite" (flat pan/zoom) or "3d" (tilted aerial orbit)
-    minSeconds: 45,              // target valuation length window shown in the UI
-    maxSeconds: 90,
+    // Render defaults.
+    maxSectionSeconds: 10,       // target voiceover length per beat (meter turns amber above this)
     fps: 30,
     width: 1280,
     height: 720
