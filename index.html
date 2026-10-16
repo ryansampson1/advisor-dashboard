@@ -11343,7 +11343,7 @@ function buildNavItems(){
       {id:'calendar',      label:'📅 Calendar',       advisor:true},
       {id:'dashboard',     label:'📊 Financials',    admin:true, manager:true},
       {id:'itr',           label:'📈 ITR',           admin:true},
-      {id:'compliance',    label:'🛡️ Compliance',    admin:true, manager:true},   // COMPLY-20261016 — admins (all offices) + office managers (own office)
+      {id:'compliance',    label:'🛡️ Compliance',    admin:true},   // COMPLY-20261016; COMPLYADMIN-20261016 — admins only for now (office managers later)
       {id:'commissions',   label:'💰 My Pay',         advisor:true},
       {id:'bio',           label:effectiveAdmin?'👤 Advisor Bios':'👤 My Bio', advisor:true, admin:true, manager:true},   // ADVBIO-20261006 — advisors edit their own, admins see all; never in staff view
       {id:'users',         label:'👤 Users',           admin:true},
@@ -12238,6 +12238,8 @@ window._CMP = {
     {id:'bio',           label:'Bio complete',                short:'Bio',             w:5},
   ],
 };
+// COMPLYADMIN-20261016 — Ryan: admins only for now. Every surface (tab, EOS card, stale chips, cache warm) checks this.
+window._cmpVisible = () => !!(currentUser && currentUser.isAdmin);
 const _CMP_ACTIVE_RE = /^listing$|^loi$|signed loi|due.?diligence|under.?contract|rezoning|permitting|^closing$/i;
 const _CMP_LOI_RE    = /^loi$|signed loi/i;
 const _CMP_CT_RE     = /due.?diligence|under.?contract|rezoning|permitting|^closing$/i;
@@ -12468,7 +12470,7 @@ window._elcStampSignIn = () => {
     window._cmpSignInStamped = true;
     const prev = +(allProfiles[currentUser.uid]?.lastSignInAt) || 0;
     if (Date.now() - prev > 3600e3) Store.saveProfile(currentUser.uid, {lastSignInAt: Date.now()}).catch(e => console.warn('[compliance] sign-in stamp', e));
-    setTimeout(() => { window._cmpWarm(); window._cmpSweep(); }, 8000);
+    if (window._cmpVisible()) setTimeout(() => { window._cmpWarm(); window._cmpSweep(); }, 8000);   // COMPLYADMIN-20261016
   } catch(e){}
 };
 
@@ -12504,7 +12506,7 @@ const _cmpWeekLbl = wk => { const s = new Date(wk.wS), e = new Date(wk.wE);
 /* 🛡️ My Terra Hygiene — EOS tab, everyone */
 window._elcHygieneCardHtml = (uid) => {
   try {
-    if (!uid || !allProfiles[uid]) return '';
+    if (!uid || !allProfiles[uid] || !window._cmpVisible()) return '';   // COMPLYADMIN-20261016
     const e = window._cmpEval(uid);
     if (e.loading && !window._cmpHygWarmed) { window._cmpHygWarmed = true; window._cmpWarm(allDeals.filter(d => isDealAdvisor(d, uid))); }
     if (e.score == null) return '';
@@ -12526,7 +12528,7 @@ window._elcHygieneCardHtml = (uid) => {
 /* ⏳ stale chip on a deal card */
 window._cmpStaleChip = d => {
   try {
-    if (!window._cmpIsActive(d) || !window._cmpActKnown(d)) return '';
+    if (!window._cmpVisible() || !window._cmpIsActive(d) || !window._cmpActKnown(d)) return '';   // COMPLYADMIN-20261016
     const days = Math.floor((Date.now() - window._cmpLastTouch(d)) / _cmpDay);
     if (days <= window._CMP.staleDays) return '';
     const red = days > window._CMP.redDays;
@@ -12541,7 +12543,7 @@ window._cmpToggle = (uid, el) => { window._cmpState.open[uid] = el.open; };
 function viewCompliance(){
   const isAdm = !!currentUser?.isAdmin && !adminViewAsAdvisor;
   const isMgr = !!currentUser?.isOfficeManager && !!currentUser?.officeManagerOffice;
-  if (!isAdm && !isMgr) { setContent(`<div class="p-6 text-sm text-gray-600">🔒 The Compliance tab is for admins and office managers.</div>`); return; }
+  if (!isAdm) { setContent(`<div class="p-6 text-sm text-gray-600">🔒 The Compliance tab is for admins.</div>`); return; }   // COMPLYADMIN-20261016
   const office = isAdm ? window._cmpState.office : currentUser.officeManagerOffice;
   let roster = window._cmpRoster();
   if (office && office !== 'both') roster = roster.filter(r => r.office === office);
