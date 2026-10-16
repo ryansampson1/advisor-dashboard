@@ -48383,7 +48383,8 @@ const MKT_DEFAULT_CONFIG = {
   markets:[
     {id:'tampa',    name:'Tampa Bay',            nameLines:['Tampa Bay'],            msa:'Tampa-St. Petersburg-Clearwater MSA', counties:'Hillsborough, Pinellas, Pasco, Hernando Counties', countiesShort:'Hillsborough, Pinellas, Pasco, Hernando'},
     {id:'sarasota', name:'Sarasota-Manatee',     nameLines:['Sarasota','Manatee'],   msa:'North Port-Sarasota-Bradenton MSA',    counties:'Sarasota, Manatee Counties',                        countiesShort:'Sarasota, Manatee'},
-    {id:'lakeland', name:'Lakeland-Winter Haven',nameLines:['Lakeland','Winter Haven'],msa:'Lakeland-Winter Haven MSA',          counties:'Polk County',                                       countiesShort:'Polk'}
+    {id:'lakeland', name:'Lakeland-Winter Haven',nameLines:['Lakeland','Winter Haven'],msa:'Lakeland-Winter Haven MSA',          counties:'Polk County',                                       countiesShort:'Polk'},
+    {id:'orlando',  name:'Orlando',              nameLines:['Orlando'],              msa:'Orlando-Kissimmee-Sanford MSA',        counties:'Orange, Seminole, Osceola, Lake Counties',          countiesShort:'Orange, Seminole, Osceola, Lake'}   // MKTALL-20261016
   ],
   assets:[
     {id:'office',name:'Office',unit:'SF'},{id:'industrial',name:'Industrial',unit:'SF'},{id:'retail',name:'Retail',unit:'SF'},
@@ -48407,7 +48408,7 @@ window._mkState = window._mkState || { period:'', docs:{}, list:null, listLoaded
 /* ---------- helpers (module-scoped, prefixed _mk) ---------- */
 function _mkEsc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function _mkCanAccess(){ return !!currentUser; }   // REPORTSALL-20261016 — open to every signed-in user
-function _mkCanEdit(){ return !!(currentUser && currentUser.isAdmin && !adminViewAsAdvisor && !staffViewMode); }   // editing, imports and new quarters stay admin-only
+function _mkCanEdit(){ return !!currentUser; }   // MKTALL-20261016 — staff and advisors can do everything admins can (import CoStar, new quarters, edit, markets & uses)   // editing, imports and new quarters stay admin-only
 function _mkQuarterOf(d){ d=d||new Date(); return {y:d.getFullYear(), q:Math.floor(d.getMonth()/3)+1}; }
 function _mkDefaultPeriodId(){ const d=new Date(); d.setMonth(d.getMonth()-3); const {y,q}=_mkQuarterOf(d); return y+'-Q'+q; }
 function _mkPeriodLabel(id){ const m=/^(\d{4})-Q([1-4])$/.exec(id||''); if(!m) return id||''; return ['First','Second','Third','Fourth'][+m[2]-1]+' Quarter '+m[1]; }
@@ -48598,7 +48599,7 @@ function _mkRender(){
   const st=window._mkState; const P=_mkDoc(); const list=st.list||[];
   const periodOpts=list.map(id=>`<option value="${_mkEsc(id)}" ${id===st.period?'selected':''}>${_mkEsc(_mkPeriodShort(id))} — ${_mkEsc((st.docs[id]||{}).label||_mkPeriodLabel(id))}</option>`).join('');
   const head=`<div class="mk-head">
-      <h1>📊 Market Reports</h1>${_mkCanEdit()?`<span class="mk-chip mk-sig-soft" title="Everyone can view and generate; only admins can edit the data">Admins can edit</span>`:''}
+      <h1>📊 Market Reports</h1>
       <div class="mk-toolbar">
         <label class="sr-only" for="mk-period">Quarter</label>
         <select id="mk-period" class="mk-select" style="width:auto;min-width:220px" onchange="window._mkSetPeriod(this.value)">${periodOpts||'<option value="">No quarters yet</option>'}</select>
@@ -48646,6 +48647,45 @@ function _mkRender(){
   const log=gens.length?`<div class="mk-card"><div class="mk-card-h"><h2>Recently generated</h2></div><div class="mk-card-b mk-note">${gens.map(g=>`<div>${new Date(g.at).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})} · ${_mkEsc(g.byName||'')} · ${g.variant==='quick'?'Quick Read':'Full report'} · ${_mkEsc((g.markets||[]).join(', '))} · ${_mkEsc((g.assets||[]).join(', '))}${g.residential?', residential':''} · ${g.pages} pages</div>`).join('')}</div></div>`:'';
   setContent(`<div class="mk-wrap">${head}${gen}${_mkCanEdit()?data:''}${log}<p class="mk-note">Reports open in a new tab as a PDF (save or print from there). Nothing is emailed or filed automatically. Internal ELC report — not for distribution outside the firm.</p></div>`);
 }
+/* ---------- MKTQTASK-20261016 — quarterly "upload the CoStar reports" task for Pat ----------
+   On the first day of each calendar quarter Terra gives Pat one task to load the
+   just-finished quarter's CoStar Market Report PDFs into 📊 Market Reports, due
+   the 20th of the quarter's first month (rolled off weekends). One task per
+   quarter: the task doc id is fixed (tasks/mktq-YYYY-Qn), so any number of
+   signed-in browsers can run this without duplicates. No task is created for a
+   quarter whose data is already in the tab. */
+const MKTQ_ASSIGNEE_EMAIL='pat@thedirtdog.com';
+function _mkqPrevQuarter(d){ d=d||new Date(); let y=d.getFullYear(), q=Math.floor(d.getMonth()/3); if(q===0){ q=4; y--; } return {id:y+'-Q'+q, y, q}; }
+function _mkqDue(d){ d=d||new Date(); const due=new Date(d.getFullYear(), Math.floor(d.getMonth()/3)*3, 20); while(due.getDay()===0||due.getDay()===6) due.setDate(due.getDate()+1); return due.getFullYear()+'-'+String(due.getMonth()+1).padStart(2,'0')+'-'+String(due.getDate()).padStart(2,'0'); }
+function _mkqHasData(P){ if(!P) return false; return Object.values(P.uses||{}).some(u=>u && (u.signal || (Array.isArray(u.stats) && u.stats.some(s=>Array.isArray(s) && s[1])))); }
+window._mkQuarterTaskRun=async function(){
+  try{
+    if(!currentUser || !_fbDb || !_fbFns) return 'not ready';
+    const per=_mkqPrevQuarter(); const tid='mktq-'+per.id;
+    const {doc,getDoc,setDoc}=_fbFns;
+    if((await getDoc(doc(_fbDb,'tasks',tid))).exists()) return 'exists';
+    const mr=await getDoc(doc(_fbDb,'marketReports',per.id));
+    if(mr.exists() && _mkqHasData(_mkFsDec(mr.data()))) return 'already loaded';
+    const hit=Object.entries(allProfiles||{}).find(([,pr])=>String(pr.email||'').toLowerCase()===MKTQ_ASSIGNEE_EMAIL);
+    if(!hit) return 'assignee not found';
+    const cfg=(mr.exists() && _mkFsDec(mr.data()).config) || MKT_DEFAULT_CONFIG;
+    const mk=(cfg.markets||[]).map(m=>m.name).join(', '); const us=(cfg.assets||[]).map(a=>a.name).join(', ');
+    const short='Q'+per.q+' '+per.y;
+    const desc='Load the '+short+' CoStar Market Reports into Terra so the team can generate the quarterly Eshenbaugh Market Report.\n\n'
+      +'1. In CoStar, export the '+short+' Market Report PDF for each market and property type.\n   Markets: '+mk+'\n   Uses: '+us+'\n   Name each file "<Market> <Use> - '+short+'.pdf" (e.g. "Orlando Industrial - '+short+'.pdf") so Terra matches it automatically.\n'
+      +'2. Terra → 📊 Market Reports → ➕ New quarter → '+per.id+' (start from the previous quarter).\n'
+      +'3. Click 📥 Import CoStar PDFs, drop all the files in, check the market/use on each row, and import.\n'
+      +'4. Spot-check the numbers, then fill 📝 Overview & five things and 🏠 Residential regional.\n'
+      +'5. Click 📄 Generate full report to confirm it builds.';
+    await setDoc(doc(_fbDb,'tasks',tid), { title:'📊 Upload '+short+' CoStar reports to Market Reports', description:desc,
+      assignedTo:hit[0], assignedToName:hit[1].name||hit[1].email||'Pat', assignedToEmail:MKTQ_ASSIGNEE_EMAIL,
+      dueDate:_mkqDue(), status:'pending', source:'mktq', mktQuarter:per.id, auto:true,
+      createdBy:currentUser.uid||'system', createdByName:'Market Reports', createdAt:Date.now() });
+    if(typeof allTasks!=='undefined' && !allTasks.find(t=>t.id===tid)) allTasks.push({id:tid, title:'📊 Upload '+short+' CoStar reports to Market Reports', assignedTo:hit[0], status:'pending', dueDate:_mkqDue(), source:'mktq'});
+    console.info('[mktq] created', tid); return 'created';
+  }catch(e){ console.warn('[mktq]', e); return 'error: '+(e.message||e); }
+};
+setTimeout(()=>{ window._mkQuarterTaskRun().then(r=>{ if(r==='not ready') setTimeout(()=>window._mkQuarterTaskRun(), 90000); }); }, 25000);
 window._mkSetPeriod=function(v){ window._mkState.period=v; _mkRender(); };
 window._mkToggle=function(kind,id,on){ const st=window._mkState; if(kind==='residential') st.sel.residential=!!on; else st.sel[kind][id]=!!on; _mkRender(); };
 window._mkPreset=function(which){ const st=window._mkState; const P=_mkDoc(); const cfg=_mkConfig(P); if(which==='all'){ st.sel.markets=Object.fromEntries(cfg.markets.map(m=>[m.id,true])); st.sel.assets=Object.fromEntries(cfg.assets.map(a=>[a.id,true])); st.sel.residential=true; } _mkRender(); };
@@ -49110,9 +49150,10 @@ const MKT_SEED_2026Q3 = {
 function _mkHasUsePage(P,m,a){ const u=_mkUse(P,m,a); return !!(u && u.signal!=='na' && (u.stats||[]).some(s=>s&&s[1])); }
 function _mkHasResi(P,m){ const r=(_mkMarket(P,m).residential)||{}; return !!(r.permitsYtd||r.signal); }
 function _mkPlan(P, sel){
-  const cfg=_mkConfig(P); const mk=cfg.markets.map(m=>m.id).filter(id=>sel.markets.includes(id)); const as=cfg.assets.map(a=>a.id).filter(id=>sel.assets.includes(id));
-  const resiMk=sel.residential?mk.filter(m=>_mkHasResi(P,m)):[]; const resi=resiMk.length>0;
-  const pages=[]; const cells=[]; mk.forEach(m=>as.forEach(a=>{ if(_mkHasUsePage(P,m,a)) cells.push([m,a]); }));
+  const cfg=_mkConfig(P); const mk0=cfg.markets.map(m=>m.id).filter(id=>sel.markets.includes(id)); const as=cfg.assets.map(a=>a.id).filter(id=>sel.assets.includes(id));
+  const resiMk=sel.residential?mk0.filter(m=>_mkHasResi(P,m)):[]; const resi=resiMk.length>0;
+  const pages=[]; const cells=[]; mk0.forEach(m=>as.forEach(a=>{ if(_mkHasUsePage(P,m,a)) cells.push([m,a]); }));
+  const mk=mk0.filter(m=>cells.some(c=>c[0]===m)||resiMk.includes(m));   // MKTALL-20261016: a market with no data this quarter (e.g. Orlando before its CoStar PDFs are imported) is left out of the report
   const plan={pages, markets:mk, assets:as, residential:resi, resiMarkets:resiMk, cells, variant:sel.variant||'full'};
   if(plan.variant==='quick'){ if(cells.length||resi){ pages.push({t:'quick1'}); if(mk.length) pages.push({t:'quick2'}); } pages.forEach((p,i)=>p.n=i+1); return plan; }
   if(!cells.length && !resi) return plan;
