@@ -20613,10 +20613,11 @@ window._elcWeekScoreRaw = (uid, wS, wE, wKey) => {
   const wi = prof.weeklyInputs?.[wKey] || {};
   const netEv = wi.networkEvent||'', drPr = wi.driveProperties||'';
 
-  /* OPENTASKS-20261016 — Ryan: open/past-due tasks no longer affect the advisor
-     score. Open Tasks always awards its full 20; overdue count stays visible for
-     information only. (Staff/office-manager scorecard is a separate system.) */
-  const pts_w = [wQPct>=10?10:0, 20,
+  /* OPENTASKS-20261016 — Ryan: no penalty for past-due tasks. Full 20 when
+     nothing is past due; otherwise 2 pts per task completed that week, capped
+     at 20. (Staff/office-manager scorecard is a separate system.) */
+  const _taskPts = overdueInWk===0 ? 20 : Math.min(20, doneT*2);
+  const pts_w = [wQPct>=10?10:0, _taskPts,
     pPts+window._elcCallPtsSum(caN), lPts, prPts, lstPts, cPts, netEv==='yes'?10:0, drPr==='yes'?10:0];
   const score = Math.round(pts_w.reduce((a,b)=>a+b,0));
 
@@ -33907,7 +33908,7 @@ function viewOfficeOverview(){
       </table>
       </div>
       <div class="px-5 py-2.5 border-t bg-gray-50 text-xs text-gray-400">
-        A+ ≥ 100 · A ≥ 90 · B ≥ 80 · C ≥ 70 · Contracts = 30pts · Listings = 20pts · LOIs = 10pts each offer · Proposals = 10pts · Prospects = 5pts · Calls = 1pt each · Open Tasks = 20pts (overdue no longer deducts) · Network Event &amp; Site Visit = 10pts each
+        A+ ≥ 100 · A ≥ 90 · B ≥ 80 · C ≥ 70 · Contracts = 30pts · Listings = 20pts · LOIs = 10pts each offer · Proposals = 10pts · Prospects = 5pts · Calls = 1pt each · Open Tasks = 20pts if none past due, else 2pts per task done (max 20) · Network Event &amp; Site Visit = 10pts each
       </div>
     </div>`;
 
@@ -34650,7 +34651,7 @@ function viewEOS(sub='rocks'){
       const qTip        = window._scTipHtml('Q'+qNum+' Goal volume',
                             det.qDeals.map(d=>{ const _p=d.purchasePrice||d.contractPrice||0, _c=_elcQGoalCredit(d);   // QGOALSPLIT-20261005
                               return _nm(d)+_suf(_c<_p ? fmt$(_c)+' (1/'+_elcDealAdvisorCount(d)+' of '+fmt$(_p)+')' : fmt$(_p)); }));
-      const overdueTip  = window._scTipHtml('Overdue tasks · no point impact',
+      const overdueTip  = window._scTipHtml('Overdue tasks · no penalty — earn 2 pts per task done (max 20)',
                             det.overdueTasks.map(t=>window._scEsc(t.title||'Untitled')+_suf('due '+t.dueDate)));
       const prospectTip = window._scTipHtml(window._elcCallTipLbl(callsPW),
                             [...det.prospectDeals.map(_nm), ...callsPW.map(c=>'📞 '+window._scEsc(c.label||'Call'))]);
@@ -35000,7 +35001,7 @@ function viewEOS(sub='rocks'){
           </table>
         </div>
         <div class="px-6 py-3 border-t bg-gray-50 flex flex-wrap gap-5 text-xs text-gray-400">
-          <span>Open Tasks = 20pts (overdue no longer deducts) · Contracts = 30pts · Listings = 20pts · LOIs = 10pts · Proposals = 10pts · Prospects = 5pts · Calls = 1pt each (calls reset every Monday) · split on co-advisor deals</span>
+          <span>Open Tasks = 20pts if none past due, else 2pts per task done (max 20) · Contracts = 30pts · Listings = 20pts · LOIs = 10pts · Proposals = 10pts · Prospects = 5pts · Calls = 1pt each (calls reset every Monday) · split on co-advisor deals</span>
           <span><span style="color:#059669;font-weight:700">●</span> Green = target met</span>
           <span><span style="color:#DA291C;font-weight:700">●</span> Red = below target</span>
           <span>Network Event &amp; Property Visit: advisors self-report weekly · Locks Sunday 9pm</span>
@@ -35221,7 +35222,7 @@ function viewEOS(sub='rocks'){
         </div>
         <div class="px-6 py-3 border-t bg-gray-50 text-xs text-gray-400 flex flex-wrap gap-4">
           <span>Score uses same formula as current week</span>
-          <span>Open Tasks = 20pts (overdue no longer deducts) · Contracts = 30pts · LOIs = 10pts · Listings = 20pts · Props = 10pts · Prospects = 5pts · Calls = 1pt each</span>
+          <span>Open Tasks = 20pts if none past due, else 2pts per task done (max 20) · Contracts = 30pts · LOIs = 10pts · Listings = 20pts · Props = 10pts · Prospects = 5pts · Calls = 1pt each</span>
           <span>Network Event &amp; Property Visit pulled from saved weekly inputs</span>
         </div>
       </div>`;
@@ -36460,7 +36461,7 @@ function viewEOS(sub='rocks'){
       const _cnm=d=>window._scEsc(d.projectName||d.propertyAddress||'Unnamed');
       const _csuf=t=>" <span style='opacity:.6'>· "+window._scEsc(t)+"</span>";
       const _tQ =window._scTipHtml('Q'+_qn+' Goal volume',_dt.qDeals.map(d=>_cnm(d)+_csuf(fmt$(d.purchasePrice||d.contractPrice||0))));
-      const _tOd=window._scTipHtml('Overdue tasks · no point impact',_dt.overdueTasks.map(t=>window._scEsc(t.title||'Untitled')+_csuf('due '+t.dueDate)));
+      const _tOd=window._scTipHtml('Overdue tasks · no penalty — earn 2 pts per task done (max 20)',_dt.overdueTasks.map(t=>window._scEsc(t.title||'Untitled')+_csuf('due '+t.dueDate)));
       const _tPr=window._scTipHtml(window._elcCallTipLbl(_ca),[..._dt.prospectDeals.map(_cnm),..._ca.map(c=>'📞 '+window._scEsc(c.label||'Call'))]);
       const _tLo=window._scTipHtml('LOIs · 10 pts each',_dt.loiRows.map(x=>_cnm(x.d)+(x.n>1?_csuf(x.n+' offers'):'')));
       const _tPo=window._scTipHtml('Proposals · 10 pts each',_dt.propDeals.map(_cnm));
