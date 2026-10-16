@@ -20910,7 +20910,7 @@ window._propLoadActivities = async (dealId, feedElId) => {
                      : a.type === 'email'   && a.gmailDate   ? ` · ${a.gmailDate}` : '';
         // Backdated entries carry a user-chosen day, not a real clock time — show date only (elc-v429)
         const tsStr  = a.createdAt ? (a.backdated ? new Date(a.createdAt).toLocaleDateString() : new Date(a.createdAt).toLocaleString()) : '';
-        activities.push({ id: a.id, dealId, ts: a.createdAt || 0, tsStr, icon, text: a.body || '', title, meta, createdByName: a.createdByName || '', type: a.type, gmailSubject: a.gmailSubject||'', gmailId: a.gmailId||'', aiSummary: !!a.aiSummary });
+        activities.push({ id: a.id, dealId, ts: a.createdAt || 0, tsStr, icon, text: a.body || '', title, meta, createdByName: a.createdByName || '', type: a.type, gmailSubject: a.gmailSubject||'', gmailId: a.gmailId||'', aiSummary: !!a.aiSummary, mw: /^mailwatch/.test(a.source||'') ? { rev: a.source==='mailwatch-reviewed', cat: a.mwCategory||'', dp: Array.isArray(a.mwDatapoints)?a.mwDatapoints:[] } : null });   // MW2PT-20261016
       });
     } catch (e) { /* sub-collection may not exist yet — that's fine */ }
   }
@@ -20933,6 +20933,7 @@ window._propLoadActivities = async (dealId, feedElId) => {
             ${a.title ? `<div style="font-size:.68rem;font-weight:600;color:#6b7280;text-transform:uppercase;letter-spacing:.04em;margin-bottom:.1rem">${a.title}${a.meta || ''}</div>` : ''}
             ${a.type==='email' && a.gmailSubject ? `<div style="font-size:.75rem;font-weight:600;color:#374151;margin-bottom:.15rem">${a.gmailSubject.replace(/</g,'&lt;')}</div>` : ''}
             <div style="color:#1f2937;line-height:1.45;font-size:.8rem;white-space:pre-wrap;word-break:break-word">${(a.text || '').replace(/</g, '&lt;') || '<em style="color:#9ca3af">No notes</em>'}</div>
+            ${a.mw ? `<div style="font-size:.68rem;color:#6b7280;margin-top:.2rem" title="${(a.mw.dp||[]).join(', ').replace(/"/g,'&quot;').replace(/</g,'&lt;')}">${a.mw.rev?'📥 Filed from Email review':'🤖 Filed automatically'}${a.mw.cat&&window._mwCatLabel?' · '+window._mwCatLabel(a.mw.cat):''}${(a.mw.dp||[]).length?' · matched '+a.mw.dp.length+' datapoint'+(a.mw.dp.length===1?'':'s'):''}</div>` : ''}
             ${a.type==='email' && (a.aiSummary || a.gmailId) ? `<div style="font-size:.68rem;color:#9ca3af;margin-top:.2rem">${a.aiSummary ? '✨ AI summary' : ''}${a.aiSummary && a.gmailId ? ' · ' : ''}${a.gmailId ? `<a href="https://mail.google.com/mail/u/0/#all/${a.gmailId}" target="_blank" rel="noopener" style="color:#2563eb;text-decoration:none">Open full email in Gmail ↗</a>` : ''}</div>` : ''}
             <div style="font-size:.7rem;color:#9ca3af;margin-top:.15rem">${a.tsStr}${a.createdByName ? ' · ' + a.createdByName : ''}</div>
           </div>
@@ -46182,7 +46183,7 @@ function _mrHistoryRows(deal, activities, tasks, opt){   // opt.includeHidden �
     if(a.autoLogged&&/^(contact refresh|task:|✅|⚠️ fix listing|📧 monthly e-blast)/i.test(String(a.body||'').trim())) return;
     let text=a.body||'';
     if(a.type==='email') text=(a.gmailSubject?('Email: '+a.gmailSubject+(text?' — ':'')):'')+text;
-    const mwLab={om_sent:'OM / info sent',info_request:'Info requested',question:'Buyer question',offer:'Offer'}[a.mwCategory||''];   // MAILWATCH-20261008: auto-filed emails print as a labelled client-safe line, newest first
+    const mwLab={om_sent:'OM / info sent',info_request:'Info requested',question:'Buyer question',offer:'Offer',proposal:'Proposal',deal_activity:'Transaction update',correspondence:'Correspondence',buyer_rep:'Buyer activity'}[a.mwCategory||''];   // MW2PT-20261016: + proposal / transaction / correspondence (hidden from the report unless shown)   // MAILWATCH-20261008: auto-filed emails print as a labelled client-safe line, newest first
     if(mwLab && a.mwSummary) text=mwLab+': '+a.mwSummary;
     if(a.type==='call') text='Call'+(a.callDuration?(' ('+a.callDuration+' min)'):'')+(text?': '+text:'');
     if(a.type==='meeting') text='Meeting'+(a.meetingTitle?(' — '+a.meetingTitle):'')+(text?': '+text:'');
@@ -47561,6 +47562,106 @@ async function _mrPreflight(A){
 }
 function _mrApprovalOk(rep, fp){ return !!(rep && rep.approval && rep.approval.fp===fp); }
 /* ---------- 🔍 Review & approve modal ---------- */
+/* =======================================================
+   📥 EMAIL REVIEW — markers MAILWATCH-20261008 + MW2PT-20261016
+   The nightly elc-mailwatch-worker files an email on a property card by itself only when it carries TWO independent
+   datapoints that point at that card (name, street address, parcel, acreage, price, owner/client, listing link/doc)
+   or continues a chain already tied to the card. Everything else lands here (emailReview/{id}, status 'pending').
+   Covers every live card: seller listings, buyer-rep cards, prospects and proposals.
+   Logging from here writes the same entry the worker would, and remembers the email chain so the rest of it
+   (in every mailbox) files itself from then on.
+   ======================================================= */
+const _mwCatLabelMap={om_sent:'OM / info sent',info_request:'Info request',question:'Question',offer:'Offer',proposal:'Proposal / BOV',buyer_rep:'Buyer-rep',deal_activity:'Contract / DD / closing',correspondence:'Correspondence'};
+window._mwCatLabel=c=>_mwCatLabelMap[c]||c;   // also used by the property-card history line
+const _mwMarketing=['om_sent','info_request','question','offer'];
+const _mwReasonText=r=>{ r=String(r||'');
+  if(r==='one-datapoint') return 'only one datapoint pointed at a card';
+  if(r==='no-property-identifier') return 'nothing named the property itself (only owner / acreage / price)';
+  if(r.startsWith('tie:')) return 'just as close to '+r.slice(4);
+  if(r.startsWith('duplicate-card:')) return 'two cards for the same property ('+r.slice(15)+')';
+  if(r==='acreage-conflict') return 'acreage in the email doesn’t match the card';
+  if(r==='ai-picked-other') return 'the AI read it as a different card';
+  if(r==='ai-no-card') return 'the AI couldn’t tie it to one card';
+  if(r.startsWith('ai-conf-')) return 'AI not confident ('+Math.round(parseFloat(r.slice(8))*100)+'%)';
+  if(r==='offer-no-buyer') return 'offer with no identifiable buyer';
+  return r; };
+const _mwDpText=s=>String(s||'').replace(/^name:subject-lead:/,'name in subject: ').replace(/^name:subject-word:/,'name word in subject: ').replace(/^name:words:/,'name words: ').replace(/^name:subject$/,'card name in subject').replace(/^name:body$/,'card name in email').replace(/^party:email:/,'owner/client email: ').replace(/^party:name:/,'owner/client: ').replace(/^party:crm-contact$/,'CRM contact on the card').replace(/^thread:linked-thread$/,'chain already on the card').replace(/^address:/,'address: ').replace(/^parcel:/,'parcel: ').replace(/^acreage:/,'acreage: ').replace(/^price:/,'price: ').replace(/^document:/,'listing ');
+function _mwSideOf(d){ if((d.representation||'')==='buyer') return 'buyer'; if(/^(prospect|proposal)/i.test(_mrStageOf(d)||'')) return 'proposal'; return 'seller'; }
+function _mwLiveCards(){   // same scope the worker matches against: everything not Sold/Lost, plus Sold/Lost in the last 60 days
+  const now=Date.now();
+  return (typeof allDeals!=='undefined'?allDeals:[]).filter(d=>{ if(!d||d.deleted||d.archived) return false; const s=String(_mrStageOf(d)||'');
+    if(!/^(sold|closed|lost|cancel|dead|terminated)/i.test(s)) return true; const t=+d.stageEnteredAt||+d.updatedAt||0; return t && now-t<60*86400000; });
+}
+const _mwRfc=s=>String(s||'').trim().replace(/^<|>$/g,'').toLowerCase();
+window._mwPanelHtml=function(){
+  return `<div class="mr-sec" id="mw-panel" style="margin-top:.8rem"><div class="mr-row" style="justify-content:space-between;align-items:center;gap:.6rem;flex-wrap:wrap">
+    <h3 style="margin:0">📥 Email review <span class="mr-note">— emails Terra couldn’t tie to one property card on two datapoints (checked nightly)</span></h3>
+    <button class="mr-btn mr-btn-sm" onclick="window._mwLoad(true,this)">↻ Refresh</button></div>
+    <div id="mw-body" class="mr-muted" style="margin-top:.4rem">Loading…</div></div>`;
+};
+window._mwLoad=async function(force,btn){
+  const box=document.getElementById('mw-body'); if(!box) return; const done=btn?elcBusy(btn,'…'):()=>{};
+  try{
+    const st=window._mrState; const {collection,getDocs,query,where}=_fbFns;
+    if(force||!st.mwRows){ const snap=await getDocs(query(collection(_fbDb,'emailReview'),where('status','==','pending'))); st.mwRows=snap.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>(b.emailDate||0)-(a.emailDate||0)); }
+    const all=_mrSeesAll(); const me=String(currentUser?.email||'').toLowerCase(); const byId={}; (typeof allDeals!=='undefined'?allDeals:[]).forEach(d=>{ byId[d.id]=d; });
+    const mine=st.mwRows.filter(r=>all||String(r.mailbox||'').toLowerCase()===me||(r.candidates||[]).some(c=>byId[c.id]&&_mrIsMyDeal(byId[c.id])));
+    if(!mine.length){ box.innerHTML='Nothing waiting — every email the nightly check found was either filed on its card or ignored.'; return; }
+    const live=_mwLiveCards().filter(d=>all||_mrIsMyDeal(d)).sort((a,b)=>_mrDealName(a).localeCompare(_mrDealName(b)));
+    const groups=[['seller','Seller listings'],['buyer','Buyer-rep cards'],['proposal','Prospects & proposals']];
+    const optsFor=r=>{ const sug=(r.candidates||[]).filter(c=>byId[c.id]);
+      const opt=(d,label)=>`<option value="${_mrEsc(d.id)}"${d.id===r.suggestedDealId?' selected':''}>${_mrEsc(label||_mrDealName(d))}</option>`;
+      return (sug.length?`<optgroup label="Suggested">${sug.map(c=>opt(byId[c.id],_mrDealName(byId[c.id])+' — '+(c.datapoints||[]).map(_mwDpText).join(', '))).join('')}</optgroup>`:'')
+        +groups.map(([k,l])=>{ const ds=live.filter(d=>_mwSideOf(d)===k&&!sug.some(c=>c.id===d.id)); return ds.length?`<optgroup label="${l}">${ds.map(d=>opt(d)).join('')}</optgroup>`:''; }).join(''); };
+    box.innerHTML=`<div class="mr-note" style="margin:.1rem 0 .3rem">${mine.length} waiting${all?'':' on your cards'}. “Log it” files the email on the card you pick and every later email in that chain files itself.</div>`+mine.slice(0,40).map(r=>{
+      const when=r.emailDate?new Date(r.emailDate).toLocaleDateString('en-US',{month:'short',day:'numeric'}):'';
+      const o=r.offer&&(r.category==='offer'||r.category==='buyer_rep')&&r.offer.price?` · ${_mrFmtMoney(r.offer.price)}`:'';
+      const why=(r.reasons||[]).map(_mwReasonText).filter(Boolean); const dp=(r.datapoints||[]).map(_mwDpText);
+      return `<div class="mr-row" data-mw="${_mrEsc(r.id)}" style="gap:.5rem;align-items:center;flex-wrap:wrap;padding:.5rem 0;border-top:1px solid var(--border)">
+        <div style="flex:1 1 320px;min-width:240px"><b>${_mrEsc(_mwCatLabelMap[r.category]||r.category)}</b>${_mrEsc(o)} · ${_mrEsc(r.counterpartyCompany||r.counterpartyName||r.counterpartyEmail||'')} <span class="mr-note">${_mrEsc(when)} · ${_mrEsc(r.mailbox||'')}</span>
+          <div class="mr-note">${_mrEsc(r.subject||'')} — ${_mrEsc(r.summary||'')}</div>
+          ${why.length||dp.length?`<div class="mr-note" style="margin-top:.15rem">${why.length?'Held: '+_mrEsc(why.join('; ')):''}${dp.length?(why.length?' · ':'')+'Matched: '+_mrEsc(dp.join(', ')):''}</div>`:''}</div>
+        <select class="mr-select" aria-label="Property card for this email" style="max-width:min(100%,340px)"><option value="">Choose card…</option>${optsFor(r)}</select>
+        <button class="mr-btn mr-btn-sm mr-btn-primary" onclick="window._mwApprove('${_mrEsc(r.id)}',this)">Log it</button>
+        <button class="mr-btn mr-btn-sm" onclick="window._mwDismiss('${_mrEsc(r.id)}',this)">Dismiss</button></div>`; }).join('')+(mine.length>40?`<div class="mr-note" style="margin-top:.4rem">+ ${mine.length-40} more — clear these first.</div>`:'');
+  }catch(e){ console.warn('[mw] load',e); box.textContent='Could not load the review queue ('+(e.message||e)+').'; } finally{ done(); }
+};
+window._mwApprove=async function(id,btn){
+  const st=window._mrState; const r=(st.mwRows||[]).find(x=>x.id===id); const row=btn.closest('[data-mw]'); const dealId=row&&row.querySelector('select').value;
+  if(!r) return; if(!dealId){ showToast('Pick the property card first','warning'); return; }
+  const deal=(allDeals||[]).find(d=>d.id===dealId); if(!deal){ showToast('That card is no longer available','warning'); return; }
+  const done=elcBusy(btn,'Logging…');
+  try{
+    const {doc,setDoc,updateDoc}=_fbFns; const side=_mwSideOf(deal);
+    let cat=r.category; if(side==='buyer'&&_mwMarketing.includes(cat)) cat='buyer_rep'; if(side==='proposal'&&_mwMarketing.includes(cat)&&cat!=='offer') cat='proposal';
+    const prints=side==='seller'&&MR_ACTIVE_STAGES.includes(_mrStageOf(deal));
+    const act={ type:'email', source:'mailwatch-reviewed', mwCategory:cat, mwSummary:r.summary||'', body:r.summary||r.subject||'', direction:r.direction||'',
+      mwSide:side, mwDatapoints:r.datapoints||[], rfcId:r.rfcId||'', mwRootId:r.rootId||'', gmailId:r.gmailId||id, gmailThreadId:r.gmailThreadId||'', gmailSubject:r.subject||'',
+      gmailDate:r.emailDate||'', gmailFrom:r.direction==='out'?r.mailbox:(r.counterpartyEmail||''), counterpartyName:r.counterpartyName||'', counterpartyCompany:r.counterpartyCompany||'', mailbox:r.mailbox||'',
+      createdBy:currentUser?.uid||'', createdByName:currentUser?.name||currentUser?.displayName||'', reviewedFrom:id, createdAt:r.emailDate||Date.now(),
+      ...((!prints||!_mwMarketing.includes(cat))?{reportHidden:true,reportHiddenBy:'mailwatch'}:{}) };   // proposal / buyer-rep / transaction mail stays off the owner report unless an advisor shows it
+    await setDoc(doc(_fbDb,'deals',dealId,'activities','mw_'+id.replace(/^mw_/,'')),act);
+    if(cat==='offer'&&side==='seller'){
+      const cur=Array.isArray(deal.lois)?deal.lois.slice():[]; const o=r.offer||{};
+      if(!cur.some(l=>l&&l.gmailThreadId&&l.gmailThreadId===r.gmailThreadId)){
+        cur.push({ id:'mw_'+id.replace(/^mw_/,''), source:'mailwatch', aiCreated:true, needsVerification:true, status:'received', receivedAt:r.emailDate?new Date(r.emailDate).toISOString().slice(0,10):'', addedAt:Date.now(), buyer:o.buyer||r.counterpartyCompany||r.counterpartyName||'', price:o.price||null, deposit:o.deposit||null, ddTerms:o.ddTerms||'', contingencies:o.contingencies||'', estClose:o.estClose||'', buyerBroker:o.buyerBroker||'', gmailThreadId:r.gmailThreadId||'', gmailSubject:r.subject||'', reportInclude:false });
+        try{ await Store.updateDeal(dealId,{lois:cur}); }catch(e){ console.warn('[mw] offer record',e); showToast('Email filed, but only the card’s advisor can add the offer record','warning',6000); }
+      }
+    }
+    const root=_mwRfc(r.rootId||r.rfcId);   // the approved review doc (rootId + dealId) is what makes the rest of this chain file itself — the worker reads approved/merged reviews nightly
+    const sibs=(st.mwRows||[]).filter(x=>x.id!==id&&root&&_mwRfc(x.rootId||x.rfcId)===root);   // other held emails from the same chain go with it
+    await updateDoc(doc(_fbDb,'emailReview',id),{status:'approved',dealId,reviewedBy:currentUser?.uid||'',reviewedAt:Date.now()});
+    for(const x of sibs){ try{ await updateDoc(doc(_fbDb,'emailReview',x.id),{status:'merged',dealId,mergedInto:id,reviewedBy:currentUser?.uid||'',reviewedAt:Date.now()}); }catch(e){ console.warn('[mw] merge',e); } }
+    st.mwRows=st.mwRows.filter(x=>x.id!==id&&!sibs.includes(x)); window._mwLoad(false);
+    showToast('Filed on '+_mrDealName(deal)+(sibs.length?' (+'+sibs.length+' more from the same chain)':''),'success');
+  }catch(e){ console.warn('[mw] approve',e); showToast('Could not log: '+(e.message||e),'error'); done(); }
+};
+window._mwDismiss=async function(id,btn){
+  const st=window._mrState; const r=(st.mwRows||[]).find(x=>x.id===id); const done=elcBusy(btn,'…');
+  try{ await _fbFns.updateDoc(_fbFns.doc(_fbDb,'emailReview',id),{status:'dismissed',reviewedBy:currentUser?.uid||'',reviewedAt:Date.now()}); st.mwRows=(st.mwRows||[]).filter(x=>x.id!==id); window._mwLoad(false);
+    if(typeof showUndoToast==='function'&&r) showUndoToast('Email dismissed',async()=>{ await _fbFns.updateDoc(_fbFns.doc(_fbDb,'emailReview',id),{status:'pending'}); st.mwRows=[r,...(st.mwRows||[])].sort((a,b)=>(b.emailDate||0)-(a.emailDate||0)); window._mwLoad(false); }); }
+  catch(e){ console.warn('[mw] dismiss',e); showToast('Could not dismiss: '+(e.message||e),'error'); done(); }
+};
 window._mrReview=async function(dealId){
   const deal=(allDeals||[]).find(d=>d.id===dealId); if(!deal) return;
   const ym=window._mrState.month||_mrPrevMonth();
