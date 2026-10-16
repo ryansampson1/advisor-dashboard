@@ -48305,12 +48305,26 @@ function _mkStrs(s){ return String(s||'').split(',').map(x=>x.trim()).filter(Boo
 function _mkLines(s){ return String(s||'').split('\n').map(x=>x.trim()).filter(Boolean); }
 
 /* ---------- Firestore ---------- */
+// MKFSNEST-20261016 — Firestore rejects arrays nested directly in arrays (stat rows are [label,value,change]).
+// _mkFsEnc wraps every inner array as {__a:[…]} and drops undefined; _mkFsDec reverses it on read.
+function _mkIsPlain(v){ return v!==null && typeof v==='object' && (Object.getPrototypeOf(v)===Object.prototype || Object.getPrototypeOf(v)===null); }
+function _mkFsEnc(v,inArr){
+  if(Array.isArray(v)){ const a=v.map(x=>x===undefined?null:_mkFsEnc(x,true)); return inArr?{__a:a}:a; }
+  if(_mkIsPlain(v)){ const o={}; Object.keys(v).forEach(k=>{ if(v[k]!==undefined) o[k]=_mkFsEnc(v[k],false); }); return o; }
+  return v;
+}
+function _mkFsDec(v){
+  if(Array.isArray(v)) return v.map(_mkFsDec);
+  if(_mkIsPlain(v)){ const ks=Object.keys(v); if(ks.length===1 && ks[0]==='__a' && Array.isArray(v.__a)) return v.__a.map(_mkFsDec); const o={}; ks.forEach(k=>{ o[k]=_mkFsDec(v[k]); }); return o; }
+  return v;
+}
+window._mkFsEnc=_mkFsEnc; window._mkFsDec=_mkFsDec;
 async function _mkListPeriods(force){
   const st=window._mkState; if(st.listLoaded && !force) return st.list||[];
   st.list=[]; st.listLoaded=true;
   if(!_fbDb||!_fbFns){ return st.list; }
   try{ const {collection,getDocs}=_fbFns; const snap=await getDocs(collection(_fbDb,'marketReports'));
-    snap.docs.forEach(d=>{ const v={id:d.id,...d.data()}; st.docs[d.id]=v; st.list.push(d.id); });
+    snap.docs.forEach(d=>{ const v={id:d.id,..._mkFsDec(d.data())}; st.docs[d.id]=v; st.list.push(d.id); });
     st.list.sort().reverse();
   }catch(e){ console.warn('[mk] list',e); st.loadError=e.message||String(e); }
   return st.list;
@@ -48319,7 +48333,7 @@ function _mkDoc(){ const st=window._mkState; return st.period?st.docs[st.period]
 async function _mkSave(patch){
   const st=window._mkState; const id=st.period; if(!id) throw new Error('No quarter selected');
   const data={...patch, id, updatedAt:Date.now(), updatedBy:currentUser?.uid||'', updatedByName:currentUser?.name||''};
-  if(_fbDb&&_fbFns){ const {doc,setDoc}=_fbFns; await setDoc(doc(_fbDb,'marketReports',id), data, {merge:true}); }
+  if(_fbDb&&_fbFns){ const {doc,setDoc}=_fbFns; await setDoc(doc(_fbDb,'marketReports',id), _mkFsEnc(data), {merge:true}); }
   const cur=st.docs[id]||{id}; st.docs[id]=_mkDeepMerge(cur,data);
   return st.docs[id];
 }
@@ -48341,7 +48355,7 @@ async function _mkCreatePeriod(id, copyFrom){
     Object.entries(src.uses||{}).forEach(([k,u])=>{ base.uses[k]={signal:'',signalNote:'',summary:'',stats:(u.stats||[]).map(s=>[s[0],'','']),chart:{...(u.chart||{}),a:[],b:[]},vac:{...(u.vac||{}),values:[]},projects:[],projectsTotal:0,submarkets:[],submarketCols:u.submarketCols||null,segments:[],segmentCols:u.segmentCols||null,read:'',source:'',land:''}; });
     base.residential.builders=[]; base.residential.chartTitle=(src.residential||{}).chartTitle||'';
   }
-  if(_fbDb&&_fbFns){ const {doc,setDoc}=_fbFns; await setDoc(doc(_fbDb,'marketReports',id), base, {merge:true}); }
+  if(_fbDb&&_fbFns){ const {doc,setDoc}=_fbFns; await setDoc(doc(_fbDb,'marketReports',id), _mkFsEnc(base), {merge:true}); }
   st.docs[id]=base; if(!st.list.includes(id)){ st.list.push(id); st.list.sort().reverse(); } st.period=id;
   return base;
 }
@@ -48498,13 +48512,13 @@ window._mkNewPeriod=async function(){
 window._mkLoadSample=async function(){
   const st=window._mkState; const seed=JSON.parse(JSON.stringify(MKT_SEED_2026Q3)); seed.config=seed.config||MKT_DEFAULT_CONFIG;
   if(st.docs[seed.id] && !(await elcConfirm('Q3 2026 already exists. Replace it with the sample data?',{title:'Replace quarter',okLabel:'Replace',danger:true}))) return;
-  try{ if(_fbDb&&_fbFns){ const {doc,setDoc}=_fbFns; await setDoc(doc(_fbDb,'marketReports',seed.id), {...seed, updatedAt:Date.now(), updatedBy:currentUser?.uid||'', updatedByName:currentUser?.name||''}); }
+  try{ if(_fbDb&&_fbFns){ const {doc,setDoc}=_fbFns; await setDoc(doc(_fbDb,'marketReports',seed.id), _mkFsEnc({...seed, updatedAt:Date.now(), updatedBy:currentUser?.uid||'', updatedByName:currentUser?.name||''})); }
     st.docs[seed.id]=seed; if(!(st.list||[]).includes(seed.id)){ st.list=(st.list||[]).concat(seed.id).sort().reverse(); } st.period=seed.id; st.sel={markets:null,assets:null,residential:true};
     showToast('Q3 2026 sample loaded — click Generate','success'); _mkRender();
   }catch(e){ console.error('[mk] sample',e); showToast('Could not save: '+e.message+(/(permission|denied)/i.test(e.message)?' — publish the marketReports Firestore rule first':''),'error',8000); }
 };
 window._mkExportJson=function(){ const P=_mkDoc(); if(!P) return; const blob=new Blob([JSON.stringify(P,null,1)],{type:'application/json'}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='ELC_Market_Report_'+P.id+'_data.json'; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),4000); };
-window._mkImportJsonClick=function(){ const i=document.createElement('input'); i.type='file'; i.accept='application/json,.json'; i.onchange=async()=>{ const f=i.files&&i.files[0]; if(!f) return; try{ const j=JSON.parse(await f.text()); if(!j||!/^\d{4}-Q[1-4]$/.test(j.id||'')) throw new Error('JSON needs an "id" like 2026-Q3'); const st=window._mkState; if(st.docs[j.id] && !(await elcConfirm('Replace the data already on file for '+j.id+'?',{title:'Replace quarter',okLabel:'Replace',danger:true}))) return; if(_fbDb&&_fbFns){ const {doc,setDoc}=_fbFns; await setDoc(doc(_fbDb,'marketReports',j.id), {...j, updatedAt:Date.now(), updatedBy:currentUser?.uid||'', updatedByName:currentUser?.name||''}); } st.docs[j.id]=j; if(!(st.list||[]).includes(j.id)) st.list=(st.list||[]).concat(j.id).sort().reverse(); st.period=j.id; st.sel={markets:null,assets:null,residential:true}; showToast('Imported '+j.id,'success'); _mkRender(); }catch(e){ showToast('Import failed: '+e.message,'error',7000); } }; i.click(); };
+window._mkImportJsonClick=function(){ const i=document.createElement('input'); i.type='file'; i.accept='application/json,.json'; i.onchange=async()=>{ const f=i.files&&i.files[0]; if(!f) return; try{ const j=JSON.parse(await f.text()); if(!j||!/^\d{4}-Q[1-4]$/.test(j.id||'')) throw new Error('JSON needs an "id" like 2026-Q3'); const st=window._mkState; if(st.docs[j.id] && !(await elcConfirm('Replace the data already on file for '+j.id+'?',{title:'Replace quarter',okLabel:'Replace',danger:true}))) return; if(_fbDb&&_fbFns){ const {doc,setDoc}=_fbFns; await setDoc(doc(_fbDb,'marketReports',j.id), _mkFsEnc({...j, updatedAt:Date.now(), updatedBy:currentUser?.uid||'', updatedByName:currentUser?.name||''})); } st.docs[j.id]=j; if(!(st.list||[]).includes(j.id)) st.list=(st.list||[]).concat(j.id).sort().reverse(); st.period=j.id; st.sel={markets:null,assets:null,residential:true}; showToast('Imported '+j.id,'success'); _mkRender(); }catch(e){ showToast('Import failed: '+e.message,'error',7000); } }; i.click(); };
 
 /* ---------- generic overlay + form helpers ---------- */
 function _mkOverlay(title, bodyHtml, onSave, opts){
