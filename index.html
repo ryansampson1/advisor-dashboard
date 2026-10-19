@@ -48895,16 +48895,113 @@ window._mbMarketingBlock=function(deal){
 
 /* ---- composer ---- */
 function _mbAdvisorFor(deal){ const a=_mrAdvisorsOf(deal)[0]||{}; return {name:a.name||deal.advisorName||'', email:a.email||(deal.advisorEmail||'').toLowerCase(), phone:a.phone||'', designations:a.designations||'', title:a.title||'', headshot:a.headshotUrl||''}; }
-function _mbDefaultCopy(deal){
-  const price=_mrDealPrice(deal); const bits=[];
-  if(deal.acreage) bits.push(Number(deal.acreage).toLocaleString('en-US',{maximumFractionDigits:2})+'± acres'); if(deal.county) bits.push(deal.county+' County'); if(deal.zoning) bits.push('zoned '+deal.zoning); if(deal.landType) bits.push(deal.landType);
-  return { subject:(deal.acreage?Number(deal.acreage).toLocaleString('en-US',{maximumFractionDigits:2})+'± Acres':_mrDealName(deal))+(deal.county?' in '+deal.county+' County':'')+(price?' — '+_mrFmtMoney(price):''),
-    previewText:_mrDealAddr(deal), headline:_mrDealName(deal), body:'Still available: '+_mrDealName(deal)+(bits.length?' — '+bits.join(', '):'')+'. Contact us for the offering memorandum, survey and due-diligence materials.', bullets:bits };
+/* EBLASTAERIAL-20261019 — the composer pulls the listing's aerial(s) with parcel lines (image files on the deal or the
+   listing website, or one Terra draws from the parcel boundary on Esri imagery), shows acreage + zoning, the property
+   highlights, and links to the property website to drive traffic. Pictures: tick up to 5, first ticked = big hero,
+   the rest go in a 2-across gallery (worker mcBlastHtml content.gallery). */
+const MB_AERIAL_RX=/aerial|drone|overhead|outline|boundar|parcel|exhibit|satellite|site\s*map|location\s*map/i;
+function _mbIsImg(name,url){ const n=String(name||''), u=String(url||''); return /\.(jpe?g|png|webp|gif)(\?|$)/i.test(n)||/\.(jpe?g|png|webp|gif)(\?|$)/i.test(u); }
+function _mbFmtAcres(a){ const s=String(a==null?'':a).trim(); if(!s) return ''; if(/[a-z±]/i.test(s)) return s; const n=parseFloat(s.replace(/[^0-9.]/g,'')); return n?n.toLocaleString('en-US',{maximumFractionDigits:2})+'±':s; }
+async function _mbListing(deal){
+  if(!deal||!deal.listingSiteId||typeof _fbDb==='undefined'||!_fbDb||!_fbFns) return null;
+  try{ const { doc, getDoc }=_fbFns; const snap=await getDoc(doc(_fbDb,'listings',deal.listingSiteId)); return snap.exists()?snap.data():null; }catch(e){ console.warn('[mb] listing',e); return null; }
 }
-async function _mbAiCopy(deal){
-  const adv=_mbAdvisorFor(deal);
-  const sys='You write e-mail marketing for Eshenbaugh Land Company, a Florida land brokerage. Return ONLY a JSON object with keys: subject (≤ 70 chars, concrete, no clickbait), previewText (≤ 90 chars), headline (≤ 60 chars), body (2 short paragraphs, 50-90 words total, plain text, only facts given, no invented numbers), bullets (3-5 short facts/selling points, strings). No markdown.';
-  const user='Property: '+_mrDealName(deal)+'\nAddress: '+_mrDealAddr(deal)+'\nAcreage: '+(deal.acreage||'n/a')+'\nCounty: '+(deal.county||'n/a')+'\nZoning: '+(deal.zoning||'n/a')+'\nFuture land use: '+(deal.futureLandUse||deal.flu||'n/a')+'\nLand type: '+(deal.landType||'n/a')+'\nAsking price: '+(_mrFmtMoney(_mrDealPrice(deal))||'call for details')+'\nHighlights / notes: '+String(deal.highlights||deal.description||deal.notes||'').replace(/\s+/g,' ').slice(0,700)+'\nAdvisor: '+adv.name;
+function _mbFactsOf(deal, L){ L=L||{}; return { acreage:deal.acreage||L.acreage||'', zoning:deal.zoning||L.zoning||'', county:deal.county||L.county||'', flu:deal.futureLandUse||deal.flu||'' }; }
+function _mbHighlightsOf(deal, L){
+  const h=(L&&Array.isArray(L.highlights))?L.highlights.map(x=>String(x||'').trim()).filter(Boolean):[];
+  if(h.length) return h.slice(0,8);
+  return String(deal.highlights||'').split(/\n|•/).map(x=>x.replace(/^[-*\s]+/,'').trim()).filter(Boolean).slice(0,8);
+}
+function _mbLinkOptions(deal){
+  const out=[]; const seen=new Set(); const add=(url,label)=>{ url=String(url||'').trim(); if(!/^https?:\/\//i.test(url)||seen.has(url)) return; seen.add(url); out.push({url,label}); };
+  try{ if(deal.listingSiteId && deal.listingPublished!==false && typeof _lsShareLink==='function') add(_lsShareLink(deal.listingSiteId),'🌐 Property website'); }catch(_){}
+  (typeof _mrDealLinks==='function'?_mrDealLinks(deal):[]).forEach(l=>add(l.url,l.label||'Website'));
+  return out;
+}
+function _mbPhotoCandidates(deal, L){
+  const out=[]; const seen=new Set(); const add=(url,label,aerial)=>{ if(!url||seen.has(url)) return; seen.add(url); out.push({url,label:label||'Photo',aerial:!!aerial}); };
+  (deal.dealAttachments||[]).forEach(a=>{ if(a&&a.url&&_mbIsImg(a.name,a.url)&&MB_AERIAL_RX.test(a.name||'')) add(a.url,a.name,true); });
+  if(L){
+    (L.docs||[]).forEach(x=>{ if(x&&x.url&&_mbIsImg(x.name,x.url)&&(x.category==='aerial'||x.category==='map'||MB_AERIAL_RX.test((x.label||'')+' '+(x.name||'')))) add(x.url,x.label||x.name||'Aerial',true); });
+    (L.gallery||[]).forEach(g=>{ if(g&&g.url&&MB_AERIAL_RX.test(g.caption||'')) add(g.url,g.caption,true); });
+  }
+  if(deal.eblastAerialUrl) add(deal.eblastAerialUrl,'Aerial with parcel lines (drawn by Terra)',true);
+  (typeof _spPhotoCandidates==='function'?_spPhotoCandidates(deal):[]).forEach(p=>add(p.url,p.label,false));
+  if(L){ add(L.heroPhoto,'Listing website photo',false); (L.gallery||[]).forEach(g=>add(g&&g.url,(g&&g.caption)||'Listing website photo',false)); }
+  return out;
+}
+/* Parcel boundary from the FGIO statewide cadastral layer (PARCEL_ID indexed, CORS open — the FL_Parcels layer used by
+   _prPA_FL_Statewide times out on PARCEL_ID searches): the deal's parcel ID(s) as typed / stripped, Hillsborough folios
+   via HCPA folio→PIN, else the parcel under the street-address pin. */
+async function _mbParcelRings(deal){
+  const base='https://services9.arcgis.com/Gh9awoU677aKree0/arcgis/rest/services/Florida_Statewide_Cadastral/FeatureServer/0/query';
+  const q=async extra=>{ const r=await fetch(base+'?'+new URLSearchParams({outFields:'PARCEL_ID,CO_NO',returnGeometry:'true',outSR:'4326',f:'json',...extra})); if(!r.ok) throw new Error('Parcel map HTTP '+r.status); const d=await r.json(); if(d.error) throw new Error(d.error.message||'Parcel map error'); return d.features||[]; };
+  const ids=[...new Set([].concat(deal.parcelRaw||[], deal.folioNumber||[], deal.parcelIds||[], deal.parcelId||[]).flatMap(x=>String(x||'').split(/[,;\n&]+/)).map(x=>x.replace(/^[^·]*·\s*/,'').trim()).filter(x=>x.replace(/[^0-9a-z]/gi,'').length>=6))].slice(0,12);
+  const hills=/hillsborough/i.test(deal.county||'');
+  const rings=[]; const got=new Set();
+  const take=f=>{ f.forEach(x=>{ const k=(x.attributes&&x.attributes.PARCEL_ID)||('#'+got.size); if(got.has(k)) return; got.add(k); ((x.geometry&&x.geometry.rings)||[]).forEach(r=>rings.push(r)); }); };
+  for(const id of ids){
+    const vars=[...new Set([id.toUpperCase().replace(/[^0-9A-Z]/g,''), id])].filter(Boolean);
+    let hit=false;
+    for(const v of vars){
+      let f=[]; try{ f=await q({where:"PARCEL_ID='"+v.replace(/'/g,"''")+"'"}); }catch(e){ console.warn('[mb] parcel lookup',e); continue; }
+      if(f.length){ take(f.slice(0,3)); hit=true; break; }
+    }
+    if(!hit && hills){
+      const folio=id.replace(/[^0-9]/g,'');
+      if(folio.length>=6){ try{ const r=await fetch('https://gis.hcpafl.org/CommonServices/property/search/BasicSearch?folio='+encodeURIComponent(folio)+'&pagesize=1&page=1',{headers:{'Accept':'application/json'}}); const j=r.ok?await r.json():[]; const pin=j&&j[0]&&j[0].pin; if(pin){ const f=await q({where:"PARCEL_ID='"+String(pin).replace(/'/g,"''")+"'"}); take(f.slice(0,1)); } }catch(e){ console.warn('[mb] HCPA folio',e); } }
+    }
+  }
+  if(rings.length) return {rings, src:'parcel', count:got.size};
+  let pt=null; try{ pt=(typeof _mapGeocode==='function')?await _mapGeocode(deal):null; }catch(_){}
+  if(pt && pt.precision==='exact'){
+    const f=await q({geometry:JSON.stringify({x:pt.lng,y:pt.lat,spatialReference:{wkid:4326}}),geometryType:'esriGeometryPoint',inSR:'4326',spatialRel:'esriSpatialRelIntersects'});
+    ((f[0]&&f[0].geometry&&f[0].geometry.rings)||[]).forEach(r=>rings.push(r));
+    if(rings.length) return {rings, src:'address', count:1};
+  }
+  return {rings:[], src:'', count:0};
+}
+function _mbRoundRect(g,x,y,w,h,r){ g.beginPath(); g.moveTo(x+r,y); g.arcTo(x+w,y,x+w,y+h,r); g.arcTo(x+w,y+h,x,y+h,r); g.arcTo(x,y+h,x,y,r); g.arcTo(x,y,x+w,y,r); g.closePath(); }
+/* Esri World Imagery (Web Mercator, exact bbox) + yellow parcel lines + acreage/zoning pill → JPEG blob. */
+async function _mbDrawAerial(rings, opts){
+  opts=opts||{}; const W=1280, H=800, R=6378137;
+  const mx=lon=>lon*Math.PI/180*R, my=lat=>R*Math.log(Math.tan(Math.PI/4+lat*Math.PI/360));
+  let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
+  const mr=rings.map(r=>r.map(p=>{ const x=mx(p[0]), y=my(p[1]); if(x<x0)x0=x; if(x>x1)x1=x; if(y<y0)y0=y; if(y>y1)y1=y; return [x,y]; }));
+  const res=Math.max((x1-x0)/(W*0.6), (y1-y0)/(H*0.6), 0.3);
+  const cx=(x0+x1)/2, cy=(y0+y1)/2; const bx0=cx-W*res/2, by0=cy-H*res/2, bx1=cx+W*res/2, by1=cy+H*res/2;
+  const url='https://server.arcgisonline.com/arcgis/rest/services/World_Imagery/MapServer/export?'+new URLSearchParams({bbox:[bx0,by0,bx1,by1].join(','),bboxSR:'3857',imageSR:'3857',size:W+','+H,format:'jpg',f:'image'});
+  const img=await new Promise((ok,bad)=>{ const i=new Image(); i.crossOrigin='anonymous'; i.onload=()=>ok(i); i.onerror=()=>bad(new Error('The aerial imagery did not load — try again')); i.src=url; });
+  const c=document.createElement('canvas'); c.width=W; c.height=H; const g=c.getContext('2d'); g.drawImage(img,0,0,W,H);
+  const trace=()=>{ g.beginPath(); for(const r of mr){ r.forEach((p,i)=>{ const X=(p[0]-bx0)/res, Y=(by1-p[1])/res; if(i) g.lineTo(X,Y); else g.moveTo(X,Y); }); g.closePath(); } };
+  trace(); g.fillStyle='rgba(255,224,27,0.14)'; g.fill('evenodd');
+  g.lineJoin='round'; g.lineCap='round';
+  trace(); g.strokeStyle='rgba(0,0,0,0.55)'; g.lineWidth=9; g.stroke();
+  trace(); g.strokeStyle='#FFE01B'; g.lineWidth=5; g.stroke();
+  const lbl=[opts.acres?opts.acres+' AC':'', opts.zoning?'Zoned '+opts.zoning:''].filter(Boolean).join('  ·  ');
+  if(lbl){ g.font='bold 30px Arial, Helvetica, sans-serif'; const tw=g.measureText(lbl).width; g.fillStyle='rgba(17,24,39,0.86)'; _mbRoundRect(g,24,H-80,tw+40,56,10); g.fill(); g.fillStyle='#fff'; g.textBaseline='middle'; g.fillText(lbl,44,H-52); }
+  g.font='14px Arial, Helvetica, sans-serif'; g.textBaseline='alphabetic'; const at='Imagery © Esri · parcel lines approximate · Eshenbaugh Land Company'; const aw=g.measureText(at).width;
+  g.fillStyle='rgba(0,0,0,0.55)'; g.fillRect(W-aw-20,H-24,aw+20,24); g.fillStyle='#fff'; g.fillText(at,W-aw-10,H-7);
+  return await new Promise((ok,bad)=>c.toBlob(b=>b?ok(b):bad(new Error('Could not save the aerial')),'image/jpeg',0.86));
+}
+function _mbFactsFromForm(deal){
+  const v=id=>(document.getElementById(id)?.value||'').trim(); const out=[];
+  const ac=_mbFmtAcres(v('mb-acres')); if(ac) out.push({label:'Acres',value:ac});
+  const z=v('mb-zoning'); if(z) out.push({label:'Zoning',value:z});
+  const f=_mbFactsOf(deal, window._mbState&&window._mbState.listing); if(f.county) out.push({label:'County',value:f.county}); if(f.flu) out.push({label:'Future land use',value:f.flu});
+  return out.slice(0,4);
+}
+function _mbDefaultCopy(deal, L){
+  const price=_mrDealPrice(deal); const f=_mbFactsOf(deal,L); const ac=_mbFmtAcres(f.acreage); const bits=[];
+  if(ac) bits.push(ac+' acres'); if(f.county) bits.push(f.county+' County'); if(f.zoning) bits.push('zoned '+f.zoning); if(deal.landType) bits.push(deal.landType);
+  const hl=_mbHighlightsOf(deal,L);
+  return { subject:(ac?ac+' Acres':_mrDealName(deal))+(f.county?' in '+f.county+' County':'')+(price?' — '+_mrFmtMoney(price):''),
+    previewText:_mrDealAddr(deal), headline:_mrDealName(deal), body:'Still available: '+_mrDealName(deal)+(bits.length?' — '+bits.join(', '):'')+'. See the property website for photos, maps and documents, or contact us for the offering memorandum, survey and due-diligence materials.', bullets:hl.length?hl:(deal.landType?[deal.landType]:[]) };   // acreage / county / zoning already show in the facts strip
+}
+async function _mbAiCopy(deal, L){
+  const adv=_mbAdvisorFor(deal); const f=_mbFactsOf(deal,L); const hl=_mbHighlightsOf(deal,L);
+  const sys='You write e-mail marketing for Eshenbaugh Land Company, a Florida land brokerage. Return ONLY a JSON object with keys: subject (≤ 70 chars, concrete, no clickbait; include the acreage when given), previewText (≤ 90 chars), headline (≤ 60 chars), body (2 short paragraphs, 50-90 words total, plain text, only facts given, no invented numbers; end by inviting the reader to visit the property website), bullets (3-6 property highlights — concrete selling points such as frontage, access, utilities, entitlements, location; use the given highlights first; do not repeat the acreage or zoning, which are shown separately). No markdown.';
+  const user='Property: '+_mrDealName(deal)+'\nAddress: '+_mrDealAddr(deal)+'\nAcreage: '+(f.acreage||'n/a')+'\nCounty: '+(f.county||'n/a')+'\nZoning: '+(f.zoning||'n/a')+'\nFuture land use: '+(f.flu||'n/a')+'\nLand type: '+(deal.landType||'n/a')+'\nAsking price: '+(_mrFmtMoney(_mrDealPrice(deal))||'call for details')+'\nProperty highlights: '+(hl.join('; ')||'n/a')+'\nDescription / notes: '+String((L&&L.description)||deal.highlights||deal.description||deal.notes||'').replace(/\s+/g,' ').slice(0,900)+'\nAdvisor: '+adv.name;
   const txt=await leadAI(sys,user,700); const m=String(txt||'').match(/\{[\s\S]*\}/); if(!m) throw new Error('AI did not return JSON'); const j=JSON.parse(m[0]);
   return { subject:String(j.subject||'').trim(), previewText:String(j.previewText||'').trim(), headline:String(j.headline||'').trim(), body:String(j.body||'').trim(), bullets:Array.isArray(j.bullets)?j.bullets.map(x=>String(x).trim()).filter(Boolean):[] };
 }
@@ -48920,9 +49017,13 @@ window._mbOpen=async function(dealId, taskId){
   const deal=(allDeals||[]).find(d=>d.id===dealId); if(!deal){ showToast('Deal not found','error'); return; }
   if(_dnmGuard(deal,'e-blasts')) return;   // DNM-20261016
   _mrInjectStyles(); document.getElementById('mb-ov')?.remove();
-  const ym=_mbYm(); const adv=_mbAdvisorFor(deal); const photos=(typeof _spPhotoCandidates==='function')?_spPhotoCandidates(deal):[]; const link=(typeof _spLinkFor==='function')?_spLinkFor(deal):'https://www.thedirtdog.com';
-  const copy=_mbDefaultCopy(deal);
-  window._mbState={dealId, deal, ym, taskId:taskId||'', adv, hero:photos[0]?photos[0].url:'', link, prior:null, audience:null, draftId:'', draftKind:'', busy:false};
+  const L=await _mbListing(deal); document.getElementById('mb-ov')?.remove();   // EBLASTAERIAL-20261019
+  const ym=_mbYm(); const adv=_mbAdvisorFor(deal); const photos=_mbPhotoCandidates(deal, L); const linkOpts=_mbLinkOptions(deal);
+  const link=(linkOpts[0]&&linkOpts[0].url)||((typeof _spLinkFor==='function')?_spLinkFor(deal):'https://www.thedirtdog.com');
+  const copy=_mbDefaultCopy(deal, L); const mf=_mbFactsOf(deal, L);
+  const aer=photos.filter(p=>p.aerial), rest=photos.filter(p=>!p.aerial);
+  const picked=[...aer.slice(0,2).map(p=>p.url), ...(rest[0]?[rest[0].url]:[])];
+  window._mbState={dealId, deal, ym, taskId:taskId||'', adv, hero:picked[0]||'', link, prior:null, audience:null, draftId:'', draftKind:'', busy:false, listing:L, photos, picked, linkOpts};
   const ov=document.createElement('div'); ov.className='mr-ov fixed inset-0 flex items-center justify-center'; ov.id='mb-ov';
   ov.innerHTML=`<div class="mr-modal" style="width:min(980px,100%)" role="dialog" aria-label="Monthly e-blast">
     <div class="mr-modal-h"><div style="min-width:0"><h2>📧 E-blast — ${_mrEsc(_mrDealName(deal))}</h2><div class="mr-muted" id="mb-status">Checking ${_mrEsc(_mrMonthLabel(ym))} and prior e-blasts…</div></div><span style="flex:1"></span><button class="mr-x" aria-label="Close" onclick="window._mbClose()">✕</button></div>
@@ -48937,10 +49038,15 @@ window._mbOpen=async function(dealId, taskId){
             <label class="mr-lbl">Preview text<input id="mb-preview" class="mr-input" style="width:100%" value="${_mrEsc(copy.previewText)}"></label>
             <label class="mr-lbl">Headline<input id="mb-headline" class="mr-input" style="width:100%" value="${_mrEsc(copy.headline)}" oninput="window._mbPreview()"></label>
             <label class="mr-lbl">Price line<input id="mb-price" class="mr-input" style="width:100%" value="${_mrEsc(_mrFmtMoney(_mrDealPrice(deal)))}" oninput="window._mbPreview()"></label>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:.5rem"><label class="mr-lbl">Acreage<input id="mb-acres" class="mr-input" style="width:100%" value="${_mrEsc(String(mf.acreage||''))}" placeholder="e.g. 47.2" oninput="window._mbPreview()"></label><label class="mr-lbl">Zoning<input id="mb-zoning" class="mr-input" style="width:100%" value="${_mrEsc(String(mf.zoning||''))}" placeholder="e.g. AG / PD" oninput="window._mbPreview()"></label></div>
+            ${(!mf.acreage||!mf.zoning)?`<div class="mr-note mb-warn">${!mf.acreage&&!mf.zoning?'Acreage and zoning are':(!mf.acreage?'Acreage is':'Zoning is')} blank on the deal card — type ${!mf.acreage&&!mf.zoning?'them':'it'} here for this e-blast (and fix the card).</div>`:''}
             <label class="mr-lbl">Body<textarea id="mb-body" class="mr-textarea" style="min-height:110px" oninput="window._mbPreview()">${_mrEsc(copy.body)}</textarea></label>
-            <label class="mr-lbl">Bullets <span class="mr-note">(one per line)</span><textarea id="mb-bullets" class="mr-textarea" style="min-height:80px" oninput="window._mbPreview()">${_mrEsc(copy.bullets.join('\n'))}</textarea></label>
-            <label class="mr-lbl">Link<input id="mb-link" class="mr-input" style="width:100%" value="${_mrEsc(link)}" oninput="window._mbPreview()"></label>
-            <div><div class="mr-lbl">Photo</div><div class="mr-row" style="gap:.5rem">${photos.map((p,i)=>`<label title="${_mrEsc(p.label)}" style="cursor:pointer;position:relative"><input type="radio" name="mb-photo" value="${_mrEsc(p.url)}" ${i===0?'checked':''} onchange="window._mbState.hero=this.value;window._mbPreview()" style="position:absolute;top:4px;left:4px"><img class="mr-thumb" src="${_mrEsc(p.url)}" alt=""></label>`).join('')||'<span class="mr-note">No photo on the deal card yet — add one in 📬 Monthly report assets.</span>'}</div></div>
+            <label class="mr-lbl">Property highlights <span class="mr-note">(one per line${(L&&(L.highlights||[]).length)?' · from the listing website':''})</span><textarea id="mb-bullets" class="mr-textarea" style="min-height:96px" placeholder="e.g. 1,200 ft of frontage on SR 54&#10;Water and sewer at the site&#10;— or click ✨ AI draft" oninput="window._mbPreview()">${_mrEsc(copy.bullets.join('\n'))}</textarea></label>
+            <label class="mr-lbl">Property website link <span class="mr-note">(the button, pictures and link in the e-blast all go here)</span><input id="mb-link" class="mr-input" style="width:100%" value="${_mrEsc(link)}" oninput="window._mbPreview()"></label>
+            ${linkOpts.length>1?`<div class="mr-row" style="gap:.35rem;flex-wrap:wrap;margin-top:-.25rem">${linkOpts.map(o=>`<button type="button" class="mr-btn mr-btn-sm" data-u="${_mrEsc(o.url)}" onclick="document.getElementById('mb-link').value=this.dataset.u;window._mbPreview()">${_mrEsc(o.label)}</button>`).join('')}</div>`:''}
+            ${!linkOpts.length?`<div class="mr-note mb-warn" style="margin-top:-.25rem">No property website on this listing yet, so the link goes to thedirtdog.com. Use 🌐 Create Listing Website on the deal card, or add the website link in 📬 Monthly report assets.</div>`:''}
+            <div><div class="mr-lbl">Pictures <span class="mr-note">(tick up to 5 · the first ticked is the big one at the top · aerials are listed first)</span></div><div id="mb-photos" class="mr-row" style="gap:.5rem;flex-wrap:wrap"></div>
+              <div class="mr-row" style="gap:.5rem;margin-top:.45rem;align-items:center;flex-wrap:wrap"><button type="button" class="mr-btn mr-btn-sm" id="mb-aerial-btn" onclick="window._mbMakeAerial(this)">🛰 ${deal.eblastAerialUrl?'Redraw':'Make'} aerial with parcel lines</button><span class="mr-note" id="mb-aerial-note" role="status" aria-live="polite"></span></div></div>
             ${_mbModeHtml('mb')}
             <div class="mr-row" style="gap:.5rem;margin-top:.3rem"><button class="mr-btn mr-btn-primary" id="mb-create-btn" onclick="window._mbCreate(this)">📧 Build & send</button><span class="mr-note" id="mb-create-note"></span></div>
           </div>
@@ -48951,7 +49057,9 @@ window._mbOpen=async function(dealId, taskId){
     </div>
     <div class="mr-modal-f"><span class="mr-note" id="mb-foot"></span><span style="flex:1"></span><button class="mr-btn" onclick="window._mbClose()">Close</button></div>
   </div>`;
-  document.body.appendChild(ov); window._mbPreview();
+  ov.insertAdjacentHTML('afterbegin','<style>.mb-warn{color:#b45309}html.dark .mb-warn{color:#fbbf24}#mb-photos label{min-width:44px;min-height:44px}</style>');
+  document.body.appendChild(ov); window._mbRenderPhotos(); window._mbPreview();
+  if(!aer.length && (((deal.parcelRaw||[]).length)||deal.folioNumber||deal.parcelId||deal.propertyAddress)) window._mbMakeAerial(null, true);   // EBLASTAERIAL-20261019: no aerial on file → draw one
   _mbStatus(deal, ym).then(s=>{ const el=document.getElementById('mb-status'); if(!el||!window._mbState) return; el.textContent=s.sent.length?(_mrMonthLabel(ym)+': '+s.sent.length+' e-blast'+(s.sent.length===1?'':'s')+' already on this listing ✓ — '+(s.sent[0].subject||'')):(_mrMonthLabel(ym)+': no e-blast yet on this listing.'); });
   _mbPrior(deal).then(prior=>{ const st=window._mbState; if(!st) return; st.prior=prior; const box=document.getElementById('mb-prior'); if(!box) return;
     if(!prior.length){ box.innerHTML='<span class="mr-muted">No e-blast about this listing in the last 6 months — build a new one below.</span>'; return; }
@@ -48969,15 +49077,51 @@ window._mbOpen=async function(dealId, taskId){
 window._mbAudienceList=function(){ const st=window._mbState; if(!st||!st.audience) return; const listId=document.getElementById('mb-list')?.value; const segs=(st.audience.segments||[]).filter(s=>s.listId===listId); const box=document.getElementById('mb-segs'); if(!box) return;
   box.innerHTML=segs.length?segs.map(s=>`<label style="cursor:pointer;font-size:.8rem"><input type="checkbox" class="mb-seg" value="${s.id}"> ${_mrEsc(s.name)} <span class="mr-muted">(${Number(s.memberCount).toLocaleString()}${s.type==='saved'?' · segment':''})</span></label>`).join(''):'<span class="mr-muted">No tags or segments on this audience.</span>'; };
 window._mbClose=function(){ document.getElementById('mb-ov')?.remove(); window._mbState=null; };
+window._mbRenderPhotos=function(){
+  const st=window._mbState; const box=document.getElementById('mb-photos'); if(!st||!box) return;
+  box.innerHTML=(st.photos||[]).length ? st.photos.map((p,i)=>{ const n=st.picked.indexOf(p.url); return `<label title="${_mrEsc(p.label)}" style="cursor:pointer;position:relative;display:inline-block"><input type="checkbox" aria-label="Include ${_mrEsc(p.label)}" ${n>=0?'checked':''} onchange="window._mbTogglePhoto(${i},this.checked)" style="position:absolute;top:4px;left:4px;width:18px;height:18px;z-index:1"><img class="mr-thumb" src="${_mrEsc(p.url)}" alt="${_mrEsc(p.label)}" style="${n>=0?'outline:3px solid #DA291C;outline-offset:1px':'opacity:.75'}">${p.aerial?`<span style="position:absolute;top:4px;right:4px;background:rgba(0,0,0,.75);color:#FFE01B;font-size:9px;font-weight:700;border-radius:4px;padding:1px 4px">AERIAL</span>`:''}${n>=0?`<span style="position:absolute;bottom:4px;right:4px;background:#DA291C;color:#fff;font-size:10px;font-weight:700;border-radius:9px;padding:1px 6px">${n===0?'Main':n+1}</span>`:''}</label>`; }).join('') : '<span class="mr-note">No picture on the deal card yet — make the aerial below, or add photos in 📬 Monthly report assets.</span>';
+};
+window._mbTogglePhoto=function(i,on){
+  const st=window._mbState; if(!st) return; const p=(st.photos||[])[i]; if(!p) return;
+  st.picked=st.picked.filter(u=>u!==p.url);
+  if(on){ if(st.picked.length>=5) showToast('Up to 5 pictures per e-blast — untick one first','warning'); else st.picked.push(p.url); }
+  st.hero=st.picked[0]||''; window._mbRenderPhotos(); window._mbPreview();
+};
+window._mbMakeAerial=async function(btn, auto){
+  const st=window._mbState; if(!st||st.aerialBusy) return; st.aerialBusy=true;
+  const b=btn||document.getElementById('mb-aerial-btn'); const done=b?elcBusy(b,'Drawing parcel lines…'):()=>{}; const note=document.getElementById('mb-aerial-note');
+  const say=t=>{ const el=document.getElementById('mb-aerial-note'); if(el&&window._mbState===st) el.textContent=t; };
+  say('Finding the parcel boundary…');
+  try{
+    const {rings,src,count}=await _mbParcelRings(st.deal);
+    if(!rings.length) throw new Error('Couldn’t find the parcel boundary — check the parcel ID'+(st.deal.propertyAddress?'':' and street address')+' on the deal card, or attach an aerial image to the deal.');
+    say('Drawing the aerial…');
+    const blob=await _mbDrawAerial(rings,{acres:_mbFmtAcres(document.getElementById('mb-acres')?.value||st.deal.acreage||''), zoning:(document.getElementById('mb-zoning')?.value||st.deal.zoning||'').trim()});
+    const url=await _lsUpload(`dealPhotos/${st.dealId}/eblast_aerial_${Date.now()}.jpg`, blob);
+    await Store.updateDeal(st.dealId,{eblastAerialUrl:url, eblastAerialAt:Date.now()}); st.deal.eblastAerialUrl=url;
+    if(window._mbState!==st) return;
+    const old=st.photos.filter(p=>/drawn by Terra/.test(p.label)).map(p=>p.url);
+    st.photos=[{url,label:'Aerial with parcel lines (drawn by Terra)',aerial:true}, ...st.photos.filter(p=>p.url!==url&&!old.includes(p.url))];
+    st.picked=[url, ...st.picked.filter(u=>u!==url&&!old.includes(u))].slice(0,5); st.hero=url;
+    window._mbRenderPhotos(); window._mbPreview();
+    say('✓ Aerial drawn from the '+(src==='address'?'parcel at the street address':(count>1?count+' parcels on the deal card':'parcel ID on the deal card'))+' — check the lines before sending.');
+    if(b) b.textContent='🛰 Redraw aerial with parcel lines';
+    if(!auto) showToast('Aerial with parcel lines added','success');
+  }catch(e){ console.warn('[mb] aerial',e); say(e.message); if(!auto) showToast(e.message,'error',8000); }
+  finally{ st.aerialBusy=false; done(); }
+};
 window._mbPreview=function(){
   const st=window._mbState; if(!st) return; const pv=document.getElementById('mb-pv'); if(!pv) return;
   const v=id=>document.getElementById(id)?.value||'';
   const bullets=v('mb-bullets').split('\n').map(x=>x.trim()).filter(Boolean);
-  pv.innerHTML=`<div style="background:#fff;border-radius:8px;overflow:hidden;font-family:Arial,sans-serif;font-size:13px;color:#1F2933"><div style="background:#DA291C;color:#fff;padding:8px 12px;font-size:10px;letter-spacing:.1em;text-transform:uppercase;font-weight:700">Available Land · Eshenbaugh Land Company</div>${st.hero?`<img src="${_mrEsc(st.hero)}" style="width:100%;display:block">`:''}<div style="padding:12px"><div style="font-family:Georgia,serif;font-size:18px;font-weight:700">${_mrEsc(v('mb-headline'))}</div><div style="color:#6E7480;font-size:12px;margin-top:3px">${_mrEsc(_mrDealAddr(st.deal))}</div>${v('mb-price')?`<div style="color:#DA291C;font-weight:700;font-size:15px;margin-top:6px">${_mrEsc(v('mb-price'))}</div>`:''}<p style="margin:10px 0 0;line-height:1.45;white-space:pre-wrap">${_mrEsc(v('mb-body'))}</p>${bullets.length?`<ul style="margin:8px 0 0;padding-left:18px">${bullets.map(b=>`<li>${_mrEsc(b)}</li>`).join('')}</ul>`:''}<div style="margin-top:12px"><span style="background:#DA291C;color:#fff;padding:7px 12px;border-radius:5px;font-weight:700;font-size:12px">View the listing →</span></div><div style="margin-top:12px;font-size:12px"><b>${_mrEsc(st.adv.name||'Eshenbaugh Land Company')}</b>${st.adv.designations?', '+_mrEsc(st.adv.designations):''}${st.adv.phone?'<br>'+_mrEsc(st.adv.phone):''}</div></div></div>`;
+  const facts=_mbFactsFromForm(st.deal);
+  const pics=(st.picked||[]).length?st.picked:(st.hero?[st.hero]:[]); const hero=pics[0]||''; const gal=pics.slice(1,5);
+  const link=v('mb-link').trim(); const linkShown=link.replace(/^https?:\/\//i,'').replace(/\/$/,'');
+  pv.innerHTML=`<div style="background:#fff;border-radius:8px;overflow:hidden;font-family:Arial,sans-serif;font-size:13px;color:#1F2933"><div style="background:#DA291C;color:#fff;padding:8px 12px;font-size:10px;letter-spacing:.1em;text-transform:uppercase;font-weight:700">Available Land · Eshenbaugh Land Company</div>${hero?`<img src="${_mrEsc(hero)}" alt="" style="width:100%;display:block">`:''}<div style="padding:12px"><div style="font-family:Georgia,serif;font-size:18px;font-weight:700">${_mrEsc(v('mb-headline'))}</div><div style="color:#6E7480;font-size:12px;margin-top:3px">${_mrEsc(_mrDealAddr(st.deal))}</div>${v('mb-price')?`<div style="color:#DA291C;font-weight:700;font-size:15px;margin-top:6px">${_mrEsc(v('mb-price'))}</div>`:''}${facts.length?`<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:8px">${facts.map(f=>`<div style="flex:1 1 70px;border:1px solid #e5e7eb;border-radius:4px;padding:5px 7px"><div style="font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:#6E7480">${_mrEsc(f.label)}</div><div style="font-weight:700;font-size:13px">${_mrEsc(f.value)}</div></div>`).join('')}</div>`:''}<p style="margin:10px 0 0;line-height:1.45;white-space:pre-wrap">${_mrEsc(v('mb-body'))}</p>${bullets.length?`<div style="margin-top:10px;font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#DA291C">Property highlights</div><ul style="margin:4px 0 0;padding-left:18px">${bullets.map(b=>`<li>${_mrEsc(b)}</li>`).join('')}</ul>`:''}${gal.length?`<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-top:10px">${gal.map((u,i)=>`<img src="${_mrEsc(u)}" alt="" style="width:100%;display:block;border-radius:4px;${gal.length%2&&i===gal.length-1?'grid-column:1 / -1':''}">`).join('')}</div>`:''}<div style="margin-top:12px"><span style="background:#DA291C;color:#fff;padding:7px 12px;border-radius:5px;font-weight:700;font-size:12px">View the property website →</span></div>${link?`<div style="margin-top:6px;font-size:11px;color:#6E7480">Property website: <span style="color:#DA291C;word-break:break-all">${_mrEsc(linkShown)}</span></div>`:''}<div style="margin-top:12px;font-size:12px"><b>${_mrEsc(st.adv.name||'Eshenbaugh Land Company')}</b>${st.adv.designations?', '+_mrEsc(st.adv.designations):''}${st.adv.phone?'<br>'+_mrEsc(st.adv.phone):''}</div></div></div>`;
 };
 window._mbDraft=async function(btn){
   const st=window._mbState; if(!st) return; const done=elcBusy(btn,'Drafting…');
-  try{ const c=await _mbAiCopy(st.deal); const set=(id,val)=>{ const el=document.getElementById(id); if(el&&val) el.value=val; }; set('mb-subject',c.subject); set('mb-preview',c.previewText); set('mb-headline',c.headline); set('mb-body',c.body); if(c.bullets.length) set('mb-bullets',c.bullets.join('\n')); window._mbPreview(); }
+  try{ const c=await _mbAiCopy(st.deal, st.listing); const set=(id,val)=>{ const el=document.getElementById(id); if(el&&val) el.value=val; }; set('mb-subject',c.subject); set('mb-preview',c.previewText); set('mb-headline',c.headline); set('mb-body',c.body); if(c.bullets.length) set('mb-bullets',c.bullets.join('\n')); window._mbPreview(); }
   catch(e){ showToast('AI draft failed: '+e.message,'error'); } finally{ done(); }
 };
 function _mbModeOf(prefix){ const mode=document.querySelector(`input[name="${prefix}-mode"]:checked`)?.value||'test'; const whenEl=document.getElementById(prefix+'-when'); let scheduleAt=''; if(mode==='schedule'){ const w=whenEl?.value; if(!w) throw new Error('Pick a date and time to schedule.'); const d=new Date(w); if(isNaN(d)||d.getTime()<Date.now()+5*60*1000) throw new Error('Schedule time must be in the future.'); scheduleAt=d.toISOString(); } return {mode, scheduleAt}; }
@@ -49029,8 +49173,9 @@ window._mbCreate=async function(btn){
     if(!(await _mbConfirmSend(mode, scheduleAt, '“'+subject+'”', segNames.length?listName+' · '+segNames.join(', '):'the whole '+listName+' audience'))) return;
     st.busy=true; const done=elcBusy(btn, mode==='test'?'Sending test…':mode==='send'?'Sending…':'Scheduling…');
     try{
-      const d=st.deal; const facts=[]; if(d.acreage) facts.push({label:'Acres',value:Number(d.acreage).toLocaleString('en-US',{maximumFractionDigits:2})+'±'}); if(d.county) facts.push({label:'County',value:d.county}); if(d.zoning) facts.push({label:'Zoning',value:d.zoning}); if(d.futureLandUse||d.flu) facts.push({label:'Future land use',value:d.futureLandUse||d.flu});
-      const content={kicker:'Available Land', hero:st.hero, headline:v('mb-headline'), address:_mrDealAddr(d), price:v('mb-price'), facts:facts.slice(0,4), body:v('mb-body'), bullets:v('mb-bullets').split('\n').map(x=>x.trim()).filter(Boolean), link:v('mb-link'), linkLabel:'View the listing', advisor:st.adv};
+      const d=st.deal; const facts=_mbFactsFromForm(d);   // EBLASTAERIAL-20261019: acreage + zoning from the form
+      const pics=(st.picked||[]).length?st.picked.slice(0,5):(st.hero?[st.hero]:[]);
+      const content={kicker:'Available Land', hero:pics[0]||'', gallery:pics.slice(1,5), headline:v('mb-headline'), address:_mrDealAddr(d), price:v('mb-price'), facts:facts.slice(0,4), body:v('mb-body'), highlightsTitle:'Property highlights', bullets:v('mb-bullets').split('\n').map(x=>x.trim()).filter(Boolean), link:v('mb-link'), linkLabel:'View the property website', showLinkText:true, advisor:st.adv};
       const body={listId, segmentIds, subject, previewText:v('mb-preview'), fromName:st.adv.name||'Eshenbaugh Land Company', replyTo:st.adv.email||'', title:'Terra e-blast '+_mrLocalDate(Date.now())+' — '+_mrDealName(d), mode, scheduleAt, testEmails:[currentUser?.email].filter(Boolean), content};
       st.draftKind='create';
       const r= st.draftId ? await _spWorkerPost('/mailchimp/send',{campaignId:st.draftId, subject, previewText:v('mb-preview'), mode, scheduleAt, testEmails:body.testEmails}) : await _spWorkerPost('/mailchimp/create',body);
