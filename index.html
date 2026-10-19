@@ -27503,27 +27503,198 @@ function _exportGroupMembers(gid){
                     .sort((a,b)=> key(a).localeCompare(key(b)));
 }
 
+/* ── EXPCOLS-20261019 — pick-your-columns contact export ─────────────────────
+   Ryan 2026-10-19: staff can export from the CRM but couldn't choose what goes in
+   the file. Every contact CSV now goes through one column picker:
+     • 📤 Export tab (staff view) — checkboxes inline above the preview table
+     • CRM → Groups → ⬇ Export CSV — pick a group, then pick columns
+     • CRM → ⬇ Export CSV (admin, whole CRM) — same picker, admin columns included
+   Contact-info columns (name, title, company, emails, phones, mailing address,
+   groups, assigned advisor) are open to anyone who can reach an export.
+   Internal columns (Source, Linked Deals, Notes, Created) stay admin-only.
+   Defaults reproduce the old files exactly: 4 columns for group exports,
+   the old 12 for the admin whole-CRM export. Choices are remembered per browser.
+   Read-only: never writes to Firestore.
+   ───────────────────────────────────────────────────────────────────────── */
+const _expAddr = c => { const m=c.mailingAddress; return (m && typeof m==='object') ? m : {street: typeof m==='string'?m:''}; };
+const _expAdvName = uid => { if(!uid) return ''; try{ return (getDistinctAdvisors()||[]).find(a=>a.uid===uid)?.name||''; }catch(_){ return ''; } };
+const _EXP_COLS = [
+  {k:'firstName',   label:'First Name',        grp:'Name',            v:c=>c.firstName},
+  {k:'lastName',    label:'Last Name',         grp:'Name',            v:c=>c.lastName},
+  {k:'fullName',    label:'Full Name',         grp:'Name',            v:c=>[c.firstName,c.lastName].filter(Boolean).join(' ')},
+  {k:'title',       label:'Title',             grp:'Name',            v:c=>c.title},
+  {k:'company',     label:'Company',           grp:'Company & contact', v:c=>c.company},
+  {k:'email',       label:'Email',             grp:'Company & contact', v:c=>String(c.email||'').trim()},
+  {k:'email2',      label:'Secondary Email',   grp:'Company & contact', v:c=>c.email2},
+  {k:'phone',       label:'Mobile Phone',      grp:'Company & contact', v:c=>c.phone},
+  {k:'officePhone', label:'Office Phone',      grp:'Company & contact', v:c=>c.officePhone ? c.officePhone+(c.officePhoneExt?' x'+c.officePhoneExt:'') : ''},
+  {k:'street',      label:'Street',            grp:'Mailing address', v:c=>_expAddr(c).street},
+  {k:'city',        label:'City',              grp:'Mailing address', v:c=>_expAddr(c).city},
+  {k:'state',       label:'State',             grp:'Mailing address', v:c=>_expAddr(c).state},
+  {k:'zip',         label:'Zip',               grp:'Mailing address', v:c=>_expAddr(c).zip},
+  {k:'fullAddress', label:'Full Address (one line)', grp:'Mailing address', v:c=>{ const a=_expAddr(c); return [a.street,a.city,[a.state,a.zip].filter(Boolean).join(' ')].filter(x=>String(x||'').trim()).join(', '); }},
+  {k:'groups',      label:'Groups',            grp:'CRM',             v:c=>(c.groups||[]).map(gid=>allCRMGroups.find(x=>x.id===gid)?.name||'').filter(Boolean).join('; ')},
+  {k:'advisor',     label:'Assigned Advisor',  grp:'CRM',             v:c=>_expAdvName(c.assignedAdvisor)},
+  {k:'source',      label:'Source',            grp:'CRM',             v:c=>c.source, admin:true},
+  {k:'linkedDeals', label:'Linked Deals',      grp:'CRM',             v:c=>(c.linkedDeals||[]).map(did=>{ const d=allDeals.find(x=>x.id===did); return d?(d.projectName||d.propertyAddress||'Deal'):''; }).filter(Boolean).join('; '), admin:true},
+  {k:'notes',       label:'Notes',             grp:'CRM',             v:c=>c.notes, admin:true},
+  {k:'created',     label:'Created',           grp:'CRM',             v:c=>c.createdAt ? new Date(c.createdAt).toLocaleDateString() : '', admin:true},
+];
+const _EXP_DEFAULTS = {
+  group: ['firstName','lastName','company','email'],
+  all:   ['firstName','lastName','title','company','email','email2','phone','source','groups','linkedDeals','notes','created'],
+};
+const _EXP_PRESETS = [
+  {id:'evite',   label:'E-vite',         keys:['firstName','lastName','company','email']},
+  {id:'tags',    label:'Name tags',      keys:['firstName','lastName','company']},
+  {id:'mail',    label:'Mailing labels', keys:['fullName','company','street','city','state','zip']},
+  {id:'calls',   label:'Call list',      keys:['firstName','lastName','company','phone','officePhone','email']},
+  {id:'all',     label:'Everything',     keys:null},
+];
+const _expIsAdmin = () => !!(currentUser?.isAdmin && !adminViewAsAdvisor && !staffViewMode);
+const _expAllowed = () => _EXP_COLS.filter(c=>!c.admin || _expIsAdmin());
+window._expSel = window._expSel || {};
+function _expGetSel(ctx){
+  const ok = new Set(_expAllowed().map(c=>c.k));
+  if(!window._expSel[ctx]){
+    let saved=null; try{ saved=JSON.parse(localStorage.getItem('elc_export_cols_'+ctx)||'null'); }catch(_){}
+    window._expSel[ctx] = Array.isArray(saved) ? saved : (_EXP_DEFAULTS[ctx]||_EXP_DEFAULTS.group).slice();
+  }
+  return window._expSel[ctx].filter(k=>ok.has(k));
+}
+function _expSetSel(ctx, keys){
+  window._expSel[ctx] = keys.slice();
+  try{ localStorage.setItem('elc_export_cols_'+ctx, JSON.stringify(keys)); }catch(_){}
+}
+// Selected columns, always in catalog order so files read the same way every time.
+const _expCols = ctx => { const s=new Set(_expGetSel(ctx)); return _expAllowed().filter(c=>s.has(c.k)); };
+
+function _expPickerHtml(ctx, rerender){
+  const sel = new Set(_expGetSel(ctx));
+  const allowed = _expAllowed();
+  const grps = [...new Set(allowed.map(c=>c.grp))];
+  const isOn = p => { const keys=p.keys||allowed.map(c=>c.k); return keys.length===sel.size && keys.every(k=>sel.has(k)); };
+  return `
+    <div class="exp-picker">
+      <div class="flex flex-wrap items-center gap-2 mb-3">
+        <span class="text-xs font-semibold text-gray-500 uppercase tracking-wide mr-1">Quick pick</span>
+        ${_EXP_PRESETS.map(p=>`<button type="button" onclick="window._expPreset('${ctx}','${p.id}','${rerender}')"
+            class="exp-chip border rounded-full px-3 text-xs font-semibold ${isOn(p)?'bg-teal-50 border-teal-400 text-teal-700':'border-gray-300 text-gray-600 hover:bg-gray-50'}"
+            style="min-height:32px" aria-pressed="${isOn(p)}">${p.label}</button>`).join('')}
+        <button type="button" onclick="window._expPreset('${ctx}','none','${rerender}')"
+          class="border rounded-full px-3 text-xs font-semibold border-gray-300 text-gray-600 hover:bg-gray-50" style="min-height:32px">Clear</button>
+      </div>
+      <div class="grid gap-4" style="grid-template-columns:repeat(auto-fit,minmax(170px,1fr))">
+        ${grps.map(g=>`
+          <fieldset>
+            <legend class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">${_expEsc(g)}</legend>
+            ${allowed.filter(c=>c.grp===g).map(c=>`
+              <label class="flex items-center gap-2 text-sm text-gray-800 cursor-pointer py-1" style="min-height:32px">
+                <input type="checkbox" ${sel.has(c.k)?'checked':''} onchange="window._expToggle('${ctx}','${c.k}',this.checked,'${rerender}')"
+                  style="width:18px;height:18px;accent-color:#00b2a9;flex:0 0 auto"/>
+                <span>${_expEsc(c.label)}</span>
+              </label>`).join('')}
+          </fieldset>`).join('')}
+      </div>
+      <div class="text-xs text-gray-500 mt-2">${sel.size} column${sel.size!==1?'s':''} selected${_expIsAdmin()?'':' · Notes, deal links and source stay in the CRM.'}</div>
+    </div>`;
+}
+const _expRerender = r => { if(r==='tab') window.viewExportContacts(); else if(r==='modal') window._expRenderModal(); };
+window._expToggle = (ctx, k, on, r) => {
+  const s = new Set(_expGetSel(ctx)); on ? s.add(k) : s.delete(k);
+  _expSetSel(ctx, [...s]); _expRerender(r);
+};
+window._expPreset = (ctx, id, r) => {
+  const p = _EXP_PRESETS.find(x=>x.id===id);
+  _expSetSel(ctx, id==='none' ? [] : (p?.keys || _expAllowed().map(c=>c.k)));
+  _expRerender(r);
+};
+// "N with no email · M with no phone" for the selected columns, so a blank cell is never a surprise.
+function _expMissingNote(rows, cols){
+  const checks = [
+    {keys:['email'], label:'email', test:c=>!String(c.email||'').trim()},
+    {keys:['phone','officePhone'], label:'phone', test:c=>!String(c.phone||'').trim() && !String(c.officePhone||'').trim()},
+    {keys:['street','city','fullAddress'], label:'mailing address', test:c=>{ const a=_expAddr(c); return !String(a.street||'').trim() && !String(a.city||'').trim(); }},
+  ];
+  const ks = new Set(cols.map(c=>c.k));
+  return checks.filter(ch=>ch.keys.some(k=>ks.has(k)))
+    .map(ch=>({n:rows.filter(ch.test).length, label:ch.label})).filter(x=>x.n>0)
+    .map(x=>`${x.n} with no ${x.label}`).join(' · ');
+}
+function _expBuildCsv(rows, cols){
+  const esc = v => '"' + String(v==null?'':v).replace(/"/g,'""') + '"';
+  return [cols.map(c=>esc(c.label)).join(','), ...rows.map(r=>cols.map(c=>esc(c.v(r))).join(','))].join('\r\n');
+}
+function _expDownload(csv, base){
+  // Leading BOM so Excel reads accented names (José, Muñoz) instead of mojibake
+  const blob = new Blob(['﻿'+csv], {type:'text/csv;charset=utf-8'});
+  const safe = String(base||'contacts').replace(/[^\w\s-]/g,'').trim().replace(/\s+/g,'_').slice(0,60) || 'contacts';
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = safe + '_' + new Date().toISOString().slice(0,10) + '.csv';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url), 1000);
+}
+
+// Modal picker — used by CRM Groups export and the admin whole-CRM export.
+window._expModal = null;
+window.crmExportPicker = ({rows, title, subtitle, base, ctx}) => {
+  window._expModal = {rows: rows||[], title, subtitle, base, ctx: ctx||'group'};
+  document.getElementById('exp-col-modal')?.remove();
+  const m = document.createElement('div');
+  m.id = 'exp-col-modal';
+  m.className = 'fixed inset-0 z-40 flex items-center justify-center modal-bg bg-black/40 p-4';
+  m.addEventListener('click', e => { if(e.target===m) m.remove(); });
+  document.body.appendChild(m);
+  window._expRenderModal();
+};
+window._expRenderModal = () => {
+  const s = window._expModal, m = document.getElementById('exp-col-modal');
+  if(!s || !m) return;
+  const cols = _expCols(s.ctx), miss = _expMissingNote(s.rows, cols);
+  m.innerHTML = `
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto" role="dialog" aria-modal="true" aria-labelledby="exp-col-title">
+      <div class="p-5 border-b flex items-start justify-between gap-3">
+        <div>
+          <h2 id="exp-col-title" class="text-lg font-bold text-gray-800">⬇ ${_expEsc(s.title||'Export contacts')}</h2>
+          <p class="text-sm text-gray-500 mt-0.5">${_expEsc(s.subtitle||'')} — choose the columns you want in the file.</p>
+        </div>
+        <button type="button" aria-label="Close" onclick="document.getElementById('exp-col-modal')?.remove()"
+          class="text-gray-500 hover:text-gray-800 text-2xl leading-none" style="min-width:44px;min-height:44px">&times;</button>
+      </div>
+      <div class="p-5">${_expPickerHtml(s.ctx,'modal')}
+        ${miss?`<div class="text-xs text-amber-600 font-semibold mt-3">${miss} (exported with blank cells)</div>`:''}
+      </div>
+      <div class="p-5 border-t flex justify-end gap-2 flex-wrap">
+        <button type="button" onclick="document.getElementById('exp-col-modal')?.remove()"
+          class="border rounded-lg px-4 py-2 text-sm text-gray-600 hover:bg-gray-50" style="min-height:44px">Cancel</button>
+        <button type="button" onclick="window._expModalDownload()" ${cols.length?'':'disabled'}
+          class="brand-btn px-4 py-2 rounded-lg text-sm font-semibold ${cols.length?'':'opacity-40 cursor-not-allowed'}" style="min-height:44px">
+          ⬇ Download CSV · ${s.rows.length} contact${s.rows.length!==1?'s':''}</button>
+      </div>
+    </div>`;
+};
+window._expModalDownload = () => {
+  const s = window._expModal; if(!s) return;
+  const cols = _expCols(s.ctx);
+  if(!cols.length){ showToast('Pick at least one column','error'); return; }
+  if(!s.rows.length){ showToast('No contacts to export','error'); return; }
+  _expDownload(_expBuildCsv(s.rows, cols), s.base);
+  document.getElementById('exp-col-modal')?.remove();
+  showToast(`Exported ${s.rows.length} contact${s.rows.length!==1?'s':''} · ${cols.length} column${cols.length!==1?'s':''}`, 'success');
+};
+/* end EXPCOLS-20261019 shared block */
+
 window.exportGroupCSV = () => {
   const gid = window._exportGroupId;
   const g   = allCRMGroups.find(x=>x.id===gid);
   if(!g){ showToast('Pick a group first','error'); return; }
   const rows = _exportGroupMembers(gid);
   if(rows.length===0){ showToast('That group has no contacts','error'); return; }
-  const esc = v => '"' + String(v==null?'':v).replace(/"/g,'""') + '"';
-  const csv = [
-    ['First Name','Last Name','Company','Email'].join(','),
-    ...rows.map(c => [c.firstName||'', c.lastName||'', c.company||'', (c.email||'').trim()].map(esc).join(','))
-  ].join('\r\n');
-  // Leading BOM so Excel reads accented names (José, Muñoz) instead of mojibake
-  const blob = new Blob(['﻿'+csv], {type:'text/csv;charset=utf-8'});
-  const safe = String(g.name||'group').replace(/[^\w\s-]/g,'').trim().replace(/\s+/g,'_').slice(0,60) || 'group';
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = safe + '_' + new Date().toISOString().slice(0,10) + '.csv';
-  document.body.appendChild(a); a.click(); a.remove();
-  setTimeout(()=>URL.revokeObjectURL(url), 1000);
-  showToast('Exported ' + rows.length + ' contact' + (rows.length!==1?'s':'') + ' from ' + g.name, 'success');
+  const cols = _expCols('group');   // EXPCOLS-20261019 — staff-picked columns (default = the original 4)
+  if(!cols.length){ showToast('Pick at least one column','error'); return; }
+  _expDownload(_expBuildCsv(rows, cols), g.name||'group');
+  showToast('Exported ' + rows.length + ' contact' + (rows.length!==1?'s':'') + ' from ' + g.name + ' · ' + cols.length + ' column' + (cols.length!==1?'s':''), 'success');
 };
 
 /* =======================================================
@@ -27776,15 +27947,16 @@ function viewExportContacts(){
   const gid     = window._exportGroupId;
   const g       = groups.find(x=>x.id===gid) || null;
   const rows    = _exportGroupMembers(gid);
-  const noEmail = rows.filter(c=>!String(c.email||'').trim()).length;
+  const cols    = _expCols('group');   // EXPCOLS-20261019
+  const miss    = _expMissingNote(rows, cols);
   const PREVIEW = 50;
-  const ready   = !!g && rows.length>0;
+  const ready   = !!g && rows.length>0 && cols.length>0;
 
   setContent(`
     <div class="flex items-center justify-between mb-6 flex-wrap gap-3">
       <div>
         <h2 class="text-xl font-bold text-gray-800">\U0001f4e4 Export</h2>
-        <p class="text-sm text-gray-500 mt-0.5">Name tags &amp; e-vites — pick a group, download name, company and email.</p>
+        <p class="text-sm text-gray-500 mt-0.5">Name tags, e-vites, mailing &amp; call lists — pick a group, pick the columns, download.</p>
       </div>
     </div>
 
@@ -27803,8 +27975,9 @@ function viewExportContacts(){
           class="brand-btn px-4 py-2 rounded-lg text-sm font-semibold ${ready?'':'opacity-40 cursor-not-allowed'}"
           style="min-height:44px">⬇ Download CSV</button>
       </div>
-      <div class="text-xs text-gray-400 mt-3">
-        Four columns only — First Name, Last Name, Company, Email. Phone numbers, addresses, notes and deal history stay in the CRM.
+      <div class="border-t mt-4 pt-4">
+        <div class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Columns</div>
+        ${_expPickerHtml('group','tab')}
       </div>
     </div>
 
@@ -27821,25 +27994,20 @@ function viewExportContacts(){
       </div>` : `
       <div class="text-xs text-gray-400 mb-3">
         ${rows.length} contact${rows.length!==1?'s':''} in
-        <span class="font-semibold text-gray-600">${_expEsc(g.name)}</span>${noEmail?` · <span class="text-amber-600 font-semibold">${noEmail} with no email address</span> (exported with a blank email cell)`:''}
+        <span class="font-semibold text-gray-600">${_expEsc(g.name)}</span>${miss?` · <span class="text-amber-600 font-semibold">${miss}</span> (exported with blank cells)`:''}
       </div>
       <div class="bg-white rounded-2xl border overflow-x-auto">
         <table class="w-full text-sm">
           <thead>
             <tr class="border-b bg-gray-50 text-left text-xs text-gray-500 uppercase tracking-wide">
-              <th class="px-4 py-3 font-semibold">First Name</th>
-              <th class="px-4 py-3 font-semibold">Last Name</th>
-              <th class="px-4 py-3 font-semibold">Company</th>
-              <th class="px-4 py-3 font-semibold">Email</th>
+              ${cols.length?cols.map(c=>`<th class="px-4 py-3 font-semibold whitespace-nowrap">${_expEsc(c.label)}</th>`).join(''):`<th class="px-4 py-3 font-semibold">Pick at least one column above</th>`}
             </tr>
           </thead>
           <tbody class="divide-y divide-gray-100">
             ${rows.slice(0,PREVIEW).map(c=>`
               <tr class="export-row hover:bg-gray-50">
-                <td class="px-4 py-3 text-gray-800">${_expEsc(c.firstName)}</td>
-                <td class="px-4 py-3 text-gray-800">${_expEsc(c.lastName)}</td>
-                <td class="px-4 py-3 text-gray-600">${_expEsc(c.company)}</td>
-                <td class="px-4 py-3 ${String(c.email||'').trim()?'text-gray-600':'text-amber-600 italic'}">${String(c.email||'').trim()?_expEsc(c.email):'no email'}</td>
+                ${cols.map((col,ci)=>{ const val=String(col.v(c)==null?'':col.v(c)).trim();
+                  return `<td class="px-4 py-3 ${val?(ci===0?'text-gray-800':'text-gray-600'):'text-amber-600 italic'}">${val?_expEsc(val):(['email','phone','officePhone','street','city','state','zip','fullAddress'].includes(col.k)?'—':'')}</td>`; }).join('')}
               </tr>`).join('')}
           </tbody>
         </table>
@@ -31460,23 +31628,10 @@ window.crmDoImport = async () => {
 };
 
 // ── CSV Export ─────────────────────────────────────────────────────
-window.crmExportCSV = () => {
+window.crmExportCSV = () => {   // EXPCOLS-20261019 — opens the column picker (default = the original 12 columns)
   if(allContacts.length===0){ showToast('No contacts to export','error'); return; }
-  const headers = ['First Name','Last Name','Title','Company','Email','Secondary Email','Phone','Source','Groups','Linked Deals','Notes','Created'];
-  const rows = allContacts.map(c=>{
-    const groups = (c.groups||[]).map(gid=>allCRMGroups.find(x=>x.id===gid)?.name||gid).join('; ');
-    const deals  = (c.linkedDeals||[]).map(did=>{ const d=allDeals.find(x=>x.id===did); return d?(d.projectName||d.propertyAddress||'Deal'):''; }).filter(Boolean).join('; ');
-    const created = c.createdAt ? new Date(c.createdAt).toLocaleDateString() : '';
-    const esc = v => `"${(v||'').toString().replace(/"/g,'""')}"`;
-    return [c.firstName,c.lastName,c.title,c.company,c.email,c.email2||'',c.phone,c.source,groups,deals,c.notes,created].map(esc).join(',');
-  });
-  const csv = [headers.join(','), ...rows].join('\n');
-  const blob = new Blob([csv], {type:'text/csv'});
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `contacts_${new Date().toISOString().slice(0,10)}.csv`;
-  a.click();
-  showToast(`Exported ${allContacts.length} contacts`,'success');
+  window.crmExportPicker({rows: allContacts.slice(), ctx:'all', title:'Export all contacts',
+    subtitle: allContacts.length+' contacts in the CRM', base:'contacts'});
 };
 
 // ── Company modal ───────────────────────────────────────────────────
@@ -40346,7 +40501,7 @@ window.exportGroupsCSV = () => {
       <div style="padding:18px 20px 14px;border-bottom:1px solid #f1f5f9;display:flex;align-items:center;justify-content:space-between;">
         <div>
           <div style="font-size:15px;font-weight:700;color:#111;">⬇ Export Group as CSV</div>
-          <div style="font-size:12px;color:#64748b;margin-top:2px;">Select a group to download: Name, Company, Email</div>
+          <div style="font-size:12px;color:#64748b;margin-top:2px;">Select a group, then choose the columns to download</div>
         </div>
         <button onclick="document.getElementById('export-group-modal')?.remove()"
           style="width:28px;height:28px;border-radius:50%;border:1px solid #e2e8f0;background:#f8fafc;font-size:14px;cursor:pointer;color:#64748b;">✕</button>
@@ -40368,21 +40523,15 @@ window.exportGroupsCSV = () => {
   modal.addEventListener('click', e => { if(e.target===modal) modal.remove(); });
 };
 
-window._doExportGroupCSV = gid => {
+window._doExportGroupCSV = gid => {   // EXPCOLS-20261019 — group picked → choose columns
   document.getElementById('export-group-modal')?.remove();
   const g = (allCRMGroups||[]).find(x=>x.id===gid);
   if(!g){ showToast('Group not found','error'); return; }
-  const members = (allContacts||[]).filter(c=>(c.groups||[]).includes(gid));
-  const hdr = ['First Name','Last Name','Company','Email'];
-  const rows = members.map(c => [c.firstName||'', c.lastName||'', c.company||'', c.email||'']
-    .map(v=>`"${String(v).replace(/"/g,'""')}"`).join(','));
-  const csv = [hdr.join(','), ...rows].join('\n');
-  const blob = new Blob([csv], {type:'text/csv'});
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `${(g.name||'group').replace(/[^a-zA-Z0-9_-]/g,'-')}.csv`;
-  a.click();
-  showToast(`Exported ${members.length} contact${members.length!==1?'s':''} from "${g.name}"`, 'success');
+  const key = c => String(c.lastName||c.firstName||c.company||c.email||'').toLowerCase();
+  const members = (allContacts||[]).filter(c=>(c.groups||[]).includes(gid)).sort((a,b)=>key(a).localeCompare(key(b)));
+  if(!members.length){ showToast('That group has no contacts','error'); return; }
+  window.crmExportPicker({rows: members, ctx:'group', title:'Export '+(g.name||'group'),
+    subtitle: members.length+' contact'+(members.length!==1?'s':'')+' in this group', base: g.name||'group'});
 };
 
 window.exportCSV = () => {
