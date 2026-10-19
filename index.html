@@ -43050,6 +43050,7 @@ function viewDocuments(arg) {
     <div class="dl-search">
       <input id="dl-q" type="search" placeholder='Try "co-broke 3%", "NDA for a lender", "urgency list", "lien"' value="${dlEsc(dlState.q)}" oninput="dlSearch(this.value)" aria-label="Search forms" autocomplete="off">
       <button class="dl-btn primary" id="dl-wizbtn" onclick="dlWizOpen()">🧭 Which form do I need?</button>
+      <button class="dl-btn" id="dl-invbtn" onclick="dlInvOpen()" title="Same commission invoice the deal card makes at Closing">🧾 Commission invoice</button>
     </div>
     <div class="dl-chips" id="dl-chips"></div>
     <div class="dl-grid">
@@ -43086,6 +43087,7 @@ function dlRenderResults() {
   const fd = DOCLIB.folders.find(f => f.id === dlState.folder);
   const fname = dlState.folder === 'all' ? 'All forms' : (fd ? fd.name : dlState.folder.split('/').pop());
   let h = `<div class="dl-rhead"><span>${dlEsc(fname)}${dlState.q ? ' · matching “' + dlEsc(dlState.q) + '”' : ''}</span><span>${list.length} form${list.length === 1 ? '' : 's'}</span></div>`;
+  if (/invoice|bill|brokerage fee/i.test(dlState.q)) h += `<button class="dl-card dl-invcard" onclick="dlInvOpen()"><span class="dl-code">INVOICE</span><h3>🧾 Commission Invoice</h3><p>Word invoice on ELC letterhead + W-9 and wire instructions — the same one the deal card makes at Closing.</p></button>`;   // DOCINVOICE-20261019
   if (!list.length) h += '<div class="dl-empty">No form matches. Try fewer words, or use <b>Which form do I need?</b></div>';
   if (!dlState.sel || !list.some(f => f.code === dlState.sel)) dlState.sel = list[0] ? list[0].code : null;
   list.forEach(f => {
@@ -43328,6 +43330,168 @@ async function dlGenFromProperty(code, dealId, sel) {
   }
 }
 /* ===== end DOCGENPROP-20261016 ===== */
+
+// ── DOCINVOICE-20261019 — 🧾 Commission Invoice from the Documents tab ───────
+// Same generator the deal card uses at Closing (window.generateCommissionInvoice):
+// same Word invoice + letterhead, same W-9 / wire-instruction downloads, same
+// "Send commission invoice to escrow" task with the Gmail draft link. This just
+// lets anyone start it here — pick a property (numbers prefill from the deal
+// card and stay editable) or type it in for a deal that isn't on Terra.
+function dlInvDeals() {
+  const deals = (typeof allDeals !== 'undefined' ? allDeals : []) || [];
+  const u = currentUser;
+  return deals.filter(d => d && !d.deleted && !d.archived && (!u || u.isAdmin || u.isOfficeManager || u.isStaff
+    || (typeof isDealAdvisor === 'function' ? isDealAdvisor(d, u.uid) : d.advisorUid === u.uid)));
+}
+function dlInvOptions() {
+  const list = dlInvDeals();
+  const order = ['Closing', 'Due Diligence (Under Contract)', 'Signed LOI/Contract Drafting', 'Closed Won', 'LOI', 'Listing', 'Prospect', 'Buyer Opportunities', 'Closed Lost'];
+  const groups = {};
+  list.forEach(d => { const g = d.stage || 'Other'; (groups[g] = groups[g] || []).push(d); });
+  const keys = Object.keys(groups).sort((a, b) => {
+    const ia = order.indexOf(a), ib = order.indexOf(b);
+    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || a.localeCompare(b);
+  });
+  return '<option value="">— Not on Terra / enter it by hand —</option>' + keys.map(g =>
+    '<optgroup label="' + agEsc(g) + '">' + groups[g].slice().sort((a, b) => dlPropLabel(a).localeCompare(dlPropLabel(b)))
+      .map(d => '<option value="' + agEsc(d.id) + '">' + agEsc(dlPropLabel(d)) + '</option>').join('') + '</optgroup>').join('');
+}
+const DL_INV_FIELDS = [
+  ['projectName', 'Project / property name', 'text', true],
+  ['purchasePrice', 'Sale price ($)', 'money', true],
+  ['elcCommissionPct', 'ELC commission %', 'pct', true],
+  ['closeDate', 'Closing date', 'date', false],
+  ['ownershipEntity', 'Seller entity (bill to)', 'text', true],
+  ['contactPerson', 'Seller contact', 'text', false],
+  ['contactEmail', 'Seller email', 'email', false],
+  ['buyer', 'Buyer', 'text', false],
+  ['escrowAgent', 'Escrow / title agent', 'text', false],
+  ['escrowAgentEmail', 'Escrow email', 'email', false],
+  ['advisorName', 'Signed by (advisor)', 'text', false],
+];
+let dlInvDealId = '';
+function dlInvNum(v) { const n = parseFloat(String(v == null ? '' : v).replace(/[^0-9.]/g, '')); return isNaN(n) ? 0 : n; }
+function dlInvFmtPrice(el) {
+  const raw = String(el.value || '').replace(/[^0-9.]/g, ''); if (!raw) { el.value = ''; return; }
+  const [w, f] = raw.split('.'); const pos = el.selectionStart, before = el.value.length;
+  el.value = Number(w || 0).toLocaleString('en-US') + (f !== undefined ? '.' + f.slice(0, 2) : '');
+  try { const p = Math.max(0, pos + (el.value.length - before)); el.setSelectionRange(p, p); } catch (e) {}
+}
+function dlInvFieldsHtml(deal) {
+  deal = deal || {};
+  const val = k => {
+    if (k === 'purchasePrice') { const n = dlInvNum(deal.purchasePrice || deal.contractPrice); return n ? n.toLocaleString('en-US') : ''; }
+    if (k === 'elcCommissionPct') return deal.elcCommissionPct || deal.commissionPct || '';
+    if (k === 'projectName') return deal.projectName || deal.propertyAddress || '';
+    if (k === 'buyer') return deal.buyer || deal.loiBuyer || '';
+    if (k === 'advisorName') return deal.advisorName || (deal.id ? '' : (currentUser && (currentUser.name || currentUser.displayName)) || '');
+    return deal[k] || '';
+  };
+  return DL_INV_FIELDS.map(([k, label, type, req]) => {
+    const id = 'dl-inv-' + k, v = agEsc(String(val(k)));
+    const attrs = type === 'money' ? 'type="text" inputmode="decimal" oninput="dlInvFmtPrice(this);dlInvRecalc()"'
+      : type === 'pct' ? 'type="text" inputmode="decimal" oninput="dlInvRecalc()"'
+      : 'type="' + type + '"';
+    return '<div class="ag-fld"><label class="ag-fieldlabel" for="' + id + '">' + label + (req ? ' <span class="ag-req">*</span>' : '') + '</label>'
+      + '<input id="' + id + '" class="ag-input dl-inv-in" ' + attrs + ' value="' + v + '" autocomplete="off"></div>';
+  }).join('');
+}
+function dlInvRecalc() {
+  const price = dlInvNum((document.getElementById('dl-inv-purchasePrice') || {}).value);
+  const pct = dlInvNum((document.getElementById('dl-inv-elcCommissionPct') || {}).value);
+  const out = document.getElementById('dl-inv-amt'); if (!out) return;
+  out.textContent = (price && pct) ? fmt$(Math.round(price * pct / 100)) : '—';
+  const note = document.getElementById('dl-inv-amtnote');
+  if (note) note.textContent = (price && pct) ? pct + '% of ' + fmt$(price) : 'Enter the sale price and commission %';
+}
+function dlInvOpen(dealId) {
+  dlInvDealId = '';
+  let ov = document.getElementById('dl-inv');
+  if (ov) ov.remove();
+  ov = document.createElement('div'); ov.id = 'dl-inv';
+  ov.className = 'fixed inset-0 z-50 flex items-center justify-center p-4';
+  ov.style.background = 'rgba(10,20,20,.45)';
+  ov.setAttribute('role', 'dialog'); ov.setAttribute('aria-modal', 'true'); ov.setAttribute('aria-labelledby', 'dl-inv-h');
+  ov.addEventListener('click', e => { if (e.target === ov) dlInvClose(); });
+  ov.addEventListener('keydown', e => { if (e.key === 'Escape') dlInvClose(); });
+  ov.innerHTML = `<div class="dl-wiz dl-inv-box">
+    <h3 id="dl-inv-h">🧾 Commission Invoice</h3>
+    <p class="dl-sub" style="margin:-4px 0 12px">The same invoice the deal card makes at Closing — Word invoice on ELC letterhead, plus the W-9 and wire instructions. Pick the property and check the numbers; every field stays editable.</p>
+    <div class="ag-fld"><label class="ag-fieldlabel" for="dl-inv-deal">Property</label>
+      <select id="dl-inv-deal" class="ag-select" style="max-width:none;font-size:16px;min-height:44px" onchange="dlInvPick(this.value)">${dlInvOptions()}</select></div>
+    <div id="dl-inv-override" class="dl-dont" style="display:none;margin-bottom:10px"></div>
+    <div class="dl-inv-grid" id="dl-inv-fields">${dlInvFieldsHtml(null)}</div>
+    <div class="dl-inv-total"><div><div class="ag-fieldlabel" style="margin:0">Invoice amount</div><div id="dl-inv-amtnote" class="dl-path"></div></div><div id="dl-inv-amt" class="dl-inv-amt">—</div></div>
+    <label class="dl-inv-task" id="dl-inv-tasklbl"><input type="checkbox" id="dl-inv-task" checked disabled> <span id="dl-inv-tasktxt">Pick a property to also create the “Send commission invoice to escrow” task (with the Gmail draft link)</span></label>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px;flex-wrap:wrap">
+      <button class="dl-btn" onclick="dlInvClose()">Cancel</button>
+      <button class="dl-btn primary" id="dl-inv-go" onclick="dlInvGenerate(this)">📄 Generate invoice</button>
+    </div></div>`;
+  document.body.appendChild(ov);
+  if (dealId) { const s = document.getElementById('dl-inv-deal'); if (s) s.value = dealId; dlInvPick(dealId); }
+  dlInvRecalc();
+  setTimeout(() => { const s = document.getElementById('dl-inv-deal'); if (s) s.focus(); }, 20);
+}
+function dlInvClose() { const ov = document.getElementById('dl-inv'); if (ov) ov.remove(); const b = document.getElementById('dl-invbtn'); if (b) b.focus(); }
+function dlInvPick(id) {
+  dlInvDealId = id || '';
+  const deal = id ? dlInvDeals().find(d => d.id === id) : null;
+  const box = document.getElementById('dl-inv-fields'); if (box) box.innerHTML = dlInvFieldsHtml(deal);
+  const cb = document.getElementById('dl-inv-task'), txt = document.getElementById('dl-inv-tasktxt');
+  if (cb) { cb.disabled = !deal; cb.checked = true; }
+  if (txt) txt.textContent = deal ? 'Also create the “Send commission invoice to escrow” task on this deal (with the Gmail draft link)'
+    : 'Pick a property to also create the “Send commission invoice to escrow” task (with the Gmail draft link)';
+  const ov = document.getElementById('dl-inv-override');
+  const og = deal ? dlInvNum(deal.commissionOverrideGross) : 0;
+  if (ov) {
+    ov.style.display = og ? '' : 'none';
+    ov.innerHTML = og ? '<b>Heads up:</b> this deal has a hand-entered gross commission of ' + fmt$(og) + ' (Confirm Closing). The invoice bills sale price × commission % — adjust the numbers below if the invoice should match it.' : '';
+  }
+  dlInvRecalc();
+}
+async function dlInvGenerate(btn) {
+  const get = k => String((document.getElementById('dl-inv-' + k) || {}).value || '').trim();
+  const missing = DL_INV_FIELDS.filter(f => f[3] && !get(f[0])).map(f => f[1]);
+  const pct = dlInvNum(get('elcCommissionPct')), price = dlInvNum(get('purchasePrice'));
+  if (missing.length) { showToast('Fill in: ' + missing.join(', '), 'warning', 5000); const el = document.getElementById('dl-inv-' + DL_INV_FIELDS.find(f => f[3] && !get(f[0]))[0]); if (el) el.focus(); return; }
+  if (pct > 100) { showToast('Commission % can’t be over 100', 'warning'); return; }
+  if (!price || !pct) { showToast('Sale price and commission % must be numbers above zero', 'warning'); return; }
+  const base = dlInvDealId ? (dlInvDeals().find(d => d.id === dlInvDealId) || {}) : {};
+  const merged = { ...base };
+  DL_INV_FIELDS.forEach(([k]) => { const v = get(k); if (v) merged[k] = v; });
+  merged.purchasePrice = price; merged.elcCommissionPct = pct;
+  if (base.id) merged.id = base.id;
+  const makeTask = !!(base.id && (document.getElementById('dl-inv-task') || {}).checked);
+  const restore = (typeof elcBusy === 'function' && btn) ? elcBusy(btn, 'Generating…') : null;
+  try {
+    window.generateCommissionInvoice(merged, !makeTask);   // openOnly=true → download only, no task
+    if (!makeTask) showToast('📄 Word invoice downloaded' + (base.id ? '' : ' — not linked to a Terra deal, so no task was created'), 'success', 5000);
+    dlInvClose();
+  } catch (e) {
+    console.error('[doclib] commission invoice', e);
+    showToast('Couldn’t build the invoice: ' + (e.message || e), 'error', 6000);
+  } finally { if (restore) restore(); }
+}
+(function dlInvStyles() {
+  if (document.getElementById('dl-inv-styles')) return;
+  const s = document.createElement('style'); s.id = 'dl-inv-styles';
+  s.textContent = `
+  .dl-inv-box{max-width:640px}
+  .dl-inv-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);column-gap:14px}
+  .dl-inv-grid .ag-input{padding-left:11px;font-size:16px;min-height:44px}
+  @media(max-width:640px){.dl-inv-grid{grid-template-columns:minmax(0,1fr)}}
+  .dl-inv-total{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 14px;border:1px solid #00b2a9;border-radius:10px;background:rgba(0,178,169,.06);margin-top:2px}
+  .dl-inv-amt{font-size:1.35rem;font-weight:800;color:var(--text-1);font-variant-numeric:tabular-nums}
+  .dl-inv-task{display:flex;gap:8px;align-items:flex-start;margin-top:12px;font-size:.84rem;color:var(--text-1);cursor:pointer;min-height:44px}
+  .dl-inv-task input{width:18px;height:18px;margin-top:2px;flex:none;accent-color:#00b2a9}
+  .dl-inv-task input:disabled+span{color:var(--text-3)}
+  .dl-invcard{border-style:dashed}
+  html.dark .dl-inv-total{border-color:#2dd4bf;background:rgba(45,212,191,.08)}
+  `;
+  document.head.appendChild(s);
+})();
+window.dlInvOpen = dlInvOpen; window.dlInvClose = dlInvClose; window.dlInvPick = dlInvPick; window.dlInvGenerate = dlInvGenerate; window.dlInvRecalc = dlInvRecalc; window.dlInvFmtPrice = dlInvFmtPrice;
+/* ===== end DOCINVOICE-20261019 ===== */
 
 
 
