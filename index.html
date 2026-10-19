@@ -1832,6 +1832,20 @@ html.dark .deal-search-empty{ color:#A6ADBA !important; }
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="ELC">
 <link rel="apple-touch-icon" href="/advisor-dashboard/icon-192.png">
+<style id="taxdist-css">
+/* TAXDIST-20261019 — Site Research jurisdiction card */
+.sr-juri-warn{margin:.45rem 0 .2rem;padding:.45rem .55rem;border-radius:7px;font-size:.74rem;line-height:1.45;color:#78350f;background:#fef3c7;border:1px solid #fcd34d}
+.sr-juri-links{display:flex;flex-direction:column;gap:.15rem;margin-top:.5rem}
+.sr-juri-links a{display:flex;align-items:center;gap:.3rem;min-height:32px;padding:.3rem .45rem;border-radius:6px;font-size:.76rem;font-weight:600;color:#1d4ed8;text-decoration:none}
+.sr-juri-links a:hover{background:#eff6ff}
+.sr-juri-links a:focus-visible{outline:2px solid #2563eb;outline-offset:1px}
+.sr-juri-links a span{color:#6b7280;font-size:.7rem;font-weight:400}
+@media (pointer:coarse){.sr-juri-links a{min-height:44px}}
+html.dark .sr-juri-warn{color:#fde68a;background:rgba(245,158,11,.14);border-color:rgba(245,158,11,.45)}
+html.dark .sr-juri-links a{color:#93c5fd}
+html.dark .sr-juri-links a:hover{background:rgba(59,130,246,.16)}
+html.dark .sr-juri-links a span{color:var(--text-3,#9ca3af)}
+</style>
 </head>
 <body class="min-h-screen" style="background:var(--bg);color:var(--text-1)">
 
@@ -4521,7 +4535,7 @@ async function _prPA_FL_Statewide(county, address, parcelId, pt){
     // reject EVERY request with HTTP 400 ("'outFields' parameter is invalid"),
     // so this statewide fallback — the path for 57 of Florida's 67 counties —
     // had never once returned a record. Verified field list, 2026-09-02.
-    const fields = 'PARCEL_ID,OWN_NAME,OWN_ADDR1,OWN_ADDR2,OWN_CITY,OWN_STATE,OWN_ZIPCD,PHY_ADDR1,PHY_CITY,PHY_ZIPCD,JV,AV_NSD,LND_VAL,Acres,S_LEGAL,SALE_PRC1,SALE_YR1,SALE_MO1,SALE_PRC2,SALE_YR2,SALE_MO2,TOT_LVG_AR,NO_BULDNG,EFF_YR_BLT,ACT_YR_BLT,DOR_UC,LU,CountyName,ASMNT_YR,TWN,RNG,SEC,Wetlands,SourceDate,Latitude,Longitude';
+    const fields = 'PARCEL_ID,OWN_NAME,OWN_ADDR1,OWN_ADDR2,OWN_CITY,OWN_STATE,OWN_ZIPCD,PHY_ADDR1,PHY_CITY,PHY_ZIPCD,JV,AV_NSD,LND_VAL,Acres,S_LEGAL,SALE_PRC1,SALE_YR1,SALE_MO1,SALE_PRC2,SALE_YR2,SALE_MO2,TOT_LVG_AR,NO_BULDNG,EFF_YR_BLT,ACT_YR_BLT,DOR_UC,LU,CountyName,ASMNT_YR,TWN,RNG,SEC,Wetlands,SourceDate,Latitude,Longitude,TAX_AUTH_C';
 
     let url;
     if(pt && pt.lat!=null && pt.lon!=null){
@@ -4596,6 +4610,8 @@ async function _prPA_FL_Statewide(county, address, parcelId, pt){
       assessedValue: a.AV_NSD ? '$'+Number(a.AV_NSD).toLocaleString() : null,
       landValue: a.LND_VAL ? '$'+Number(a.LND_VAL).toLocaleString() : null,
       taxDistrict: mun,
+      // TAXDIST-20261019: the PA's own taxing-district code (what the PA page shows).
+      taxAuthCode: (a.TAX_AUTH_C!=null && String(a.TAX_AUTH_C).trim()) ? String(a.TAX_AUTH_C).trim() : null,
       structures,
       salesHistory,
       taxYear: a.ASMNT_YR ? String(a.ASMNT_YR) : null,
@@ -4769,27 +4785,190 @@ function _vcCard(emoji, title, rowsHtml, footHtml){
   </div>`;
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+   TAXDIST-20261019 — TAXING DISTRICT → MUNICIPALITY → MUNICODE
+   The property appraiser's taxing district says which government taxes the
+   parcel, and therefore whose land development code governs it. Inside a city
+   limit the county zoning layer is silent, so without this a broker was left
+   guessing which code book to open.
+   Two independent sources, cross-checked:
+     1. PA taxing-district code (FDOR roll TAX_AUTH_C — the same code the
+        property appraiser page shows), decoded by _FL_TAXDIST_CITY.
+     2. Census incorporated-place boundary at the pin (TIGERweb, current).
+   Agreement → confirmed. Disagreement → shown with a warning, never hidden.
+   Municode links come from a verified client list (api.municode.com), never
+   from a guessed slug.
+   ═══════════════════════════════════════════════════════════════════════════ */
+// TAXDIST-20261019 — PA taxing-district code (FDOR TAX_AUTH_C) → municipality, per county.
+// Built 2026-10-19 by sampling every incorporated place in Florida (Census TIGERweb) against the
+// FDOR parcel roll; a code is listed only when >=85% of >=3 samples agreed. A code NOT listed here
+// still resolves through the Census city-limits check at the pin — this table is the cross-check.
+const _FL_TAXDIST_CITY = {"Alachua":{"7600":"Micanopy","9700":"Waldo","6700":"La Crosse","4600":"Hawthorne","2700":"Archer","5700":"High Springs","1700":"Alachua","8700":"Newberry","3600":"Gainesville"},"Baker":{"GL":"Glen St. Mary","MC":"Macclenny"},"Bay":{"10":"Parker","08":"Mexico Beach","20":"Springfield","02":"Callaway","06":"Lynn Haven","13":"Panama City Beach","16":"Panama City"},"Bradford":{"1":"Brooker","2":"Hampton","3":"Lawtey","5":"Starke"},"Brevard":{"51R0":"Melbourne Village","43J0":"Palm Shores","34X0":"Melbourne Beach","54S0":"Indialantic","41P0":"Indian Harbour Beach","41M0":"Satellite Beach","26G0":"Cape Canaveral","26H0":"Cocoa Beach","34V0":"West Melbourne","34Z0":"Malabar","23D0":"Cocoa","23E0":"Rockledge","34L0":"Grant-Valkaria","14A0":"Titusville","34U0":"Palm Bay","53K0":"Melbourne"},"Broward":{"0312":"Fort Lauderdale","0912":"Wilton Manors","1812":"Lazy Lake","0211":"Lauderdale-by-the-Sea","0311":"Fort Lauderdale","1611":"Sea Ranch Lakes","1411":"Lighthouse Point","1311":"Hillsboro Beach","3513":"West Park","0613":"Pembroke Park","2012":"Lauderdale Lakes","2513":"Hallandale Beach","2912":"North Lauderdale","0413":"Dania Beach","1013H":"Cooper City","2413H":"Davie","1712":"Oakland Park","1212":"Margate","1912":"Lauderhill","3212I":"Coconut Creek","3413":"Southwest Ranches","3012":"Parkland","3112":"Tamarac","2112":"Sunrise","1112A":"Deerfield Beach","1512B":"Pompano Beach","2212N":"Plantation","2812":"Coral Springs","2412H":"Davie","2613":"Pembroke Pines","3312":"Weston","2713":"Miramar","0513":"Hollywood"},"Calhoun":{"1":"Altha","2":"Blountstown"},"Charlotte":{"0155":"Punta Gorda","0104":"Punta Gorda"},"Citrus":{"0000":"Crystal River","000R":"Crystal River","000T":"Inverness"},"Clay":{"003":"Keystone Heights","005":"Penney Farms","004":"Orange Park","002":"Green Cove Springs"},"Collier":{"0015":"Everglades","0282":"Naples","0058":"Marco Island"},"Columbia":{"4":"Fort White","1":"Lake City"},"DeSoto":{"1":"Arcadia"},"Dixie":{"HB":"Horseshoe Beach","CC":"Cross City"},"Duval":{"USD5":"Baldwin","USD4":"Neptune Beach","USD3":"Atlantic Beach","USD2":"Jacksonville Beach","USD1":"Jacksonville"},"Escambia":{"F":"Century","X":"Pensacola"},"Flagler":{"041":"Beverly Beach","032":"Marineland","031":"Marineland","021":"Flagler Beach","013":"Bunnell","061":"Palm Coast"},"Franklin":{"3":"Apalachicola","2":"Carrabelle"},"Gadsden":{"002":"Greensboro","003":"Gretna","004":"Havana","001":"Chattahoochee","005":"Midway","006":"Quincy"},"Gilchrist":{"1":"Bell","3":"Trenton","2":"Fanning Springs"},"Glades":{"07":"Moore Haven"},"Gulf":{"3":"Wewahitchka","5":"Port St. Joe"},"Hamilton":{"3":"White Springs","2":"Jennings","1":"Jasper"},"Hardee":{"901":"Bowling Green","903":"Zolfo Springs","902":"Wauchula"},"Hendry":{"15C":"Clewiston","10":"LaBelle"},"Hernando":{"CWBE":"Brooksville"},"Highlands":{"50":"Lake Placid","10":"Avon Park","20":"Sebring"},"Hillsborough":{"TT":"Temple Terrace","PC":"Plant City","TA":"Tampa"},"Holmes":{"4":"Noma","3":"Esto","2":"Bonifay","5":"Ponce de Leon","6":"Westville"},"Indian River":{"6":"Indian River Shores","8":"Vero Beach","2":"Sebastian","4":"Fellsmere"},"Jackson":{"2":"Bascom","1":"Alford","3":"Campbellton","9":"Jacob City","11":"Malone","4":"Cottondale","12":"Sneads","6":"Graceville","7":"Greenwood","5":"Grand Ridge","10":"Marianna"},"Jefferson":{"1":"Monticello"},"Lafayette":{"MA":"Mayo"},"Lake":{"00MV":"Montverde","000H":"Howey-in-the-Hills","000A":"Astatula","00U1":"Umatilla","VOFP":"Fruitland Park","000F":"Fruitland Park","0MD2":"Mount Dora","00MD":"Mount Dora","00LL":"Lady Lake","0MI2":"Minneola","00MA":"Mascotte","00E1":"Eustis","000T":"Tavares","00GR":"Groveland","000C":"Clermont"},"Lee":{"032":"Fort Myers Beach","050":"Sanibel","010":"Sanibel","017":"Bonita Springs","311":"Bonita Springs","316":"Estero","057":"Cape Coral","090":"Fort Myers"},"Leon":{"1":"Tallahassee"},"Levy":{"CK":"Cedar Key","OC":"Otter Creek","IN":"Inglis","BRSR":"Bronson","BRSW":"Bronson","FS":"Fanning Springs","CH":"Chiefland","WI":"Williston"},"Liberty":{"2":"Bristol"},"Madison":{"3":"Greenville","2":"Lee","1":"Madison"},"Manatee":{"0025":"Bradenton Beach","0023":"Anna Maria","0024":"Holmes Beach","0256":"Longboat Key","0019":"Palmetto","0021":"Bradenton"},"Marion":{"4001":"McIntosh","6001":"Reddick","2001":"Belleview","3002":"Dunnellon","1001":"Ocala"},"Martin":{"1400":"Ocean Breeze","2200":"Sewall's Point","4300":"Jupiter Island","3100":"Stuart","8018":"Indiantown"},"Miami-Dade":{"2600":"Virginia Gardens","0500":"Miami Springs","2800":"Aventura","1900":"Golden Beach","1800":"El Portal","0100":"Miami","1100":"Miami Shores","2100":"Indian Creek","1300":"Bay Harbor Islands","1200":"Bal Harbour","2300":"North Bay Village","1400":"Surfside","1700":"Biscayne Park","1500":"West Miami","3100":"Sunny Isles Beach","2400":"Key Biscayne","0900":"South Miami","2200":"Medley","2700":"Hialeah Gardens","0400":"Hialeah","2500":"Sweetwater","0800":"Opa-locka","0700":"North Miami Beach","3200":"Miami Lakes","1600":"Florida City","0200":"Miami Beach","2000":"Pinecrest","0600":"North Miami","3300":"Palmetto Bay","3600":"Cutler Bay","0300":"Coral Gables","1000":"Homestead","3500":"Doral","3400":"Miami Gardens"},"Monroe":{"50LA":"Layton","50KC":"Key Colony Beach","10KW":"Key West","50VI":"Islamorada, Village of Islands","50CM":"Marathon"},"Nassau":{"1":"Callahan","3":"Hilliard","2":"Fernandina Beach"},"Okaloosa":{"4":"Fort Walton Beach","2":"Cinco Bayou","7":"Shalimar","5":"Mary Esther","17":"Laurel Hill","10":"Destin","6":"Niceville","3":"Crestview"},"Okeechobee":{"50":"Okeechobee"},"Orange":{"EVL34":"Eatonville","EDG20":"Edgewood","ORG20":"Belle Isle","WND75":"Windermere","BI20":"Belle Isle","OAK65":"Oakland","LBV70":"Lake Buena Vista","MTL06":"Maitland","WP06":"Winter Park","WG65":"Winter Garden","OCO65":"Ocoee","BAY70":"Bay Lake","APK11":"Apopka","ORL08":"Orlando"},"Osceola":{"200":"Kissimmee","100":"St. Cloud"},"Palm Beach":{"14523":"Glen Ridge","10523":"Cloud Lake","74983":"West Palm Beach","08984":"Boynton Beach","09984":"Briny Breezes","46984":"Ocean Ridge","40534":"Lantana","62524":"South Palm Beach","30571":"Jupiter","32461":"Jupiter Inlet Colony","54401":"Palm Beach Shores","42984":"Manalapan","40537":"Lantana","26984":"Hypoluxo","24984":"Highland Beach","22482":"Haverhill","44407":"Mangonia Park","66984":"Golf","20984":"Gulf Stream","34523":"Lake Clarke Shores","02982":"Atlantis","60461":"Tequesta","28471":"Juno Beach","36507":"Lake Park","00116":"South Bay","68401":"North Palm Beach","50417":"Palm Beach","70453":"Palm Springs","48486":"Pahokee","18983":"Greenacres","38453":"Lake Worth Beach","38452":"Lake Worth Beach","77486":"Westlake","04486":"Belle Glade","56407":"Riviera Beach","72486":"Royal Palm Beach","41486":"Loxahatchee Groves","12987":"Delray Beach","08987":"Boynton Beach","06154":"Boca Raton","52401":"Palm Beach Gardens","73486":"Wellington","74407":"West Palm Beach"},"Pasco":{"SL":"St. Leo","SA":"San Antonio","PR":"Port Richey","NP":"New Port Richey","DC":"Dade City","ZH":"Zephyrhills"},"Pinellas":{"BB":"Belleair Beach","BS":"Belleair Shore","NRB":"North Redington Beach","RS":"Redington Shores","IS":"Indian Shores","RB":"Redington Beach","CW":"Clearwater","BBL":"Belleair Bluffs","SPA":"South Pasadena","KC":"Kenneth City","IRB":"Indian Rocks Beach","MB":"Madeira Beach","BL":"Belleair","SPB":"St. Pete Beach","GP":"Gulfport","HR":"Safety Harbor","SM":"Seminole","TS":"Tarpon Springs","OM":"Oldsmar","DN":"Dunedin","PPW":"Pinellas Park","LA":"Largo","SP":"St. Petersburg"},"Polk":{"90350":"Hillcrest Heights","90340":"Highland Park","90470":"Eagle Lake","90520":"Polk City","90450":"Lake Hamilton","91110":"Mulberry","90430":"Davenport","90210":"Fort Meade","90460":"Dundee","90220":"Frostproof","90440":"Lake Alfred","90420":"Haines City","90320":"Lake Wales","92410":"Winter Haven","90310":"Bartow","91510":"Lakeland"},"Putnam":{"050":"Welaka","020":"Crescent City","023":"Crescent City","040":"Pomona Park","030":"Interlachen","010":"Palatka"},"Saint Johns":{"551":"St. Augustine Beach","452":"St. Augustine"},"Saint Lucie":{"0009":"St. Lucie Village","0022":"Fort Pierce","0011":"Port St. Lucie"},"Santa Rosa":{"0002":"Jay","0001":"Gulf Breeze","0003":"Milton"},"Sarasota":{"M0300":"Venice","M0200":"Sarasota","M0500":"North Port"},"Seminole":{"L100":"Longwood","C100":"Casselberry","A100":"Altamonte Springs","M100":"Lake Mary","V100":"Oviedo","W100":"Winter Springs","S100":"Sanford"},"Sumter":{"3003":"Coleman","7007":"Center Hill","6006":"Bushnell","2002V":"Wildwood"},"Suwannee":{"CB":"Branford","LO":"Live Oak"},"Taylor":{"PE":"Perry"},"Union":{"3":"Raiford","4":"Worthington Springs","2":"Lake Butler"},"Volusia":{"403":"Daytona Beach Shores","401":"South Daytona","203":"Holly Hill","405":"Ponce Inlet","013":"Lake Helen","014":"Orange City","011":"Pierson","012":"DeLand","015":"DeBary","601":"New Smyrna Beach","201":"Ormond Beach","016":"Deltona","402":"Port Orange","604":"Edgewater","204":"Daytona Beach"},"Wakulla":{"1":"Sopchoppy","2":"St. Marks","4":"St. Marks"},"Walton":{"3":"Paxton","1":"DeFuniak Springs","2":"Freeport"},"Washington":{"5":"Wausau","4":"Caryville","2":"Chipley","3":"Vernon","6":"Ebro"}};
+const _FL_TAXDIST_UNINC = {"Alachua":["0300"],"Bay":["55"],"Bradford":["6"],"Clay":["001"],"Flagler":["001"],"Hardee":["900"],"Highlands":["40"],"Jackson":["15"],"Lake":["0001","0002"],"Martin":["6006"],"Miami-Dade":["3000"],"Orange":["ORG65","ORG75"],"Palm Beach":["00354"],"Pasco":["UF"],"Pinellas":["STFU"],"Polk":["90000","91000"],"Seminole":["0100"],"Union":["1"],"Volusia":["600"]};
+// Municode Library clients in Florida — [clientId, code product slug]. Pulled from api.municode.com
+// 2026-10-19. Product is the land development / zoning code where the client publishes one separately,
+// otherwise the Code of Ordinances. URL slug = client name lower-cased, spaces → underscores.
+const _FL_MUNICODE_CLIENTS = {"Alachua":[961,"code_of_ordinances"],"Alachua County":[20,"code_of_ordinances"],"Altamonte Springs":[1001,"land_development_code"],"Anna Maria":[1039,"code_of_ordinances"],"Apalachicola":[1051,"code_of_ordinances"],"Apopka":[1052,"code_of_ordinances"],"Arcadia":[11594,"code_of_ordinances"],"Archer":[18885,"code_of_ordinances"],"Astatula":[8029,"code_of_ordinances"],"Atlantic Beach":[1095,"code_of_ordinances"],"Atlantis":[1097,"code_of_ordinances"],"Auburndale":[1108,"code_of_ordinances"],"Aventura":[1117,"code_of_ordinances"],"Avon Park":[1121,"code_of_ordinances"],"Baker County":[16169,"code_of_ordinances"],"Bal Harbour":[10212,"code_of_ordinances"],"Baldwin":[8053,"code_of_ordinances"],"Bartow":[1167,"code_of_ordinances"],"Bay County":[190,"code_of_ordinances"],"Bay Harbor Islands":[8073,"code_of_ordinances"],"Belle Glade":[1222,"code_of_ordinances"],"Belle Isle":[1223,"code_of_ordinances"],"Belleair":[8090,"code_of_ordinances"],"Belleair Beach":[1226,"code_of_ordinances"],"Belleair Bluffs":[1227,"code_of_ordinances"],"Belleair Shore":[12715,"code_of_ordinances"],"Belleview":[1230,"code_of_ordinances"],"Beverly Beach":[12718,"code_of_ordinances"],"Biscayne Park":[10247,"code_of_ordinances"],"Blountstown":[1317,"code_of_ordinances"],"Boca Raton":[1331,"code_of_ordinances"],"Bonita Springs":[12773,"code_of_ordinances"],"Bowling Green":[1364,"code_of_ordinances"],"Boynton Beach":[1369,"code_of_ordinances"],"Bradenton":[1372,"code_of_ordinances"],"Bradenton Beach":[1373,"code_of_ordinances"],"Bradford County":[12086,"code_of_ordinances"],"Branford":[12160,"code_of_ordinances"],"Brevard County":[683,"code_of_ordinances"],"Bronson":[8186,"code_of_ordinances"],"Brooksville":[1434,"code_of_ordinances"],"Broward County":[713,"code_of_ordinances"],"Broward County Board of Rules and Appeals":[12263,"the_florida_building_code"],"Bunnell":[1464,"land_development_code"],"Bushnell":[1475,"code_of_ordinances"],"Callaway":[1495,"code_of_ordinances"],"Cape Canaveral":[1520,"code_of_ordinances"],"Cape Coral":[1521,"code_of_ordinances"],"Carrabelle":[1540,"code_of_ordinances"],"Casselberry":[1557,"code_of_ordinances"],"Cedar Key":[13301,"code_of_ordinances"],"Center Hill":[1576,"land_development_code"],"Century":[8286,"code_of_ordinances"],"Charlotte County":[878,"code_of_ordinances"],"Chattahoochee":[1607,"code_of_ordinances"],"Chiefland":[1633,"land_development_code"],"Children's Trust of Alachua County":[20469,"code_of_ordinances"],"Chipley":[1640,"code_of_ordinances"],"Cinco Bayou":[8329,"code_of_ordinances"],"Citrus County":[932,"code_of_ordinances"],"Clay County":[11352,"code_of_ordinances"],"Clearwater":[1675,"community_development_code"],"Clermont":[1678,"code_of_ordinances"],"Clewiston":[1681,"code_of_ordinances"],"Cloud Lake":[16622,"code_of_ordinances"],"Cocoa":[1700,"code_of_ordinances"],"Cocoa Beach":[1701,"land_development_code"],"Coconut Creek":[1702,"code_of_ordinances"],"Coleman":[15328,"land_development_code"],"Collier County":[5149,"land_development_code"],"Columbia County":[13002,"land_development_regulations"],"Cooper City":[1757,"code_of_ordinances"],"Coral Gables":[1763,"zoning_code"],"Coral Springs":[1764,"land_development_code"],"Crescent City":[11713,"code_of_ordinances"],"Crestview":[1812,"land_development_code"],"Cross City":[8399,"code_of_ordinances"],"Crystal River":[1829,"code_of_ordinances"],"Cutler Bay":[16193,"code_of_ordinances"],"Dade City":[1849,"land_development_regulations"],"Dania Beach":[1861,"code_of_ordinances"],"Davenport":[1868,"code_of_ordinances"],"Davie":[8419,"code_of_ordinances"],"Daytona Beach":[1877,"land_development_code"],"Daytona Beach Shores":[1878,"code_of_ordinances"],"DeBary":[1885,"land_development_code"],"DeFuniak Springs":[1893,"code_of_ordinances"],"DeLand":[1899,"code_of_ordinances"],"DeSoto County":[5684,"code_of_ordinances"],"Deerfield Beach":[1891,"land_development_code"],"Delray Beach":[1907,"land_development_regulations"],"Deltona":[1909,"code_of_ordinances"],"Destin":[1929,"land_development_code"],"Dixie County":[5698,"code_of_ordinances"],"Doral":[13434,"code_of_ordinances"],"Dundee":[8464,"code_of_ordinances"],"Dunedin":[1981,"code_of_ordinances"],"Dunnellon":[1985,"code_of_ordinances"],"Eagle Lake":[1999,"land_development_regulations"],"Eatonville":[8500,"code_of_ordinances"],"Edgewater":[12127,"code_of_ordinances"],"Edgewood":[2047,"code_of_ordinances"],"El Portal":[10394,"code_of_ordinances"],"Escambia County":[5813,"code_of_ordinances"],"Estero":[19290,"land_development_code"],"Eustis":[2141,"land_development_regulations"],"Fellsmere":[2186,"land_development_code"],"Fernandina Beach":[2192,"land_development_code"],"Flagler Beach":[2203,"code_of_ordinances"],"Flagler County":[5872,"code_of_ordinances"],"Florida City":[2214,"code_of_ordinances"],"Florida State University SGA":[20668,"policy_and_procedures"],"Fort Lauderdale":[2247,"unified_land_development_code"],"Fort Meade":[2250,"code_of_ordinances"],"Fort Myers":[2253,"code_of_ordinances"],"Fort Myers Beach":[8595,"code_of_ordinances"],"Fort Pierce":[2257,"code_of_ordinances"],"Fort Walton Beach":[2263,"land_development_code"],"Fort White":[15333,"charter"],"Franklin County":[11395,"code_of_ordinances"],"Freeport":[2286,"code_of_ordinances"],"Frostproof":[2297,"code_of_ordinances"],"Fruitland Park":[2301,"land_development_code"],"Gadsden County":[5945,"code_of_ordinances"],"Gainesville":[2308,"code_of_ordinances"],"Gilchrist County":[5997,"land_development_code"],"Glades County":[6007,"code_of_ordinances"],"Glen Ridge":[8649,"code_of_ordinances"],"Golden Beach":[8656,"code_of_ordinances"],"Green Cove Springs":[2439,"code_of_ordinances"],"Greenacres":[2443,"code_of_ordinances"],"Greensboro":[8690,"code_of_ordinances"],"Greenville":[8691,"code_of_ordinances"],"Gretna":[2456,"code_of_ordinances"],"Groveland":[2469,"community_development_code"],"Gulf Breeze":[2477,"code_of_ordinances"],"Gulf County":[6112,"code_of_ordinances"],"Gulf Stream":[8705,"code_of_ordinances"],"Gulfport":[2479,"code_of_ordinances"],"Haines City":[2492,"land_development_regulations"],"Hallandale Beach":[2495,"code_of_ordinances"],"Hampton":[19954,"code_of_ordinances"],"Hardee County":[6154,"land_development_code"],"Haverhill":[8744,"code_of_ordinances"],"Hawthorne":[12811,"code_of_ordinances"],"Hendry County":[6218,"code_of_ordinances"],"Hernando County":[6224,"code_of_ordinances"],"Hialeah":[2601,"code_of_ordinances"],"Hialeah Gardens":[2602,"code_of_ordinances"],"High Springs":[2614,"code_of_ordinances"],"Highland Beach":[8764,"code_of_ordinances"],"Highlands County":[6241,"code_of_ordinances"],"Hilliard":[8768,"code_of_ordinances"],"Hillsboro Beach":[8770,"code_of_ordinances"],"Hillsborough County":[6247,"land_development_code"],"Holly Hill":[2647,"code_of_ordinances"],"Holmes Beach":[2651,"code_of_ordinances"],"Homestead":[2658,"code_of_ordinances"],"Horseshoe Beach":[15337,"code_of_ordinances"],"Howey-In-The-Hills":[8802,"code_of_ordinances"],"Hypoluxo":[8817,"code_of_ordinances"],"Indialantic":[8818,"code_of_ordinances"],"Indian Creek Village":[10514,"code_of_ordinances"],"Indian Harbour Beach":[2717,"code_of_ordinances"],"Indian River County":[6329,"code_of_ordinances"],"Indian River Shores":[8821,"code_of_ordinances"],"Indian Rocks Beach":[2718,"code_of_ordinances"],"Indian Shores":[8822,"code_of_ordinances"],"Indiantown":[20232,"charter,_comprehensive_plan_and_land_development_regulations"],"Inglis":[8824,"code_of_ordinances"],"Inverness":[2728,"land_development_code"],"Islamorada":[10520,"code_of_ordinances"],"Jackson County":[11547,"code_of_ordinances"],"Jacksonville":[11845,"code_of_ordinances"],"Jacksonville Beach":[2757,"code_of_ordinances"],"Jay":[8841,"code_of_ordinances"],"Jefferson County":[11624,"code_of_ordinances"],"Juno Beach":[8849,"code_of_ordinances"],"Jupiter":[8850,"code_of_ordinances"],"Jupiter Inlet Colony":[8851,"code_of_ordinances"],"Jupiter Island":[8852,"code_of_ordinances"],"Kenneth City":[8861,"code_of_ordinances"],"Key Biscayne":[10536,"code_of_ordinances"],"Key Colony Beach":[2836,"land_development_regulations"],"Key West":[2837,"code_of_ordinances"],"Keystone Heights":[2839,"code_of_ordinances"],"Kissimmee":[2866,"code_of_ordinances"],"LaBelle":[2895,"code_of_ordinances"],"Lady Lake":[8891,"land_development_code"],"Lake Alfred":[2910,"code_of_ordinances"],"Lake Butler":[2912,"code_of_ordinances"],"Lake City":[2914,"code_of_ordinances"],"Lake Clarke Shores":[8899,"code_of_ordinances"],"Lake County":[11506,"code_of_ordinances"],"Lake Hamilton":[8901,"code_of_ordinances"],"Lake Helen":[2922,"code_of_ordinances"],"Lake Park":[8906,"code_of_ordinances"],"Lake Placid":[8907,"code_of_ordinances"],"Lake Wales":[2934,"code_of_ordinances"],"Lake Worth Beach":[2936,"code_of_ordinances"],"Lakeland":[2937,"land_development_code"],"Lantana":[8918,"code_of_ordinances"],"Largo":[2957,"comprehensive_development_code"],"Lauderdale Lakes":[2967,"land_development_regulations"],"Lauderdale-By-The-Sea":[8922,"code_of_ordinances"],"Lauderhill":[2968,"land_development_regulations"],"Layton":[13184,"code_of_ordinances"],"Lee County":[11749,"land_development_code"],"Leesburg":[2995,"code_of_ordinances"],"Leon County":[11247,"code_of_ordinances"],"Levy County":[6597,"code_of_ordinances"],"Liberty County":[20538,"code_of_ordinances"],"Live Oak":[12858,"code_of_ordinances"],"Longboat Key":[8987,"code_of_ordinances"],"Longwood":[3073,"code_of_ordinances"],"Loxahatchee Groves":[16534,"unified_land_development_code"],"Lynn Haven":[3118,"code_of_ordinances"],"Macclenny":[3123,"code_of_ordinances"],"Madeira Beach":[3129,"code_of_ordinances"],"Madison":[11614,"land_development_regulations"],"Maitland":[3141,"land_development_code"],"Malabar":[9025,"code_of_ordinances"],"Manalapan":[13185,"code_of_ordinances"],"Manatee County":[6717,"land_development_code"],"Mangonia Park":[9032,"code_of_ordinances"],"Marathon":[12861,"code_of_ordinances"],"Marco Island":[3175,"code_of_ordinances"],"Margate":[3178,"code_of_ordinances"],"Marianna":[12077,"code_of_ordinances"],"Marion County":[11253,"land_development_code"],"Martin County":[12081,"land_development_regulations"],"Mary Esther":[3205,"land_development_code"],"Mascotte":[3209,"code_of_ordinances"],"Mayo":[9062,"code_of_ordinances"],"McIntosh":[13399,"code_of_ordinances"],"Medley":[9077,"code_of_ordinances"],"Melbourne":[3257,"code_of_ordinances"],"Miami":[3288,"ordinance_11000_(previous_zoning_code)"],"Miami - Dade County":[11719,"code_of_ordinances"],"Miami Beach":[3289,"resiliency_code_(current_land_development_regulations)"],"Miami Gardens":[13114,"code_of_ordinances"],"Miami Lakes":[12870,"code_of_ordinances"],"Miami Shores Village":[10633,"code_of_ordinances"],"Miami Springs":[3290,"code_of_ordinances"],"Micanopy":[12985,"code_of_ordinances"],"Midway":[3302,"code_of_ordinances"],"Milton":[3319,"code_of_ordinances"],"Minneola":[12727,"code_of_ordinances"],"Miramar":[11963,"land_development_code"],"Monroe County":[12037,"land_development_code"],"Monticello":[12875,"code_of_ordinances"],"Montverde":[12876,"code_of_ordinances"],"Moore Haven":[3381,"code_of_ordinances"],"Mount Dora":[3419,"land_development_code"],"Mulberry":[3442,"code_of_ordinances"],"Naples":[3471,"code_of_ordinances"],"Nassau County":[7009,"code_of_ordinances"],"Neptune Beach":[3495,"code_of_ordinances"],"New Port Richey":[3526,"code_of_ordinances"],"New Smyrna Beach":[3531,"code_of_ordinances"],"Newberry":[3537,"code_of_ordinances"],"Niceville":[3551,"code_of_ordinances"],"North Bay Village":[3575,"unified_land_development_code"],"North Broward Hospital District - Broward Health":[13210,"code_of_ordinances"],"North Lauderdale":[3585,"code_of_ordinances"],"North Miami":[3590,"code_of_ordinances"],"North Miami Beach":[3591,"code_of_ordinances"],"North Palm Beach":[10702,"code_of_ordinances"],"North Port":[3598,"unified_land_development_code"],"North Redington Beach":[9252,"code_of_ordinances"],"Oak Hill":[3630,"code_of_ordinances"],"Oakland":[12013,"code_of_ordinances"],"Oakland Park":[3639,"code_of_ordinances"],"Ocala":[3643,"code_of_ordinances"],"Ocean Ridge":[9283,"code_of_ordinances"],"Ocoee":[3650,"land_development_code"],"Okaloosa County":[7124,"code_of_ordinances"],"Okeechobee":[3668,"code_of_ordinances"],"Okeechobee County":[7126,"code_of_ordinances"],"Oldsmar":[3675,"code_of_ordinances"],"Opa-locka":[3696,"code_of_ordinances"],"Orange City":[3701,"code_of_ordinances"],"Orange County":[11856,"code_of_ordinances"],"Orange Park":[9304,"code_of_ordinances"],"Orchid":[9307,"code_of_ordinances"],"Orlando":[3712,"code_of_ordinances"],"Ormond Beach":[3713,"land_development_code"],"Osceola County":[7166,"land_development_code"],"Oviedo":[12039,"land_development_code"],"Pahokee":[3752,"code_of_ordinances"],"Palatka":[3756,"code_of_ordinances"],"Palm Beach":[9332,"code_of_ordinances"],"Palm Beach County":[7208,"unified_land_development_code"],"Palm Beach Gardens":[3759,"code_of_ordinances"],"Palm Beach Shores":[9333,"code_of_ordinances"],"Palm Coast":[12089,"land_development_code"],"Palm Springs":[10739,"code_of_ordinances"],"Palmetto":[3764,"code_of_ordinances"],"Palmetto Bay":[13409,"code_of_ordinances"],"Panama City":[3772,"code_of_ordinances"],"Panama City Beach":[3773,"code_of_ordinances"],"Parker":[3786,"code_of_ordinances"],"Parkland":[3788,"code_of_ordinances"],"Pasco County":[7229,"land_development_code"],"Pembroke Park":[9360,"code_of_ordinances"],"Pensacola":[3825,"code_of_ordinances"],"Perry":[3829,"code_of_ordinances"],"Pierson":[9378,"land_development_regulations"],"Pinecrest":[10759,"code_of_ordinances"],"Pinellas County":[7309,"code_of_ordinances"],"Pinellas Park":[3867,"land_development_code"],"Plant City":[3887,"code_of_ordinances"],"Plantation":[3888,"code_of_ordinances"],"Polk City":[9412,"code_of_ordinances"],"Polk County":[11452,"land_development_code"],"Pomona Park":[12192,"code_of_ordinances"],"Ponce Inlet":[9419,"code_of_ordinances"],"Port Orange":[3932,"land_development_code"],"Port Richey":[3934,"code_of_ordinances"],"Port St. Joe":[3936,"code_of_ordinances"],"Port St. Lucie":[3937,"code_of_ordinances"],"Punta Gorda":[3990,"code_of_ordinances"],"Putnam County":[11475,"code_of_ordinances"],"Quincy":[3994,"code_of_ordinances"],"Redington Beach":[9470,"code_of_ordinances"],"Redington Shores":[9471,"code_of_ordinances"],"Riviera Beach":[4094,"code_of_ordinances"],"Rockledge":[4115,"land_development_regulations"],"Royal Palm Beach":[10817,"code_of_ordinances"],"Safety Harbor":[4172,"land_development_code"],"San Antonio":[4191,"code_of_ordinances"],"Sanford":[4223,"code_of_ordinances"],"Sanibel":[4225,"code_of_ordinances"],"Santa Rosa County":[7626,"code_of_ordinances"],"Sarasota":[4241,"zoning"],"Sarasota County":[7627,"code_of_ordinances"],"Satellite Beach":[4247,"code_of_ordinances"],"Sea Ranch Lakes":[10836,"code_of_ordinances"],"Sebastian":[4287,"land_development_code"],"Sebring":[4290,"code_of_ordinances"],"Seminole":[4297,"code_of_ordinances"],"Seminole County":[12009,"land_development_code"],"Sewall's Point":[11588,"code_of_ordinances"],"Sneads":[9652,"code_of_ordinances"],"Sopchoppy":[13535,"code_of_ordinances"],"South Bay":[4387,"code_of_ordinances"],"South Daytona":[4392,"land_development_code"],"South Florida Water Management District":[12813,"administrative_policies"],"South Miami":[4404,"land_development_code"],"South Palm Beach":[9666,"code_of_ordinances"],"Southwest Ranches":[12068,"code_of_ordinances"],"Springfield":[4440,"code_of_ordinances"],"St. Augustine":[4446,"code_of_ordinances"],"St. Augustine Beach":[4447,"code_of_ordinances"],"St. Cloud":[4453,"code_of_ordinances"],"St. Leo":[9555,"code_of_ordinances"],"St. Lucie County":[7802,"land_development_code"],"St. Marks":[13859,"code_of_ordinances"],"St. Pete Beach":[4474,"land_development_code"],"St. Petersburg":[4477,"code_of_ordinances"],"Starke":[4488,"code_of_ordinances"],"Stuart":[4520,"land_development_code"],"Sumter County":[11704,"code_of_ordinances"],"Sunny Isles Beach":[4542,"code_of_ordinances"],"Sunrise":[4546,"code_of_ordinances"],"Surfside":[9764,"code_of_ordinances"],"Suwannee County":[7878,"code_of_ordinances"],"Sweetwater":[4559,"code_of_ordinances"],"Tallahassee":[4575,"land_development_code"],"Tamarac":[4582,"land_development_code"],"Tampa":[4583,"code_of_ordinances"],"Tarpon Springs":[4586,"code_of_ordinances"],"Tavares":[4589,"code_of_ordinances"],"Taylor County":[12621,"code_of_ordinances"],"Temple Terrace":[4604,"code_of_ordinances"],"Tequesta":[10895,"code_of_ordinances"],"Titusville":[4633,"land_development_regulations"],"Treasure Island":[4655,"code_of_ordinances"],"Umatilla":[4699,"code_of_ordinances"],"Valparaiso":[4728,"code_of_ordinances"],"Venice":[4737,"code_of_ordinances"],"Vero Beach":[4742,"code_of_ordinances"],"Virginia Gardens":[10919,"code_of_ordinances"],"Volusia County":[10989,"code_of_ordinances"],"Wakulla County":[11002,"code_of_ordinances"],"Waldo":[4781,"code_of_ordinances"],"Walton County":[11018,"code_of_ordinances"],"Washington County":[11304,"code_of_ordinances"],"Wauchula":[4831,"code_of_ordinances"],"Webster":[13459,"land_development_code"],"Wellington":[10940,"unified_land_development_code"],"West Melbourne":[4892,"code_of_ordinances"],"West Miami":[4894,"code_of_ordinances"],"West Palm Beach":[4897,"code_of_ordinances"],"West Park":[13997,"code_of_ordinances"],"Westlake":[19695,"code_of_ordinances"],"Wildwood":[4951,"code_of_ordinances"],"Williston":[4963,"code_of_ordinances"],"Wilton Manors":[4978,"code_of_ordinances"],"Windermere":[10014,"code_of_ordinances"],"Winter Garden":[4997,"code_of_ordinances"],"Winter Haven":[4998,"code_of_ordinances"],"Winter Park":[4999,"code_of_ordinances"],"Winter Springs":[5000,"code_of_ordinances"],"Yankeetown":[15361,"code_of_ordinances"],"Zephyrhills":[5065,"code_of_ordinances"],"Zolfo Springs":[10065,"code_of_ordinances"]};
+const _FL_PLACE_KIND = {"Alford":"town","Altha":"town","Astatula":"town","Bal Harbour":"village","Baldwin":"town","Bascom":"town","Bay Harbor Islands":"town","Bell":"town","Belleair":"town","Belleair Shore":"town","Beverly Beach":"town","Biscayne Park":"village","Branford":"town","Briny Breezes":"town","Bronson":"town","Brooker":"town","Callahan":"town","Campbellton":"town","Caryville":"town","Century":"town","Cinco Bayou":"town","Cloud Lake":"town","Cottondale":"town","Cross City":"town","Cutler Bay":"town","Davie":"town","Dundee":"town","Eatonville":"town","Ebro":"town","El Portal":"village","Estero":"village","Esto":"town","Fort Myers Beach":"town","Fort White":"town","Glen Ridge":"town","Glen St. Mary":"town","Golden Beach":"town","Golf":"village","Grand Ridge":"town","Grant-Valkaria":"town","Greensboro":"town","Greenville":"town","Greenwood":"town","Gulf Stream":"town","Havana":"town","Haverhill":"town","Highland Beach":"town","Highland Park":"village","Hillcrest Heights":"town","Hilliard":"town","Hillsboro Beach":"town","Horseshoe Beach":"town","Howey-in-the-Hills":"town","Hypoluxo":"town","Indialantic":"town","Indian Creek":"village","Indian River Shores":"town","Indian Shores":"town","Indiantown":"village","Inglis":"town","Interlachen":"town","Islamorada, Village of Islands":"village","Jay":"town","Jennings":"town","Juno Beach":"town","Jupiter":"town","Jupiter Inlet Colony":"town","Jupiter Island":"town","Kenneth City":"town","Key Biscayne":"village","La Crosse":"town","Lady Lake":"town","Lake Clarke Shores":"town","Lake Hamilton":"town","Lake Park":"town","Lake Placid":"town","Lantana":"town","Lauderdale-by-the-Sea":"town","Lazy Lake":"village","Lee":"town","Longboat Key":"town","Loxahatchee Groves":"town","Malabar":"town","Malone":"town","Manalapan":"town","Mangonia Park":"town","Marineland":"town","Mayo":"town","McIntosh":"town","Medley":"town","Melbourne Beach":"town","Melbourne Village":"town","Miami Lakes":"town","Miami Shores":"village","Micanopy":"town","Montverde":"town","Noma":"town","North Palm Beach":"village","North Redington Beach":"town","Oakland":"town","Ocean Breeze":"town","Ocean Ridge":"town","Orange Park":"town","Orchid":"town","Otter Creek":"town","Palm Beach":"town","Palm Beach Shores":"town","Palm Shores":"town","Palm Springs":"village","Palmetto Bay":"village","Paxton":"town","Pembroke Park":"town","Penney Farms":"town","Pierson":"town","Pinecrest":"village","Polk City":"town","Pomona Park":"town","Ponce Inlet":"town","Ponce de Leon":"town","Raiford":"town","Reddick":"town","Redington Beach":"town","Redington Shores":"town","Royal Palm Beach":"village","Sea Ranch Lakes":"village","Sewall's Point":"town","Shalimar":"town","Sneads":"town","South Palm Beach":"town","Southwest Ranches":"town","St. Leo":"town","St. Lucie Village":"town","Surfside":"town","Tequesta":"village","Virginia Gardens":"village","Wausau":"town","Welaka":"town","Wellington":"village","Westville":"town","White Springs":"town","Windermere":"town","Worthington Springs":"town","Yankeetown":"town","Zolfo Springs":"town"};
+// City zoning layers, keyed by normalized municipality name. County zoning
+// layers cover unincorporated land only, so a city pin needs the city's own
+// layer. VERIFIED LIVE 2026-10-19. Adding a city = one row here.
+const _FL_CITY_ZONING_LAYERS = {
+  'tampa':          {name:'City of Tampa',          zoning:['https://arcgis.tampagov.net/arcgis/rest/services/OpenData/Planning/MapServer/28','ZONECLASS,ZONEDESC']},
+  'st. petersburg': {name:'City of St. Petersburg', zoning:['https://services2.arcgis.com/9qPLjNtocjo438CJ/arcgis/rest/services/ZoningDistricts_view/FeatureServer/0','ZONECLASS,ZONEDESC,PDFURL']},
+  'clearwater':     {name:'City of Clearwater',     zoning:['https://gis.myclearwater.com/arcgis/rest/services/ArcGISMapServices/Zoning_WGS84/MapServer/1','ZONING,ZONING_DESC']},
+  'bradenton':      {name:'City of Bradenton',      zoning:['https://services6.arcgis.com/wl0q8tN2gn8MMx1p/arcgis/rest/services/Zoning_CoB/FeatureServer/0','ZONLABEL,ZON_DESC']},
+};
+
+function _muniNorm(s){
+  return String(s||'').toLowerCase().trim()
+    .replace(/^saint\s+/,'st. ').replace(/^st\s+/,'st. ')
+    .replace(/[^a-z0-9.']+/g,' ').replace(/\s+/g,' ').trim();
+}
+let _muniIdx = null;
+function _muniLookup(clientName){
+  if(!clientName) return null;
+  if(!_muniIdx){ _muniIdx = {}; for(const k in _FL_MUNICODE_CLIENTS) _muniIdx[_muniNorm(k)] = k; }
+  const k = _muniIdx[_muniNorm(clientName)];
+  if(!k) return null;
+  const [id, product] = _FL_MUNICODE_CLIENTS[k];
+  const slug = k.toLowerCase().replace(/ /g,'_');
+  return {client:k, id, slug, product,
+    productLabel: product.replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase()).replace(/\b(Of|And|The)\b/g,w=>w.toLowerCase()),
+    home:`https://library.municode.com/fl/${slug}/codes/${product}`};
+}
+function _muniSearchUrl(m, q){
+  return `https://library.municode.com/search?stateId=9&clientId=${m.id}&searchText=${encodeURIComponent(q)}&searchMode=CLIENTMODE&contentTypeId=CODES`;
+}
+window._muniLookup = _muniLookup;
+
+// Census incorporated place containing the point. {} = answered, not inside any
+// city/town/village. null = the service did not answer (renders "unconfirmed").
+async function _prPlaceAtPoint(lat, lon){
+  const g=encodeURIComponent(JSON.stringify({x:lon,y:lat,spatialReference:{wkid:4326}}));
+  const u=`https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/Places_CouSub_ConCity_SubMCD/MapServer/4/query?geometry=${g}&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=NAME,BASENAME,GEOID&returnGeometry=false&f=json`;
+  for(let attempt=0; attempt<2; attempt++){
+    if(attempt) await new Promise(r=>setTimeout(r,500));
+    try{
+      const r=await fetch(u,{signal:AbortSignal.timeout(10000)});
+      if(!r.ok) continue;
+      const d=await r.json();
+      if(d.error) continue;
+      const a=(d.features||[])[0]?.attributes;
+      if(!a) return {};
+      return {name:a.BASENAME||null, full:a.NAME||null, geoid:a.GEOID||null};
+    }catch(e){ /* retry */ }
+  }
+  return null;
+}
+
+function _prResolveJurisdiction(parcel, county, place){
+  const pc   = (parcel && parcel._county) ? String(parcel._county).trim() : (county||'');
+  const code = (parcel && parcel.taxAuthCode) ? String(parcel.taxAuthCode).trim() : null;
+  const paCity  = (code && _FL_TAXDIST_CITY[pc]) ? (_FL_TAXDIST_CITY[pc][code]||null) : null;
+  const paUninc = !!(code && (_FL_TAXDIST_UNINC[pc]||[]).includes(code));
+  const censusOk   = place!=null;
+  const censusCity = (place && place.name) ? place.name : null;
+  const same = (a,b)=>!!a && !!b && _muniNorm(a)===_muniNorm(b);
+  let muni=null, basis='', chip='', warn=null;
+  if(paCity && censusCity){
+    muni = paCity;
+    if(same(paCity, censusCity)){ basis='PA taxing district and Census city limits agree'; chip='PA + Census'; }
+    else { basis='PA taxing district'; chip='PA tax district';
+      warn=`The property appraiser's taxing district says ${paCity}, but the pin falls inside ${censusCity}'s Census city limits. The parcel may straddle a boundary — confirm the taxing district on the PA page.`; }
+  } else if(paCity){
+    muni = paCity; basis='PA taxing district'; chip='PA tax district';
+    if(censusOk) warn=`Taxed by ${paCity}, but the pin falls outside the Census city limits — usually a recent annexation or a parcel that straddles the line. Confirm on the PA page.`;
+  } else if(censusCity){
+    muni = censusCity; basis='Census city limits'; chip='Census limits';
+    if(paUninc) warn=`The pin is inside ${censusCity}'s city limits, but the PA taxing district (${code}) is an unincorporated district — the parcel may straddle the line. Confirm on the PA page.`;
+  } else if(censusOk || paUninc){
+    basis = paUninc ? (censusOk ? 'PA taxing district and Census city limits agree' : 'PA taxing district') : 'Census city limits';
+    chip  = paUninc ? (censusOk ? 'PA + Census' : 'PA tax district') : 'Census limits';
+  } else {
+    return {code, county:pc, unknown:true, municode:_muniLookup(pc?pc+' County':null)};
+  }
+  const kindRaw = muni ? (_FL_PLACE_KIND[muni] || (same(muni,censusCity) && place.full ? ((place.full.match(/\b(city|town|village)$/i)||[])[1]) : null) || 'city') : null;
+  const kind  = kindRaw ? kindRaw[0].toUpperCase()+kindRaw.slice(1).toLowerCase() : null;
+  const label = muni ? `${kind} of ${muni}` : `Unincorporated ${pc} County`;
+  return {code, county:pc, municipality:muni, kind, label, incorporated:!!muni,
+    paCity, paUninc, basis, chip, warn, census:place,
+    municode:_muniLookup(muni || (pc+' County'))};
+}
+window._prResolveJurisdiction = _prResolveJurisdiction;
+
+async function _prCityZoning(lat, lon, muni){
+  const cfg = _FL_CITY_ZONING_LAYERS[_muniNorm(muni)];
+  if(!cfg) return null;
+  const z = await _prQueryPointLayer(cfg.zoning[0], cfg.zoning[1], lat, lon);
+  if(!z) return {city:cfg.name, source:cfg.zoning[0], _noAnswer:true};
+  return {
+    code:           _prZoningPick(z,['ZONECLASS','ZONING','ZONLABEL']),
+    description:    _prZoningPick(z,['ZONEDESC','ZONING_DESC','ZON_DESC']),
+    codeSectionUrl: _prZoningPick(z,['PDFURL']),
+    city: cfg.name, source: cfg.zoning[0],
+  };
+}
+
+// Links for the governing code. Zoning code (city or county) sharpens the searches.
+function _juriLinks(d){
+  const j = d.juris; if(!j) return [];
+  const zc = (d.cityZoning && d.cityZoning.code) || (!j.incorporated && d.zoning && d.zoning.code) || null;
+  const out = [];
+  const m = j.municode;
+  const who = j.incorporated ? j.label : `${j.county} County`;
+  if(m){
+    out.push({label:`📖 ${who} — ${m.productLabel} (Municode)`, url:m.home});
+    if(zc) out.push({label:`🔎 Zoning district “${zc}” in the code`, url:_muniSearchUrl(m, zc)});
+    else   out.push({label:'🔎 Zoning districts', url:_muniSearchUrl(m, 'zoning districts')});
+    out.push({label:'📏 Setbacks & dimensional standards'+(zc?` — ${zc}`:''), url:_muniSearchUrl(m, zc ? `${zc} setbacks` : 'setbacks dimensional standards')});
+    out.push({label:'✅ Allowed / permitted uses'+(zc?` — ${zc}`:''),      url:_muniSearchUrl(m, zc ? `${zc} permitted uses` : 'permitted uses')});
+  } else {
+    out.push({label:`📖 ${who} land development code — not on Municode, search the web`,
+      url:'https://www.google.com/search?q='+encodeURIComponent(`${who} Florida land development code zoning`)});
+  }
+  if(d.cityZoning && d.cityZoning.codeSectionUrl) out.push({label:`📄 ${zc} district regulations (city link)`, url:d.cityZoning.codeSectionUrl});
+  const p = d.parcel;
+  if(p && p.parcelId){
+    const pid = String(p.parcelId).replace(/[^0-9A-Za-z]/g,'');
+    const fn  = (typeof _PA_DEEP_LINK!=='undefined') ? _PA_DEEP_LINK[j.county] : null;
+    const pa  = (typeof _FL_PA!=='undefined') ? _FL_PA[j.county] : null;
+    const url = fn ? fn(pid) : (pa && (pa.search||pa.url));
+    if(url) out.push({label:`🏛 Verify the taxing district on the ${j.county} County PA page`, url});
+  }
+  return out;
+}
+
 // Fan out every point service at one coordinate. Each helper already swallows its
 // own failures and returns null, so one dead service never sinks the whole run.
 async function _valConfirmedAtPoint(lat, lon){
   // County comes from the census boundary layer, NOT from the parcel record — a pin
   // in a lake, a road right-of-way, or a gap in the state roll still resolves a
   // county, and therefore still gets zoning.
-  const [parcel, countyRec] = await Promise.all([
+  const [parcel, countyRec, place] = await Promise.all([
     _prPA_FL_Statewide(null, null, null, {lat, lon}),
     _prCountyAtPoint(lat, lon),
+    _prPlaceAtPoint(lat, lon),
   ]);
   const countyName = (countyRec && countyRec.name)
                   || (parcel && parcel._county ? String(parcel._county).trim() : null);
   const fips = (countyRec && countyRec.fips) || (countyName ? _FL_COUNTY_FIPS[countyName] : null);
 
-  const [fema, firm, nwi, oz, qct, soils, elevation, zoning] = await Promise.all([
+  // TAXDIST-20261019 — who governs this parcel: PA taxing district × Census city limits.
+  const juris = _prResolveJurisdiction(parcel, countyName, place);
+  // The roll's PHY_CITY is the POSTAL city, not the jurisdiction (a "Tampa" mailing
+  // address is often unincorporated Hillsborough). Replace that guess with the
+  // resolved one so every downstream consumer (AI prompt, zoning source) is right.
+  if(parcel && juris && !juris.unknown) parcel._municipality = juris.label;
+
+  const [fema, firm, nwi, oz, qct, soils, elevation, zoning, cityZoning] = await Promise.all([
     _prFEMA(lat,lon), _prFIRMPanel(lat,lon), _prNWI(lat,lon), _prOZ(lat,lon),
     _prQCT(lat,lon), _prSoils(lat,lon), _prElevation(lat,lon),
     fips ? _prCountyZoning(lat,lon,fips) : Promise.resolve(null),
+    (juris && juris.municipality) ? _prCityZoning(lat,lon,juris.municipality) : Promise.resolve(null),
   ]);
 
-  return {lat, lon, parcel, county:countyName, fips, fema, firm, nwi, oz, qct, soils, elevation, zoning, at:new Date()};
+  return {lat, lon, parcel, county:countyName, fips, fema, firm, nwi, oz, qct, soils, elevation, zoning, juris, cityZoning, at:new Date()};
 }
 
 function _valRenderConfirmed(d){
@@ -4817,28 +4996,77 @@ function _valRenderConfirmed(d){
     ? `Source: Florida DOR statewide parcel roll${p.rollDate?', data as of '+_vcEsc(p.rollDate):''}. This is the annual state rollup, not live county data — confirm current values on the property appraiser site before relying on them.`
     : '';
 
+  // ── Jurisdiction (TAXDIST-20261019) ───────────────────────────────────────
+  const j = d.juris, cz = d.cityZoning;
+  let juriRows = '', juriFoot = '';
+  if(j && !j.unknown){
+    const paDecoded = j.paCity ? (_FL_PLACE_KIND[j.paCity] ? _titleCase(_FL_PLACE_KIND[j.paCity]) : 'City')+' of '+j.paCity
+                    : j.paUninc ? 'Unincorporated '+j.county+' County' : null;
+    juriRows = [
+      _vcRow('Taxing district (PA)', j.code ? j.code+(paDecoded?' — '+paDecoded:'') : null, 'PA / FDOR roll',
+        j.code ? null : 'No taxing-district code on the roll'),
+      _vcRow('Municipality', j.label, j.chip),
+      _vcRow('Governing code', j.municode ? `${j.incorporated?j.label:j.county+' County'} — ${j.municode.productLabel}` : null, 'Municode',
+        'Not on Municode — use the search link below'),
+    ].join('');
+    if(j.code && !j.paCity && !j.paUninc && j.incorporated){
+      juriRows += `<div style="font-size:.68rem;color:#6b7280;padding:.25rem 0">District code ${_vcEsc(j.code)} is not in Terra's decode table yet; the city comes from the Census city limits at the pin.</div>`;
+    }
+    juriFoot = j.incorporated
+      ? `Inside ${_vcEsc(j.label)} — the city's land development code governs zoning, setbacks and allowed uses, not the county's.`
+      : `Unincorporated — ${_vcEsc(j.county)} County's land development code governs zoning, setbacks and allowed uses.`;
+  } else if(j && j.unknown){
+    juriRows = `<div style="font-size:.78rem;color:#92400e;padding:.3rem 0">Neither the parcel roll nor the Census city-limits service answered for this point — check the taxing district on the property appraiser page.</div>`;
+  } else {
+    juriRows = `<div style="font-size:.78rem;color:#92400e;padding:.3rem 0">Jurisdiction not resolved for this point.</div>`;
+  }
+  // A county zoning district answering at a "city" pin means the pin itself is on the
+  // unincorporated side — say so, the broker needs to know which piece they're pricing.
+  const straddle = (j && j.warn && j.incorporated && z && z.code && !(cz && cz.code))
+    ? ` The county zoning layer also maps a county district (${z.code}) at the pin, so this point is on the unincorporated side — check which portion of the parcel you're pricing.` : '';
+  const juriWarn = (j && j.warn) ? `<div class="sr-juri-warn" role="note">⚠️ ${_vcEsc(j.warn+straddle)}</div>` : '';
+  const juriLinks = _juriLinks(d);
+  const juriLinksHtml = juriLinks.length ? `<div class="sr-juri-links">${juriLinks.map(l=>
+      `<a href="${_vcEsc(l.url)}" target="_blank" rel="noopener">${_vcEsc(l.label)} <span aria-hidden="true">↗</span></a>`).join('')}</div>` : '';
+
   // ── Zoning & future land use ──────────────────────────────────────────────
+  // Inside a city the county layer is silent; the city's own layer answers when
+  // one is registered in _FL_CITY_ZONING_LAYERS.
+  const cityRows = (cz && cz.code) ? [
+      _vcRow('Zoning', cz.code, 'city GIS'),
+      _vcRow('Zoning description', cz.description, 'city GIS'),
+    ].join('') : '';
   let zoningRows;
   if(z){
-    zoningRows = [
-      _vcRow('Zoning', z.code, 'county GIS',
-        z._inMunicipality ? (z.jurisdiction && !/uninc/i.test(z.jurisdiction)
-            ? 'Inside '+_vcEsc(_titleCase(z.jurisdiction))+' — the city’s code governs, not the county’s'
-            : 'Inside a municipality — the city’s code governs, not the county’s')
+    zoningRows = (cityRows || _vcRow('Zoning', z.code, 'county GIS',
+        z._inMunicipality || (j && j.incorporated) ? ((j && j.incorporated)
+            ? 'Inside '+_vcEsc(j.label)+' — look the district up in the city’s code (links above)'
+            : (z.jurisdiction && !/uninc/i.test(z.jurisdiction)
+              ? 'Inside '+_vcEsc(_titleCase(z.jurisdiction))+' — the city’s code governs, not the county’s'
+              : 'Inside a municipality — the city’s code governs, not the county’s'))
         : z._noZoningLayer ? 'County publishes no zoning layer — check the LDC'
-        : 'Point falls outside a county zoning district'),
-      _vcRow('Zoning description', z.description, 'county GIS'),
+        : 'Point falls outside a county zoning district')
+      + ((cityRows || (!z.code && j && j.incorporated)) ? '' : _vcRow('Zoning description', z.description, 'county GIS'))) + [
       _vcRow('Future land use', z.flu, 'county GIS'),
       _vcRow('FLU description', z.fluDescription, 'county GIS'),
       _vcRow('Overlay', z.overlay, 'county GIS', '—'),
       _vcRow('Jurisdiction', z.jurisdiction, 'county GIS'),
     ].join('');
+  } else if(cityRows){
+    zoningRows = cityRows;
+  } else if(j && j.incorporated){
+    zoningRows = _vcRow('Zoning', null, 'city GIS',
+      (cz && cz._noAnswer) ? _vcEsc(cz.city)+' zoning service did not answer — use the code links above'
+                           : 'Inside '+_vcEsc(j.label)+' — look the district up in the city’s code (links above)');
   } else if(d.fips){
     zoningRows = `<div style="font-size:.78rem;color:#92400e;padding:.3rem 0">County zoning service did not answer for this point.</div>`;
   } else {
     zoningRows = `<div style="font-size:.78rem;color:#92400e;padding:.3rem 0">No zoning service registered for ${_vcEsc(d.county||'this county')} yet. Add its layer to <code>_FL_ZONING_LAYERS</code> and it works everywhere at once.</div>`;
   }
-  const zoningFoot = (z && (z._inMunicipality || (z.jurisdiction && /^city/i.test(z.jurisdiction))))
+  const zoningFoot = (cz && cz.code)
+    ? `Zoning read live from ${_vcEsc(cz.city)}'s GIS at this point. Future land use is the county layer.`
+    : (z && z.code) ? 'County layers cover unincorporated land; inside a city limit the municipal code governs.'
+    : (j && j.incorporated) || (z && (z._inMunicipality || (z.jurisdiction && /^city/i.test(z.jurisdiction))))
     ? 'This point is inside a municipality, so the city code governs. The county layer deliberately reports no district here — look the zoning up in that city&rsquo;s land development code.'
     : 'County layers cover unincorporated land; inside a city limit the municipal code governs.';
 
@@ -4892,13 +5120,14 @@ function _valRenderConfirmed(d){
 
   return `
     <div style="display:flex;align-items:center;justify-content:space-between;gap:.5rem;margin-bottom:.6rem;flex-wrap:wrap">
-      <div style="font-size:.82rem;font-weight:800;color:#065f46">✅ Confirmed public records${d.county?' — '+_vcEsc(d.county)+' County':''}</div>
+      <div style="font-size:.82rem;font-weight:800;color:#065f46">✅ Confirmed public records${d.juris&&d.juris.incorporated?' — '+_vcEsc(d.juris.label)+',':''}${d.county?' '+(d.juris&&d.juris.incorporated?'':'— ')+_vcEsc(d.county)+' County':''}</div>
       <div style="font-size:.68rem;color:#9ca3af">${d.lat.toFixed(5)}, ${d.lon.toFixed(5)} · ${d.at.toLocaleTimeString()}</div>
     </div>
     <div style="font-size:.68rem;color:#6b7280;margin-bottom:.7rem;line-height:1.45">
       Every value below was read directly from a government service at this exact coordinate. Nothing here is AI-generated. Anything marked <b style="color:#92400e">unconfirmed</b> was not returned by the source — go look, don't assume.
     </div>
     ${_vcCard('🏛','Parcel',parcelRows,parcelFoot)}
+    ${_vcCard('🏙','Jurisdiction & Governing Code',juriRows+juriWarn+juriLinksHtml,juriFoot)}
     ${_vcCard('📐','Zoning & Future Land Use',zoningRows,zoningFoot)}
     ${_vcCard('🌊','Flood',floodRows,'Source: FEMA National Flood Hazard Layer. Pull a FIRMette at msc.fema.gov for anything going in a file.')}
     ${_vcCard('🐸','Wetlands',wetRows,'NWI is a desktop screen only — it is not a jurisdictional determination. A formal delineation is still required.')}
@@ -4991,20 +5220,26 @@ async function _prCountyAtPoint(lat,lon){
 }
 async function _prNWI(lat,lon){
   // fwsprimary.wim.usgs.gov/.../Wetlands/MapServer/0 was retired — that service now
-  // reports an empty layer list and every query 500s. Live host is fwspublicservices,
-  // where the layer is a JOIN, so outFields must be qualified with "Wetlands.".
-  // Verified 2026-09-02.
-  try{
-    const r=await fetch(`https://fwspublicservices.wim.usgs.gov/wetlandsmapservice/rest/services/Wetlands/MapServer/0/query?geometry=${lon},${lat}&geometryType=esriGeometryPoint&spatialRel=esriSpatialRelIntersects&outFields=Wetlands.ATTRIBUTE,Wetlands.WETLAND_TYPE,Wetlands.ACRES&returnGeometry=false&f=json&distance=1000&units=esriSRUnit_Meter&inSR=4326`,{signal:AbortSignal.timeout(12000)});
-    if(!r.ok) return null;
-    const d=await r.json();
-    if(d.error){ console.warn('[_prNWI]',d.error); return null; }
-    // Strip the table prefix so callers keep reading ATTRIBUTE / WETLAND_TYPE / ACRES.
-    return (d.features||[]).map(f=>{
-      const o={}; for(const k in f.attributes) o[k.replace(/^Wetlands\./,'')]=f.attributes[k];
-      return o;
-    });
-  }catch(e){return null;}
+  // reports an empty layer list and every query 500s. Live host is fwspublicservices.
+  // NWIFIX-20261019: USFWS dropped the table join on this layer, so the qualified
+  // names (Wetlands.ATTRIBUTE) that were required on 2026-09-02 now return
+  // HTTP-200 {"error":400} and every Site Research run showed wetlands "unconfirmed".
+  // Ask with plain names first; fall back to the qualified form if the join returns.
+  const base=`https://fwspublicservices.wim.usgs.gov/wetlandsmapservice/rest/services/Wetlands/MapServer/0/query?geometry=${lon},${lat}&geometryType=esriGeometryPoint&spatialRel=esriSpatialRelIntersects&returnGeometry=false&f=json&distance=1000&units=esriSRUnit_Meter&inSR=4326&outFields=`;
+  for(const fields of ['ATTRIBUTE,WETLAND_TYPE,ACRES','Wetlands.ATTRIBUTE,Wetlands.WETLAND_TYPE,Wetlands.ACRES']){
+    try{
+      const r=await fetch(base+encodeURIComponent(fields),{signal:AbortSignal.timeout(12000)});
+      if(!r.ok) continue;
+      const d=await r.json();
+      if(d.error){ console.warn('[_prNWI]',fields,d.error); continue; }
+      // Strip any table prefix so callers keep reading ATTRIBUTE / WETLAND_TYPE / ACRES.
+      return (d.features||[]).map(f=>{
+        const o={}; for(const k in f.attributes) o[k.replace(/^Wetlands\./,'')]=f.attributes[k];
+        return o;
+      });
+    }catch(e){ /* try next form */ }
+  }
+  return null;
 }
 async function _prOZ(lat,lon){
   // The layer id is 13, not 0 — layer 0 does not exist on this service and returns
@@ -16296,6 +16531,9 @@ function _resolveCityMunicode(source) {
   const stripped = s.replace(/^(City|Town|Village) of\s+/i,'');
   if(_FL_CITY_MUNICODE[stripped] !== undefined) return _FL_CITY_MUNICODE[stripped];
   if(_FL_CITY_MUNICODE['City of '+stripped] !== undefined) return _FL_CITY_MUNICODE['City of '+stripped];
+  // TAXDIST-20261019 — fall back to the verified Municode client list (all FL clients).
+  const _m = _muniLookup(stripped.replace(/^Unincorporated\s+/i,''));
+  if(_m) return _m.home;
   return undefined; // unknown — don't override county default
 }
 
@@ -16478,6 +16716,20 @@ function _valFactsForPrompt(c){
   } else {
     L.push('PARCEL: no polygon contains this point (right-of-way, water, or a gap in the state roll).');
   }
+  const jj=c.juris;
+  if(jj && !jj.unknown){
+    L.push('JURISDICTION (PA taxing district × Census city limits):');
+    if(jj.code) L.push(`  PA taxing district code: ${jj.code}`);
+    L.push(`  Governing jurisdiction: ${jj.label} (${jj.basis})`);
+    if(jj.municode) L.push(`  Governing code: ${jj.municode.productLabel} — ${jj.municode.home}`);
+    if(jj.warn) L.push(`  WARNING: ${jj.warn}`);
+    L.push(jj.incorporated
+      ? `  NOTE: zoning, setbacks and allowed uses come from ${jj.label}'s code, NOT the county's. Do not quote county standards for this parcel.`
+      : `  NOTE: unincorporated — ${jj.county} County's land development code governs.`);
+  }
+  if(c.cityZoning && c.cityZoning.code){
+    L.push(`CITY ZONING (${c.cityZoning.city} GIS, point-in-polygon): ${c.cityZoning.code}${c.cityZoning.description?' — '+c.cityZoning.description:''}`);
+  }
   if(c.zoning){
     L.push('ZONING / FUTURE LAND USE (county GIS, point-in-polygon):');
     [['Zoning code',c.zoning.code],['Zoning description',c.zoning.description],
@@ -16572,7 +16824,8 @@ async function _valRun(){
     : `https://msc.fema.gov/portal/search?AddressQuery=${addrEncoded}`;
 
   // Municode — hardcoded county slug, never AI-guessed
-  const municodeUrl = _FL_MUNICODE[county] || 'https://library.municode.com/fl';
+  let municodeUrl = _FL_MUNICODE[county] || 'https://library.municode.com/fl';
+  let municodeLabel = '📖 Municode — '+county+' County';
 
   // Build quick links immediately
   if(linksEl) linksEl.innerHTML = [
@@ -16614,6 +16867,13 @@ async function _valRun(){
     catch(e){ console.warn('[SiteResearch] confirmed fan-out failed', e); }
   }
   window._valConfirmed = confirmed;
+  // TAXDIST-20261019 — point the Municode quick link at the code that actually
+  // governs (the city's, when the parcel is inside one).
+  if(confirmed && confirmed.juris && confirmed.juris.municode){
+    const jm = confirmed.juris;
+    municodeUrl = jm.municode.home;
+    municodeLabel = '📖 Municode — '+(jm.incorporated ? jm.label : jm.county+' County');
+  }
 
   const paApiData = (confirmed && confirmed.parcel) ? confirmed.parcel
                   : await _fetchCountyPA(county, address, parcel, _pt);
@@ -16849,6 +17109,21 @@ For anything NOT in the ground-truth block: if you did not actually retrieve it 
           data.property.futureYearLandUse = c.zoning.flu + (c.zoning.fluDescription? ' — '+c.zoning.fluDescription : '');
         }
       }
+      // TAXDIST-20261019 — the resolved jurisdiction and the city's own zoning layer
+      // outrank both the county layer and the model.
+      if(c.juris && !c.juris.unknown){
+        data.zoning = data.zoning || {};
+        data.zoning.source = c.juris.label;
+        if(c.juris.municode) data.zoning.municodeUrl = c.juris.municode.home;
+      }
+      if(c.cityZoning && c.cityZoning.code){
+        data.zoning = data.zoning || {};
+        data.zoning.code = c.cityZoning.code;
+        if(c.cityZoning.description) data.zoning.description = c.cityZoning.description;
+        data.property = data.property || {};
+        data.property.zoning = c.cityZoning.code;
+        if(c.cityZoning.description) data.property.zoningDescription = c.cityZoning.description;
+      }
       if(c.fema && c.fema.length){
         const zs=[...new Set(c.fema.map(z=>`Zone ${z.FLD_ZONE}${z.ZONE_SUBTY?' — '+z.ZONE_SUBTY:''}`))].join('; ');
         const sfha=c.fema.some(z=>z.SFHA_TF==='T');
@@ -16884,7 +17159,7 @@ For anything NOT in the ground-truth block: if you did not actually retrieve it 
     // Init FEMA flood mini-map after HTML is in the DOM
     setTimeout(_valInitFloodMinimap, 150);
     // After AI returns, geocoding has had time to complete — rebuild coordinate-sensitive quick links
-    _valRefreshCoordLinks(county, pa, paDeepLink, fdepUrl, swfwmdUrl, inSwfwmd, municodeUrl);
+    _valRefreshCoordLinks(county, pa, paDeepLink, fdepUrl, swfwmdUrl, inSwfwmd, municodeUrl, municodeLabel);
 
   } catch(err){
     console.error('[valuation] research error', err);
@@ -17138,7 +17413,7 @@ function _valLink(label, url){
 }
 
 // Called after AI returns — by then geocoding has completed, so we can build coordinate-precise links
-function _valRefreshCoordLinks(county, pa, paDeepLink, fdepUrl, swfwmdUrl, inSwfwmd, municodeUrl){
+function _valRefreshCoordLinks(county, pa, paDeepLink, fdepUrl, swfwmdUrl, inSwfwmd, municodeUrl, municodeLabel){
   const linksEl = document.getElementById('val-links-list');
   if(!linksEl) return;
   const pin = _valMarker ? _valMarker.getLatLng() : null;
@@ -17158,7 +17433,7 @@ function _valRefreshCoordLinks(county, pa, paDeepLink, fdepUrl, swfwmdUrl, inSwf
     {label:'🐸 NWI Wetlands Mapper'+(pin?' (zoomed to site)':''), url:nwiUrl},
     {label:'🗻 USGS Topo Viewer'+(pin?' (zoomed to site)':''),   url:topoUrl},
     {label:'🌊 FEMA Flood Map Service Center',                   url:femaUrl},
-    {label:'📖 Municode — '+county+' County',                    url:municodeUrl},
+    {label:municodeLabel||('📖 Municode — '+county+' County'),    url:municodeUrl},
   ].map(l=>`
     <div style="margin-bottom:.35rem">
       <a href="${l.url}" target="_blank" rel="noopener"
