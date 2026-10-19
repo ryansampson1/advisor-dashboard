@@ -12233,7 +12233,8 @@ window.renderCurrentView = (...a) => renderCurrentView(...a);
    Checks (weight) — a check that doesn't apply to a person is left out of
    both the numerator and the denominator, so score = passed ÷ applicable:
      deals_current (20) every active deal touched in the last 14 days
-     fields        (15) active deals have their stage's required fields + acreage + county
+     fields        (15) Listing-column deals have their stage's required fields + acreage + county
+                        (LOI / under contract / rezoning / permitting / closing are not checked — COMPLYFLD-20261019)
      offers        (15) LOI-stage deals have an offer on file; contract-stage deals have the signed contract
      calls         (10) ≥ 10 logged calls last week (advisors; admins only when they hold active deals)
      tasks         (15) no task more than 5 business days past due
@@ -12390,16 +12391,19 @@ window._cmpEval = (uid, nowTs) => {
   add('deals_current', role!=='staff' && listings.length>0, stale.length===0, stale,
       listings.length ? `${listings.length} active listing${listings.length===1?'':'s'} · deals under contract or with an LOI are never stale` : '');
 
-  // 2. Required fields
+  // 2. Required fields — COMPLYFLD-20261019: Ryan — only active listings (Listing column) need their fields kept up;
+  //    deals with an LOI, under contract, in rezoning / permitting or closing are not checked.
+  const fieldDeals = deals.filter(window._cmpIsStaleCandidate);
   const miss = [];
-  deals.forEach(d => {
+  fieldDeals.forEach(d => {
     let m = [];
     try { m = getStageRequiredFields(d.stage||'', d).filter(f => !(f.id==='sf-rezone-expiration' && d.rezoneExpiration)).map(f => f.label || f.id); } catch(e){}   // rezoning expiration has no carry-forward getter
     if (!(d.acreage || d.acres)) m.push('Acreage');
     if (!d.county) m.push('County');
     if (m.length) miss.push({kind:'deal', id:d.id, label:_cmpName(d), note:'Missing: '+m.join(', ')});
   });
-  add('fields', role!=='staff' && deals.length>0, miss.length===0, miss);
+  add('fields', role!=='staff' && fieldDeals.length>0, miss.length===0, miss,
+      fieldDeals.length ? `${fieldDeals.length} active listing${fieldDeals.length===1?'':'s'} checked · deals with an LOI, under contract, in rezoning / permitting or closing are not checked` : '');
 
   // 3. Offers & contracts on file
   const offerDeals = deals.filter(d => _CMP_LOI_RE.test(_cmpStage(d)) || _CMP_CT_RE.test(_cmpStage(d)));
