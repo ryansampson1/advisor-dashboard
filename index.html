@@ -50744,7 +50744,7 @@ async function _mkListPeriods(force){
   st.list=[]; st.listLoaded=true;
   if(!_fbDb||!_fbFns){ return st.list; }
   try{ const {collection,getDocs}=_fbFns; const snap=await getDocs(collection(_fbDb,'marketReports'));
-    snap.docs.forEach(d=>{ const v={id:d.id,..._mkFsDec(d.data())}; st.docs[d.id]=v; st.list.push(d.id); });
+    snap.docs.forEach(d=>{ const v={id:d.id,..._mkFsDec(d.data())}; st.docs[d.id]=v; if(v.config||v.headline||v.uses||v.label) st.list.push(d.id); });   // RESIAUTO-20261022: a doc with only resiAuto* (worker ran before ➕ New quarter) isn't listed
     st.list.sort().reverse();
   }catch(e){ console.warn('[mk] list',e); st.loadError=e.message||String(e); }
   return st.list;
@@ -50763,7 +50763,7 @@ function _mkDeepMerge(a,b){ // Firestore merge semantics: maps merge, everything
   return out;
 }
 async function _mkCreatePeriod(id, copyFrom){
-  const st=window._mkState; if(st.docs[id]) { st.period=id; return st.docs[id]; }
+  const st=window._mkState; const pre=st.docs[id]; if(pre && (pre.config||pre.headline||pre.label)) { st.period=id; return pre; }   // RESIAUTO-20261022
   const src=copyFrom?st.docs[copyFrom]:null;
   const base={ id, label:_mkPeriodLabel(id), short:_mkPeriodShort(id), dataAsOf:'', resiThrough:'', createdAt:Date.now(),
     preparedBy:src?.preparedBy||'', contactName:src?.contactName||'', contactEmail:src?.contactEmail||'', coverPhotoUrl:src?.coverPhotoUrl||'',
@@ -50776,7 +50776,7 @@ async function _mkCreatePeriod(id, copyFrom){
     base.residential.builders=[]; base.residential.chartTitle=(src.residential||{}).chartTitle||'';
   }
   if(_fbDb&&_fbFns){ const {doc,setDoc}=_fbFns; await setDoc(doc(_fbDb,'marketReports',id), _mkFsEnc(base), {merge:true}); }
-  st.docs[id]=base; if(!st.list.includes(id)){ st.list.push(id); st.list.sort().reverse(); } st.period=id;
+  st.docs[id]=pre?{...pre,...base}:base; if(!st.list.includes(id)){ st.list.push(id); st.list.sort().reverse(); } st.period=id;
   return base;
 }
 async function _mkUploadImage(file, name){
@@ -50868,6 +50868,7 @@ function _mkSelection(P){
 }
 function _mkRender(){
   const st=window._mkState; const P=_mkDoc(); const list=st.list||[];
+  if(P&&P.resiAutoAt&&P.resiAutoAt>(P.resiAutoAppliedAt||0)&&!st._raBusy) setTimeout(()=>_mkResiAutoApply(),0);   // RESIAUTO-20261022
   const periodOpts=list.map(id=>`<option value="${_mkEsc(id)}" ${id===st.period?'selected':''}>${_mkEsc(_mkPeriodShort(id))} — ${_mkEsc((st.docs[id]||{}).label||_mkPeriodLabel(id))}</option>`).join('');
   const head=`<div class="mk-head">
       <h1>📊 Market Reports</h1>
@@ -50913,7 +50914,7 @@ function _mkRender(){
     <div style="overflow:auto"><table class="mk-matrix" aria-label="Report data by market and use"><thead><tr><th style="min-width:110px">Use</th>${cfg.markets.map(m=>`<th style="min-width:200px"><button onclick="window._mkEditMarket('${m.id}')" title="Edit market snapshot">${_mkEsc(m.name)} ✎</button><div class="mk-note">${_mkEsc(_mkMarket(P,m.id).countiesShort||'')}${(_mkMarket(P,m.id).demo||[]).length?'':' · <b>no demographics</b>'}</div></th>`).join('')}</tr></thead>
       <tbody>${cfg.assets.map(a=>`<tr><td class="mk-rowh"><button disabled style="cursor:default">${_mkEsc(a.name)}</button></td>${cfg.markets.map(m=>cell(m,a)).join('')}</tr>`).join('')}
       <tr><td class="mk-rowh"><button onclick="window._mkEditResidential()">Residential ✎</button></td>${cfg.markets.map(m=>resiCell(m)).join('')}</tr></tbody></table></div>
-    <div class="mk-card-b mk-note">Headline: <em>${_mkEsc(ov.title||'— not written —')}</em>${P.preparedBy?' · Prepared by '+_mkEsc(P.preparedBy):''}${P.updatedAt?' · last edited '+new Date(P.updatedAt).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})+(P.updatedByName?' by '+_mkEsc(P.updatedByName):''):''}</div></div>`;
+    <div class="mk-card-b mk-note">Headline: <em>${_mkEsc(ov.title||'— not written —')}</em>${P.preparedBy?' · Prepared by '+_mkEsc(P.preparedBy):''}${P.updatedAt?' · last edited '+new Date(P.updatedAt).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})+(P.updatedByName?' by '+_mkEsc(P.updatedByName):''):''}</div>${_mkResiAutoLine(P)}</div>`;   /* RESIAUTO-20261022 */
   const gens=(P.generated||[]).slice(-6).reverse();
   const log=gens.length?`<div class="mk-card"><div class="mk-card-h"><h2>Recently generated</h2></div><div class="mk-card-b mk-note">${gens.map(g=>`<div>${new Date(g.at).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})} · ${_mkEsc(g.byName||'')} · ${g.variant==='quick'?'Quick Read':'Full report'} · ${_mkEsc((g.markets||[]).join(', '))} · ${_mkEsc((g.assets||[]).join(', '))}${g.residential?', residential':''} · ${g.pages} pages</div>`).join('')}</div></div>`:'';
   setContent(`<div class="mk-wrap">${head}${gen}${_mkCanEdit()?data:''}${log}<p class="mk-note">Reports open in a new tab as a PDF (save or print from there). Nothing is emailed or filed automatically. Internal ELC report — not for distribution outside the firm.</p></div>`);
@@ -50946,7 +50947,7 @@ window._mkQuarterTaskRun=async function(){
       +'1. In CoStar, export the '+short+' Market Report PDF for each market and property type.\n   Markets: '+mk+'\n   Uses: '+us+'\n   Name each file "<Market> <Use> - '+short+'.pdf" (e.g. "Orlando Industrial - '+short+'.pdf") so Terra matches it automatically. CoStar\'s "Melbourne" / "Palm Bay" reports are Space Coast; "Daytona Beach" reports are Daytona Beach.\n'
       +'2. Terra → 📊 Market Reports → ➕ New quarter → '+per.id+' (start from the previous quarter).\n'
       +'3. Click 📥 Import CoStar PDFs, drop all the files in, check the market/use on each row, and import.\n'
-      +'4. Spot-check the numbers, then fill 📝 Overview & five things and 🏠 Residential regional.\n'
+      +'4. Spot-check the numbers, then fill 📝 Overview & five things. Residential: Census permits and the mortgage rate fill in automatically; open each market\'s Residential cell and 🏠 Residential regional, check the 🔎 research drafts against their sources and click Use.\n'
       +'5. Click 📄 Generate full report to confirm it builds.';
     await setDoc(doc(_fbDb,'tasks',tid), { title:'📊 Upload '+short+' CoStar reports to Market Reports', description:desc,
       assignedTo:hit[0], assignedToName:hit[1].name||hit[1].email||'Pat', assignedToEmail:MKTQ_ASSIGNEE_EMAIL,
@@ -51048,7 +51049,7 @@ window._mkEditMarket=function(m, focus){
     <div class="mk-grid">${_mkF('mk-m-jobs','Fastest-growing job sectors line',M.jobSectors,{full:true,ta:true,rows:2,ph:'Fastest-growing job sectors (12-mo): Education and Health Services (2.32%, 260K), …'})}</div>
     <div class="mk-sec">Quick Read — where to point clients (3 items)</div>
     ${_mkRows('mk-m-quick',[{label:'Label',ph:'RETAIL',w:'22%'},{label:'One or two sentences',ph:'Pads and outparcels in Pasco, SE Hillsborough, Hernando. Grocers and big boxes are building.',ta:true}],M.quick?M.quick.map(q=>[q.label,q.text]):[],{addLabel:'Add item'})}
-    <div class="mk-sec" id="mk-m-resi">Residential — permits, resale, communities and lots</div>
+    <div class="mk-sec" id="mk-m-resi">Residential — permits, resale, communities and lots</div>${_mkResiDraftPanel(P,m)}
     <div class="mk-grid">${_mkSigSelect('mk-r-sig',r.signal)}${_mkF('mk-r-note','Scorecard note',r.signalNote,{ph:'9,480 SF permits YTD (-0.7%)'})}${_mkF('mk-r-ytd','SF permits YTD',r.permitsYtd,{ph:'9,480'})}${_mkF('mk-r-yoy','YTD YoY',r.permitsYoy,{ph:'-0.7%'})}${_mkF('mk-r-prior','Prior-year same period',r.permitsPrior,{ph:'9,551'})}${_mkF('mk-r-lm','Latest month permits',r.latestMonth,{ph:'1,282'})}${_mkF('mk-r-lmyoy','Latest month YoY',r.latestMonthYoy,{ph:'-3.2%'})}${_mkF('mk-r-bym','Permits by month this year (comma-separated)',_mkCsv(r.permitsByMonth),{ph:'1110, 1140, 1175, …'})}
       ${_mkF('mk-r-pnote','Permits note',r.permitsNote,{ta:true,rows:3,full:true})}</div>
     <div class="mk-lbl">Resale, single-family (by county)</div>
@@ -51080,7 +51081,7 @@ window._mkEditOverview=function(){
 };
 window._mkEditResidential=function(){
   const P=_mkDoc(); if(!P) return; const R=P.residential||{};
-  const html=`<p class="mk-note">The per-market permit numbers, resale tables and community notes are edited on each market (the Residential row in the data grid). This is the regional page.</p>
+  const html=`<p class="mk-note">The per-market permit numbers, resale tables and community notes are edited on each market (the Residential row in the data grid). This is the regional page.</p>${_mkResiRegionalDraftPanel(P)}
     <div class="mk-grid">${_mkSigSelect('mk-rr-sig',R.signal)}${_mkF('mk-rr-note','Signal note',R.signalNote,{ph:'Permits flat to up, resale inventory tightening, builders optioning lots at 7% mortgage rates'})}${_mkF('mk-rr-ctitle','Permits chart title',R.chartTitle,{ph:'SINGLE-FAMILY PERMITS BY MONTH, 2026 (UNITS, CENSUS BPS)'})}${_mkF('mk-rr-months','Chart months (comma-separated)',_mkCsv(R.chartMonths),{ph:'Jan, Feb, Mar, Apr, May, Jun, Jul, Aug'})}</div>
     <div class="mk-sec">Regional tiles (the per-market permit tiles are added automatically)</div>
     ${_mkRows('mk-rr-stats',[{label:'Tile label',ph:'30-YR MORTGAGE RATE',w:'28%'},{label:'Value',ph:'7.03%',w:'20%'},{label:'Sub-line',ph:'Week of Sept 24, 2026 · year ago 6.30%'}],(R.stats&&R.stats.length)?R.stats:[['30-YR MORTGAGE RATE','',''],['FLORIDA SF CLOSED SALES','',''],['FLORIDA SF INVENTORY','','']],{addLabel:'Add tile'})}
@@ -51102,6 +51103,107 @@ window._mkEditAppendix=function(){
     await _mkSave({appendix}); showToast('Appendix saved','success'); _mkRender(); return true;
   });
 };
+/* ---------- RESIAUTO-20261022 — automatic residential data (elc-resi-worker) ----------
+   CoStar has no for-sale residential report. elc-resi-worker (1st + 15th of every month, or 🔄 Refresh now)
+   writes marketReports/{period}.resiAutoJson:
+   - OFFICIAL series (Census single-family permits via FRED for every market, Freddie Mac 30-yr rate):
+     merged into the report automatically. A field is filled when blank, refreshed when it still holds the
+     value the last pull wrote (residential.autoPrev), and never touched once a person has typed over it.
+   - RESEARCH (Gemini + Google Search: county resale, new homes, MPCs, land and lots, population, Florida
+     Realtors, builders, Zonda): shown as a draft inside the Residential editors with sources and a
+     "not found" list. "Use" copies it into the fields; nothing is saved until Save. In testing the model
+     returned some wrong county figures, so research is never written into the report without a person. */
+const MKT_RESI_WORKER=(typeof APP_CONFIG!=='undefined'&&APP_CONFIG&&APP_CONFIG.resiWorkerUrl)||'https://elc-resi-worker.dirtdog.workers.dev';
+const _mkRaCache=new WeakMap();
+function _mkResiAuto(P){ if(!P||!P.resiAutoJson) return null; const c=_mkRaCache.get(P); if(c&&c.at===P.resiAutoAt) return c.v; let v=null; try{ v=JSON.parse(P.resiAutoJson); }catch(e){ console.warn('[mk] resiAuto parse',e); } _mkRaCache.set(P,{at:P.resiAutoAt,v}); return v; }
+function _mkRaDay(d){ if(!d) return ''; const t=new Date(String(d).length<=10?d+'T12:00:00':d); return isNaN(t)?String(d):t.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}); }
+function _mkRaFmt(v,kind){ if(v==null||v==='') return ''; if(typeof v==='number'){ if(kind==='pct') return (v>0?'+':'')+v.toFixed(1)+'%'; if(kind==='usd') return '$'+Math.round(v).toLocaleString('en-US'); return v.toLocaleString('en-US'); } const s=String(v).trim(); if(/^not ?found$/i.test(s)||/^n\/?a$/i.test(s)) return ''; if(kind==='pct'&&!/^[-+]?\d/.test(s)) return ''; return s; }
+function _mkResiOfficial(A,m){ const p=A&&A.markets&&A.markets[m]&&A.markets[m].permits; if(!p||p.error||p.ytd==null) return null;
+  const f=n=>n==null?'':Math.round(n).toLocaleString('en-US'); const mo=p.months||[]; const rng=mo.length>1?mo[0]+'-'+mo[mo.length-1]:(mo[0]||'');
+  return { permitsYtd:f(p.ytd), permitsYoy:p.ytdYoy||'', permitsPrior:f(p.ytdPrior), latestMonth:f(p.latest), latestMonthYoy:p.latestYoy||'', permitsByMonth:(p.byMonth||[]).map(x=>x==null?0:x),
+    permitsNote:rng+' '+p.year+' vs '+rng+' '+(p.year-1)+'; latest month '+p.through+'. U.S. Census Building Permits Survey via FRED ('+p.series+'), single-family, not seasonally adjusted.'+(p.complete?'':' Later months of the quarter not yet published.') }; }
+function _mkResiAutoPatch(P){
+  const A=_mkResiAuto(P); if(!A) return null;
+  const eq=(a,b)=>JSON.stringify(a==null?'':a)===JSON.stringify(b==null?'':b); const blank=v=>v==null||v===''||(Array.isArray(v)&&(!v.length||v.every(x=>x===''||x==null)));
+  const patch={resiAutoAppliedAt:P.resiAutoAt}; let n=0; const cfg=_mkConfig(P);
+  cfg.markets.forEach(mk=>{ const off=_mkResiOfficial(A,mk.id); if(!off) return; const r=(((P.markets||{})[mk.id]||{}).residential)||{}; let prev={}; try{ prev=JSON.parse(r.autoPrev||'{}'); }catch(e){}
+    const upd={}, np={...prev};
+    Object.keys(off).forEach(k=>{ const mine=!blank(r[k])&&!eq(r[k],prev[k]); if(mine) return; if(!eq(r[k],off[k])){ upd[k]=off[k]; n++; } np[k]=off[k]; });
+    if(Object.keys(upd).length||!eq(np,prev)){ patch.markets=patch.markets||{}; patch.markets[mk.id]={residential:{...upd, autoPrev:JSON.stringify(np)}}; } });
+  const R=P.residential||{}; let rp={}; try{ rp=JSON.parse(R.autoPrev||'{}'); }catch(e){} const ru={}, rnp={...rp};
+  const q=A.mortgage&&A.mortgage.quarterEnd;
+  if(q&&q.rate!=null){ const val=[Number(q.rate).toFixed(2)+'%', 'Week of '+_mkRaDay(q.date)+(q.yearAgo!=null?' · year ago '+Number(q.yearAgo).toFixed(2)+'%':'')+' · Freddie Mac PMMS'];
+    const stats=((R.stats&&R.stats.length)?R.stats:[['30-YR MORTGAGE RATE','',''],['FLORIDA SF CLOSED SALES','',''],['FLORIDA SF INVENTORY','','']]).map(x=>(x||[]).slice());
+    let i=stats.findIndex(x=>/MORTGAGE/i.test(x[0]||'')); const cur=i>=0?[stats[i][1]||'',stats[i][2]||'']:['',''];
+    if(blank(cur)||eq(cur,rp.mortgage)){ if(!eq(cur,val)){ if(i<0){ stats.unshift(['30-YR MORTGAGE RATE','','']); i=0; } stats[i]=[stats[i][0]||'30-YR MORTGAGE RATE',val[0],val[1]]; ru.stats=stats; n++; } rnp.mortgage=val; } }
+  const first=cfg.markets.map(mk=>A.markets&&A.markets[mk.id]&&A.markets[mk.id].permits).find(p=>p&&p.months&&p.months.length);
+  if(first){ const months=first.months; const mine=!blank(R.chartMonths)&&!eq(R.chartMonths,rp.chartMonths);
+    if(!mine){ if(!eq(R.chartMonths,months)){ ru.chartMonths=months; n++; } rnp.chartMonths=months; }
+    if(blank(R.chartTitle)){ ru.chartTitle='SINGLE-FAMILY PERMITS BY MONTH, '+first.year+' (UNITS, CENSUS BPS)'; n++; } }
+  if(A.through){ const mine=!blank(P.resiThrough)&&!eq(P.resiThrough,rp.resiThrough); if(!mine){ if(!eq(P.resiThrough,A.through)){ patch.resiThrough=A.through; n++; } rnp.resiThrough=A.through; } }
+  if(Object.keys(ru).length||!eq(rnp,rp)) patch.residential={...ru, autoPrev:JSON.stringify(rnp)};
+  return {patch,n};
+}
+async function _mkResiAutoApply(){
+  const st=window._mkState; const P=_mkDoc(); if(!P||st._raBusy||!_mkCanEdit()) return;
+  if(!(P.config||P.headline)||!P.resiAutoAt||P.resiAutoAt<=(P.resiAutoAppliedAt||0)) return;
+  st._raBusy=true; try{ const r=_mkResiAutoPatch(P); if(!r) return; await _mkSave(r.patch); if(r.n) showToast('🏠 Residential data updated automatically ('+r.n+' field'+(r.n>1?'s':'')+': Census permits, mortgage rate)','success',6000); if(currentView==='marketReports') _mkRender(); }
+  catch(e){ console.warn('[mk] resiAuto apply',e); } finally{ st._raBusy=false; } }
+window._mkResiAutoApply=_mkResiAutoApply; window._mkResiAutoPatch=_mkResiAutoPatch;
+function _mkResiAutoLine(P){
+  const A=_mkResiAuto(P); const btn=_mkCanEdit()?` <button class="mk-btn mk-btn-sm" onclick="window._mkResiRefresh(this)">🔄 Refresh now</button>`:'';
+  if(!A) return `<div class="mk-card-b mk-note">🏠 <b>Residential data</b> · not pulled for ${_mkEsc(P.short||_mkPeriodShort(P.id))} yet. It is pulled automatically on the 1st and 15th of each month: Census permits and the mortgage rate fill in on their own, and web research is drafted for review.${btn}</div>`;
+  const nR=Object.values(A.markets||{}).filter(x=>x&&x.research).length;
+  return `<div class="mk-card-b mk-note">🏠 <b>Residential data</b> · auto-pulled ${_mkEsc(new Date(A.ranAt).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}))} · ${_mkEsc(P.resiAutoStatus||'')}. Census permits and the 30-yr rate fill in on their own; anything you type over is left alone. ${nR?`Research drafts (resale by county, new homes, communities, land deals, population${A.regional?', Florida Realtors and builders':''}) are waiting in each market's <b>Residential</b> cell and in <b>🏠 Residential regional</b>: check them against the sources, then click Use.`:''}${(A.errors||[]).length?` <span title="${_mkEsc((A.errors||[]).join('\n'))}">⚠ ${A.errors.length} issue(s)</span>`:''}${btn}</div>`; }
+window._mkResiRefresh=async function(btn){
+  const P=_mkDoc(); if(!P) return; const done=elcBusy(btn,'Pulling… about a minute');
+  try{ const r=await fetch(MKT_RESI_WORKER+'/run?period='+encodeURIComponent(P.id),{method:'POST'}); const j=await r.json().catch(()=>({})); if(!r.ok) throw new Error(j.error||('HTTP '+r.status));
+    const {doc,getDoc}=_fbFns; const snap=await getDoc(doc(_fbDb,'marketReports',P.id)); const d=_mkFsDec(snap.data()||{}); const st=window._mkState;
+    st.docs[P.id]={...st.docs[P.id], resiAutoJson:d.resiAutoJson, resiAutoAt:d.resiAutoAt, resiAutoStatus:d.resiAutoStatus};
+    showToast('Residential data pulled · '+(j.status||''),'success',6000); _mkRender(); }
+  catch(e){ console.warn('[mk] resi refresh',e); showToast('Could not pull residential data: '+e.message,'error',8000); } finally{ done(); } };
+function _mkFillRows(id, rows){ const t=document.getElementById(id); if(!t) return; const tpl=(window._mkRowTpl||{})[id]; if(!tpl) return; t.tBodies[0].innerHTML='';
+  (rows.length?rows:[[]]).forEach(r=>{ t.tBodies[0].insertAdjacentHTML('beforeend',tpl); [...t.tBodies[0].lastElementChild.querySelectorAll('input,textarea')].forEach((el,i)=>{ el.value=r[i]==null?'':String(r[i]); }); }); }
+function _mkRaSources(list){ const xs=(list||[]).filter(x=>x&&(x.title||x.url)); if(!xs.length) return ''; return `<div class="mk-note"><b>Sources:</b> ${xs.map(x=>x.url?`<a href="${_mkEsc(x.url)}" target="_blank" rel="noopener">${_mkEsc(x.title||x.url)}</a>`:_mkEsc(x.title)).join(' · ')}</div>`; }
+function _mkRaWhen(A){ return A&&A.ranAt?new Date(A.ranAt).toLocaleDateString('en-US',{month:'short',day:'numeric'}):''; }
+function _mkResiDraftPanel(P,m){
+  const A=_mkResiAuto(P); const X=A&&A.markets&&A.markets[m]; if(!X) return '';
+  if(!X.research) return X.error?`<p class="mk-note">⚠ Web research for this market failed on the ${_mkEsc(_mkRaWhen(A))} pull (${_mkEsc(X.error.slice(0,140))}). Census permits above still update.</p>`:'';
+  const R=X.research; const rs=R.resale||[];
+  const td=v=>`<td>${_mkEsc(_mkRaFmt(v))}</td>`;
+  return `<details class="mk-draft" open style="border:1px dashed var(--border,#D1D5DB);border-radius:10px;padding:.5rem .7rem;margin:.4rem 0 .8rem"><summary style="cursor:pointer;font-weight:700">🔎 Research draft · ${_mkEsc(_mkRaWhen(A))} · Gemini + Google Search: check before using</summary>
+    <p class="mk-note">Drafted from the web under ELC's rules (no estimates, "not found" when unpublished, a source on every figure). The model can still get a figure wrong, so check each one against its source. <b>Use</b> only fills the fields below; nothing is saved until you click Save.</p>
+    ${rs.length?`<div style="overflow:auto"><table class="mk-rows"><thead><tr><th>County</th><th>Period</th><th>Closed</th><th>YoY</th><th>Median</th><th>YoY</th><th>Mo. supply</th><th>Inv. YoY</th><th>Source</th></tr></thead><tbody>${rs.map(x=>`<tr>${td(x.county)}${td(x.period)}${td(x.closed)}${td(x.closedYoy)}${td(x.median)}${td(x.medianYoy)}${td(x.monthsSupply)}${td(x.inventoryYoy)}<td>${x.url?`<a href="${_mkEsc(x.url)}" target="_blank" rel="noopener">${_mkEsc(x.source||'link')}</a>`:_mkEsc(x.source||'')}</td></tr>`).join('')}</tbody></table></div>`:'<p class="mk-note">No resale figures found.</p>'}
+    ${R.resaleNote?`<p class="mk-note">${_mkEsc(R.resaleNote)}</p>`:''}
+    ${[['newHome','New homes and builders'],['mpc','Master-planned communities'],['lots','Land and lots'],['population','Population']].map(([k,l])=>R[k]?`<p style="font-size:.8rem;margin:.3rem 0"><b>${l}:</b> ${_mkEsc(R[k])}</p>`:'').join('')}
+    ${(R.notFound||[]).length?`<p class="mk-note"><b>Not found:</b> ${_mkEsc(R.notFound.join('; '))}</p>`:''}${_mkRaSources(R.sources)}
+    <div style="display:flex;gap:.4rem;flex-wrap:wrap;margin-top:.4rem">${rs.length?`<button type="button" class="mk-btn mk-btn-sm" onclick="window._mkUseResiDraft('${m}','resale')">⬇ Use resale rows</button>`:''}<button type="button" class="mk-btn mk-btn-sm" onclick="window._mkUseResiDraft('${m}','text')">⬇ Use notes (new homes, communities, lots, population)</button></div></details>`; }
+window._mkUseResiDraft=function(m,what){
+  const A=_mkResiAuto(_mkDoc()); const R=A&&A.markets&&A.markets[m]&&A.markets[m].research; if(!R) return;
+  if(what==='resale'){ _mkFillRows('mk-r-resale',(R.resale||[]).map(x=>[x.county,x.closed,x.closedYoy,x.median,x.medianYoy,x.monthsSupply,x.inventoryYoy].map(v=>_mkRaFmt(v))));
+    const n=document.getElementById('mk-r-rnote'); if(n&&R.resaleNote) n.value=R.resaleNote; }
+  else { const set=(id,v)=>{ const el=document.getElementById(id); if(el&&v) el.value=v; }; set('mk-r-mpc',R.mpc); set('mk-r-lots',R.lots); set('mk-r-pop',R.population);
+    const pn=document.getElementById('mk-r-pnote'); if(pn&&R.newHome&&!pn.value.includes(R.newHome)) pn.value=(pn.value?pn.value.trim()+' ':'')+R.newHome; }
+  showToast('Draft copied into the fields. Review, then Save.','info',5000); };
+function _mkResiRegionalDraftPanel(P){
+  const A=_mkResiAuto(P); const G=A&&A.regional; if(!G) return '';
+  const F=G.florida||{}; const B=G.builders||[];
+  return `<details class="mk-draft" open style="border:1px dashed var(--border,#D1D5DB);border-radius:10px;padding:.5rem .7rem;margin:.4rem 0 .8rem"><summary style="cursor:pointer;font-weight:700">🔎 Research draft · ${_mkEsc(_mkRaWhen(A))} · Florida Realtors, public builders, Zonda: check before using</summary>
+    <p class="mk-note">The 30-yr mortgage tile, chart months and permit figures are already filled automatically from Freddie Mac and the Census. The items below are drafted from the web; <b>Use</b> fills the fields, Save keeps them.</p>
+    ${F.period||F.closed?`<p style="font-size:.8rem;margin:.3rem 0"><b>Florida Realtors, single-family, ${_mkEsc(_mkRaFmt(F.period))}:</b> ${_mkEsc(_mkRaFmt(F.closed))} closed sales (${_mkEsc(_mkRaFmt(F.closedYoy,'pct'))} YoY) · median ${_mkEsc(_mkRaFmt(F.median,'usd'))} (${_mkEsc(_mkRaFmt(F.medianYoy,'pct'))}) · inventory ${_mkEsc(_mkRaFmt(F.inventory)||'not found')}${F.inventoryYoy?' ('+_mkEsc(_mkRaFmt(F.inventoryYoy,'pct'))+')':''} · ${_mkEsc(_mkRaFmt(F.monthsSupply))} months supply ${F.url?`· <a href="${_mkEsc(F.url)}" target="_blank" rel="noopener">source</a>`:''}</p>`:''}
+    ${B.length?`<div style="font-size:.8rem">${B.map(b=>`<p style="margin:.25rem 0"><b>${_mkEsc(b.name||'')}</b> (${_mkEsc(b.period||'')}): ${_mkEsc(b.text||'')}${b.url?` <a href="${_mkEsc(b.url)}" target="_blank" rel="noopener">source</a>`:''}</p>`).join('')}</div>`:''}
+    ${G.lotIndex?`<p style="font-size:.8rem;margin:.3rem 0"><b>Lots:</b> ${_mkEsc(G.lotIndex)}</p>`:''}
+    ${(G.notFound||[]).length?`<p class="mk-note"><b>Not found:</b> ${_mkEsc(G.notFound.join('; '))}</p>`:''}${_mkRaSources(G.sources)}
+    <div style="display:flex;gap:.4rem;flex-wrap:wrap;margin-top:.4rem">${F.closed?`<button type="button" class="mk-btn mk-btn-sm" onclick="window._mkUseResiRegional('florida')">⬇ Use Florida tiles</button>`:''}${B.length?`<button type="button" class="mk-btn mk-btn-sm" onclick="window._mkUseResiRegional('builders')">⬇ Use builders + lot note</button>`:''}</div></details>`; }
+window._mkUseResiRegional=function(what){
+  const A=_mkResiAuto(_mkDoc()); const G=A&&A.regional; if(!G) return;
+  if(what==='florida'){ const F=G.florida||{}; const rows=_mkReadRows('mk-rr-stats'); const per=_mkRaFmt(F.period);
+    const put=(re,label,v,sub)=>{ const i=rows.findIndex(r=>re.test(r[0]||'')); const row=[label,v,sub]; if(i>=0) rows[i]=[rows[i][0],v,sub]; else rows.push(row); };
+    put(/CLOSED/i,'FLORIDA SF CLOSED SALES',_mkRaFmt(F.closed),[per,_mkRaFmt(F.closedYoy,'pct')?_mkRaFmt(F.closedYoy,'pct')+' YoY':'',F.median?'median '+_mkRaFmt(F.median,'usd')+(F.medianYoy!=null&&F.medianYoy!==''?' ('+_mkRaFmt(F.medianYoy,'pct')+')':''):''].filter(Boolean).join(' · '));
+    const inv=/month|supply/i.test(String(F.inventory||''))?'':_mkRaFmt(F.inventory); put(/INVENTORY/i,'FLORIDA SF INVENTORY',inv||(F.monthsSupply?_mkRaFmt(F.monthsSupply)+' mo.':''),[per,_mkRaFmt(F.inventoryYoy,'pct')?_mkRaFmt(F.inventoryYoy,'pct')+' YoY':'',inv&&F.monthsSupply?_mkRaFmt(F.monthsSupply)+' months supply':(inv?'':'months supply')].filter(Boolean).join(' · '));
+    _mkFillRows('mk-rr-stats',rows); }
+  else { _mkFillRows('mk-rr-build',(G.builders||[]).map(b=>[b.name,b.period,b.text])); const n=document.getElementById('mk-rr-bnote'); if(n&&G.lotIndex) n.value=G.lotIndex; }
+  showToast('Draft copied into the fields. Review, then Save.','info',5000); };
 window._mkOpenConfig=function(){
   const P=_mkDoc(); if(!P) return; const cfg=_mkConfig(P);
   const html=`<p class="mk-note">Markets and uses define the rows and columns of this quarter's report. Ids are short lowercase keys (e.g. <code>orlando</code>, <code>selfstorage</code>); renaming an id orphans its data, so add rather than rename.</p>
