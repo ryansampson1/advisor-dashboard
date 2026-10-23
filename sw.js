@@ -1,4 +1,4 @@
-const CACHE = 'elc-v580';
+const CACHE = 'elc-v581';
 const PRECACHE = [
   '/advisor-dashboard/',
   '/advisor-dashboard/index.html',
