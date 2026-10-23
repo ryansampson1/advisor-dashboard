@@ -47878,6 +47878,51 @@ async function _mrPreloadReports(ym, deals){
   await Promise.all(need.map(async d=>{ try{ const s=await getDoc(doc(_fbDb,'deals',d.id,'monthlyReports',ym)); st.reports[d.id+'|'+ym]=s.exists()?{id:s.id,...s.data()}:null; }catch(e){ st.reports[d.id+'|'+ym]=null; } }));
 }
 function _mrLetters(){ return (eosCache && eosCache.monthlyReportLetters) || {}; }
+/* AILETTER-20261023 — which status letter a report uses: 'ai' (default) | 'firm' (Bill's letter for the month) | 'custom' (advisor's own).
+   Stored as monthlyReports/{ym}.letterChoice. Reports saved before this change: a written custom letter stays custom;
+   a report already SENT keeps the letter it went out with; everything else becomes the AI draft. */
+function _mrLetterChoice(rep){
+  if(rep && rep.letterChoice) return rep.letterChoice;
+  const own=!!(rep && rep.letterMode==='custom' && String(rep.letterBody||'').trim());
+  if(own) return 'custom';
+  if(rep && rep.status==='sent') return 'firm';
+  return 'ai';
+}
+function _mrLetterReady(dealId,ym){
+  const r=window._mrState.reports[dealId+'|'+ym]; const c=_mrLetterChoice(r);
+  if(c==='ai') return true;   // drafted automatically when the report is built (Review / Preview / Send)
+  if(c==='custom') return !!String((r&&r.letterBody)||'').trim();
+  return !!_mrLetterFor(ym);
+}
+async function _mrAiLetterDraft(deal, ym, rep, ctx){
+  ctx=ctx||{};
+  let history=ctx.history;
+  if(!history){ const [acts,tasks]=await Promise.all([_mrFetchActivities(deal.id),_mrFetchTasks(deal.id)]); history=_mrHistoryRows(deal,acts,tasks).history; }
+  let emails=ctx.emails;
+  if(!emails){ try{ emails=(typeof _mrMcForReport==='function')?await _mrMcForReport(deal,ym,rep):[]; }catch(e){ emails=[]; } }
+  const posts=ctx.posts||((typeof _mrMonthPosts==='function')?_mrMonthPosts(deal,ym):[]);
+  const rng=_mrMonthRange(ym); const t=(rep&&rep.traffic)||{};
+  const acts=(history||[]).filter(r=>r.ts>=rng.start&&r.ts<rng.end).slice(0,40).map(r=>r.date+' '+r.type+': '+String(r.text||'').slice(0,180)).join('\n');
+  const offers=(Array.isArray(deal.lois)?deal.lois:[]).filter(l=>l&&l.reportInclude!==false).slice(0,6).map(l=>'- '+[l.receivedAt?('received '+l.receivedAt):'', l.buyer?('buyer '+l.buyer):'', l.price?('price '+_mrFmtMoney(l.price)):'', l.status?('status '+l.status):'', l.estClose?('est. closing '+l.estClose):'', l.ddTerms?('due diligence '+l.ddTerms):''].filter(Boolean).join(', ')).join('\n');
+  const blasts=(emails||[]).slice(0,8).map(e=>'- '+(e.title||e.subject||'E-blast')+(e.date?(' ('+e.date+')'):'')+(e.recipients?(', sent to '+e.recipients):'')+(e.opens?(', '+e.opens+' opens'):'')+(e.clicks?(', '+e.clicks+' clicks'):'')).join('\n');
+  const sc=(deal.signCallsByMonth||{})[ym]; const signCalls=sc&&Number(sc.calls)>0?Number(sc.calls):0;
+  const tr=[['site visits',t.siteVisits],['unique visitors',t.uniqueVisitors],['documents viewed',t.docsViewed],['confidentiality agreements signed',t.casSigned],['LoopNet views',t.loopnetViews],['Crexi views',t.crexiViews],['leads',t.totalLeads]].filter(x=>x[1]!=null&&x[1]!==''&&Number(x[1])>0).map(x=>x[1]+' '+x[0]).join(', ');
+  const sys='You write the monthly status-update letter that Eshenbaugh Land Company (a Florida land brokerage) sends to the owner of a property it has listed for sale. Write the BODY of the letter only: it is printed after "Dear <owner>:" and before the advisor\'s signature, so no greeting, no sign-off, no signature, no subject line. 2 to 4 short paragraphs, 150-260 words, first person plural ("we"), warm, plain-spoken and professional. Cover: the marketing done this month (e-blasts, social posts, website), buyer activity and interest (inquiries, calls, tours, OMs sent), any offers/LOIs or contract progress with their key terms, and what we plan to do next month. Use ONLY the facts provided — never invent numbers, names, buyers, dates or events. If there was little activity, say so honestly and describe the ongoing marketing. Do not use square-bracket placeholders. No bullet points, no markdown.';
+  const user='Property: '+_mrDealName(deal)+' — '+_mrDealAddr(deal)
+    +'\nMonth covered: '+_mrMonthLabel(ym)
+    +'\nAcreage: '+(_mrDealAcres(deal)||'n/a')+'   County: '+(deal.county||'n/a')+'   Zoning: '+(deal.zoning||'n/a')
+    +'\nAsking price: '+(_mrFmtMoney(_mrDealPrice(deal))||'n/a')+'   Current stage: '+_mrStageOf(deal)
+    +'\nListing expiration: '+(deal.listingExpiration||'n/a')
+    +'\nE-blasts this month:\n'+(blasts||'(none)')
+    +'\nSocial media posts this month: '+((posts||[]).length||0)
+    +(signCalls?('\nCalls to the property sign line this month: '+signCalls):'')
+    +'\nListing website / portal traffic this month: '+(tr||'(not available)')
+    +'\nOffers / LOIs on file:\n'+(offers||'(none)')
+    +'\nLogged activity this month (emails, calls, meetings, notes):\n'+(acts||'(no logged activity this month)');
+  const txt=String(await leadAI(sys,user,900)||'').trim().replace(/^dear[^\n]*\n+/i,'').trim();
+  if(!txt) throw new Error('The AI returned an empty letter');
+  return txt;
+}
 function _mrLetterFor(ym){ const L=_mrLetters(); return (L[ym]&&L[ym].body)||''; }
 async function _mrSaveLetter(ym, body){
   const {doc,setDoc}=_fbFns;
@@ -48144,14 +48189,14 @@ window._mrRenderRows=function(){
   tb.innerHTML=deals.map(d=>{
     const rep=st.reports[d.id+'|'+ym]||null; const recips=_mrRecipients(d);
     const sendOn=_mrSendOn(d); const ready=recips.length>0 && sendOn;
-    const custom=!!(rep&&rep.letterMode==='custom'); const hasOwn=!!(rep&&String(rep.letterBody||'').trim());
+    const lchoice=_mrLetterChoice(rep); const hasOwn=!!(rep&&String(rep.letterBody||'').trim());   // AILETTER-20261023
     return `<tr${sendOn?'':' style="opacity:.62"'}>
       <td><input type="checkbox" class="mr-check" aria-label="Select ${_mrEsc(_mrDealName(d))}" ${st.selected[d.id]?'checked':''} ${ready?'':`disabled title="${sendOn?'Add recipients first':'Send to client is switched off'}"`} onchange="window._mrToggleSel('${d.id}',this.checked)"></td>
       <td><div style="display:flex;gap:.6rem;align-items:center">${d.primaryPhotoUrl?`<img class="mr-thumb" src="${_mrEsc(d.primaryPhotoUrl)}" alt="">`:`<div class="mr-thumb"></div>`}<div><div style="font-weight:700">${_mrEsc(_mrDealName(d))}</div><div class="mr-muted">${_mrEsc(_mrDealAddr(d))}${_mrDealPrice(d)?' · '+_mrFmtMoney(_mrDealPrice(d)):''}</div></div></div></td>
       <td>${(()=>{ const n=_mrAdvisorNames(d); return n.length?`${_mrEsc(n[0])}${n.length>1?`<div class="mr-muted" style="font-size:.72rem">+ ${_mrEsc(n.slice(1).join(', '))}</div>`:''}`:''; })()}</td>   <!-- REPORTSALL-20261016 co-advisors shown -->
       <td><span class="mr-muted">${_mrEsc(_mrStageOf(d))}</span></td>
       <td>${recips.length?`<span title="${_mrEsc(recips.map(r=>r.email).join(', '))}">${recips.length} owner${recips.length===1?'':'s'}</span>`:`<span style="color:#b91c1c;font-weight:600">None</span>`}</td>
-      <td><select class="mr-select" style="min-width:128px" aria-label="Status update letter for ${_mrEsc(_mrDealName(d))}" onchange="window._mrRowLetter('${d.id}',this.value)"><option value="default" ${custom&&hasOwn?'':'selected'}>Bill’s firm letter</option><option value="custom" ${custom&&hasOwn?'selected':''}>My own letter${custom&&!hasOwn?' (not written)':''}</option></select></td>
+      <td><select class="mr-select" style="min-width:128px" aria-label="Status update letter for ${_mrEsc(_mrDealName(d))}" onchange="window._mrRowLetter('${d.id}',this.value)"><option value="ai" ${lchoice==='ai'||(lchoice==='custom'&&!hasOwn)?'selected':''}>✨ AI letter</option><option value="default" ${lchoice==='firm'?'selected':''}>Bill’s firm letter</option><option value="custom" ${lchoice==='custom'&&hasOwn?'selected':''}>My own letter</option></select></td>
       <td><label style="display:flex;gap:.35rem;align-items:center;cursor:pointer;white-space:nowrap"><input type="checkbox" class="mr-check" ${sendOn?'checked':''} aria-label="Send monthly report to the client for ${_mrEsc(_mrDealName(d))}" onchange="window._mrToggleSend('${d.id}',this.checked)"> <span class="mr-muted">${sendOn?'On':'Off'}</span></label></td>
       <td>${(()=>{ const miss=(typeof _mrAssetsMissing==='function')?_mrAssetsMissing(d):[]; const task=(typeof _mrAssetsTaskFor==='function')?_mrAssetsTaskFor(d.id):null; return miss.length?`<span style="font-size:.72rem;color:#b45309;background:#fef3c7;border-radius:999px;padding:.1rem .5rem" title="Missing: ${_mrEsc(miss.join(', '))}">${miss.length} missing</span>${task?`<div class="mr-muted" style="font-size:.68rem">→ ${_mrEsc(task.assignedToName||'Nick')}</div>`:`<div><button class="mr-btn mr-btn-sm" style="font-size:.68rem;padding:.1rem .4rem" onclick="window._mrAssignAssets('${d.id}',this)">→ Nick</button></div>`}`:`<span style="font-size:.72rem;color:#047857;background:#d1fae5;border-radius:999px;padding:.1rem .5rem">✓</span>`; })()}</td>
       <td>${window._mbCellHtml?window._mbCellHtml(d,ym):''}</td>
@@ -48185,7 +48230,7 @@ window._mrRowLetter=async function(id,mode){
     const r=document.querySelector('input[name=mr-letter-mode][value=custom]'); if(r){ r.checked=true; window._mrLetterMode('custom'); const t=document.getElementById('mr-ed-letter'); if(t){ if(!t.value.trim()) window._mrLetterCopyDefault(); t.scrollIntoView({block:'center'}); t.focus(); } }
     window._mrRenderRows(); return;
   }
-  try{ await _mrSaveReport(id,ym,{letterMode:mode==='custom'?'custom':'default'}); showToast(mode==='custom'?'Using your own letter for '+_mrDealName(d):'Using Bill’s firm letter for '+_mrDealName(d),'success',3000); }
+  try{ await _mrSaveReport(id,ym,{letterChoice:mode==='default'?'firm':mode, letterMode:mode==='custom'?'custom':'default'}); showToast(mode==='custom'?'Using your own letter for '+_mrDealName(d):mode==='ai'?'Using the ✨ AI letter for '+_mrDealName(d)+' — drafted when you Review':'Using Bill’s firm letter for '+_mrDealName(d),'success',3500); }
   catch(e){ console.error('[mr] letter',e); showToast('Could not save: '+e.message,'error'); }
   window._mrRenderRows();
 };
@@ -48327,6 +48372,54 @@ function _mrRowsTable(id, cols, rows, addLabel){
   <button class="mr-btn mr-btn-sm" style="margin-top:.4rem" onclick="window._mrAddRow('${id}')">+ ${_mrEsc(addLabel||'Add row')}</button>`;
 }
 window._mrAddRow=function(id){ const t=document.getElementById(id); if(!t) return; const tr=t.tBodies[0].rows[0]; const clone=tr?tr.cloneNode(true):null; if(!clone) return; clone.querySelectorAll('input').forEach(i=>i.value=''); t.tBodies[0].appendChild(clone); clone.querySelector('input')?.focus(); };
+/* CRMAC-20261023 — typing in an Additional recipient's Name or Email box suggests CRM contacts; picking one fills both boxes. */
+(function(){
+  if(window._mrCrmAcBound) return; window._mrCrmAcBound=true;
+  let box=null, rows=[], idx=-1, inp=null;
+  const norm=s=>String(s||'').toLowerCase().trim();
+  const close=()=>{ if(box){ box.remove(); box=null; } rows=[]; idx=-1; if(inp){ inp.setAttribute('aria-expanded','false'); inp.removeAttribute('aria-activedescendant'); } };
+  const nameOf=c=>((c.firstName||'')+' '+(c.lastName||'')).trim()||c.company||'';
+  const search=q=>{ q=norm(q); if(q.length<2) return []; const words=q.split(/\s+/).filter(Boolean); const out=[];
+    for(const c of (typeof allContacts!=='undefined'?allContacts:[])||[]){
+      const emails=[c.email,c.email2].map(norm).filter(e=>/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)); if(!emails.length) continue;
+      const nm=nameOf(c); const hay=norm(nm+' '+(c.company||'')+' '+emails.join(' '));
+      if(!words.every(w=>hay.includes(w))) continue;
+      const score=(norm(nm).startsWith(q)?0:norm(c.lastName).startsWith(q)?1:emails.some(e=>e.startsWith(q))?2:3);
+      emails.forEach(e=>out.push({c,name:nm,email:e,company:c.company||'',score}));
+      if(out.length>400) break; }
+    return out.sort((a,b)=>a.score-b.score||a.name.localeCompare(b.name)).slice(0,8); };
+  const paint=()=>{ if(!box) return; box.innerHTML=rows.map((r,i)=>`<div role="option" id="mr-ac-o${i}" aria-selected="${i===idx}" data-i="${i}" class="mr-ac-opt${i===idx?' on':''}"><b>${_mrEsc(r.name||r.email)}</b><span>${_mrEsc(r.email)}${r.company&&r.company!==r.name?' · '+_mrEsc(r.company):''}</span></div>`).join('')||'<div class="mr-ac-empty">No CRM contact with an email matches — type the owner in by hand.</div>';
+    if(inp){ if(idx>=0) inp.setAttribute('aria-activedescendant','mr-ac-o'+idx); else inp.removeAttribute('aria-activedescendant'); } };
+  const place=()=>{ if(!box||!inp) return; const r=inp.getBoundingClientRect(); box.style.left=Math.max(8,Math.min(r.left, window.innerWidth-Math.min(420,window.innerWidth-16)-8))+'px'; box.style.top=(r.bottom+4)+'px'; box.style.width=Math.min(420,Math.max(r.width,280),window.innerWidth-16)+'px'; };
+  const pick=i=>{ const r=rows[i]; if(!r||!inp) return; const tr=inp.closest('tr'); const n=tr&&tr.querySelector('input[data-k=name]'), e=tr&&tr.querySelector('input[data-k=email]');
+    if(n) n.value=r.name||''; if(e) e.value=r.email; close(); (e||n).focus(); };
+  const open=el=>{ inp=el; rows=search(el.value); idx=rows.length?0:-1;
+    if(norm(el.value).length<2){ close(); return; }
+    if(!box){ box=document.createElement('div'); box.id='mr-ac'; box.setAttribute('role','listbox'); box.setAttribute('aria-label','CRM contacts');
+      box.addEventListener('mousedown',ev=>{ const o=ev.target.closest('[data-i]'); if(o){ ev.preventDefault(); pick(+o.dataset.i); } });
+      document.body.appendChild(box); }
+    el.setAttribute('aria-expanded','true'); el.setAttribute('aria-controls','mr-ac'); paint(); place(); };
+  const isAc=el=>el&&el.matches&&el.matches('#mr-manual input[data-k=name], #mr-manual input[data-k=email]');
+  document.addEventListener('focusin',ev=>{ if(isAc(ev.target)){ ev.target.setAttribute('autocomplete','off'); ev.target.setAttribute('role','combobox'); ev.target.setAttribute('aria-autocomplete','list'); ev.target.setAttribute('aria-expanded','false'); } });
+  document.addEventListener('input',ev=>{ if(isAc(ev.target)) open(ev.target); });
+  document.addEventListener('keydown',ev=>{ if(!box||ev.target!==inp) return;
+    if(ev.key==='ArrowDown'&&rows.length){ ev.preventDefault(); idx=(idx+1)%rows.length; paint(); }
+    else if(ev.key==='ArrowUp'&&rows.length){ ev.preventDefault(); idx=(idx-1+rows.length)%rows.length; paint(); }
+    else if(ev.key==='Enter'&&idx>=0&&rows.length){ ev.preventDefault(); pick(idx); }
+    else if(ev.key==='Escape'){ ev.preventDefault(); ev.stopPropagation(); close(); }
+    else if(ev.key==='Tab') close(); }, true);
+  document.addEventListener('focusout',ev=>{ if(ev.target===inp) setTimeout(()=>{ if(document.activeElement!==inp) close(); },120); });
+  window.addEventListener('resize',()=>place()); document.addEventListener('scroll',()=>place(),true);
+  const css=document.createElement('style'); css.textContent=`#mr-ac{position:fixed;z-index:100000;max-height:320px;overflow:auto;background:var(--surface,#fff);color:var(--text,#111);border:1px solid var(--border,#d1d5db);border-radius:10px;box-shadow:0 12px 32px rgba(0,0,0,.22);padding:.25rem}
+#mr-ac .mr-ac-opt{display:flex;flex-direction:column;gap:.05rem;padding:.45rem .6rem;border-radius:8px;cursor:pointer;min-height:44px;justify-content:center}
+#mr-ac .mr-ac-opt b{font-size:.86rem}#mr-ac .mr-ac-opt span{font-size:.76rem;color:var(--text-2,#4b5563)}
+#mr-ac .mr-ac-opt.on,#mr-ac .mr-ac-opt:hover{background:var(--surface-2,#f1f5f9)}
+#mr-ac .mr-ac-empty{padding:.55rem .6rem;font-size:.8rem;color:var(--text-2,#4b5563)}
+html.dark #mr-ac{background:var(--surface,#1f2937);color:var(--text,#f3f4f6);border-color:var(--border,#374151)}
+html.dark #mr-ac .mr-ac-opt.on,html.dark #mr-ac .mr-ac-opt:hover{background:var(--surface-2,#374151)}
+html.dark #mr-ac .mr-ac-opt span,html.dark #mr-ac .mr-ac-empty{color:var(--text-2,#cbd5e1)}`;
+  document.head.appendChild(css);
+})();
 function _mrReadRows(id){ const t=document.getElementById(id); if(!t) return []; return [...t.tBodies[0].rows].map(tr=>{ const o={}; tr.querySelectorAll('input[data-k]').forEach(i=>o[i.dataset.k]=i.value.trim()); return o; }).filter(o=>Object.values(o).some(v=>v)); }
 const MR_EMAIL_COLS=[{key:'title',label:'Title',ph:'Symmes Rd Live Local'},{key:'date',label:'Date sent',type:'date'},{key:'recipients',label:'Recipients',ph:'814'},{key:'opens',label:'Opens',ph:'390'},{key:'clicks',label:'Clicks',ph:'43'}];
 const MR_FB_COLS=[{key:'date',label:'Date',type:'date'},{key:'reach',label:'Reach'},{key:'interactions',label:'Interactions'},{key:'clicks',label:'Clicks'}];
@@ -48354,7 +48447,7 @@ window._mrOpenEditor=async function(dealId){
       <div class="mr-sec"><h3>1 · Owner recipients</h3>
         <label class="mr-row" style="gap:.5rem;cursor:pointer;margin-bottom:.6rem;padding:.45rem .6rem;border:1px solid var(--border);border-radius:8px"><input type="checkbox" class="mr-check" id="mr-ed-sendon" ${_mrSendOn(deal)?'checked':''}> <span><b>Send this report to the client</b> <span class="mr-muted">— switch off to hold this listing out of sending (you can still edit and preview it)</span></span></label>
         ${cands.length?`<div class="mr-grid2">${cands.map((c,i)=>`<label class="mr-row" style="gap:.5rem;cursor:pointer"><input type="checkbox" class="mr-check mr-recip" data-i="${i}" ${chosenEmails.has(c.email)?'checked':''}> <span><b>${_mrEsc(c.name||'(no name)')}</b> <span class="mr-muted">${_mrEsc(c.email)} · ${_mrEsc(c.src)}</span></span></label>`).join('')}</div>`:`<p class="mr-note">No CRM contacts are linked to this deal and the card has no contact email. Add the owner(s) below, or link their CRM contact to the deal.</p>`}
-        <div style="margin-top:.6rem"><span class="mr-lbl">Additional recipients</span>${_mrRowsTable('mr-manual',[{key:'name',label:'Name',ph:'Jane Owner'},{key:'email',label:'Email',ph:'jane@example.com'}],manual,'Add recipient')}</div>
+        <div style="margin-top:.6rem"><span class="mr-lbl">Additional recipients</span>${_mrRowsTable('mr-manual',[{key:'name',label:'Name',ph:'Start typing — CRM contacts appear'},{key:'email',label:'Email',ph:'jane@example.com'}],manual,'Add recipient')}</div>
       </div>
       <div class="mr-sec"><h3>2 · Listing details (from the deal card)</h3>
         <div class="mr-grid3">
@@ -48369,12 +48462,19 @@ window._mrOpenEditor=async function(dealId){
         </div>
       </div>
       <div class="mr-sec"><h3>3 · Status update letter</h3>
-        ${(()=>{ const custom=rep.letterMode==='custom'; const adv=_mrAdvisorsOf(deal)[0]||{}; const defSig=(adv.name||'')+(adv.designations?', '+adv.designations:'')+' — Eshenbaugh Land Company'; return `
-        <div class="mr-row" style="gap:1rem;margin-bottom:.5rem">
-          <label style="display:flex;gap:.35rem;align-items:center;cursor:pointer"><input type="radio" name="mr-letter-mode" value="default" ${custom?'':'checked'} onchange="window._mrLetterMode('default')"> Use Bill’s firm letter for the month</label>
+        ${(()=>{ const lc=_mrLetterChoice(rep); const custom=lc==='custom', ai=lc==='ai'; const adv=_mrAdvisorsOf(deal)[0]||{}; const defSig=(adv.name||'')+(adv.designations?', '+adv.designations:'')+' — Eshenbaugh Land Company'; return `
+        <div class="mr-row" style="gap:1rem;margin-bottom:.5rem;flex-wrap:wrap">
+          <label style="display:flex;gap:.35rem;align-items:center;cursor:pointer"><input type="radio" name="mr-letter-mode" value="ai" ${ai?'checked':''} onchange="window._mrLetterMode('ai')"> ✨ AI letter from this month’s activity</label>
+          <label style="display:flex;gap:.35rem;align-items:center;cursor:pointer"><input type="radio" name="mr-letter-mode" value="default" ${(!ai&&!custom)?'checked':''} onchange="window._mrLetterMode('default')"> Use Bill’s firm letter for the month</label>
           <label style="display:flex;gap:.35rem;align-items:center;cursor:pointer"><input type="radio" name="mr-letter-mode" value="custom" ${custom?'checked':''} onchange="window._mrLetterMode('custom')"> Write my own letter for this owner</label>
         </div>
-        <div id="mr-letter-default" style="${custom?'display:none':''}"><div class="mr-note" style="white-space:pre-wrap;max-height:120px;overflow:auto;border:1px dashed var(--border);border-radius:8px;padding:.5rem .6rem">${letter?_mrEsc(letter):'<b style="color:#b91c1c">The firm-wide letter for '+_mrEsc(_mrMonthLabel(ym))+' hasn’t been written yet.</b>'}</div></div>
+        <div id="mr-letter-ai" style="${ai?'':'display:none'}">
+          <div class="mr-row" style="justify-content:space-between;flex-wrap:wrap;gap:.4rem"><label class="mr-lbl" for="mr-ed-ailetter" style="margin:0">AI-drafted letter (printed after “Dear …:”) — edit freely; what you see here is what goes out</label><button class="mr-btn mr-btn-sm" id="mr-ai-letter-btn" onclick="window._mrAiLetterRedo(this)">${String(rep.aiLetterBody||'').trim()?'↻ Redraft':'✨ Draft now'}</button></div>
+          <textarea id="mr-ed-ailetter" class="mr-textarea" style="min-height:190px" placeholder="Drafting from this month’s e-blasts, posts, calls, emails, offers and web traffic…">${_mrEsc(rep.aiLetterBody||'')}</textarea>
+          <div class="mr-note" id="mr-ai-letter-status">${rep.aiLetterAt?('Drafted '+_mrEsc(_mrFmtDate(rep.aiLetterAt))+'. Redraft after you add activity, offers or traffic.'):'Drafted automatically from the listing’s month — read it before you approve.'}</div>
+          <label class="mr-lbl" for="mr-ed-sig-ai" style="margin-top:.4rem">Signature line</label><input id="mr-ed-sig-ai" class="mr-input" value="${_mrEsc(rep.letterSignature||defSig)}">
+        </div>
+        <div id="mr-letter-default" style="${(!ai&&!custom)?'':'display:none'}"><div class="mr-note" style="white-space:pre-wrap;max-height:120px;overflow:auto;border:1px dashed var(--border);border-radius:8px;padding:.5rem .6rem">${letter?_mrEsc(letter):'<b style="color:#b91c1c">The firm-wide letter for '+_mrEsc(_mrMonthLabel(ym))+' hasn’t been written yet.</b>'}</div></div>
         <div id="mr-letter-custom" style="${custom?'':'display:none'}">
           <div class="mr-row" style="justify-content:space-between"><label class="mr-lbl" for="mr-ed-letter">Your letter (printed on the Status Update page, after “Dear …:”)</label><button class="mr-btn mr-btn-sm" onclick="window._mrLetterCopyDefault()">⤵ Start from the firm letter</button></div>
           <textarea id="mr-ed-letter" class="mr-textarea" style="min-height:160px" placeholder="Write the status update for this owner…">${_mrEsc(rep.letterBody||'')}</textarea>
@@ -48434,10 +48534,24 @@ window._mrOpenEditor=async function(dealId){
   </div>`;
   document.body.appendChild(ov);
   if(window._mrMcAutoFill) window._mrMcAutoFill();   // MCREPORT-20261007
+  { const r=document.querySelector('input[name=mr-letter-mode][value=ai]'); const ta=document.getElementById('mr-ed-ailetter'); if(r&&r.checked&&ta&&!ta.value.trim()) window._mrAiLetterRedo(document.getElementById('mr-ai-letter-btn')); }   // AILETTER-20261023
   // history counts (async)
   window._mrHistLoad(dealId);   // MWFIX-20261008
 };
-window._mrLetterMode=function(m){ const c=m==='custom'; const d=document.getElementById('mr-letter-default'), e=document.getElementById('mr-letter-custom'); if(d) d.style.display=c?'none':''; if(e) e.style.display=c?'':'none'; if(c){ const t=document.getElementById('mr-ed-letter'); if(t&&!t.value.trim()){ t.value=_mrLetterFor(window._mrState.editor?.ym||window._mrState.month)||''; } } };
+window._mrLetterMode=function(m){ const c=m==='custom', ai=m==='ai'; const d=document.getElementById('mr-letter-default'), e=document.getElementById('mr-letter-custom'), a=document.getElementById('mr-letter-ai'); if(d) d.style.display=(c||ai)?'none':''; if(e) e.style.display=c?'':'none'; if(a) a.style.display=ai?'':'none';
+  if(ai){ const ta=document.getElementById('mr-ed-ailetter'); if(ta&&!ta.value.trim()) window._mrAiLetterRedo(document.getElementById('mr-ai-letter-btn')); }   // AILETTER-20261023
+  if(c){ const t=document.getElementById('mr-ed-letter'); if(t&&!t.value.trim()){ t.value=_mrLetterFor(window._mrState.editor?.ym||window._mrState.month)||''; } } };
+window._mrAiLetterRedo=async function(btn){   // AILETTER-20261023
+  const ed=window._mrState.editor; if(!ed) return; const ta=document.getElementById('mr-ed-ailetter'); if(!ta) return;
+  if(ed._aiBusy) return; ed._aiBusy=true;
+  const st=document.getElementById('mr-ai-letter-status'); const done=btn?elcBusy(btn,'Drafting…'):()=>{};
+  if(st) st.textContent='Drafting from this month’s activity…'; ta.setAttribute('aria-busy','true');
+  try{ const txt=await _mrAiLetterDraft(ed.deal, ed.ym, {...(ed.rep||{}), traffic:ed.traffic||(ed.rep||{}).traffic||{}});
+    if(window._mrState.editor!==ed) return; ta.value=txt; ed._aiDrafted=Date.now();
+    if(st) st.textContent='Drafted just now — read it and edit anything before you approve. Save to keep it.'; if(btn) btn.textContent='↻ Redraft'; }
+  catch(e){ console.warn('[mr] ai letter',e); if(st) st.textContent='Couldn’t draft the letter ('+e.message+'). Try again, or pick Bill’s letter / write your own.'; showToast('AI letter failed: '+e.message,'error',6000); }
+  finally{ ed._aiBusy=false; ta.removeAttribute('aria-busy'); done(); }
+};
 window._mrLetterCopyDefault=function(){ const t=document.getElementById('mr-ed-letter'); if(t) t.value=_mrLetterFor(window._mrState.editor?.ym||window._mrState.month)||''; };
 window._mrCloseEditor=function(){ document.getElementById('mr-editor-ov')?.remove(); window._mrState.editor=null; };
 function _mrCollectEditor(){
@@ -48453,7 +48567,7 @@ function _mrCollectEditor(){
     appId:(document.getElementById('mr-ed-appid')?.value||'').trim(),
     sendOn:(document.getElementById('mr-ed-sendon')?document.getElementById('mr-ed-sendon').checked:true),
     report:{ preparedFor:(document.getElementById('mr-ed-owner')?.value||'').trim(), advisorNote:(document.getElementById('mr-ed-note')?.value||'').trim(),
-      letterMode:(document.querySelector('input[name=mr-letter-mode]:checked')?.value||'default'), letterBody:(document.getElementById('mr-ed-letter')?.value||'').trim(), letterSignature:(document.getElementById('mr-ed-sig')?.value||'').trim(),
+      ...(()=>{ const m=document.querySelector('input[name=mr-letter-mode]:checked')?.value||'ai'; const ai=document.getElementById('mr-ed-ailetter'); const o={letterChoice:m==='default'?'firm':m, letterMode:m==='custom'?'custom':'default', letterBody:(document.getElementById('mr-ed-letter')?.value||'').trim(), letterSignature:((m==='ai'?document.getElementById('mr-ed-sig-ai'):document.getElementById('mr-ed-sig'))?.value||'').trim()}; if(ai){ o.aiLetterBody=ai.value.trim(); if(o.aiLetterBody&&(window._mrState.editor||{})._aiDrafted) o.aiLetterAt=window._mrState.editor._aiDrafted; } return o; })(),   // AILETTER-20261023
       emailBlasts:_mrReadRows('mr-emails'), emailCampaigns:(ed.emailCampaigns||[]).slice(0,20), emailCampaignsPicked:!!ed.emailCampaignsPicked, facebook:_mrReadRows('mr-fb'), linkedin:_mrReadRows('mr-li'),
       emailScreenshotUrl:ed.shots.email||'', socialPhotos:ed.socialPhotos.slice(0,12), traffic }
   };
@@ -48710,8 +48824,14 @@ async function _mrAssemble(deal, ym){
     Promise.all(advisors.map(a=>_mrImg(a.headshotUrl,{cover:1,maxPx:400})))
   ]);
   advisors.forEach((a,i)=>a.head=heads[i]);
-  const custom=rep.letterMode==='custom' && String(rep.letterBody||'').trim();
-  return { deal, ym, rep, history:h.history, tasks:h.tasks, letter:custom?rep.letterBody:(L.body||''), signature:custom?(rep.letterSignature||((advisors[0]||{}).name||'')+' — Eshenbaugh Land Company'):(L.signature||cfg.letterSignature||'Ryan Sampson, ALC, CCIM — Managing Partner / Broker of Record'), letterCustom:!!custom, about:cfg.about||MR_DEFAULT_ABOUT,
+  const lchoice=_mrLetterChoice(rep); let aiErr='';   // AILETTER-20261023
+  if(lchoice==='ai' && !String(rep.aiLetterBody||'').trim()){
+    try{ const body=await _mrAiLetterDraft(deal, ym, rep, {history:h.history, emails, posts}); const at=Date.now(); rep.aiLetterBody=body; rep.aiLetterAt=at; await _mrSaveReport(deal.id, ym, {aiLetterBody:body, aiLetterAt:at}); }
+    catch(e){ console.warn('[mr] ai letter',e); aiErr=e.message||String(e); }
+  }
+  const custom=lchoice==='custom' && String(rep.letterBody||'').trim(); const aiL=lchoice==='ai' && String(rep.aiLetterBody||'').trim();
+  const advSig=((advisors[0]||{}).name||'')+((advisors[0]||{}).designations?', '+(advisors[0]||{}).designations:'')+' — Eshenbaugh Land Company';
+  return { deal, ym, rep, history:h.history, tasks:h.tasks, letter:custom?rep.letterBody:aiL?rep.aiLetterBody:(lchoice==='ai'?'':(L.body||'')), signature:(custom||aiL)?(rep.letterSignature||advSig):(L.signature||cfg.letterSignature||'Ryan Sampson, ALC, CCIM — Managing Partner / Broker of Record'), letterCustom:!!custom, letterKind:custom?'custom':aiL?'ai':(lchoice==='ai'?'ai-failed':'firm'), aiLetterError:aiErr, about:cfg.about||MR_DEFAULT_ABOUT,
     firmAddress:cfg.firmAddress||'304 S. Willow Ave, Tampa, FL 33606', firmWebsite:cfg.firmWebsite||'WWW.THEDIRTDOG.COM', advisors, hero, logo, sign, web, qr, links:(typeof _mrDealLinks==='function'?_mrDealLinks(deal):[]), shotE, social:(social||[]).filter(Boolean), posts, emails, companies,
     preparedFor:rep.preparedFor||_mrOwnerLabel(deal), traffic:rep.traffic||{} };
 }
@@ -48985,7 +49105,7 @@ async function _mrSendDeal(deal, ym, opts){
   opts=opts||{};
   if(!_mrSendOn(deal)) throw new Error('“Send to client” is switched off for '+_mrDealName(deal)+' — turn it back on first.');
   const recips=_mrRecipients(deal); if(!recips.length) throw new Error('No recipients on '+_mrDealName(deal));
-  if(!_mrLetterFor(ym) && !_mrHasCustomLetter(deal.id,ym)) throw new Error('The '+_mrMonthLabel(ym)+' status update letter hasn’t been written yet (write one for this owner in ✏️ Edit, or the firm letter).');
+  if(!_mrLetterReady(deal.id,ym)) throw new Error('The '+_mrMonthLabel(ym)+' status update letter isn’t ready (pick ✨ AI letter, write your own in ✏️ Edit, or write the firm letter).');
   const advs=_mrAdvisorsOf(deal); const from=advs[0]||{}; if(!/@thedirtdog\.com$/i.test(from.email||'')) throw new Error('Listing advisor on '+_mrDealName(deal)+' has no @thedirtdog.com email to send from.');
   const A=await _mrAssemble(deal,ym);
   const pf=await _mrPreflight(A);   // MCVERIFY-20261016: nothing goes to an owner unless every check passes and the report is approved as-is
@@ -49016,7 +49136,7 @@ window._mrSendOne=async function(dealId){
   const ym=window._mrState.month||_mrPrevMonth(); const recips=_mrRecipients(deal);
   if(!_mrSendOn(deal)){ showToast('Send to client is switched off for this listing — turn it on in the list or ✏️ Edit','warning',5000); return; }
   if(!recips.length){ showToast('Add recipients first (✏️ Edit)','warning'); return; }
-  if(!_mrLetterFor(ym) && !_mrHasCustomLetter(deal.id,ym)){ showToast('Write the '+_mrMonthLabel(ym)+' letter first (firm letter, or your own in ✏️ Edit)','warning'); return; }
+  if(!_mrLetterReady(deal.id,ym)){ showToast('This listing’s letter isn’t ready — pick ✨ AI letter, write your own in ✏️ Edit, or write the '+_mrMonthLabel(ym)+' firm letter','warning',6000); return; }
   const _rp=window._mrState.reports[dealId+'|'+ym]; if(!(_rp&&_rp.approval)){ showToast('Review & approve this report before sending','warning',5000); window._mrReview(dealId); return; }   // MCVERIFY-20261016
   const from=_mrAdvisorsOf(deal)[0]||{};
   const ok=await elcConfirm('Send the '+_mrMonthLabel(ym)+' report for '+_mrDealName(deal)+' to:\n\n'+recips.map(r=>'• '+(r.name?r.name+' — ':'')+r.email).join('\n')+'\n\nFrom: '+(from.email||'?')+' (advisor is Cc’d)',{title:'Send monthly report',okLabel:'Send now'});
@@ -49029,7 +49149,7 @@ window._mrSendSelected=async function(){
   const st=window._mrState; const ym=st.month||_mrPrevMonth();
   const deals=_mrActiveDeals().filter(d=>st.selected[d.id]&&_mrRecipients(d).length&&_mrSendOn(d));   // MRTOGGLE: paused listings never go out in a bulk send
   if(!deals.length){ showToast('Select at least one listing with recipients','warning'); return; }
-  if(!_mrLetterFor(ym) && !deals.every(d=>_mrHasCustomLetter(d.id,ym))){ showToast('Write the '+_mrMonthLabel(ym)+' firm letter first (or your own letter on each selected listing)','warning'); return; }
+  { const nr=deals.filter(d=>!_mrLetterReady(d.id,ym)); if(nr.length){ showToast(nr.length+' selected listing'+(nr.length===1?' uses':'s use')+' Bill’s letter or an unwritten own letter — write the '+_mrMonthLabel(ym)+' firm letter or switch them to ✨ AI letter','warning',7000); return; } }   // AILETTER-20261023
   const already=deals.filter(d=>(st.reports[d.id+'|'+ym]||{}).status==='sent');
   const unappr=deals.filter(d=>!((st.reports[d.id+'|'+ym]||{}).approval));   // MCVERIFY-20261016
   const ok=await elcConfirm('Send '+deals.length+' '+_mrMonthLabel(ym)+' report'+(deals.length===1?'':'s')+' now?'+(already.length?('\n\n'+already.length+' of these were already sent this month and will be re-sent.'):'')+(unappr.length?('\n\n'+unappr.length+' are not approved yet and will be skipped — only approved, unchanged reports go out.'):'')+'\n\nEach goes from its listing advisor’s mailbox to the owners picked on that listing.',{title:'Send selected reports',okLabel:'Send '+deals.length});
@@ -49341,8 +49461,8 @@ async function _mrPreflight(A){
     if(v.length) add('Social posts','block',label+' — '+v.join('; ').replace(/e-blast/g,'post')+'.'); else add('Social posts','ok',label); });
   // 4 · status letter
   const L=String(A.letter||'');
-  if(!L.trim()) add('Status letter','block','No status letter for '+_mrMonthLabel(A.ym)+'.');
-  else { const blanks=(L.match(/\[[^\]\n]{2,160}\]/g)||[]); if(blanks.length) add('Status letter','block','Letter still has '+blanks.length+' template blank'+(blanks.length===1?'':'s')+' — e.g. '+blanks.slice(0,2).join('  ')+'.'); else add('Status letter','ok',A.letterCustom?'Custom letter':'Firm letter'); }
+  if(!L.trim()) add('Status letter','block',A.letterKind==='ai-failed'?('The AI letter couldn’t be drafted'+(A.aiLetterError?' ('+A.aiLetterError+')':'')+' — open ✏️ Edit and press ✨ Draft now, or pick Bill’s letter / your own.'):('No status letter for '+_mrMonthLabel(A.ym)+'.'));
+  else { const blanks=(L.match(/\[[^\]\n]{2,160}\]/g)||[]); if(blanks.length) add('Status letter','block','Letter still has '+blanks.length+' template blank'+(blanks.length===1?'':'s')+' — e.g. '+blanks.slice(0,2).join('  ')+'.'); else add('Status letter','ok',A.letterKind==='ai'?'✨ AI-drafted letter — read it below before approving':A.letterCustom?'Custom letter':'Firm letter'); }
   // 5 · recipients + photos
   const rc=_mrRecipients(deal); if(!rc.length) add('Recipients','block','No owners picked to receive this report.'); else add('Recipients','ok',rc.map(r=>r.name||r.email).join(', '));
   if(!A.hero) add('Photos','block','No parcel photo on the cover.');
@@ -49564,6 +49684,7 @@ window._mrReview=async function(dealId){
   const rows=secs.map(s=>`<div style="margin:.15rem 0 .7rem"><div style="font-weight:700;font-size:.8rem;text-transform:uppercase;letter-spacing:.03em;color:var(--muted,#6b7280);margin-bottom:.25rem">${_mrEsc(s)}</div>${pf.items.filter(i=>i.sec===s).map(i=>`<div style="display:flex;gap:.5rem;align-items:flex-start;padding:.3rem .45rem;border-radius:8px;${i.level==='block'?'background:rgba(254,226,226,.45)':i.level==='warn'?'background:rgba(254,243,199,.45)':''}"><span aria-hidden="true">${icon[i.level]}</span><div style="flex:1;font-size:.82rem;line-height:1.35">${_mrEsc(i.msg)}</div>${i.fix==='mc'?`<div style="display:flex;gap:.3rem;flex-shrink:0"><button class="mr-btn mr-btn-sm" onclick="window._mrReviewDropMc('${_mrEsc(i.id)}',this)">Remove from report</button><button class="mr-btn mr-btn-sm" title="Only if the deal card is wrong — records your name" onclick="window._mrReviewConfirmMc('${_mrEsc(i.id)}',this)">It is this property</button></div>`:''}</div>`).join('')}</div>`).join('');
   const notes=(A.history||[]).slice(0,40).map(h=>`<div style="font-size:.74rem;line-height:1.3;padding:.15rem 0;border-bottom:1px solid var(--border)"><span class="mr-muted">${_mrEsc(h.date)} · ${_mrEsc(h.type)}</span> ${_mrEsc(String(h.text).slice(0,220))}</div>`).join('');
   document.getElementById('mr-rv-body').innerHTML=`${pf.blocks.length?`<div style="background:#fee2e2;color:#991b1b;border-radius:10px;padding:.55rem .7rem;font-weight:600;font-size:.85rem;margin-bottom:.7rem">${pf.blocks.length} problem${pf.blocks.length===1?'':'s'} must be fixed before this report can be approved or sent.</div>`:approved?`<div style="background:#dcfce7;color:#166534;border-radius:10px;padding:.55rem .7rem;font-weight:600;font-size:.85rem;margin-bottom:.7rem">Approved by ${_mrEsc(rep.approval.byName||'')} ${_mrEsc(_mrFmtDate(rep.approval.at))} — nothing has changed since.</div>`:`<div style="background:#e0f2fe;color:#075985;border-radius:10px;padding:.55rem .7rem;font-weight:600;font-size:.85rem;margin-bottom:.7rem">All checks pass. Open the PDF, read it, then approve.</div>`}${factsForm}${rows}${notes?`<details style="margin-top:.3rem"><summary style="cursor:pointer;font-size:.8rem;font-weight:600">Property notes that will print (${(A.history||[]).length})</summary><div style="max-height:30vh;overflow:auto;margin-top:.3rem">${notes}</div></details>`:''}`;
+  if(A.letter && String(A.letter).trim()){ const lb=document.getElementById('mr-rv-body'); if(lb){ const box=document.createElement('div'); box.style.cssText='margin:.2rem 0 .8rem;border:1px solid var(--border);border-radius:10px;padding:.6rem .75rem;background:var(--surface-1,var(--surface))'; box.innerHTML=`<div class="mr-row" style="justify-content:space-between;align-items:center;margin-bottom:.35rem"><div style="font-weight:700;font-size:.8rem;text-transform:uppercase;letter-spacing:.03em;color:var(--muted)">Status letter${A.letterKind==='ai'?' — ✨ AI draft':A.letterCustom?' — advisor’s own':' — Bill’s firm letter'}</div><button class="mr-btn mr-btn-sm" onclick="document.getElementById('mr-rv-ov').remove();window._mrOpenEditor('${deal.id}')">✏️ Edit letter</button></div><div style="white-space:pre-wrap;font-size:.84rem;line-height:1.45;max-height:260px;overflow:auto">${_mrEsc(A.letter)}</div><div class="mr-muted" style="font-size:.75rem;margin-top:.35rem">— ${_mrEsc(A.signature||'')}</div>`; lb.insertBefore(box, lb.firstChild.nextSibling); } }   // AILETTER-20261023
   document.getElementById('mr-rv-foot').innerHTML=`<span class="mr-muted" style="flex:1;font-size:.75rem">Any later change to the e-blasts, posts, letter, notes, owners or listing facts clears the approval.</span><button class="mr-btn" onclick="window._mrReviewPdf(this)">👁 Open PDF</button><button class="mr-btn mr-btn-primary" ${pf.blocks.length?'disabled title="Fix the ⛔ items first"':''} onclick="window._mrReviewApprove(this)">${approved?'✓ Approved':'✅ Approve report'}</button>`;
 };
 window._mrReviewPdf=async function(btn){ const r=window._mrState.review; if(!r) return; const done=elcBusy(btn,'Building…'); try{ const doc=await _mrBuildPdf(r.A); const w=window.open(doc.output('bloburl'),'_blank'); if(!w) showToast('Pop-up blocked — allow pop-ups for Terra','warning',6000); }catch(e){ showToast('Preview failed: '+e.message,'error',6000); } finally{ done(); } };
