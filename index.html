@@ -37447,9 +37447,35 @@ function viewEOS(sub='rocks'){
     //  Closing, Closed Won/Sold, Closed Lost). Substring match — NOT anchored —
     // so multi-word stage names like "Due Diligence (Under Contract)" still hit.
     const headlineStages = /listing|contract|closing|closed\s*won|^sold$|closed\s*lost|terminat/i;
+    /* L10HLWK-20261026 — Ryan: deal headlines only show what is HAPPENING in the
+       previous or current week (prior Monday → this Sunday), judged by the date that
+       matters for the card's stage — not the day it was dragged. A card dragged to
+       Closing whose closing date isn't in that window does not show.
+         Closing                → closing date (closeDate); no date on file → not shown
+         Closed Won / Sold      → close date, else the day it was moved to Sold
+         Due Diligence / Under Contract → PSA effective date, else stage-entry day
+         Listing                → listing effective date, else stage-entry day
+         Signed LOI / Contract Drafting, Lost / Terminated → stage-entry day
+       Cards that landed in their stage by a backward drag are skipped. */
+    const _hlTs = v => { if(v==null||v==='') return 0; if(typeof v==='number') return v;
+      const s=String(v); const m=/^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+      if(m) return new Date(+m[1],+m[2]-1,+m[3],12).getTime();
+      const t=Date.parse(s); return isNaN(t)?0:t; };
+    const _hlEventTs = d => {
+      const s = d.stage||'', entered = _hlTs(d.stageEnteredAt)||_hlTs(d.createdAt);
+      if(/closed\s*lost|terminat|lost/i.test(s)) return entered;
+      if(/closed\s*won|^sold$/i.test(s))       return _hlTs(d.closeDate)||entered;
+      if(/closing/i.test(s))                    return _hlTs(d.closeDate);
+      if(/due.?diligence|under.?contract/i.test(s)) return _hlTs(d.psaEffectiveDate||d.effectiveDate)||entered;
+      if(/listing/i.test(s))                    return _hlTs(d.listingEffectiveDate)||_hlTs(d.listingEnteredAt)||entered;
+      return entered;
+    };
+    const hlWinS = pwSts, hlWinE = thisMon2.getTime() + 7*86400000 - 1;   // prior Mon 00:00 → this Sun 23:59
     const newDealHeadlines = l10Deals
-      .filter(d=>{ const ts=d.stageEnteredAt||d.createdAt||0; return ts>=pwSts&&ts<=pwEts&&headlineStages.test(d.stage||''); })
-      .sort((a,b)=>(b.stageEnteredAt||b.createdAt||0)-(a.stageEnteredAt||a.createdAt||0));
+      .filter(d=>{ if(!headlineStages.test(d.stage||'')) return false;
+        if(typeof _landedBackward==='function' && _landedBackward(d)) return false;
+        const ts=_hlEventTs(d); return ts>=hlWinS&&ts<=hlWinE; })
+      .sort((a,b)=>_hlEventTs(b)-_hlEventTs(a));
     const stageIcon = s => /listing/i.test(s)?'🏠':/proposal/i.test(s)?'📄':/closing/i.test(s)?'🤝':/closed.?won|^sold$/i.test(s)?'🏆':/closed.?lost|terminat/i.test(s)?'❌':/contract/i.test(s)?'📝':'📌';
 
     // ── section card ─────────────────────────────────────────────────────
@@ -37840,12 +37866,13 @@ function viewEOS(sub='rocks'){
       let dealHtml = '';
       if((isAdvTab||isAdminTab) && newDealHeadlines.length>0){
         dealHtml = `<div class="mb-3">
-          <p class="text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">📊 Pipeline Activity — Prior Week</p>
+          <p class="text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">📊 Pipeline Activity — Last Week &amp; This Week</p>
           ${newDealHeadlines.map(d=>`
             <div class="flex items-center gap-2 py-1.5 border-b border-gray-50 last:border-0">
               <span>${stageIcon(d.stage)}</span>
               <span class="text-sm font-semibold text-gray-800">${d.projectName||d.propertyAddress||'Unnamed'}</span>
               <span class="text-xs text-gray-400">→ ${d.stage}</span>
+              <span class="text-xs text-gray-400">· ${new Date(_hlEventTs(d)).toLocaleDateString('en-US',{month:'short',day:'numeric'})}</span>
               <span class="text-xs text-gray-400 ml-auto">${d.advisorName||''}</span>
             </div>`).join('')}
         </div>`;
