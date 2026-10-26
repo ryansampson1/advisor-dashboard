@@ -21865,7 +21865,7 @@ window._elcWeekWindow = (d) => {
 window._elcDealLoiList = (d) => {
   if(Array.isArray(d.lois) && d.lois.length) return d.lois;
   if(d.loiBuyer||d.loiPrice||d.loiUrl||d.loiFileName)
-    return [{buyer:d.loiBuyer||'', price:d.loiPrice||'', addedAt:+d.loiAddedAt||0}];
+    return [{buyer:d.loiBuyer||'', price:d.loiPrice||'', addedAt:+d.loiAddedAt||0, fileUrl:d.loiUrl||'', fileName:d.loiFileName||''}];   // LOIATTACH-20261026: keep the legacy file so it still counts as a document
   return [];
 };
 // elc-v424 — latest FORWARD entry into LOI; a card dragged BACK into LOI never scores.
@@ -21892,23 +21892,48 @@ window._elcLoiStageTs = (d) => {
    same card on the same day is one offer (re-uploads / email + manual copies). */
 window._elcYmdTs = s => { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(s||''));
   return m ? new Date(+m[1], +m[2]-1, +m[3], 12).getTime() : 0; };
-window._elcOfferTs = l => window._elcYmdTs(l && (l.effectiveDate || l.receivedAt)) || (+(l && l.addedAt) || 0);
+/* LOIATTACH-20261026 — Ryan: "If there is no date, use the date of the email with the
+   initial attachment. If no attachment, then it isn't an LOI." The first EFFDATE cut
+   used an auto-filed offer's receivedAt, which is just the date of whatever email the
+   filer read (a reply in an old thread made a July LOI look new; an email from Rocwell
+   about SR 33 Lot 5 with nothing attached scored as an LOI).
+   An offer is an LOI only with a document: an uploaded file (fileUrl/fileName) or, for
+   email-filed offers, an LOI-named attachment found in the thread (attachmentAt, set by
+   the mail worker / backfill). Its date, in order: the LOI's own date (effectiveDate /
+   loiDate); "Date received" when an advisor entered it (manual offers) or verified it
+   (auto-filed offers); the email that first carried the LOI attachment; the upload day. */
+window._elcOfferHasDoc = l => !!(l && !l.noAttachment && (l.fileUrl || l.fileName || +l.attachmentAt || l.attachmentName));
+window._elcOfferTs = l => {
+  if(!window._elcOfferHasDoc(l)) return 0;
+  const own = window._elcYmdTs(l.effectiveDate || l.loiDate); if(own) return own;
+  if(l.source !== 'mailwatch' || l.verifiedAt){ const r = window._elcYmdTs(l.receivedAt); if(r) return r; }
+  if(+l.attachmentAt) return +l.attachmentAt;
+  return l.source === 'mailwatch' ? 0 : (+l.addedAt || 0);
+};
+/* One document = one LOI. The same LOI file forwarded in two threads, re-uploaded, or
+   filed once by hand and once from email counts once, on its earliest date. Without a
+   file name, the same buyer on the same day is one offer. */
 window._elcOfferKey = l => {
+  const f = String((l && (l.attachmentName || l.fileName)) || '').toLowerCase()
+    .replace(/\.(pdf|docx?|rtf|pages)/g, '').replace(/\(\d+\)|\bcopy\b/g, '').replace(/[^a-z0-9]/g, '');
+  if(f) return 'f:' + f;
   const b = String((l && l.buyer) || '').toLowerCase()
     .replace(/\b(llc|inc|corp|co|company|group|lp|ltd|the)\b/g, '').replace(/[^a-z0-9]/g, '');
-  return b || String((l && l.fileName) || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  return b ? 'b:' + b : '';
 };
 window._elcLoiCountInWindow = (d, start, end) => {
-  const list = window._elcDealLoiList(d); if(!list.length) return 0;
+  const list = window._elcDealLoiList(d).filter(window._elcOfferHasDoc); if(!list.length) return 0;
   const sTs = window._elcLoiStageTs(d);
   const stageIn = sTs>=start && sTs<=end;
+  const keyOf = (l, a) => { const k = window._elcOfferKey(l); return !k ? '' : k.startsWith('f:') ? k : k+'|'+(a ? new Date(a).toDateString() : 'stage'); };
+  const first = new Map();   // key -> earliest credit ts across ALL the deal's offers
+  for(const l of list){ const a = window._elcOfferTs(l) || (stageIn ? sTs : 0); const k = keyOf(l, window._elcOfferTs(l)); if(k && a && (!first.has(k) || a < first.get(k))) first.set(k, a); }
   let n=0; const seen = new Set();
   for(const l of list){
-    if(!l) continue;
     const a = window._elcOfferTs(l);
-    if(a){ if(!(a>=start && a<=end)) continue; } else if(!stageIn) continue;
-    const k = window._elcOfferKey(l);
-    if(k){ const dk = k+'|'+(a ? new Date(a).toDateString() : 'stage'); if(seen.has(dk)) continue; seen.add(dk); }
+    if(a){ if(!(a>=start && a<=end)) continue; } else if(!stageIn) continue;   // undated legacy upload → LOI-stage week
+    const k = keyOf(l, a);
+    if(k){ if(seen.has(k)) continue; if(first.has(k) && first.get(k) < (a || sTs)) continue; seen.add(k); }
     n++;
   }
   return n;
@@ -49891,7 +49916,7 @@ async function _mwFileReview(r, dealId, note){
   if(cat==='offer'&&side==='seller'){
     const cur=Array.isArray(deal.lois)?deal.lois.slice():[]; const o=r.offer||{};
     if(!cur.some(l=>l&&l.gmailThreadId&&l.gmailThreadId===r.gmailThreadId)){
-      cur.push({ id:'mw_'+String(r.id).replace(/^mw_/,''), source:'mailwatch', aiCreated:true, needsVerification:true, status:'received', receivedAt:r.emailDate?new Date(r.emailDate).toISOString().slice(0,10):'', addedAt:Date.now(), buyer:o.buyer||r.counterpartyCompany||r.counterpartyName||'', price:o.price||null, deposit:o.deposit||null, ddTerms:o.ddTerms||'', contingencies:o.contingencies||'', estClose:o.estClose||'', buyerBroker:o.buyerBroker||'', gmailThreadId:r.gmailThreadId||'', gmailSubject:r.subject||'', reportInclude:false });
+      cur.push({ id:'mw_'+String(r.id).replace(/^mw_/,''), source:'mailwatch', aiCreated:true, needsVerification:true, status:'received', receivedAt:r.emailDate?new Date(r.emailDate).toISOString().slice(0,10):'', addedAt:Date.now(), buyer:o.buyer||r.counterpartyCompany||r.counterpartyName||'', price:o.price||null, deposit:o.deposit||null, ddTerms:o.ddTerms||'', contingencies:o.contingencies||'', estClose:o.estClose||'', buyerBroker:o.buyerBroker||'', gmailThreadId:r.gmailThreadId||'', gmailSubject:r.subject||'', reportInclude:false, mailbox:r.mailbox||'' }   /* LOIATTACH-20261026: the mail worker looks up the LOI attachment overnight */);
       try{ await Store.updateDeal(dealId,{lois:cur}); }catch(e){ console.warn('[mw] offer record',e); showToast('Email filed, but only the card’s advisor can add the offer record','warning',6000); }
     }
   }
