@@ -50286,9 +50286,9 @@ const MR_BLAST_TASK_TITLE='📧 Monthly e-blast';
 function _mbCfg(){ return (APP_CONFIG.mcBlast = APP_CONFIG.mcBlast || {enabled:true, dueDay:20, autoDay:25, autoResend:true}); }
 function _mbYm(){ return _mrLocalDate(Date.now()).slice(0,7); }
 function _mbEligible(d){ return _mrStageOf(d)==='Listing' && _mrIsSellerRep(d) && !d.archived && !d.doNotMarket; }   // DNM-20261016: no e-blast guarantee / auto-resend
-window._mrIsBlastTask=function(t){ return !!(t && t.dealId && t.status!=='complete' && /monthly e-blast/i.test(t.title||'')); };
+window._mrIsBlastTask=function(t){ return !!(t && t.dealId && t.status!=='complete' && t.status!=='cancelled' && /monthly e-blast/i.test(t.title||'')); };   // BLASTNICK-20261026: cancelled ≠ open
 function _mbTasksFor(dealId, ym){ return (typeof allTasks!=='undefined'?allTasks:[]).filter(t=>t&&t.dealId===dealId&&/monthly e-blast/i.test(t.title||'')&&(!ym||t.mcBlastMonth===ym)); }
-function _mbOpenTasksFor(dealId, ym){ return _mbTasksFor(dealId, ym).filter(t=>t.status!=='complete'); }
+function _mbOpenTasksFor(dealId, ym){ return _mbTasksFor(dealId, ym).filter(t=>t.status!=='complete'&&t.status!=='cancelled'); }   // BLASTNICK-20261026
 function _mbLog(d, ym){ return (d.mcBlastLog&&d.mcBlastLog[ym])||null; }
 function _mbSlim(c){ return {id:c.id||'', subject:c.subject||'', title:c.title||'', sendTime:c.sendTime||'', emailsSent:c.emailsSent||c.recipientCount||0, uniqueOpens:c.uniqueOpens||0, openRate:c.openRate||0, uniqueClicks:c.uniqueClicks||0, clickRate:c.clickRate||0, image:c.image||'', archiveUrl:c.archiveUrl||'', segment:c.segment||'', listName:c.listName||''}; }
 
@@ -50321,7 +50321,8 @@ function _mbDueDate(ym){ const [y,m]=ym.split('-').map(Number); const cfg=_mbCfg
 async function _mbCreateTasks(deal, ym){
   const nick=_mrNickProfile(); const adv=_mrAdvisorsOf(deal)[0]||{};
   const owners=[{uid:nick.uid||nick.email, name:nick.name, email:nick.email}];
-  if(adv.email && adv.email!==nick.email) owners.push({uid:deal.advisorUid||adv.uid||adv.email, name:adv.name||deal.advisorName||'', email:adv.email});
+  // BLASTNICK-20261026 (Ryan): e-blast tasks go to Nick only — the advisor is named in the description, no longer given a copy.
+  if(false && adv.email && adv.email!==nick.email) owners.push({uid:deal.advisorUid||adv.uid||adv.email, name:adv.name||deal.advisorName||'', email:adv.email});
   const title=MR_BLAST_TASK_TITLE+' — '+(typeof _taskHeadlineName==='function'?_taskHeadlineName(deal):_mrDealName(deal))+' ('+_mrMonthLabel(ym)+')';
   const desc='No Mailchimp e-blast has gone out on this listing in '+_mrMonthLabel(ym)+'. Every active listing needs at least one e-blast a month so the owner’s Monthly Marketing Report has an Email Report page.\n\nProperty: '+_mrDealAddr(deal)+'\nAdvisor: '+(deal.advisorName||deal.advisorEmail||'')+'\n\nClick 📧 Compose e-blast on this task (or on the deal card) to resend the last e-blast to the same groups, or build a new one and pick the audience. Either Nick or the advisor sending it completes both tasks.'+(_mbCfg().autoResend!==false?'\n\nIf nothing goes out by the '+(_mbCfg().autoDay||25)+'th and a prior e-blast exists, Terra resends it to the same groups automatically.':'');
   const ids=[];
@@ -50330,6 +50331,28 @@ async function _mbCreateTasks(deal, ym){
       createdBy:(typeof currentUser!=='undefined'&&currentUser)?currentUser.uid:'system', createdByName:'Monthly Reports', createdAt:Date.now() }));
   }
   return ids;
+}
+/* BLASTNICK-20261026 (Ryan): every monthly e-blast task belongs to Nick, who does the marketing.
+   Fixes tasks already assigned to advisors: reassigned to Nick, or — when Nick already has the
+   open task for that listing and month — the advisor's copy is set to status 'cancelled' (kept, not
+   deleted; cancelled tasks drop out of every task list). Runs at the start of each e-blast check. */
+async function _mbReassignToNick(){
+  const nick=_mrNickProfile(); if(!nick.uid) return 0;
+  const isNick=t=>t.assignedTo===nick.uid||String(t.assignedToEmail||'').toLowerCase()===nick.email;
+  const open=(typeof allTasks!=='undefined'?allTasks:[]).filter(t=>t&&t.dealId&&t.status==='pending'&&/monthly e-blast/i.test(t.title||''));
+  let n=0;
+  for(const t of open.filter(t=>!isNick(t))){
+    const same=x=>x!==t&&isNick(x)&&x.dealId===t.dealId&&(x.mcBlastMonth||'')===(t.mcBlastMonth||'');
+    const nickHas=open.some(same)||(typeof allTasks!=='undefined'?allTasks:[]).some(x=>same(x)&&x.status==='complete');   // Nick already has it open, or already did it
+    const now=Date.now();
+    const upd=nickHas
+      ? {status:'cancelled', updatedAt:now, cancelledReason:'E-blast tasks belong to Nick — he already has (or finished) this one (BLASTNICK-20261026)', previousAssignedToName:t.assignedToName||''}
+      : {assignedTo:nick.uid, assignedToName:nick.name, assignedToEmail:nick.email, updatedAt:now, previousAssignedTo:t.assignedTo||'', previousAssignedToName:t.assignedToName||''};
+    try{ await Store.updateTask(t.id, upd); Object.assign(t, upd); n++; if(nickHas) open.splice(open.indexOf(t),1); }
+    catch(e){ console.warn('[mb] reassign to Nick',t.id,e&&e.code); }
+  }
+  if(n){ try{ if(currentView==='tasks' && typeof viewTasks==='function') viewTasks(); }catch(_){} }
+  return n;
 }
 async function _mbCloseTasks(dealId, ym){ for(const t of _mbOpenTasksFor(dealId, ym)){ try{ await window.toggleTask(t.id,'complete'); }catch(e){ console.warn('[mb] close task',e); } } }
 
@@ -50351,6 +50374,7 @@ window._mbRun=async function(opts){
   const st=window._mrState; if(!st) return; if(st.mbRunning) return; st.mbRunning=true;
   const ym=_mbYm(); const day=new Date().getDate(); const result={created:0, closed:0, auto:0, autoSkipped:[], errors:[]};
   try{
+    try{ result.reassigned=await _mbReassignToNick(); }catch(e){ console.warn('[mb] reassign',e); }   // BLASTNICK-20261026
     const deals=(allDeals||[]).filter(_mbEligible);
     try{ await _mrMcCampaigns(ym); }catch(e){ result.errors.push('Mailchimp: '+e.message); st.mbRunning=false; if(!opts.silent) showToast('E-blast check skipped — '+e.message,'warning'); return result; }
     for(const d of deals){
