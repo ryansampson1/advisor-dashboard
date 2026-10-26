@@ -1493,6 +1493,8 @@ html.dark .kpi-label { color: var(--text-2); }
 html.dark .col-hdr-sticky { background: var(--surface) !important; }
 html.dark .col-hdr-sticky span.opacity-70 { background: #2A2F38 !important; color: #B3BAC5 !important; }
 html.dark .kanban-col { background: #171A20 !important; }
+/* BOARDDATE-20261026 */ .col-sort-hint{font-size:.66rem;opacity:.75;margin-top:2px;font-weight:600;letter-spacing:.01em}
+
 html.dark .drag-over { background: rgba(0,178,169,.10); }
 html.dark .deal-card span.bg-gray-100.text-gray-400 { background: #2A2F38 !important; color: #98A0AC !important; }
 html.dark .deal-card span.bg-amber-100 { background: rgba(245,158,11,.20) !important; color: #fcd34d !important; }
@@ -19427,7 +19429,14 @@ function viewBoard(){
           <option value="">All stages</option>
           ${STAGES.map(s=>`<option value="${s}" ${s===_pvStage?'selected':''}>${s}</option>`).join('')}
         </select>
-      </div>` : '';
+      </div>` : `
+      <div style="display:flex;align-items:center;gap:.4rem;flex-wrap:wrap"><!-- BOARDDATE-20261026 -->
+        <span style="font-size:.72rem;font-weight:700;color:#9ca3af;text-transform:uppercase;letter-spacing:.03em">Order</span>
+        <select class="pv-sort-select" title="How cards stack inside each column" aria-label="Card order within columns" onchange="setBoardSortMode(this.value)">
+          <option value="date" ${(window._boardSortMode&&window._boardSortMode())!=='manual'?'selected':''}>By key date</option>
+          <option value="manual" ${(window._boardSortMode&&window._boardSortMode())==='manual'?'selected':''}>Manual (drag)</option>
+        </select>
+      </div>`;
   const _pvControls = `
       <div class="pv-toggle" role="group" aria-label="View mode">
         <button type="button" class="pv-seg ${_pvMode==='board'?'active':''}" onclick="setPipelineView('board')" title="Kanban board">
@@ -19520,7 +19529,7 @@ function viewBoard(){
     ${_pvMode==='grid' ? gridHtml : `<div id="pipeline-kanban" class="board-scroll">
       <div class="board-row">
       ${STAGES.map(stage=>{
-        const allSd=(byStage[stage]||[]).slice().sort(_boardOrderCmp);
+        const allSd=(byStage[stage]||[]).slice().sort(window._boardColumnCmp?window._boardColumnCmp(stage):_boardOrderCmp);   // BOARDDATE-20261026
         const isLT = stage==='Lost / Terminated';
         // For Lost / Terminated: hide cards older than 7 days unless admin toggled
         const weekAgo = Date.now() - 7*86400000;
@@ -19564,6 +19573,7 @@ function viewBoard(){
                 </div>
               </div>
               ${total>0?`<div class="stage-total">${fmtM$(total)}</div>`:''}
+              ${window._boardSortHint&&window._boardSortHint(stage)?`<div class="col-sort-hint ${sc.txt}" title="Cards in this column are ordered by this date">⇅ ${window._boardSortHint(stage)}</div>`:''}<!-- BOARDDATE-20261026 -->
             </div>
             <div class="kanban-col ${sc.col} rounded-b-xl p-2 space-y-2" style="flex:1;"
               data-stage="${stage}"
@@ -21872,7 +21882,38 @@ window._elcLoiStageTs = (d) => {
    deal.lois[] earns credit, so three offers on one property score three times
    without needing three cards. Credited by the offer's upload date OR the week
    the card entered LOI — whichever falls in the window. */
+/* EFFDATE-20261026 — Ryan: an LOI or contract scores on its EFFECTIVE date
+   (the date on the document / the day it was received), never the day it
+   happened to reach Terra. A Friday catch-up batch of Email Review filings
+   (Oct 23) stamped ~26 September offers "added Oct 23" and credited Ryan with
+   40 LOIs in one week. Offer date = effectiveDate || receivedAt (the editable
+   "Date received" on the offer, also read by AI from the LOI itself), falling
+   back to addedAt only when the offer carries no date. The same buyer on the
+   same card on the same day is one offer (re-uploads / email + manual copies). */
+window._elcYmdTs = s => { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(s||''));
+  return m ? new Date(+m[1], +m[2]-1, +m[3], 12).getTime() : 0; };
+window._elcOfferTs = l => window._elcYmdTs(l && (l.effectiveDate || l.receivedAt)) || (+(l && l.addedAt) || 0);
+window._elcOfferKey = l => {
+  const b = String((l && l.buyer) || '').toLowerCase()
+    .replace(/\b(llc|inc|corp|co|company|group|lp|ltd|the)\b/g, '').replace(/[^a-z0-9]/g, '');
+  return b || String((l && l.fileName) || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+};
 window._elcLoiCountInWindow = (d, start, end) => {
+  const list = window._elcDealLoiList(d); if(!list.length) return 0;
+  const sTs = window._elcLoiStageTs(d);
+  const stageIn = sTs>=start && sTs<=end;
+  let n=0; const seen = new Set();
+  for(const l of list){
+    if(!l) continue;
+    const a = window._elcOfferTs(l);
+    if(a){ if(!(a>=start && a<=end)) continue; } else if(!stageIn) continue;
+    const k = window._elcOfferKey(l);
+    if(k){ const dk = k+'|'+(a ? new Date(a).toDateString() : 'stage'); if(seen.has(dk)) continue; seen.add(dk); }
+    n++;
+  }
+  return n;
+};
+window._elcLoiCountInWindow_preEffdate = (d, start, end) => {
   const list = window._elcDealLoiList(d); if(!list.length) return 0;
   const sTs = window._elcLoiStageTs(d);
   const stageIn = sTs>=start && sTs<=end;
@@ -21901,9 +21942,14 @@ window._elcCtStageTs = (d) => {
 };
 // Contract credit, once per deal: signed contract attached in the window OR the
 // card entered an under-contract stage in the window.
+// EFFDATE-20261026 — a contract with a PSA/contract effective date scores in
+// THAT week (once per deal). Attaching the PDF or dragging the card later no
+// longer re-credits it. No effective date on file → the old attach/stage rule.
 window._elcCtInWindow = (d, start, end) => {
   const c = +d.contractAttachedAt||0;
   const st = window._elcCtStageTs(d);
+  const eff = window._elcYmdTs(d.psaEffectiveDate || d.effectiveDate);
+  if(eff && (c || st || d.psaUrl || d.contractUrl)) return (eff>=start && eff<=end) ? 1 : 0;
   return ((c>=start && c<=end) || (st>=start && st<=end)) ? 1 : 0;
 };
 /* Did this deal enter a matching stage inside [wS,wE]? Replays stageHistory —
@@ -21926,12 +21972,20 @@ window._elcEnteredInWk = (d, match, wS, wE) => {
    refused to touch them ("already frozen"). Stamped per ROW now, so a stale row
    is recomputed by whichever surface reaches it first and nothing is ever
    wholesale deleted. Bump this to re-derive every locked week. */
-window._ELC_SCORECARD_VER = 6;
+window._ELC_SCORECARD_VER = 7;   // EFFDATE-20261026: v7 = effective-date credit (re-derives weeks from _ELC_SCORECARD_V7_FROM on)
 // `docVer` (the doc-level __ver) is accepted for call-site readability but is
 // deliberately NOT trusted: it is exactly what let one browser's save mark every
 // other advisor's old-formula rows as current. A row with no `v` is stale.
-window._elcRowFresh = (row, docVer) =>
-  !!row && row.score !== undefined && (+row.v || 0) >= window._ELC_SCORECARD_VER;
+/* EFFDATE-20261026 — Ryan chose "Oct 19 week forward": only weeks starting on or
+   after the cutoff are re-derived under v7 (effective-date LOI/contract credit).
+   Earlier locked rows stay frozen at v6 so past grades don't move. Callers pass
+   wKey (YYYY-MM-DD week start); without it a row is held to the current version. */
+window._ELC_SCORECARD_V7_FROM = '2026-10-19';
+window._elcRowFresh = (row, docVer, wKey) => {
+  if(!row || row.score === undefined) return false;
+  const need = (wKey && String(wKey) < window._ELC_SCORECARD_V7_FROM) ? 6 : window._ELC_SCORECARD_VER;
+  return (+row.v || 0) >= need;
+};
 
 /* Per-render memo. Every scorecard surface calls this now, and the Quarterly
    Report Card alone asks for ~19 advisors x 4 quarters of weeks in a single
@@ -22096,7 +22150,7 @@ window._elcSweepScoreHistory = async () => {
       let dirty = false;
       weeks.forEach(({wS,wE,wKey})=>{
         if(wE >= Date.now())   return;             // not finished — stays live
-        if(window._elcRowFresh(mine[wKey], hist.__ver)) return;  // frozen by the CURRENT formula
+        if(window._elcRowFresh(mine[wKey], hist.__ver, wKey)) return;  // frozen by the CURRENT formula
         if(window._elcOnVacation(aUid,wS,wE)) return; // time off is never graded
         const _r = window._elcWeekScore(aUid,wS,wE,wKey); delete _r.det; delete _r.pts;
         mine[wKey] = {..._r, v:SCORECARD_VER, autoLocked:true};
@@ -22985,7 +23039,7 @@ function viewBoardStaff(){
     <div class="board-scroll">
       <div class="board-row">
       ${STAGES.map(stage => {
-        const sd = (byStage[stage] || []).slice().sort(_boardOrderCmp);
+        const sd = (byStage[stage] || []).slice().sort(window._boardColumnCmp?window._boardColumnCmp(stage):_boardOrderCmp);   // BOARDDATE-20261026
         const sc = SC[stage];
         return `
           <div style="${_colStyle}">
@@ -23238,6 +23292,50 @@ window.openStaffDealView = function(dealId){
 window._boardOrderCmp = (a,b) =>
   ((a.boardOrder ?? 1e9) - (b.boardOrder ?? 1e9));
 
+/* ═══ BOARDDATE-20261026 — Kanban columns stack by each stage's key date ═══
+   Ryan (2026-10-26): within each column, order cards by the date that matters for
+   that stage — Listing → listing expiration, Due Diligence → DD expiration,
+   Rezoning/Permitting → rezoning expiration, Closing → closing date (soonest on top);
+   history-type columns (Prospect, Buyer Opps, LOI, Signed LOI, Closed Won, Lost)
+   put the newest on top. Cards with no date sink to the bottom.
+   Manual drag-ordering (boardOrder) is kept, not removed: the board's "Order"
+   picker switches between "By key date" (default) and "Manual (drag)". */
+(function(){
+  const ts = v => { if(v==null||v==='') return null; if(typeof v==='number') return v;
+    const s=String(v); const t=Date.parse(/^\d{4}-\d{2}-\d{2}$/.test(s)?s+'T00:00:00':s); return isNaN(t)?null:t; };
+  const entered = d => ts(d.stageEnteredAt)||ts(d.updatedAt)||ts(d.createdAt);
+  const latestLoi = d => { let m=null; (Array.isArray(d.lois)?d.lois:[]).forEach(l=>{ const t=l&&(ts(l.date)||ts(l.receivedAt)||ts(l.createdAt)); if(t&&(m==null||t>m)) m=t; }); return m||entered(d); };
+  const RULES = [
+    [/lost|terminated/i,               {label:'Newest first',          dir:-1, get:entered}],
+    [/closed won|sold|\bwon\b/i,        {label:'Most recently closed',  dir:-1, get:d=>ts(d.closeDate)||entered(d)}],
+    [/closing/i,                        {label:'Soonest closing',       dir: 1, get:d=>ts(d.closeDate)}],
+    [/due.?diligence|under.?contract/i, {label:'Soonest DD expiration', dir: 1, get:d=>ts(d.ddExpirationDate)||ts(d.dueDiligenceDate)}],
+    [/rezoning|permitting/i,            {label:'Soonest rezoning exp.', dir: 1, get:d=>ts(d.rezoneExpiration)}],
+    [/signed loi|contract drafting/i,   {label:'Newest first',          dir:-1, get:entered}],
+    [/loi/i,                            {label:'Newest LOI first',      dir:-1, get:latestLoi}],
+    [/listing/i,                        {label:'Soonest expiration',    dir: 1, get:d=>ts(d.listingExpiration)}],
+  ];
+  const DEFAULT = {label:'Newest first', dir:-1, get:d=>ts(d.createdAt)||entered(d)};
+  window._boardDateRule = stage => { const s=String(stage||''); const hit=RULES.find(([re])=>re.test(s)); return hit?hit[1]:DEFAULT; };
+  window._boardSortMode = () => { try{ return localStorage.getItem('pipelineBoardSort')==='manual'?'manual':'date'; }catch(e){ return 'date'; } };
+  window._boardColumnCmp = stage => {
+    if(window._boardSortMode()==='manual') return window._boardOrderCmp;
+    const r = window._boardDateRule(stage);
+    return (a,b) => {
+      const va=r.get(a), vb=r.get(b);
+      if(va==null && vb==null) return window._boardOrderCmp(a,b) || ((ts(b.createdAt)||0)-(ts(a.createdAt)||0));
+      if(va==null) return 1;
+      if(vb==null) return -1;
+      return r.dir*(va-vb) || window._boardOrderCmp(a,b);
+    };
+  };
+  window._boardSortHint = stage => window._boardSortMode()==='manual' ? '' : window._boardDateRule(stage).label;
+  window.setBoardSortMode = m => {
+    try{ localStorage.setItem('pipelineBoardSort', m==='manual'?'manual':'date'); }catch(e){}
+    if(document.getElementById('pipeline-kanban')) viewBoard(); else if(typeof viewBoardStaff==='function') viewBoardStaff();
+  };
+})();
+
 // Given the column element a card was dropped on, the cursor Y position, and the
 // id of the dragged card, return the desired top→bottom list of deal ids for
 // that column (dragged card inserted at the drop point).
@@ -23481,6 +23579,9 @@ window.handleDrop = (ev,newStage) => {
   if(_effStage===newStage){
     _applyColumnOrder(_desiredIds);
     viewBoard();
+    // BOARDDATE-20261026: in date order the saved hand order isn't what's shown — say so
+    if(window._boardSortMode && window._boardSortMode()!=='manual')
+      showToast('Cards are ordered by date. Switch Order to Manual to arrange them by hand.','info',6000,{label:'Use manual', onClick:()=>window.setBoardSortMode('manual')});
     return;
   }
   // ── Dragged LEFT — fell out of contract / LOI died (elc-v424) ────────────
@@ -36880,7 +36981,7 @@ function viewEOS(sub='rocks'){
           </tr>`;
           const openTasks = myTasks.filter(t=>t.status==='pending').length; // current count, by design
           let score, doneTasks;
-          const locked = window._elcRowFresh(_myHist[wKey], _storedVer) ? _myHist[wKey] : null;
+          const locked = window._elcRowFresh(_myHist[wKey], _storedVer, wKey) ? _myHist[wKey] : null;
           if(locked){
             ({score, doneTasks} = locked);
           } else {
@@ -36952,7 +37053,7 @@ function viewEOS(sub='rocks'){
         </tr>`;
         let score, wQPct, pLen, lLen, prLen, lstLen, cLen, netEv, drPr, doneT, openT, caN;
 
-        const locked = window._elcRowFresh(_myHist[wKey], _storedVer) ? _myHist[wKey] : null;
+        const locked = window._elcRowFresh(_myHist[wKey], _storedVer, wKey) ? _myHist[wKey] : null;
         if(locked){
           // Frozen week — render exactly what was stored, never recompute.
           ({score, wQPct, pLen, lLen, prLen, lstLen, cLen, netEv, drPr, doneT, openT, caN} = locked);
@@ -37124,7 +37225,7 @@ function viewEOS(sub='rocks'){
           const scores = qWeeks2
             .filter(({wKey})=>!window._elcOnVacationWeek(aUid,wKey))
             .map(({wKey,wS,wE})=>{
-              const locked = window._elcRowFresh(hist[wKey], _sv2) ? hist[wKey] : null;
+              const locked = window._elcRowFresh(hist[wKey], _sv2, wKey) ? hist[wKey] : null;
               if(locked) return locked.score;
               live++;   // never recorded (or recorded by a session without write rights)
               return window._elcWeekScore(aUid,wS,wE,wKey).score;
