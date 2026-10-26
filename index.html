@@ -48421,7 +48421,8 @@ function _mrStatusChip(rep, d){
 function _mrInjectStyles(){
   if(document.getElementById('mr-styles')) return;
   const s=document.createElement('style'); s.id='mr-styles'; s.textContent=`
-  .mr-wrap{padding:1.25rem 1.5rem;max-width:1180px}
+  .mr-wrap{padding:1.25rem 1.5rem;max-width:none;width:100%;box-sizing:border-box}   /* MRWIDE-20261026 — tab fills the window width */
+  #main-content:has(> .mr-wrap){max-width:none !important}   /* MRWIDE-20261026 — lift the 1400px app cap only while Monthly Reports is showing */
   .mr-head{display:flex;align-items:center;gap:.75rem;flex-wrap:wrap;margin-bottom:1rem}
   .mr-head h1{font-size:1.25rem;font-weight:800;color:var(--text-1);margin:0}
   .mr-toolbar{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin-left:auto}
@@ -50355,6 +50356,7 @@ async function _mbCreateTasks(deal, ym){
     ids.push(await Store.createTask({ title, description:desc, assignedTo:o.uid, assignedToName:o.name, assignedToEmail:o.email, dealId:deal.id, dealAddress:deal.propertyAddress||'', dueDate:_mbDueDate(ym), status:'pending', mcBlastMonth:ym,
       createdBy:(typeof currentUser!=='undefined'&&currentUser)?currentUser.uid:'system', createdByName:'Monthly Reports', createdAt:Date.now() }));
   }
+  try{ const log={...(deal.mcBlastLog||{})}; log[ym]={...(log[ym]||{}), taskCreatedAt:Date.now()}; await Store.updateDeal(deal.id,{mcBlastLog:log}); deal.mcBlastLog=log; }catch(e){ console.warn('[mb] taskCreatedAt',e); }   // BLASTONCE-20261026
   return ids;
 }
 /* BLASTNICK-20261026 (Ryan): every monthly e-blast task belongs to Nick, who does the marketing.
@@ -50407,7 +50409,9 @@ window._mbRun=async function(opts){
         const s=await _mbStatus(d, ym, true);
         const open=_mbOpenTasksFor(d.id, ym);
         if(s.sent.length){ if(open.length){ await _mbCloseTasks(d.id, ym); result.closed++; } continue; }
-        if(!_mbTasksFor(d.id, ym).length){ await _mbCreateTasks(d, ym); result.created++; continue; }
+        // BLASTONCE-20261026: one e-blast task per listing per month. If this month's task was already created and later
+        // removed, don't recreate it (that is what made a task Nick cleared pop back up).
+        if(!_mbTasksFor(d.id, ym).length){ if(_mbLog(d, ym)&&_mbLog(d, ym).taskCreatedAt) continue; await _mbCreateTasks(d, ym); result.created++; continue; }
         if(open.length && day>=(cfg.autoDay||25) && cfg.autoResend!==false && !(s.log&&s.log.autoAttemptedAt)){
           const prior=await _mbPrior(d); const last=prior.find(c=>c.id);
           const log={...(d.mcBlastLog||{})}; log[ym]={...(log[ym]||{}), autoAttemptedAt:Date.now()};
