@@ -8909,6 +8909,7 @@ function renderStageFields(stage, data={}){
 
   container.innerHTML = `
   <div class="border-t pt-3 mt-1 space-y-4">
+    ${(stage==='Prospect' && window._ptFieldHtml) ? window._ptFieldHtml(data, {required: !editingDealId}) : ''}<!-- PROSTERM-20261027 -->
 
     <!-- ① DOCUMENTS & AUTO-FILL ─────────────────────────────────── -->
     <div>
@@ -11300,6 +11301,7 @@ function autoStageMatches(ruleStage, dealStage, dealLostType){
 }
 
 function fireAutomations(deal, oldStage){
+  try{ window._ptOnLeave && window._ptOnLeave(deal, oldStage); }catch(e){}   // PROSTERM-20261027: stop self-renewing prospect follow-ups once the card leaves Prospect
   // elc-v424 — a backward move is a loss event, not progress. Nothing fires.
   // (Single choke point: covers drag-to-column, stage gate and modal-save paths.)
   if(oldStage && isBackwardMove(oldStage, deal.stage)){
@@ -11313,6 +11315,7 @@ function fireAutomations(deal, oldStage){
   let _taManagedKey = null;
   try { _taManagedKey = _taStageToKey(deal); if(_taManagedKey && window.applyTaskAutomation) window.applyTaskAutomation(deal.id, _taManagedKey); }
   catch(e){ console.warn('[taskAutomation hook]', e); }
+  if(/^prospect_(short|long)$/.test(_taManagedKey||'') && window._ptScheduleRecurring) window._ptScheduleRecurring(deal).catch(()=>{});   // PROSTERM-20261027
   console.log('[fireAutomations] deal.stage='+deal.stage+' lostType='+_lt+' oldStage='+oldStage+' matching rules:', allAutomations.filter(r=>r.active&&autoStageMatches(r.stage,deal.stage,_lt)).map(r=>r.id+':'+r.type));
   const rules=allAutomations.filter(r=>r.active&&autoStageMatches(r.stage,deal.stage,_lt));
   const now=Date.now();
@@ -19581,7 +19584,7 @@ function viewBoard(){
               ondragleave="this.classList.remove('drag-over')"
               ondrop="handleDrop(event,'${stage}')">
               ${toggleRow}
-              ${sd.map(d=>renderCard(d)).join('')}
+              ${(stage==='Prospect' && window._ptColumnHtml) ? window._ptColumnHtml(sd, d=>renderCard(d), true) : sd.map(d=>renderCard(d)).join('')}<!-- PROSTERM-20261027 -->
             </div>
           </div>`;
       }).join('')}
@@ -19849,7 +19852,7 @@ function renderCard(deal, opts){
           .filter(Boolean).join(' · ')
       }</div>`:''}
 
-      ${landTypeBadge}
+      ${window._ptCardChip ? window._ptCardChip(deal) : ''}${landTypeBadge}
 
       <!-- Stage-specific fields -->
       <div class="space-y-0.5">
@@ -21703,7 +21706,7 @@ window._elcCallsInWindow = (uid, s, e) =>
 window._ELC_CALL_1PT_FROM = new Date(2026,9,12).getTime();
 window._elcCallPts    = c => (((c&&c.ts)||0) >= window._ELC_CALL_1PT_FROM) ? 1 : 5;
 window._elcCallPtsSum = arr => (arr||[]).reduce((s,c)=>s+window._elcCallPts(c),0);
-window._elcCallTipLbl = arr => 'Prospects 5 pts · Calls '+((arr&&arr.length&&window._elcCallPts(arr[0])===5)?'5 pts':'1 pt')+' each';
+window._elcCallTipLbl = arr => 'Short-Term prospects 5 pts · Calls '+((arr&&arr.length&&window._elcCallPts(arr[0])===5)?'5 pts':'1 pt')+' each';
 window._elcCreditCall = async (activityId, ts, label) => {
   const u = currentUser?.uid;
   if (!u || !activityId) return;
@@ -22081,7 +22084,8 @@ window._elcWeekScoreRaw = (uid, wS, wE, wKey) => {
     const ca=(d.coAdvisors||[]).find(c=>c.uid===uid); return ca?base*(ca.splitPct||0)/100:0;
   };
   const bornInWk = d => (d.createdAt||0)>=wS && (d.createdAt||0)<=wE;
-  const pDeals  = myDeals.filter(d=>bornInWk(d)&&_initialStage(d)==='Prospect');
+  // PROSTERM-20261027 — Ryan: only Short-Term prospects score; Long-Term earn nothing. Older prospects keep the old rule.
+  const pDeals  = myDeals.filter(d=>window._elcProspectCredit ? window._elcProspectCredit(d,wS,wE) : (bornInWk(d)&&_initialStage(d)==='Prospect'));
   const caN     = window._elcCallsInWindow(uid,wS,wE);        // elc-v432: calls score like prospects
   const loiRows = myDeals.map(d=>({d,n:window._elcLoiCountInWindow(d,wS,wE)})).filter(x=>x.n>0);
   const prDeals = myDeals.filter(d=>_enteredInWk(d,st=>st==='Proposal To Do'||st==='Proposal Outstanding'));
@@ -23073,7 +23077,7 @@ function viewBoardStaff(){
               <span class="${sc.txt} text-xs opacity-70">${sd.length}</span>
             </div>
             <div class="kanban-col ${sc.col} rounded-b-xl p-2 space-y-2" style="flex:1;">
-              ${sd.map(d => renderStaffCard(d)).join('')}
+              ${(stage==='Prospect' && window._ptColumnHtml) ? window._ptColumnHtml(sd, d=>renderStaffCard(d), false) : sd.map(d => renderStaffCard(d)).join('')}<!-- PROSTERM-20261027 -->
             </div>
           </div>`;
       }).join('')}
@@ -32542,7 +32546,18 @@ const _TA_NAME_HINTS = {
 // This is the built-in DEFAULT — the live config (TASK_AUTOMATIONS) is loaded
 // below and may be edited by admins on the Automations page (synced via Firestore).
 const TASK_AUTOMATIONS_DEFAULT = {
-  prospect: { label:'Prospect', terminal:false, tasks:[
+  // PROSTERM-20261027 — Short-Term / Long-Term prospects. The recurring weekly follow-up /
+  // N-month check-in is created by _ptScheduleRecurring (not a row here) so it can renew itself.
+  prospect_short: { label:'🔥 Short-Term Prospect', terminal:false, tasks:[
+    ['Call seller — confirm motivation, timeline & price expectations', _TA.ADV, 1],
+    ['Walk the property & pull parcel research', _TA.ADV, 3],
+    ['Prepare & send proposal / BOV', _TA.ADV, 7],
+  ]},
+  prospect_long: { label:'🌱 Long-Term Prospect', terminal:false, tasks:[
+    ['Initial contact — log seller goals & timing in CRM', _TA.ADV, 3],
+    ['Add seller to CRM mailing list (Land Listings Report)', _TA.ADV, 5],
+  ]},
+  prospect: { label:'Prospect (no timeline set)', terminal:false, tasks:[
     ['Initial contact & qualify lead', _TA.ADV, 2],
   ]},
   price_change: { label:'Price Change', terminal:false, tasks:[
@@ -32703,7 +32718,7 @@ const TASK_AUTOMATIONS_DEFAULT = {
   ]},
 };
 // Order shown in the dropdown (matches how Ryan listed them).
-const TASK_AUTOMATION_ORDER = ['prospect','new_listing','loi','under_contract','uc_seller_rep','uc_buyer_rep','proposal_todo','begin_marketing','price_change','listing_renewed','closing','sold','fell_out','listing_canceled','expired_listing'];
+const TASK_AUTOMATION_ORDER = ['prospect_short','prospect_long','prospect','new_listing','loi','under_contract','uc_seller_rep','uc_buyer_rep','proposal_todo','begin_marketing','price_change','listing_renewed','closing','sold','fell_out','listing_canceled','expired_listing'];
 
 // ── Editable config: default merged with any admin-saved overrides ──────────
 function _mergeTaskAutomations(stored){
@@ -32924,7 +32939,7 @@ window.saveTaskAutomations = saveTaskAutomations;
    commission/payout flow). Under Contract picks the set by representation. */
 function _taStageToKey(deal){
   const s = String(deal && deal.stage || '');
-  if(/^prospect$/i.test(s)) return 'prospect';
+  if(/^prospect$/i.test(s)) return deal.prospectTerm==='short' ? 'prospect_short' : deal.prospectTerm==='long' ? 'prospect_long' : 'prospect';   // PROSTERM-20261027
   if(/^listing$/i.test(s)) return 'new_listing';
   if(/^loi$/i.test(s))     return 'loi';
   if(/due.?diligence|under.?contract/i.test(s)){
@@ -33116,6 +33131,389 @@ window.applyTaskAutomation = async function(dealId, key, opts){
   try{ if(typeof viewTasks==='function' && document.getElementById('tasks-view')) viewTasks(); }catch(e){}
   _taInFlight.delete(_lock);
 };
+
+/* ════════════════════════════════════════════════════════════════════════
+   PROSTERM-20261027 — Short-Term vs Long-Term prospects (Matt / Ryan)
+   One Prospect column, two kinds of prospect:
+     🔥 Short-Term — seller is ready to sell now → fast task set + weekly
+        follow-up that re-creates itself until the card leaves Prospect.
+     🌱 Long-Term  — not ready yet → light nurture set + a check-in every
+        3 / 6 / 12 months (default 6) that re-creates itself.
+   deal.prospectTerm = 'short' | 'long'   (unset on older prospects)
+   deal.prospectCheckInMonths = 3|6|12    deal.prospectShortAt = first time
+   labeled Short-Term (never overwritten) deal.prospectTermAtCreate = true when
+   the timeline was picked as the deal was created (new scoring rule applies).
+   SCORECARD (Ryan): only Short-Term prospects earn the 5 prospect points; a
+   Long-Term prospect earns nothing until it is switched to Short-Term (credited
+   that week). Prospects created before this change keep the old rule, so no
+   past week moves.
+   ════════════════════════════════════════════════════════════════════════ */
+(function(){
+  const PT_SET_KEYS  = { prospect:1, prospect_short:1, prospect_long:1 };
+  const PT_RECUR     = { prospect_followup:1, prospect_checkin:1 };
+  const PT_MONTHS    = [3,6,12];
+  const _ptEsc = s => String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const _isOpenT = t => t && t.status!=='complete' && t.status!=='completed' && t.status!=='cancelled';
+  const _isPros  = d => !!d && String(d.stage||'').toLowerCase()==='prospect';
+  const _months  = d => { const m=Number(d&&d.prospectCheckInMonths); return PT_MONTHS.includes(m)?m:6; };
+  const _ymd     = dt => { const y=dt.getFullYear(), m=String(dt.getMonth()+1).padStart(2,'0'), d=String(dt.getDate()).padStart(2,'0'); return `${y}-${m}-${d}`; };
+  const _addDays = n => { const d=new Date(); d.setDate(d.getDate()+n); return _ymd(d); };
+  const _addMonths = n => { const d=new Date(); const day=d.getDate(); d.setDate(1); d.setMonth(d.getMonth()+n);
+    const last=new Date(d.getFullYear(), d.getMonth()+1, 0).getDate(); d.setDate(Math.min(day,last)); return _ymd(d); };
+
+  window._PT_LABEL = { short:'🔥 Short-Term', long:'🌱 Long-Term' };
+  window._ptKeyFor = d => (d && d.prospectTerm==='short') ? 'prospect_short' : (d && d.prospectTerm==='long') ? 'prospect_long' : 'prospect';
+
+  /* ── Styles (light + dark) ─────────────────────────────────────────── */
+  if(typeof document!=='undefined' && !document.getElementById('pt-style')){
+    const st=document.createElement('style'); st.id='pt-style';
+    st.textContent = `
+      .pt-sec{border-radius:10px;padding:.25rem .3rem .4rem;margin:0 0 .5rem;border:1px dashed transparent;transition:background .15s,border-color .15s}
+      .pt-sec.pt-drop{border-color:#9CA3AF;background:rgba(0,0,0,.04)}
+      .pt-sec-hdr{display:flex;align-items:center;justify-content:space-between;gap:.4rem;font-size:.68rem;font-weight:800;letter-spacing:.04em;text-transform:uppercase;padding:.3rem .45rem;border-radius:7px;margin-bottom:.4rem}
+      .pt-sec-hdr .pt-n{font-weight:700;opacity:.85}
+      .pt-sec-short .pt-sec-hdr{background:#FFEDD5;color:#9A3412}
+      .pt-sec-long  .pt-sec-hdr{background:#DCFCE7;color:#166534}
+      .pt-sec-unset .pt-sec-hdr{background:#F3F4F6;color:#374151}
+      .pt-sec-sub{font-size:.66rem;font-weight:600;text-transform:none;letter-spacing:0;opacity:.85}
+      .pt-empty{font-size:.72rem;color:var(--text-2);text-align:center;padding:.55rem .25rem;border:1px dashed var(--border);border-radius:8px}
+      .pt-chip{display:inline-flex;align-items:center;gap:.2rem;font-size:.7rem;font-weight:700;padding:.15rem .5rem;border-radius:99px;border:1px solid transparent;cursor:pointer;margin:0 .25rem .35rem 0;line-height:1.3}
+      .pt-chip:focus-visible{outline:2px solid #2563EB;outline-offset:2px}
+      .pt-chip-short{background:#FFEDD5;color:#9A3412;border-color:#FDBA74}
+      .pt-chip-long{background:#DCFCE7;color:#166534;border-color:#86EFAC}
+      .pt-chip-unset{background:#F3F4F6;color:#374151;border-color:#D1D5DB}
+      .pt-field{border:1px solid var(--border);border-radius:12px;padding:.75rem;background:var(--surface)}
+      .pt-field-t{font-size:.72rem;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:var(--text-2);margin-bottom:.5rem}
+      .pt-field-t.pt-req{color:#DC2626}
+      .pt-opts{display:grid;grid-template-columns:1fr 1fr;gap:.5rem}
+      .pt-opt{display:block;position:relative;border:2px solid var(--border);border-radius:10px;padding:.6rem .7rem;cursor:pointer;min-height:44px;background:var(--surface);color:var(--text-1)}
+      .pt-opt input{position:absolute;opacity:0;pointer-events:none}
+      .pt-opt b{display:block;font-size:.85rem}
+      .pt-opt span{display:block;font-size:.72rem;color:var(--text-2);margin-top:.15rem;line-height:1.35}
+      .pt-opt:has(input:focus-visible){outline:2px solid #2563EB;outline-offset:2px}
+      .pt-opt-short:has(input:checked){border-color:#EA580C;background:#FFF7ED}
+      .pt-opt-long:has(input:checked){border-color:#16A34A;background:#F0FDF4}
+      .pt-opt.pt-checked-short{border-color:#EA580C;background:#FFF7ED}
+      .pt-opt.pt-checked-long{border-color:#16A34A;background:#F0FDF4}
+      .pt-months{display:flex;align-items:center;gap:.5rem;margin-top:.6rem;font-size:.8rem;color:var(--text-1)}
+      .pt-months select{border:1px solid var(--border);border-radius:8px;padding:.35rem .5rem;background:var(--surface);color:var(--text-1);font-size:.85rem}
+      .pt-note{font-size:.72rem;color:var(--text-2);margin-top:.5rem;line-height:1.4}
+      .pt-modal-card{background:var(--surface);color:var(--text-1);border:1px solid var(--border);border-radius:16px;max-width:440px;width:100%;padding:1.1rem 1.1rem 1rem;box-shadow:0 20px 50px rgba(0,0,0,.25)}
+      .pt-modal-card h3{font-size:1.02rem;font-weight:800;margin:0 0 .2rem}
+      .pt-modal-card p.pt-sub{font-size:.8rem;color:var(--text-2);margin:0 0 .8rem}
+      .pt-btns{display:flex;justify-content:flex-end;gap:.5rem;margin-top:1rem}
+      .pt-btn{min-height:40px;padding:.5rem 1rem;border-radius:9px;font-weight:700;font-size:.85rem;border:1px solid var(--border);background:var(--surface);color:var(--text-1);cursor:pointer}
+      .pt-btn-primary{background:#0F766E;border-color:#0F766E;color:#fff}
+      .pt-btn:focus-visible{outline:2px solid #2563EB;outline-offset:2px}
+      .pt-btn[disabled]{opacity:.5;cursor:not-allowed}
+      @media (pointer:coarse){ .pt-chip{min-height:32px;padding:.3rem .65rem} .pt-btn{min-height:44px} }
+      @media (max-width:767px){ .pt-months select{font-size:16px} }
+      @media (max-width:420px){ .pt-opts{grid-template-columns:1fr} }
+      html.dark .pt-sec.pt-drop{background:rgba(255,255,255,.05);border-color:#6B7280}
+      html.dark .pt-sec-short .pt-sec-hdr, html.dark .pt-chip-short{background:#431407;color:#FDBA74;border-color:#9A3412}
+      html.dark .pt-sec-long  .pt-sec-hdr, html.dark .pt-chip-long {background:#052E16;color:#86EFAC;border-color:#166534}
+      html.dark .pt-sec-unset .pt-sec-hdr, html.dark .pt-chip-unset{background:#262B34;color:#D1D5DB;border-color:#4B5563}
+      html.dark .pt-opt-short:has(input:checked), html.dark .pt-opt.pt-checked-short{background:#2A1407;border-color:#F97316}
+      html.dark .pt-opt-long:has(input:checked),  html.dark .pt-opt.pt-checked-long {background:#06210F;border-color:#22C55E}
+    `;
+    (document.head||document.documentElement).appendChild(st);
+  }
+
+  /* ── Deal-modal field (Prospect stage only) ────────────────────────── */
+  window._ptFieldHtml = (data, opts) => {
+    data = data || {};
+    const term = data.prospectTerm || '';
+    const m = _months(data);
+    const req = !!(opts && opts.required);
+    const radio = (v, title, sub) => `
+      <label class="pt-opt pt-opt-${v}${term===v?' pt-checked-'+v:''}">
+        <input type="radio" name="sf-prospect-term" value="${v}" ${term===v?'checked':''} onchange="window._ptFieldChange()"/>
+        <b>${window._PT_LABEL[v]}</b><span>${sub}</span>
+      </label>`;
+    return `
+    <div class="pt-field" id="pt-field">
+      <div class="pt-field-t${req?' pt-req':''}" id="pt-field-t">Prospect Timeline${req?' <span style="color:#DC2626">*</span>':''}</div>
+      <div class="pt-opts" role="radiogroup" aria-label="Prospect timeline">
+        ${radio('short','Short-Term','Ready to sell now. Fast follow-up tasks. Counts on the scorecard.')}
+        ${radio('long','Long-Term','Not ready yet. Check in every few months. No scorecard points.')}
+      </div>
+      <div class="pt-months" id="pt-months-row" style="${term==='long'?'':'display:none'}">
+        <label for="sf-prospect-checkin">Check in every</label>
+        <select id="sf-prospect-checkin">${PT_MONTHS.map(n=>`<option value="${n}" ${n===m?'selected':''}>${n} months</option>`).join('')}</select>
+      </div>
+      ${(!term && !req) ? `<div class="pt-note">This prospect was added before timelines existed. Pick one to start its follow-up tasks.</div>` : ''}
+    </div>`;
+  };
+  window._ptFieldChange = () => {
+    const v = (document.querySelector('input[name="sf-prospect-term"]:checked')||{}).value||'';
+    const row = document.getElementById('pt-months-row'); if(row) row.style.display = v==='long' ? '' : 'none';
+    document.querySelectorAll('#pt-field .pt-opt').forEach(l=>{
+      const iv=l.querySelector('input').value; l.classList.toggle('pt-checked-'+iv, iv===v);
+    });
+    const t=document.getElementById('pt-field-t'); if(t && v) t.style.color='';
+  };
+  // Spread into collectStageFields(): only returns keys when the picker is on screen,
+  // so saving a deal in any other stage never wipes its timeline.
+  window._ptCollect = () => {
+    if(typeof document==='undefined' || !document.getElementById('pt-field')) return {};
+    const v = (document.querySelector('input[name="sf-prospect-term"]:checked')||{}).value||'';
+    if(!v) return {};
+    const out = { prospectTerm: v };
+    const sel = document.getElementById('sf-prospect-checkin');
+    if(sel) out.prospectCheckInMonths = Number(sel.value)||6;
+    return out;
+  };
+  // Required on NEW Prospect deals. Returns true (and flags the field) when missing.
+  window._ptMissing = () => {
+    if(!document.getElementById('pt-field')) return false;
+    if(document.querySelector('input[name="sf-prospect-term"]:checked')) return false;
+    const f=document.getElementById('pt-field');
+    f.scrollIntoView({block:'center', behavior:'smooth'});
+    f.style.outline='2px solid #DC2626'; setTimeout(()=>{ f.style.outline=''; }, 3000);
+    const t=document.getElementById('pt-field-t'); if(t) t.style.color='#DC2626';
+    showToast('Pick a Prospect Timeline: Short-Term or Long-Term','warning');
+    return true;
+  };
+  // Stamps the timeline bookkeeping onto the save payload. Returns the OLD term.
+  window._ptStamp = (data, existDeal, stage, isNew) => {
+    const old = (existDeal && existDeal.prospectTerm) || '';
+    if(String(stage||'').toLowerCase()!=='prospect' || !data || !data.prospectTerm) return old;
+    // Remember what the deal looked like so the swap toast can Undo exactly this change.
+    if(existDeal) window._ptLastPrev = { dealId: existDeal.id, fields: {
+      prospectTerm: existDeal.prospectTerm||null, prospectCheckInMonths: existDeal.prospectCheckInMonths||null,
+      prospectShortAt: existDeal.prospectShortAt||null, prospectTermSetAt: existDeal.prospectTermSetAt||null } };
+    const now = Date.now();
+    if(isNew) data.prospectTermAtCreate = true;
+    if(data.prospectTerm !== old){ data.prospectTermSetAt = now; data.prospectTermSetBy = (currentUser&&currentUser.uid)||''; }
+    if(data.prospectTerm==='short' && !(existDeal && existDeal.prospectShortAt)) data.prospectShortAt = now;
+    return old;
+  };
+
+  /* ── Scorecard credit ───────────────────────────────────────────────
+     Returns true when deal `d` earns the 5-pt prospect credit in [wS,wE]. */
+  window._elcProspectCredit = (d, wS, wE) => {
+    if(!d) return false;
+    const init = (Array.isArray(d.stageHistory)&&d.stageHistory.length) ? d.stageHistory[0].stage : d.stage;
+    if(init !== 'Prospect') return false;
+    if(!d.prospectTermAtCreate){              // prospects created before PROSTERM: unchanged rule
+      const c = d.createdAt||0; return c>=wS && c<=wE;
+    }
+    const s = d.prospectShortAt||0;           // Short-Term only — credited the week it was labeled Short-Term
+    return !!s && s>=wS && s<=wE;
+  };
+
+  /* ── Tasks ──────────────────────────────────────────────────────────── */
+  const _dealOf = id => (typeof allDeals!=='undefined' ? allDeals : []).find(d=>d.id===id);
+  window._ptScheduleRecurring = async (deal) => {
+    if(!_isPros(deal) || !deal.prospectTerm) return null;
+    const short = deal.prospectTerm==='short';
+    const type  = short ? 'prospect_followup' : 'prospect_checkin';
+    const tasks = (typeof allTasks!=='undefined' ? allTasks : []);
+    if(tasks.some(t=>t.dealId===deal.id && t.taskType===type && _isOpenT(t))) return null;
+    const m = _months(deal);
+    const base = short ? '🔥 Weekly follow-up with seller' : `🌱 ${m}-month check-in with seller`;
+    const a = (typeof _taResolveAssignee==='function') ? _taResolveAssignee(_TA.ADV, deal)
+            : {assignedTo:deal.advisorUid||null, assignedToName:deal.advisorName||'', assignedToEmail:deal.advisorEmail||''};
+    const who = deal.clientName||deal.seller||deal.contactPerson||(Array.isArray(deal.sellers)&&deal.sellers[0])||'';
+    const addr = deal.propertyAddress||deal.projectName||'';
+    const obj = {
+      title: base + ' — ' + _taskHeadlineName(deal),
+      taskBase: base, taskType: type, autoKey: short?'prospect_short':'prospect_long',
+      autoLabel: short?'Short-Term Prospect':'Long-Term Prospect', auto:true,
+      description: short
+        ? `Short-Term prospect — seller is ready to sell.${who?'\nSeller: '+who:''}\n\n☐ Reach out (call first, then email)\n☐ Push the proposal / listing agreement forward\n☐ Log notes in CRM\n\nA new follow-up is created a week after you check this off, until the card moves out of Prospect.`
+        : `Long-Term prospect — not ready to sell yet.${who?'\nSeller: '+who:''}\n\n☐ Check in: any change in plans, timing or price expectations?\n☐ Share a relevant comp, sale or market update\n☐ Log notes in CRM\n☐ Ready now? Switch the card to 🔥 Short-Term\n\nThe next check-in is created ${m} months after you check this off.`,
+      assignedTo:a.assignedTo, assignedToName:a.assignedToName, assignedToEmail:a.assignedToEmail,
+      dealId:deal.id, dealAddress:addr, dealName:deal.projectName||addr,
+      dueDate: short ? _addDays(7) : _addMonths(m), status:'pending',
+      createdBy:(currentUser&&currentUser.uid)||'system', createdByName:'Automation', createdAt:Date.now(),
+    };
+    try{ const id=await Store.createTask(obj); if(id && !tasks.some(t=>t.id===id)) tasks.push({...obj,id}); return id||null; }
+    catch(e){ console.warn('[prosterm] recurring create failed', e); return null; }
+  };
+  // Called by toggleTask when a follow-up / check-in is checked off.
+  window._ptOnRecurringDone = (t) => {
+    if(!t || !PT_RECUR[t.taskType] || !t.dealId) return;
+    const deal = _dealOf(t.dealId);
+    if(!_isPros(deal)) return;
+    const want = deal.prospectTerm==='short' ? 'prospect_followup' : deal.prospectTerm==='long' ? 'prospect_checkin' : '';
+    if(want !== t.taskType) return;
+    window._ptScheduleRecurring(deal).then(id=>{ if(id){
+      showToast(deal.prospectTerm==='short' ? 'Next weekly follow-up scheduled' : `Next check-in scheduled in ${_months(deal)} months`,'success',3500);
+      window._taRefreshDealTasks && window._taRefreshDealTasks(deal.id);
+    }});
+  };
+  async function _ptCancel(dealId, pred, reason){
+    const tasks = (typeof allTasks!=='undefined' ? allTasks : []);
+    const hit = tasks.filter(t=>t.dealId===dealId && _isOpenT(t) && pred(t));
+    const snap = [];
+    for(const t of hit){
+      try{ await Store.updateTask(t.id,{status:'cancelled', cancelledAt:Date.now(), cancelledReason:reason, updatedAt:Date.now()});
+        snap.push({id:t.id, status:t.status||'pending'}); t.status='cancelled'; t.cancelledAt=Date.now(); }
+      catch(e){ console.warn('[prosterm] cancel failed', e); }
+    }
+    return snap;
+  }
+  // Card left the Prospect column → stop the self-renewing follow-ups.
+  window._ptOnLeave = (deal, oldStage) => {
+    if(!deal || String(oldStage||'').toLowerCase()!=='prospect' || _isPros(deal)) return;
+    _ptCancel(deal.id, t=>!!PT_RECUR[t.taskType], 'Left Prospect').catch(()=>{});
+  };
+  // Timeline changed on a card already in Prospect → swap task sets (with Undo).
+  window._ptOnTermChange = async (deal, oldTerm, prevFields) => {
+    if(!_isPros(deal)) return;
+    const nt = deal.prospectTerm||'';
+    if(!nt || nt===(oldTerm||'')) return;
+    const key = window._ptKeyFor(deal);
+    const t0 = Date.now();
+    const stamp = deal.prospectTermSetAt || null;
+    if(!prevFields && window._ptLastPrev && window._ptLastPrev.dealId===deal.id) prevFields = window._ptLastPrev.fields;
+    window._ptLastPrev = null;
+    const cancelled = await _ptCancel(deal.id, t=>(PT_SET_KEYS[t.autoKey]||PT_RECUR[t.taskType]) && t.autoKey!==key,
+      'Switched to '+(nt==='short'?'Short-Term':'Long-Term'));
+    try{ await window.applyTaskAutomation(deal.id, key, {toast:false}); }catch(e){ console.warn('[prosterm] set', e); }
+    await window._ptScheduleRecurring(deal);
+    const made = (typeof allTasks!=='undefined'?allTasks:[]).filter(t=>t.dealId===deal.id && (t.createdAt||0)>=t0 && _isOpenT(t) && (t.autoKey===key));
+    window._taRefreshDealTasks && window._taRefreshDealTasks(deal.id);
+    const msg = `${window._PT_LABEL[nt]}: ${made.length} task${made.length===1?'':'s'} added${cancelled.length?`, ${cancelled.length} ${oldTerm?(oldTerm==='short'?'short-term':'long-term'):'old'} task${cancelled.length===1?'':'s'} cancelled`:''}`;
+    const undo = async () => {
+      // A later timeline change makes this Undo stale — never let an old toast rewind a newer choice.
+      const live = _dealOf(deal.id) || deal;   // the listener may have swapped the object since
+      if((live.prospectTermSetAt||null) !== stamp){ showToast('The timeline was changed again since — nothing undone','info',4000); return; }
+      for(const s of cancelled){
+        const cur = allTasks.find(x=>x.id===s.id); if(cur && cur.status!=='cancelled') continue; try{ await Store.updateTask(s.id,{status:s.status, cancelledAt:null, cancelledReason:null, updatedAt:Date.now()});
+        const l=allTasks.find(x=>x.id===s.id); if(l){ l.status=s.status; l.cancelledAt=null; } }catch(e){} }
+      for(const m0 of made){ const t = allTasks.find(x=>x.id===m0.id) || m0; if(!_isOpenT(t)) continue; try{ await Store.updateTask(t.id,{status:'cancelled', cancelledAt:Date.now(), cancelledReason:'Undo timeline change', updatedAt:Date.now()}); t.status='cancelled'; }catch(e){} }
+      const back = prevFields || { prospectTerm: oldTerm||null };
+      try{ await Store.updateDeal(deal.id, back); Object.assign(live, back); if(live!==deal) Object.assign(deal, back); }catch(e){ console.warn('[prosterm] undo deal', e); }
+      window._taRefreshDealTasks && window._taRefreshDealTasks(deal.id);
+      try{ renderCurrentView(); }catch(e){}
+      showToast('Timeline change undone','info',3000);
+    };
+    // Undo only flips task statuses / deal fields back — nothing is deleted, so it is always safe to offer.
+    if(typeof showUndoToast==='function') showUndoToast(msg, undo, 10000);
+    else showToast(msg,'success');
+  };
+  // Change the timeline straight from the board (chip / section drop).
+  window._ptSetTerm = async (dealId, term, months) => {
+    const deal = _dealOf(dealId);
+    if(!deal || !_isPros(deal) || !window._PT_LABEL[term]) return;
+    if(!(currentUser && (currentUser.isAdmin || isDealAdvisor(deal, currentUser.uid)))){ showToast('You can only change your own deals','warning'); return; }
+    const m = PT_MONTHS.includes(Number(months)) ? Number(months) : _months(deal);
+    if(deal.prospectTerm===term && (term!=='long' || _months(deal)===m)) return;
+    const prev = { prospectTerm: deal.prospectTerm||null, prospectCheckInMonths: deal.prospectCheckInMonths||null,
+                   prospectShortAt: deal.prospectShortAt||null, prospectTermSetAt: deal.prospectTermSetAt||null };
+    const old = deal.prospectTerm||'';
+    const upd = { prospectTerm:term, prospectCheckInMonths:m, prospectTermSetAt:Date.now(), prospectTermSetBy:(currentUser&&currentUser.uid)||'', updatedAt:Date.now() };
+    if(term==='short' && !deal.prospectShortAt) upd.prospectShortAt = Date.now();
+    try{ await Store.updateDeal(dealId, upd); Object.assign(deal, upd); }
+    catch(e){ console.error('[prosterm] save', e); showToast('Could not change the timeline','error'); return; }
+    try{ renderCurrentView(); }catch(e){}
+    if(old===term){                         // only the check-in cadence changed
+      showToast(`Check-ins every ${m} months from the next one`,'success',3500); return;
+    }
+    await window._ptOnTermChange(deal, old, prev);
+    try{ renderCurrentView(); }catch(e){}
+  };
+
+  /* ── Picker dialog (board chip + Leads → Promote) ─────────────────── */
+  window._ptPickTerm = (o) => new Promise(resolve => {
+    o = o || {};
+    const cur = o.current||'', m = PT_MONTHS.includes(Number(o.months)) ? Number(o.months) : 6;
+    const ov = document.createElement('div');
+    ov.className = 'fixed inset-0 z-[95] flex items-center justify-center bg-black/50 p-4';
+    ov.setAttribute('role','dialog'); ov.setAttribute('aria-modal','true'); ov.setAttribute('aria-labelledby','pt-pick-h');
+    ov.innerHTML = `
+      <div class="pt-modal-card">
+        <h3 id="pt-pick-h">${_ptEsc(o.title||'Prospect timeline')}</h3>
+        <p class="pt-sub">${_ptEsc(o.sub||'Is this seller ready to sell now, or someone to stay in touch with?')}</p>
+        ${window._ptFieldHtml({prospectTerm:cur, prospectCheckInMonths:m}, {required:true}).replace('id="pt-field"','id="pt-field" style="border:none;padding:0;background:transparent"')}
+        <div class="pt-btns">
+          <button type="button" class="pt-btn" data-pt="cancel">Cancel</button>
+          <button type="button" class="pt-btn pt-btn-primary" data-pt="ok" ${cur?'':'disabled'}>${_ptEsc(o.okLabel||'Save')}</button>
+        </div>
+      </div>`;
+    // The modal's radios share ids/names with the deal form only while this is open.
+    const close = val => { ov.remove(); document.removeEventListener('keydown', onKey, true); resolve(val); };
+    const onKey = e => { if(e.key==='Escape'){ e.stopPropagation(); close(null); } };
+    document.addEventListener('keydown', onKey, true);
+    ov.addEventListener('click', e => {
+      if(e.target===ov) return close(null);
+      const b = e.target.closest('[data-pt]'); if(!b) return;
+      if(b.dataset.pt==='cancel') return close(null);
+      const v = (ov.querySelector('input[name="sf-prospect-term"]:checked')||{}).value||'';
+      if(!v) return;
+      const sel = ov.querySelector('#sf-prospect-checkin');
+      close({ term:v, months: sel ? Number(sel.value)||6 : 6 });
+    });
+    ov.addEventListener('change', () => {
+      const v = (ov.querySelector('input[name="sf-prospect-term"]:checked')||{}).value||'';
+      ov.querySelector('[data-pt="ok"]').disabled = !v;
+      const row = ov.querySelector('#pt-months-row'); if(row) row.style.display = v==='long' ? '' : 'none';
+      ov.querySelectorAll('.pt-opt').forEach(l=>{ const iv=l.querySelector('input').value; l.classList.toggle('pt-checked-'+iv, iv===v); });
+    });
+    document.body.appendChild(ov);
+    setTimeout(()=>{ const f = ov.querySelector('input[name="sf-prospect-term"]:checked') || ov.querySelector('input[name="sf-prospect-term"]'); try{ f && f.focus(); }catch(e){} }, 30);
+  });
+  window._ptChipClick = async (ev, dealId) => {
+    if(ev){ ev.stopPropagation(); ev.preventDefault(); }
+    const deal = _dealOf(dealId); if(!deal) return;
+    if(!(currentUser && (currentUser.isAdmin || isDealAdvisor(deal, currentUser.uid)))){ showToast('You can only change your own deals','warning'); return; }
+    const r = await window._ptPickTerm({ title: (deal.projectName||deal.propertyAddress||'Prospect'), current: deal.prospectTerm||'', months: _months(deal) });
+    if(r) window._ptSetTerm(dealId, r.term, r.months);
+  };
+  // Set up a brand-new prospect created outside the deal modal (Leads → Promote).
+  window._ptStartNew = async (dealId, fields) => {
+    let deal = _dealOf(dealId);
+    if(!deal && typeof allDeals!=='undefined'){ deal = {...fields, id:dealId}; allDeals.push(deal); }
+    if(!deal) return;
+    try{ await window.applyTaskAutomation(dealId, window._ptKeyFor(deal), {toast:false}); }catch(e){ console.warn('[prosterm] promote set', e); }
+    await window._ptScheduleRecurring(deal);
+  };
+
+  /* ── Board ──────────────────────────────────────────────────────────── */
+  window._ptCardChip = (deal) => {
+    if(!_isPros(deal)) return '';
+    const t = deal.prospectTerm;
+    const cls = t==='short' ? 'pt-chip-short' : t==='long' ? 'pt-chip-long' : 'pt-chip-unset';
+    const lbl = t==='short' ? window._PT_LABEL.short : t==='long' ? `${window._PT_LABEL.long} · ${_months(deal)} mo` : '⚪ Set timeline';
+    return `<button type="button" class="pt-chip ${cls}" onclick="window._ptChipClick(event,'${deal.id}')" draggable="false"
+      aria-label="Prospect timeline: ${t?(t==='short'?'Short-Term':'Long-Term'):'not set'}. Change" title="Change prospect timeline">${lbl}</button>`;
+  };
+  window._ptMobileLabel = (deal) => (_isPros(deal) && deal.prospectTerm) ? ' · '+(deal.prospectTerm==='short'?'🔥 Short':'🌱 Long') : '';
+  window._ptSecOver = (ev) => { ev.preventDefault(); ev.currentTarget.classList.add('pt-drop'); };
+  window._ptSecLeave = (ev) => { if(!ev.currentTarget.contains(ev.relatedTarget)) ev.currentTarget.classList.remove('pt-drop'); };
+  // Dropping a Prospect card onto the other section switches its timeline.
+  // Anything else (a reorder, or a card from another column) falls through to handleDrop.
+  window._ptSecDrop = (ev, term) => {
+    ev.currentTarget.classList.remove('pt-drop');
+    const id = (ev.dataTransfer && ev.dataTransfer.getData('text/plain')) || (typeof draggedDealId!=='undefined' ? draggedDealId : '');
+    const deal = id && _dealOf(id);
+    if(!deal || !_isPros(deal) || deal.prospectTerm===term) return;
+    ev.preventDefault(); ev.stopPropagation();
+    const col = ev.currentTarget.closest('.kanban-col'); if(col) col.classList.remove('drag-over');
+    window._ptSetTerm(id, term);
+  };
+  window._ptColumnHtml = (sd, render, droppable) => {
+    render = render || (d=>renderCard(d));
+    const g = { short:[], long:[], unset:[] };
+    for(const d of sd) g[d.prospectTerm==='short'?'short':d.prospectTerm==='long'?'long':'unset'].push(d);
+    const total = arr => { try{ const s=arr.reduce((a,d)=>a+(dealProjected(d)||0),0); return s>0?' · '+fmtM$(s):''; }catch(e){ return ''; } };
+    const sec = (k, title, sub, arr, empty) => {
+      if(k==='unset' && !arr.length) return '';
+      const dz = droppable && k!=='unset'
+        ? ` ondragover="window._ptSecOver(event)" ondragleave="window._ptSecLeave(event)" ondrop="window._ptSecDrop(event,'${k}')"` : '';
+      return `<div class="pt-sec pt-sec-${k}" data-pt-sec="${k}"${dz}>
+        <div class="pt-sec-hdr" title="${sub}"><span>${title}</span><span class="pt-n">${arr.length}${total(arr)}</span></div>
+        <div class="space-y-2">${arr.length ? arr.map(render).join('') : `<div class="pt-empty">${empty}</div>`}</div>
+      </div>`;
+    };
+    return sec('short', window._PT_LABEL.short, 'ready to sell', g.short, droppable?'Drag a prospect here when they’re ready':'None')
+         + sec('long',  window._PT_LABEL.long,  'check in', g.long, droppable?'Drag a prospect here to check in later':'None')
+         + sec('unset', '⚪ No timeline', 'set one', g.unset, '');
+  };
+})();
+
 
 /* Cancel identical OPEN tasks left behind by the old duplicate rows (elc-v423).
    Only collapses exact twins — same property, same activity, same assignee, both
@@ -33685,6 +34083,7 @@ window.toggleTask = async (id, newStatus) => {
         }).catch(e=>console.warn('[buyerOppChain]',e));
       }
     }
+    if(_done && t && window._ptOnRecurringDone) window._ptOnRecurringDone(t);   // PROSTERM-20261027
     viewTasks();
   } catch(err){ showToast('Could not update task','error'); }
 };
@@ -34324,6 +34723,7 @@ function _renderAutomationAudit(){
     // Task Automation set(s) that fire on drag into this column
     let taKeys=[];
     if(/due.?diligence|under.?contract/i.test(stage)){ taKeys=['uc_seller_rep','uc_buyer_rep','under_contract']; }
+    else if(/^prospect$/i.test(stage)){ taKeys=['prospect_short','prospect_long','prospect']; }   // PROSTERM-20261027
     else { let k=null; try{ k=_taStageToKey({stage,representation:''}); }catch(_){}
       if(k) taKeys=[k]; }
     const taSets=taKeys.filter(k=>TASK_AUTOMATIONS&&TASK_AUTOMATIONS[k]).map(k=>({key:k,cfg:TASK_AUTOMATIONS[k]}));
@@ -35843,7 +36243,7 @@ function viewOfficeOverview(){
       </table>
       </div>
       <div class="px-5 py-2.5 border-t bg-gray-50 text-xs text-gray-400">
-        A+ ≥ 100 · A ≥ 90 · B ≥ 80 · C ≥ 70 · Contracts = 30pts · Listings = 20pts · LOIs = 10pts each offer · Proposals = 10pts · Prospects = 5pts · Calls = 1pt each · Open Tasks = 20pts if none past due, else 2pts per task done (max 20) · Network Event &amp; Site Visit = 10pts each
+        A+ ≥ 100 · A ≥ 90 · B ≥ 80 · C ≥ 70 · Contracts = 30pts · Listings = 20pts · LOIs = 10pts each offer · Proposals = 10pts · Prospects = 5pts (Short-Term only) · Calls = 1pt each · Open Tasks = 20pts if none past due, else 2pts per task done (max 20) · Network Event &amp; Site Visit = 10pts each
       </div>
     </div>`;
 
@@ -36936,7 +37336,7 @@ function viewEOS(sub='rocks'){
           </table>
         </div>
         <div class="px-6 py-3 border-t bg-gray-50 flex flex-wrap gap-5 text-xs text-gray-400">
-          <span>Open Tasks = 20pts if none past due, else 2pts per task done (max 20) · Contracts = 30pts · Listings = 20pts · LOIs = 10pts · Proposals = 10pts · Prospects = 5pts · Calls = 1pt each (calls reset every Monday) · split on co-advisor deals</span>
+          <span>Open Tasks = 20pts if none past due, else 2pts per task done (max 20) · Contracts = 30pts · Listings = 20pts · LOIs = 10pts · Proposals = 10pts · Prospects = 5pts (Short-Term only) · Calls = 1pt each (calls reset every Monday) · split on co-advisor deals</span>
           <span><span style="color:#059669;font-weight:700">●</span> Green = target met</span>
           <span><span style="color:#DA291C;font-weight:700">●</span> Red = below target</span>
           <span>Network Event &amp; Property Visit: advisors self-report weekly · Locks Sunday 9pm</span>
@@ -37157,7 +37557,7 @@ function viewEOS(sub='rocks'){
         </div>
         <div class="px-6 py-3 border-t bg-gray-50 text-xs text-gray-400 flex flex-wrap gap-4">
           <span>Score uses same formula as current week</span>
-          <span>Open Tasks = 20pts if none past due, else 2pts per task done (max 20) · Contracts = 30pts · LOIs = 10pts · Listings = 20pts · Props = 10pts · Prospects = 5pts · Calls = 1pt each</span>
+          <span>Open Tasks = 20pts if none past due, else 2pts per task done (max 20) · Contracts = 30pts · LOIs = 10pts · Listings = 20pts · Props = 10pts · Prospects = 5pts (Short-Term only) · Calls = 1pt each</span>
           <span>Network Event &amp; Property Visit pulled from saved weekly inputs</span>
         </div>
       </div>`;
@@ -40565,6 +40965,7 @@ function collectStageFields(){
   const _sellerInputs = [...document.querySelectorAll('#sf-sellers-list .sf-seller-input')];
   const _sellers = _sellerInputs.map(el=>el.value.trim()).filter(Boolean);
   return {
+    ...(window._ptCollect ? window._ptCollect() : {}),   // PROSTERM-20261027 (only when the picker is on screen)
     // Sellers (multi) — primary seller also synced to contactPerson in handleDealSubmit
     sellers: _sellers,
     // Proposal / Prospect
@@ -40722,6 +41123,9 @@ window.handleDealSubmit = async ev => {
       return;
     }
   }
+
+  // PROSTERM-20261027 — a new Prospect must say Short-Term or Long-Term
+  if(stage==='Prospect' && !id && window._ptMissing && window._ptMissing()) return;
 
   // Legacy manual-mode validation (kept for custom gate stages)
   if(sf.docMode === 'manual' && !_isBackwardSave){
@@ -40992,6 +41396,7 @@ window.handleDealSubmit = async ev => {
   const existDeal = allDeals.find(d=>d.id===id);
   if(stage==='Listing'        && !existDeal?.listingEnteredAt)  data.listingEnteredAt  = Date.now();
   if(stage==='Under Contract' && !existDeal?.contractEnteredAt) data.contractEnteredAt = Date.now();
+  const _ptOld = window._ptStamp ? window._ptStamp(data, existDeal, stage, !id) : '';   // PROSTERM-20261027
   if(!id){ // new deal
     if(stage==='Listing')         data.listingEnteredAt  = Date.now();
     if(stage==='Under Contract')  data.contractEnteredAt = Date.now();
@@ -41023,6 +41428,7 @@ window.handleDealSubmit = async ev => {
     }
     if(oldStage!==stage) fireAutomations(existing,oldStage);
     if(oldStage!==stage) window._logStageChange(id, oldStage, stage);
+    if(oldStage===stage && stage==='Prospect' && window._ptOnTermChange) window._ptOnTermChange(existing, _ptOld);   // PROSTERM-20261027: timeline changed → swap task sets
     if(oldStage!==stage && !isBackwardMove(oldStage, stage)) _fireMentorStageTask(existing, oldStage, stage);
     // elc-v425 — a backward stage pick in the modal behaves exactly like a drag left
     if(oldStage!==stage && isBackwardMove(oldStage, stage)) window._offerBackwardTasks(existing, oldStage, stage);
@@ -42469,12 +42875,19 @@ async function setLeadStatus(leadId, status){
 window.setLeadStatus = setLeadStatus;
 async function promoteLeadToDeal(leadId){
   const lead=_leadById(leadId); if(!lead) return;
-  if(!await elcConfirm('Promote this lead to a Prospect-stage deal on the board?')) return;
+  // PROSTERM-20261027 — choose Short-Term / Long-Term as part of promoting
+  const _pt = window._ptPickTerm
+    ? await window._ptPickTerm({title:'Promote to a Prospect deal', sub:'Is this seller ready to sell now, or someone to check in with later?', okLabel:'Promote'})
+    : (await elcConfirm('Promote this lead to a Prospect-stage deal on the board?') ? {} : null);
+  if(!_pt) return;
+  const _ptNow = Date.now();
+  const _ptF = _pt.term ? {prospectTerm:_pt.term, prospectCheckInMonths:_pt.months||6, prospectTermAtCreate:true,
+    prospectTermSetAt:_ptNow, prospectTermSetBy:currentUser.uid, ...(_pt.term==='short'?{prospectShortAt:_ptNow}:{})} : {};
   const prof=LEAD_PROFILES[lead.profileType]||{};
   const isBuyer=(prof.side||'').toLowerCase()==='buyer';
-  const dealId = await FB.createDeal({
+  const _pdObj = {
     propertyAddress: lead.propertyAddress || ((lead.name||'Lead')+' — property TBD'),
-    stage:'Prospect', probability:10,
+    stage:'Prospect', probability:10, ..._ptF,
     advisorUid: lead.advisorUid||currentUser.uid,
     advisorEmail: lead.advisorEmail||currentUser.email,
     advisorName: lead.advisorName||currentUser.name,
@@ -42485,7 +42898,9 @@ async function promoteLeadToDeal(leadId){
       +(lead.research?'\n\n— AI RESEARCH BRIEF —\n'+lead.research:''),
     stageHistory:[{stage:'Prospect', at:Date.now(), by:currentUser.name}],
     createdAt:Date.now(), createdBy:currentUser.uid,
-  });
+  };
+  const dealId = await FB.createDeal(_pdObj);
+  if(_pt.term && window._ptStartNew) window._ptStartNew(dealId, _pdObj).catch(e=>console.warn('[prosterm] promote',e));   // PROSTERM-20261027
   await _leadUpdate(leadId,{status:'Promoted', promotedDealId:dealId,
     cadence:lead.cadence?{...lead.cadence,active:false}:null});
   await _leadLog(leadId,'Promoted to deal '+dealId);
@@ -52538,7 +52953,7 @@ window.renderMobilePipeline = function(deals, stages, stageAlias){
             <div class="mobile-deal-card" onclick="openDealModal('${d.id}')">
               <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem">
                 <div style="font-weight:700;font-size:.95rem;color:var(--text-1);flex:1;line-height:1.3">${title}</div>
-                <div style="font-size:.68rem;font-weight:700;padding:.2rem .55rem;border-radius:99px;background:#f3f4f6;color:var(--text-2);white-space:nowrap;flex-shrink:0">${stg}</div>
+                <div style="font-size:.68rem;font-weight:700;padding:.2rem .55rem;border-radius:99px;background:#f3f4f6;color:var(--text-2);white-space:nowrap;flex-shrink:0">${stg}${window._ptMobileLabel ? window._ptMobileLabel(d) : ''}</div>
               </div>
               ${price>0 ? `<div style="font-weight:700;color:var(--brand-red);margin-top:.35rem;font-size:1rem">$${Number(price).toLocaleString()}</div>` : ''}
               <div style="display:flex;flex-wrap:wrap;gap:.6rem 1rem;margin-top:.45rem;font-size:.75rem;color:var(--text-2)">
