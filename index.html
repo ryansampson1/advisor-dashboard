@@ -36590,9 +36590,9 @@ window._teSeedOnce = async () => {
     if(snap.exists()) return;
     const by = _teWho(), at = Date.now();
     const seed = { teamEventsGoal: TE_DEFAULT_GOAL, teamEvents: [
-      {id:'te_seed1', date: TE_YEAR+'-01-01', name:'Team event #1 — set the name & date', by, at, seeded:true},
-      {id:'te_seed2', date: TE_YEAR+'-01-01', name:'Team event #2 — set the name & date', by, at, seeded:true},
-      {id:'te_seed3', date: window._elcLocalDateStr(), name:'Team event #3 — set the name & date', by, at, seeded:true},
+      {id:'te_seed1', date: TE_YEAR+'-01-01', name:'Team event #1', by, at, seeded:true},
+      {id:'te_seed2', date: TE_YEAR+'-01-01', name:'Team event #2', by, at, seeded:true},
+      {id:'te_seed3', date: window._elcLocalDateStr(), name:'Team event #3 (Oct 2026)', by, at, seeded:true},
     ]};
     await setDoc(doc(_fbDb,'eos',TE_KEY), {data: seed}, {merge:false});
     eosCache[TE_KEY] = seed;
@@ -49202,7 +49202,9 @@ window._mrAppScore=_mrAppScore; window._mrAppMatchRows=_mrAppMatchRows; window._
 /* ---------- VIEW: list of active listings for the month ---------- */
 function _mrStatusChip(rep, d){
   const recips=_mrRecipients(d).length;
+  { const q=_mrGateReq(rep); if(q&&q.status==='pending') return `<span class="mr-chip" style="background:#fef3c7;color:#92400e" title="Requested by ${_mrEsc(q.byName||'')} ${_mrFmtDate(q.at)} — goes out once ${_mrEsc(_mrApproverProfile().name)} approves">⏳ Awaiting ${_mrEsc(_mrFirstName(_mrApproverProfile().name))}</span>`; }   // SENDGATE-20261029
   if(rep&&rep.status==='sent') return `<span class="mr-chip mr-chip-sent" title="Sent ${_mrFmtDate(rep.sentAt)} by ${_mrEsc(rep.sentByName||'')}">✓ Sent ${_mrFmtDate(rep.sentAt)}</span>`;
+  { const q=_mrGateReq(rep); if(q&&q.status==='declined') return `<span class="mr-chip mr-chip-warn" title="${_mrEsc(q.reason||'')}">✗ Declined by ${_mrEsc(_mrFirstName(q.resolvedByName||''))} — fix, Review, Send again</span>`; }   // SENDGATE-20261029
   if(!_mrSendOn(d)) return `<span class="mr-chip" style="background:#e5e7eb;color:#374151" title="Send to client is switched off for this listing">⏸ Not sending</span>`;
   if(!recips) return `<span class="mr-chip mr-chip-warn">No recipients</span>`;
   if(rep&&rep.approval) return `<span class="mr-chip mr-chip-sent" title="Approved ${_mrFmtDate(rep.approval.at)} by ${_mrEsc(rep.approval.byName||'')} — re-checked at send">✅ Approved</span>`;   // MCVERIFY-20261016
@@ -49304,6 +49306,7 @@ function viewMonthlyReports(){
       </div>
       ${currentUser.isAdmin?`<button class="mr-btn" onclick="window._mrOpenLetter()">✍️ ${letter?'Edit letter':'Write letter'}</button>`:''}
     </div>
+    <div id="mr-gate-banner"></div>   <!-- SENDGATE-20261029 -->
     <div class="mr-card">
       <div style="display:flex;align-items:center;gap:.6rem;padding:.7rem 1rem;border-bottom:1px solid var(--border);flex-wrap:wrap">
         <span class="mr-muted" id="mr-count">${deals.length} active seller-rep listing${deals.length===1?'':'s'}</span>
@@ -49353,9 +49356,10 @@ window._mrRenderRows=function(){
         <button class="mr-btn mr-btn-sm" onclick="window._mrOpenEditor('${d.id}')">✏️ Edit</button>
         <button class="mr-btn mr-btn-sm" onclick="window._mrReview('${d.id}')">🔍 Review</button>
         <button class="mr-btn mr-btn-sm" onclick="window._mrPreview('${d.id}')">👁 Preview</button>
-        <button class="mr-btn mr-btn-sm mr-btn-teal" onclick="window._mrSendOne('${d.id}')" ${ready?'':'disabled'} ${sendOn?'':'title="Send to client is switched off"'}>${rep&&rep.status==='sent'?'↻ Resend':'📤 Send'}</button>
+        ${_mrGatePending(rep)?(_mrIsApprover()?`<button class="mr-btn mr-btn-sm mr-btn-teal" onclick="window._mrApproveSend('${d.id}')">✅ Approve &amp; send</button><button class="mr-btn mr-btn-sm" style="color:#991b1b" onclick="window._mrDeclineSend('${d.id}')">✗ Decline</button>`:`<button class="mr-btn mr-btn-sm" disabled title="With ${_mrEsc(_mrApproverProfile().name)} for approval">⏳ Requested</button>`):`<button class="mr-btn mr-btn-sm mr-btn-teal" onclick="window._mrSendOne('${d.id}')" ${ready?'':'disabled'} ${sendOn?'':'title="Send to client is switched off"'}>${rep&&rep.status==='sent'?'↻ Resend':'📤 Send'}</button>`}   <!-- SENDGATE-20261029 -->
       </td></tr>`; }).join('');
-  const b=document.getElementById('mr-send-selected'); if(b){ const n=Object.keys(st.selected).filter(id=>st.selected[id]&&deals.some(d=>d.id===id)).length; b.disabled=!n; b.textContent='📤 Send selected ('+n+')'; }
+  const b=document.getElementById('mr-send-selected'); if(b){ const n=Object.keys(st.selected).filter(id=>st.selected[id]&&deals.some(d=>d.id===id)).length; b.disabled=!n; b.textContent=(_mrGateApplies()?'📤 Send selected for approval (':'📤 Send selected (')+n+')'; }
+  if(window._mrGateRender) window._mrGateRender(deals, ym);   // SENDGATE-20261029
 };
 window._mrSetMonth=function(v){ window._mrState.month=v; viewMonthlyReports(); };
 window._mrToggleSel=function(id,on){ window._mrState.selected[id]=!!on; window._mrRenderRows(); };
@@ -49428,12 +49432,13 @@ window._mrOpenSettings=function(){
       <div class="mr-sec"><h3>Who can see the tab</h3>
         ${isSA?`<div class="mr-row" role="radiogroup" aria-label="Access">
           ${[['owner','Only me (super-admin)'],['admins','Admins'],['all','All users (advisors, managers, admins)']].map(([v,l])=>`<label class="mr-btn" style="cursor:pointer"><input type="radio" name="mr-access" value="${v}" ${(c.access||'owner')===v?'checked':''}> ${l}</label>`).join('')}
-        </div><p class="mr-note" style="margin-top:.5rem">Nothing auto-sends. Opening the tab to all users only lets advisors prepare and send their own listings’ reports.</p>`:`<p class="mr-note">Current: <b>${_mrEsc(c.access||'owner')}</b>. Only a super-admin can change this.</p>`}
+        </div><p class="mr-note" style="margin-top:.5rem">Nothing auto-sends. Opening the tab to all users only lets advisors prepare their own listings’ reports and send them for the approver’s OK (SENDGATE-20261029).</p>`:`<p class="mr-note">Current: <b>${_mrEsc(c.access||'owner')}</b>. Only a super-admin can change this.</p>`}
       </div>
       <div class="mr-sec"><h3>Delivery</h3>
         <div class="mr-grid2">
           <div><label class="mr-lbl" for="mr-s-worker">Report worker URL</label><input id="mr-s-worker" class="mr-input" style="width:100%" value="${_mrEsc(c.workerUrl||'')}" placeholder="https://elc-report-worker.dirtdog.workers.dev"><div class="mr-note">Sends the email from the advisor’s mailbox and proxies the traffic feed. Deploy it with <code>elc-report-worker/deploy-report-worker.command</code>.</div></div>
           <div><label class="mr-lbl" for="mr-s-cc">Always Cc</label><input id="mr-s-cc" class="mr-input" style="width:100%" value="${_mrEsc(c.alwaysCc||'')}" placeholder="e.g. ryan@thedirtdog.com (comma-separated)"><div class="mr-note">The listing advisor is always Cc’d so the report lands in their Sent and Inbox.</div></div>
+          <div><label class="mr-lbl" for="mr-s-approver">Send approver</label><input id="mr-s-approver" class="mr-input" style="width:100%" value="${_mrEsc(c.sendApprover||MR_GATE_DEFAULT_APPROVER)}" placeholder="ryan@thedirtdog.com"><div class="mr-note">Every Send by anyone else becomes a request: this person gets a task + e-mail and nothing goes to an owner until they press ✅ Approve &amp; send. The approver must be in the report worker’s ADMIN_SENDERS to send as other advisors.</div></div>   <!-- SENDGATE-20261029 -->
         </div>
         <div style="margin-top:.6rem"><label class="mr-lbl" for="mr-s-subj">Email subject</label><input id="mr-s-subj" class="mr-input" style="width:100%" value="${_mrEsc(c.emailSubject||MR_DEFAULT_EMAIL_SUBJECT)}"></div>
         <div style="margin-top:.6rem"><label class="mr-lbl" for="mr-s-body">Email body</label><textarea id="mr-s-body" class="mr-textarea" style="min-height:170px">${_mrEsc(c.emailBody||MR_DEFAULT_EMAIL_BODY)}</textarea><div class="mr-note">Tokens: {names} {month} {property} {address} {advisorName} {advisorDesignations} {advisorPhone} {advisorEmail}</div></div>
@@ -49489,7 +49494,7 @@ window._mrSaveSettingsClick=async function(btn){
   const done=elcBusy(btn,'Saving…');
   try{
     const v=id=>(document.getElementById(id)?.value||'').trim();
-    const patch={ workerUrl:v('mr-s-worker').replace(/\/+$/,''), alwaysCc:v('mr-s-cc'), emailSubject:v('mr-s-subj')||MR_DEFAULT_EMAIL_SUBJECT, emailBody:v('mr-s-body')||MR_DEFAULT_EMAIL_BODY, firmAddress:v('mr-s-addr'), firmWebsite:v('mr-s-web'), about:v('mr-s-about')||MR_DEFAULT_ABOUT, letterSignature:v('mr-s-sig') };
+    const patch={ workerUrl:v('mr-s-worker').replace(/\/+$/,''), alwaysCc:v('mr-s-cc'), sendApprover:(v('mr-s-approver')||MR_GATE_DEFAULT_APPROVER).toLowerCase(),   /* SENDGATE-20261029 */ emailSubject:v('mr-s-subj')||MR_DEFAULT_EMAIL_SUBJECT, emailBody:v('mr-s-body')||MR_DEFAULT_EMAIL_BODY, firmAddress:v('mr-s-addr'), firmWebsite:v('mr-s-web'), about:v('mr-s-about')||MR_DEFAULT_ABOUT, letterSignature:v('mr-s-sig') };
     const acc=document.querySelector('input[name="mr-access"]:checked'); if(acc) patch.access=acc.value;
     await _mrSaveSettings(patch);
     { const {doc,setDoc}=_fbFns; const social={...(APP_CONFIG.social||{}), workerUrl:v('mr-s-social-worker').replace(/\/+$/,''), defaultLink:v('mr-s-social-link')||'https://www.thedirtdog.com'}; await setDoc(doc(_fbDb,'eos','settings'),{social},{merge:true}); APP_CONFIG.social=social; window._spStatusCache=null; }
@@ -50425,6 +50430,7 @@ async function _mrSendDeal(deal, ym, opts){
   const pf=await _mrPreflight(A);   // MCVERIFY-20261016: nothing goes to an owner unless every check passes and the report is approved as-is
   if(pf.blocks.length) throw new Error('Report check failed — '+pf.blocks[0].msg+(pf.blocks.length>1?' (+'+(pf.blocks.length-1)+' more)':'')+' Open 🔍 Review.');
   if(!_mrApprovalOk(A.rep,pf.fp)) throw new Error((A.rep&&A.rep.approval?'The report changed after it was approved':'Not approved yet')+' — open 🔍 Review & approve.');
+  if(opts.checkOnly) return {A,pf};   // SENDGATE-20261029 — a send request runs every check but sends nothing
   const doc=await _mrBuildPdf(A);
   const blob=doc.output('blob'); const b64=_mrB64(await blob.arrayBuffer());
   const fileName=(_mrMonthLabel(ym)+' Monthly Report - '+_mrDealAddr(deal).split(',')[0]).replace(/[^A-Za-z0-9 _.-]+/g,'')+'.pdf';
@@ -50441,10 +50447,109 @@ async function _mrSendDeal(deal, ym, opts){
   const res=await _mrWorkerPost('/send',{ from:from.email, fromName:from.name||'', to:recips.map(r=>r.email), cc, subject, text, html:_mrPlainToHtml(text), attachments:[{name:fileName,type:'application/pdf',b64}] });
   // 3 · record + history
   const sentRec={status:'sent', sentAt:Date.now(), sentBy:currentUser?.uid||'', sentByName:currentUser?.name||'', sentTo:recips.map(r=>r.email), sentFrom:from.email, pdfUrl:url, pdfName:fileName, gmailId:res.id||'', gmailThreadId:res.threadId||''};
+  if(_mrGatePending(A.rep)){ sentRec.sendRequest={...A.rep.sendRequest, status:'sent', resolvedAt:Date.now(), resolvedBy:currentUser?.uid||'', resolvedByName:currentUser?.name||''}; _mrGateCloseTasks(deal.id, ym, 'complete', 'Approved & sent'); }   // SENDGATE-20261029
   await _mrSaveReport(deal.id, ym, sentRec);
   try{ await window._dealLogActivity(deal.id,'email',{ body:'📬 '+_mrMonthLabel(ym)+' monthly owner report sent to '+recips.map(r=>r.name?(r.name+' <'+r.email+'>'):r.email).join(', ')+' from '+from.email+' — PDF filed under Attachments.', gmailId:res.id||('mr_'+deal.id+'_'+ym+'_'+Date.now()), gmailThreadId:res.threadId||'', gmailSubject:subject, gmailFrom:from.email, gmailDate:new Date().toISOString(), source:'monthly-report', autoLogged:true }); }catch(e){ console.warn('[mr] history log',e); }
   return sentRec;
 }
+/* =======================================================
+   SENDGATE-20261029 — nothing goes to an owner without the approver's OK.
+   When anyone other than the approver (⚙ Settings → "Send approver", default ryan@thedirtdog.com) hits 📤 Send — on a row,
+   in ✏️ Edit, or Send selected — every existing check still runs (recipients, letter, 🔍 Review approval, preflight), then
+   instead of sending Terra records a SEND REQUEST on monthlyReports/{ym}.sendRequest {status:'pending', by, fp, to…},
+   creates a Terra task for the approver, e-mails the approver from the requester's mailbox (best effort) and logs it on
+   the deal. The approver sees a banner on 📬 Monthly Reports with ✅ Approve & send / ✗ Decline per listing (plus the row
+   button); Approve runs the normal send (worker ADMIN_SENDERS lets the approver send as any advisor), Decline records a
+   reason, cancels the task and e-mails the requester. The approver's own Sends are unchanged.
+   ======================================================= */
+const MR_GATE_DEFAULT_APPROVER='ryan@thedirtdog.com';
+function _mrApproverEmail(){ return String(_mrCfg().sendApprover||MR_GATE_DEFAULT_APPROVER).trim().toLowerCase(); }
+function _mrApproverProfile(){ const em=_mrApproverEmail(); const hit=Object.entries(allProfiles||{}).find(([,p])=>(p.email||'').toLowerCase()===em); return {uid:hit?hit[0]:em, name:hit?(hit[1].name||em):em, email:em}; }
+function _mrIsApprover(){ return !!(currentUser&&String(currentUser.email||'').toLowerCase()===_mrApproverEmail()); }
+function _mrGateOn(){ return _mrCfg().sendGate!==false; }
+function _mrGateApplies(){ return _mrGateOn() && !_mrIsApprover(); }
+function _mrGateReq(rep){ return (rep&&rep.sendRequest&&typeof rep.sendRequest==='object')?rep.sendRequest:null; }
+function _mrGatePending(rep){ const r=_mrGateReq(rep); return !!(r&&r.status==='pending'); }
+function _mrGateAppUrl(){ return location.origin+location.pathname; }
+async function _mrGateMail(from, to, subject, text){
+  try{ if(!/@thedirtdog\.com$/i.test(from||'')||!to) return false; await _mrWorkerPost('/send',{from, fromName:currentUser?.name||'', to:[to], cc:[], subject, text, html:_mrPlainToHtml(text), attachments:[]}); return true; }
+  catch(e){ console.warn('[mr] gate mail',e); return false; }
+}
+async function _mrGateCloseTasks(dealId, ym, status, note){
+  try{ const ts=await _mrFetchTasks(dealId); for(const t of ts.filter(t=>t.mrSendRequestYm===ym&&t.status!=='complete'&&t.status!=='cancelled')){
+    await Store.updateTask(t.id, status==='complete'?{status:'complete', completedAt:Date.now(), completedByName:currentUser?.name||'', completionNote:note||'', updatedAt:Date.now()}:{status:'cancelled', cancelledAt:Date.now(), cancelledReason:note||'', updatedAt:Date.now()}); } }
+  catch(e){ console.warn('[mr] gate tasks',e); }
+}
+/* the request — all of _mrSendDeal's checks, then a record instead of a send */
+async function _mrRequestSendDeal(deal, ym){
+  const {A,pf}=await _mrSendDeal(deal, ym, {checkOnly:true});
+  const recips=_mrRecipients(deal); const ap=_mrApproverProfile(); const me={uid:currentUser?.uid||'', name:currentUser?.name||currentUser?.email||'', email:String(currentUser?.email||'').toLowerCase()};
+  const req={status:'pending', at:Date.now(), by:me.uid, byName:me.name, byEmail:me.email, fp:pf.fp, to:recips.map(r=>r.email), approver:ap.email, resend:(A.rep&&A.rep.status==='sent')||false};
+  await _mrSaveReport(deal.id, ym, {sendRequest:req});
+  const label=_mrMonthLabel(ym)+' report — '+_mrDealName(deal);
+  try{ await Store.createTask({ title:'📬 Approve & send — '+(typeof _taskHeadlineName==='function'?_taskHeadlineName(deal):_mrDealName(deal))+' ('+_mrMonthLabel(ym)+')',
+      description:me.name+' asked to send the '+label+' to '+recips.map(r=>r.name?(r.name+' <'+r.email+'>'):r.email).join(', ')+(req.resend?' (a re-send — this month’s report already went out once)':'')+'.\n\nProperty: '+_mrDealAddr(deal)+'\nAdvisor: '+(deal.advisorName||deal.advisorEmail||'')+'\n\nOpen Terra → 📬 Monthly Reports → '+_mrMonthLabel(ym)+' and press ✅ Approve & send (or ✗ Decline with a note). Nothing goes to the owner until you do.',
+      assignedTo:ap.uid, assignedToName:ap.name, assignedToEmail:ap.email, dealId:deal.id, dealAddress:deal.propertyAddress||'', dueDate:_mrLocalDate(Date.now()+86400000), status:'pending', mrSendRequestYm:ym,
+      createdBy:me.uid||'system', createdByName:'Monthly Reports', createdAt:Date.now() }); }catch(e){ console.warn('[mr] gate task',e); }
+  const mailed=await _mrGateMail(me.email, ap.email, 'Approval needed: '+label, 'Hi '+_mrFirstName(ap.name)+',\n\n'+me.name+' is ready to send the '+label+' to '+recips.map(r=>r.name?(r.name+' <'+r.email+'>'):r.email).join(', ')+'.\n\nNothing goes to the owner until you approve it. Open Terra → Monthly Reports → '+_mrMonthLabel(ym)+' and press Approve & send, or Decline with a note:\n'+_mrGateAppUrl()+'\n\n— Terra');
+  try{ await window._dealLogActivity(deal.id,'note',{ body:'📬 '+_mrMonthLabel(ym)+' monthly owner report sent to '+ap.name+' for approval by '+me.name+(mailed?'':' (notification e-mail could not be sent — task created)'), source:'monthly-report', autoLogged:true }); }catch(e){}
+  return req;
+}
+window._mrRequestSend=async function(dealId){
+  const deal=(allDeals||[]).find(d=>d.id===dealId); if(!deal) return; const ym=window._mrState.month||_mrDefaultMonth(); const recips=_mrRecipients(deal); const ap=_mrApproverProfile();
+  const ok=await elcConfirm(_mrFirstName(ap.name)+' approves every report before it goes out.\n\nSend the '+_mrMonthLabel(ym)+' report for '+_mrDealName(deal)+' to '+_mrFirstName(ap.name)+' for approval? Once approved it goes to:\n\n'+recips.map(r=>'• '+(r.name?r.name+' — ':'')+r.email).join('\n'),{title:'Request approval to send',okLabel:'Send for approval'});
+  if(!ok) return;
+  showToast('Checking the report…','info',3000);
+  try{ await _mrRequestSendDeal(deal, ym); showToast('Sent to '+_mrFirstName(ap.name)+' for approval — they’ve been notified','success',6000); if(window._mrState.editor&&window._mrState.editor.dealId===dealId) window._mrCloseEditor(); if(currentView==='monthlyReports') window._mrRenderRows(); }
+  catch(e){ console.error('[mr] request',e); showToast('Couldn’t send for approval: '+e.message,'error',8000); }
+};
+/* the approver's side */
+window._mrApproveSend=async function(dealId){
+  const deal=(allDeals||[]).find(d=>d.id===dealId); if(!deal) return; const ym=window._mrState.month||_mrDefaultMonth(); const rep=window._mrState.reports[dealId+'|'+ym]||{}; const req=_mrGateReq(rep)||{}; const recips=_mrRecipients(deal); const from=_mrAdvisorsOf(deal)[0]||{};
+  const ok=await elcConfirm('Approve and send the '+_mrMonthLabel(ym)+' report for '+_mrDealName(deal)+' now?\n\nRequested by '+(req.byName||'?')+(req.at?' '+_mrFmtDate(req.at):'')+'\nTo:\n'+recips.map(r=>'• '+(r.name?r.name+' — ':'')+r.email).join('\n')+'\n\nFrom: '+(from.email||'?')+' (advisor is Cc’d)',{title:'Approve & send',okLabel:'Approve & send now'});
+  if(!ok) return;
+  showToast('Building and sending…','info',4000);
+  try{ await _mrSendDeal(deal,ym); showToast('Approved & sent ✓ '+_mrDealName(deal),'success'); if(currentView==='monthlyReports') window._mrRenderRows(); }
+  catch(e){ console.error('[mr] approve send',e); showToast('Send failed: '+e.message,'error',8000); }
+};
+window._mrDeclineSend=function(dealId){
+  const deal=(allDeals||[]).find(d=>d.id===dealId); if(!deal) return; const ym=window._mrState.month||_mrDefaultMonth(); const rep=window._mrState.reports[dealId+'|'+ym]||{}; const req=_mrGateReq(rep)||{};
+  _mrInjectStyles(); document.getElementById('mr-gate-ov')?.remove();
+  const ov=document.createElement('div'); ov.className='mr-ov fixed inset-0 flex items-center justify-center'; ov.id='mr-gate-ov';
+  ov.innerHTML=`<div class="mr-modal" style="width:min(560px,100%)" role="dialog" aria-label="Decline send request"><div class="mr-modal-h"><h2>✗ Decline — ${_mrEsc(_mrDealName(deal))}</h2><span style="flex:1"></span><button class="mr-x" aria-label="Close" onclick="document.getElementById('mr-gate-ov').remove()">✕</button></div>
+    <div class="mr-modal-b"><p class="mr-note">${_mrEsc(req.byName||'The requester')} will be told the ${_mrEsc(_mrMonthLabel(ym))} report is not going out as-is. Say what to fix — it goes in the e-mail and on the task.</p>
+      <label class="mr-lbl" for="mr-gate-reason">What needs to change</label><textarea id="mr-gate-reason" class="mr-textarea" style="min-height:110px" placeholder="e.g. Drop the old Taylor Morrison offer and re-run Review before you resend."></textarea></div>
+    <div class="mr-modal-f"><span style="flex:1"></span><button class="mr-btn" onclick="document.getElementById('mr-gate-ov').remove()">Cancel</button><button class="mr-btn mr-btn-primary" onclick="window._mrDeclineSendGo('${_mrEsc(dealId)}',this)">Decline &amp; notify</button></div></div>`;
+  document.body.appendChild(ov); setTimeout(()=>document.getElementById('mr-gate-reason')?.focus(),50);
+};
+window._mrDeclineSendGo=async function(dealId,btn){
+  const deal=(allDeals||[]).find(d=>d.id===dealId); if(!deal) return; const ym=window._mrState.month||_mrDefaultMonth(); const rep=window._mrState.reports[dealId+'|'+ym]||{}; const req=_mrGateReq(rep)||{};
+  const reason=(document.getElementById('mr-gate-reason')?.value||'').trim(); if(!reason){ showToast('Say what needs to change','warning'); return; }
+  const done=elcBusy(btn,'Declining…');
+  try{
+    await _mrSaveReport(deal.id, ym, {sendRequest:{...req, status:'declined', reason, resolvedAt:Date.now(), resolvedBy:currentUser?.uid||'', resolvedByName:currentUser?.name||''}});
+    await _mrGateCloseTasks(deal.id, ym, 'cancelled', 'Declined: '+reason);
+    const label=_mrMonthLabel(ym)+' report — '+_mrDealName(deal);
+    const mailed=await _mrGateMail(String(currentUser?.email||'').toLowerCase(), req.byEmail, 'Not sent: '+label, 'Hi '+_mrFirstName(req.byName)+',\n\nI’m holding the '+label+'. Please fix the following, run 🔍 Review again and press Send again:\n\n'+reason+'\n\n'+_mrGateAppUrl()+'\n\n— '+(currentUser?.name||''));
+    try{ await window._dealLogActivity(deal.id,'note',{ body:'✗ '+_mrMonthLabel(ym)+' monthly owner report NOT sent — declined by '+(currentUser?.name||'')+': '+reason+(mailed?'':' (e-mail to the requester could not be sent)'), source:'monthly-report', autoLogged:true }); }catch(e){}
+    document.getElementById('mr-gate-ov')?.remove(); showToast('Declined — '+(req.byName||'the requester')+' has been told','success'); if(currentView==='monthlyReports') window._mrRenderRows();
+  }catch(e){ console.error('[mr] decline',e); showToast('Couldn’t decline: '+e.message,'error',7000); done(); }
+};
+/* banner above the list for the approver — and, for a requester, a line about their own pending ones */
+window._mrGateRender=function(deals, ym){
+  const box=document.getElementById('mr-gate-banner'); if(!box) return; const st=window._mrState;
+  const pend=deals.filter(d=>_mrGatePending(st.reports[d.id+'|'+ym]));
+  if(!pend.length){ box.innerHTML=''; return; }
+  if(_mrIsApprover()){
+    box.innerHTML=`<div class="mr-card" style="padding:.8rem 1rem;margin-bottom:1rem;border-color:#f59e0b"><div style="font-weight:800;margin-bottom:.4rem">⏳ ${pend.length} ${_mrEsc(_mrMonthLabel(ym))} report${pend.length===1?'':'s'} waiting for your approval</div>
+      ${pend.map(d=>{ const r=_mrGateReq(st.reports[d.id+'|'+ym]); return `<div class="mr-row" style="gap:.5rem;align-items:center;flex-wrap:wrap;padding:.35rem 0;border-top:1px solid var(--border)"><div style="flex:1 1 260px;min-width:200px;font-size:.84rem"><b>${_mrEsc(_mrDealName(d))}</b> <span class="mr-muted">— asked by ${_mrEsc(r.byName||'?')} ${_mrEsc(_mrFmtDate(r.at))}${r.resend?' · re-send':''} · to ${_mrEsc((r.to||[]).join(', '))}</span></div>
+        <button class="mr-btn mr-btn-sm" onclick="window._mrReview('${d.id}')">🔍 Review</button><button class="mr-btn mr-btn-sm" onclick="window._mrPreview('${d.id}')">👁 Preview</button><button class="mr-btn mr-btn-sm mr-btn-teal" onclick="window._mrApproveSend('${d.id}')">✅ Approve &amp; send</button><button class="mr-btn mr-btn-sm" style="color:#991b1b" onclick="window._mrDeclineSend('${d.id}')">✗ Decline</button></div>`; }).join('')}</div>`;
+  } else {
+    const mine=pend.filter(d=>(_mrGateReq(st.reports[d.id+'|'+ym])||{}).by===(currentUser?.uid||'')); if(!mine.length){ box.innerHTML=''; return; }
+    box.innerHTML=`<div class="mr-note" style="margin-bottom:.8rem">⏳ ${mine.length} of your ${_mrEsc(_mrMonthLabel(ym))} report${mine.length===1?' is':'s are'} with ${_mrEsc(_mrFirstName(_mrApproverProfile().name))} for approval — ${mine.length===1?'it goes':'they go'} to the owner${mine.length===1?'':'s'} as soon as ${mine.length===1?'it is':'they are'} approved.</div>`;
+  }
+};
+
 window._mrSendOne=async function(dealId){
   const deal=(allDeals||[]).find(d=>d.id===dealId); if(!deal) return;
   const ym=window._mrState.month||_mrDefaultMonth(); const recips=_mrRecipients(deal);
@@ -50452,6 +50557,7 @@ window._mrSendOne=async function(dealId){
   if(!recips.length){ showToast('Add recipients first (✏️ Edit)','warning'); return; }
   if(!_mrLetterReady(deal.id,ym)){ showToast('This listing’s letter isn’t ready — pick ✨ AI letter, write your own in ✏️ Edit, or write the '+_mrMonthLabel(ym)+' firm letter','warning',6000); return; }
   const _rp=window._mrState.reports[dealId+'|'+ym]; if(!(_rp&&_rp.approval)){ showToast('Review & approve this report before sending','warning',5000); window._mrReview(dealId); return; }   // MCVERIFY-20261016
+  if(_mrGateApplies()){ if(_mrGatePending(_rp)){ showToast('Already with '+_mrFirstName(_mrApproverProfile().name)+' for approval','info',4000); return; } return window._mrRequestSend(dealId); }   // SENDGATE-20261029
   const from=_mrAdvisorsOf(deal)[0]||{};
   const ok=await elcConfirm('Send the '+_mrMonthLabel(ym)+' report for '+_mrDealName(deal)+' to:\n\n'+recips.map(r=>'• '+(r.name?r.name+' — ':'')+r.email).join('\n')+'\n\nFrom: '+(from.email||'?')+' (advisor is Cc’d)',{title:'Send monthly report',okLabel:'Send now'});
   if(!ok) return;
@@ -50466,7 +50572,8 @@ window._mrSendSelected=async function(){
   { const nr=deals.filter(d=>!_mrLetterReady(d.id,ym)); if(nr.length){ showToast(nr.length+' selected listing'+(nr.length===1?' uses':'s use')+' Bill’s letter or an unwritten own letter — write the '+_mrMonthLabel(ym)+' firm letter or switch them to ✨ AI letter','warning',7000); return; } }   // AILETTER-20261023
   const already=deals.filter(d=>(st.reports[d.id+'|'+ym]||{}).status==='sent');
   const unappr=deals.filter(d=>!((st.reports[d.id+'|'+ym]||{}).approval));   // MCVERIFY-20261016
-  const ok=await elcConfirm('Send '+deals.length+' '+_mrMonthLabel(ym)+' report'+(deals.length===1?'':'s')+' now?'+(already.length?('\n\n'+already.length+' of these were already sent this month and will be re-sent.'):'')+(unappr.length?('\n\n'+unappr.length+' are not approved yet and will be skipped — only approved, unchanged reports go out.'):'')+'\n\nEach goes from its listing advisor’s mailbox to the owners picked on that listing.',{title:'Send selected reports',okLabel:'Send '+deals.length});
+  const gate=_mrGateApplies(); const gateName=_mrFirstName(_mrApproverProfile().name);   // SENDGATE-20261029
+  const ok=await elcConfirm((gate?'Send '+deals.length+' '+_mrMonthLabel(ym)+' report'+(deals.length===1?'':'s')+' to '+gateName+' for approval? Nothing goes to an owner until '+gateName+' approves each one.':'Send '+deals.length+' '+_mrMonthLabel(ym)+' report'+(deals.length===1?'':'s')+' now?')+(already.length?('\n\n'+already.length+' of these were already sent this month and will be re-sent.'):'')+(unappr.length?('\n\n'+unappr.length+' are not approved yet and will be skipped — only approved, unchanged reports go out.'):'')+'\n\nEach goes from its listing advisor’s mailbox to the owners picked on that listing.',{title:gate?'Request approval to send':'Send selected reports',okLabel:(gate?'Send for approval ':'Send ')+deals.length});
   if(!ok) return;
   if(st.sending) return; st.sending=true;
   const ov=document.createElement('div'); ov.className='mr-ov fixed inset-0 flex items-center justify-center'; ov.id='mr-bulk-ov';
@@ -50476,13 +50583,13 @@ window._mrSendSelected=async function(){
   let okN=0, failN=0;
   for(let i=0;i<deals.length;i++){ const d=deals[i];
     log.textContent+=(i+1)+'/'+deals.length+' '+_mrDealName(d)+' … '; log.scrollTop=log.scrollHeight;
-    try{ await _mrSendDeal(d,ym); okN++; log.textContent+='sent ✓\n'; st.selected[d.id]=false; }
+    try{ if(gate){ if(_mrGatePending(st.reports[d.id+'|'+ym])){ log.textContent+='already with '+gateName+'\n'; st.selected[d.id]=false; continue; } await _mrRequestSendDeal(d,ym); okN++; log.textContent+='sent to '+gateName+' for approval ✓\n'; } else { await _mrSendDeal(d,ym); okN++; log.textContent+='sent ✓\n'; } st.selected[d.id]=false; }   // SENDGATE-20261029
     catch(e){ failN++; log.textContent+='FAILED — '+e.message+'\n'; console.error('[mr] bulk',d.id,e); }
     bar.style.width=Math.round((i+1)/deals.length*100)+'%';
   }
   st.sending=false; document.getElementById('mr-bulk-close').disabled=false;
-  log.textContent+='\nDone: '+okN+' sent'+(failN?', '+failN+' failed (fix and resend individually)':'')+'.';
-  showToast(okN+' report'+(okN===1?'':'s')+' sent'+(failN?' · '+failN+' failed':''), failN?'warning':'success',6000);
+  log.textContent+='\nDone: '+okN+(gate?' sent to '+gateName+' for approval':' sent')+(failN?', '+failN+' failed (fix and resend individually)':'')+'.';
+  showToast(okN+' report'+(okN===1?'':'s')+(gate?' sent to '+gateName+' for approval':' sent')+(failN?' · '+failN+' failed':''), failN?'warning':'success',6000);
   if(currentView==='monthlyReports') window._mrRenderRows();
 };
 /* ===== MREPORT_BLOCK_END ===== */
