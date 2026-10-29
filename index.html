@@ -9731,6 +9731,7 @@ const FB = {
     _elcNormTaskDue(data, (allTasks||[]).find(t=>t.id===id)); _elcLlrFix(data);
     const {doc, updateDoc} = _fbFns;
     await updateDoc(doc(_fbDb,'tasks',id), data);
+    try{ if(window._mwAfterTaskWrite) await window._mwAfterTaskWrite(id, data); }catch(e){ console.warn('[mw] settle after task write',e); }   // MWSETTLE-20261029
   },
   async deleteTask(id){
     const {doc, deleteDoc} = _fbFns;
@@ -34110,6 +34111,7 @@ window.toggleTask = async (id, newStatus) => {
   try {
     // Completion stamp: record who completed it and when (cleared if reopened).
     const _done = (newStatus==='complete'||newStatus==='completed');
+    if(_done && window._mwNeedsAnswer && window._mwNeedsAnswer(id)){ window._mwRouteToAnswer(id); return; }   // MWSETTLE-20261029: a held-email task is answered, never just ticked off
     const _stamp = _done
       ? { completedAt: Date.now(), completedBy: currentUser?.uid||'', completedByName: currentUser?.name||currentUser?.email||'' }
       : { completedAt: null, completedBy: '', completedByName: '' };
@@ -51326,6 +51328,26 @@ window._caSubmitExisting=async function(taskId,btn){
 };
 
 window._mwIsReviewTask=t=>!!(t&&t.taskType==='email_review');
+/* MWSETTLE-20261029 — a held-email task (📧 Confirm email / 🗂️ New card?) is never completed without its answer */
+window._mwNeedsAnswer=function(id){ const t=(typeof allTasks!=='undefined'?allTasks:[]).find(x=>x.id===id); return !!(t&&(t.taskType==='email_review'||t.taskType==='card_ask')&&!(t.mwAnswer||t.caAnswer)); };
+window._mwRouteToAnswer=function(id){
+  const t=(typeof allTasks!=='undefined'?allTasks:[]).find(x=>x.id===id); if(!t) return;
+  try{ document.querySelectorAll('input[type=checkbox]').forEach(cb=>{ if(String(cb.getAttribute('onchange')||'').includes("'"+id+"'")) cb.checked=false; }); }catch(_){}
+  showToast(t.taskType==='card_ask'?'Answer this one — does the email need a new card?':'Answer this one — is the email about that property? (Yes / No / Respond)','info',5000);
+  if(t.taskType==='card_ask'){ if(window._caOpenCreate) window._caOpenCreate(id); return; }
+  if(window._mwOpenRespond) window._mwOpenRespond(id);
+};
+window._mwAfterTaskWrite=async function(id, data){   // safety net: completed by automation / bulk close with no answer → settle the held email so the panel can't keep it forever
+  if(!data||!(data.status==='complete'||data.status==='completed')||data.mwAnswer||data.caAnswer) return;
+  const t=(typeof allTasks!=='undefined'?allTasks:[]).find(x=>x.id===id); if(!t||!(t.taskType==='email_review'||t.taskType==='card_ask')) return;
+  const rid=t.mwReviewId||t.cardAskId; if(!rid) return;
+  const {doc,getDoc,updateDoc}=_fbFns; const s=await getDoc(doc(_fbDb,'emailReview',rid)); if(!s.exists()||s.data().status!=='pending') return;
+  const r={id:s.id,...s.data()}; const note='Task closed without an answer ('+(data.completionNote||data.completedByName||'automation')+') — not filed';
+  if(t.taskType==='card_ask'){ await updateDoc(doc(_fbDb,'emailReview',rid),{status:'dismissed',reviewedBy:currentUser?.uid||'',reviewedAt:Date.now(),advisorNote:note}); }
+  else { r.taskId=r.taskId||id; await _mwSettleReview(r,'dismissed',note); }
+  try{ await updateDoc(doc(_fbDb,'tasks',id),{mwAnswer:'no',mwResponse:note}); }catch(_){}
+  if(window._mrState) window._mrState.mwRows=null;
+};
 window._mwTaskButtons=function(t){
   if(t.status==='complete'||t.status==='completed'){
     const d=t.mwFiledDealId&&(allDeals||[]).find(x=>x.id===t.mwFiledDealId);
