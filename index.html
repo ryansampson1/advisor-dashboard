@@ -9791,10 +9791,64 @@ let _fbUnsubs = []; // holds active onSnapshot unsubscribe functions
 
 /* Debounced re-render — fires 600 ms after the last Firestore push.
    Skipped while a modal is open so the user's active form isn't interrupted. */
+// ── LIVESYNC-20261029 — live-sync rebuilds must not disturb what the user is doing ─────────────────────────
+// Since the nightly email check (MW2PT/CARDASK) and the report/traffic workers started writing to Firestore many
+// times a minute, scheduleReRender's "rebuild the view 600 ms after every push" wiped whatever the user had open:
+// an expanded ▼ Read more on a task collapsed, the pipeline board snapped back to the top-left, a scrolled table
+// jumped to its start. Two rules fix it for every view at once:
+//   1. Never rebuild while the user is interacting (pointer, wheel, keys, touch, any element scroll). Wait until
+//      they have been idle LS_IDLE_MS, then do ONE rebuild with the latest data. A rebuild is never deferred longer
+//      than LS_MAX_DEFER_MS so a colleague's change still shows within about a minute.
+//   2. Carry the view's UI state across the rebuild: the scroll offset of every scrolled container inside
+//      #main-content (keyed by id, else by its position in the tree), every expanded ▼ Read more (data-exp="1"),
+//      every open <details>, plus the window scroll that was already preserved.
+// Nothing about what gets rendered changes — only when, and what survives it.
+const LS_IDLE_MS = 6000, LS_RETRY_MS = 1500, LS_MAX_DEFER_MS = 60000;
+let _lsLastInput = 0, _lsDeferSince = 0;
+(function(){
+  const mark = () => { _lsLastInput = Date.now(); };
+  ['pointerdown','pointermove','wheel','keydown','touchstart','touchmove','scroll']
+    .forEach(ev => document.addEventListener(ev, mark, {capture:true, passive:true}));   // capture: element scrolls don't bubble
+})();
+function _lsBusy(){ return (Date.now() - _lsLastInput) < LS_IDLE_MS; }
+function _lsOverdue(){ return _lsDeferSince && (Date.now() - _lsDeferSince) > LS_MAX_DEFER_MS; }
+function _lsKey(el, root){
+  if(el.id) return '#'+el.id;
+  const p=[]; while(el && el!==root){ const par=el.parentElement; if(!par) break; p.unshift(el.tagName+':'+Array.prototype.indexOf.call(par.children, el)); el=par; }
+  return p.join('/');
+}
+function _lsFind(key, root){
+  if(key[0]==='#') return document.getElementById(key.slice(1));
+  let el=root; for(const seg of key.split('/')){ if(!seg) continue; el = el && el.children[+seg.split(':')[1]]; if(!el) return null; }
+  return el;
+}
+function _lsCapture(){
+  const st = {scroll:[], exp:[], open:[], x:window.scrollX, y:window.scrollY};
+  const root = document.getElementById('main-content'); if(!root) return st;
+  try{
+    root.querySelectorAll('*').forEach(el => { if(el.scrollLeft || el.scrollTop) st.scroll.push([_lsKey(el,root), el.scrollLeft, el.scrollTop]); });
+    root.querySelectorAll('[data-exp="1"]').forEach(el => st.exp.push(_lsKey(el,root)));
+    root.querySelectorAll('details[open]').forEach(el => st.open.push(_lsKey(el,root)));
+  }catch(e){ console.warn('[livesync] capture', e); }
+  return st;
+}
+function _lsRestore(st){
+  const root = document.getElementById('main-content');
+  try{
+    if(root){
+      // expand first (it changes heights), then put the scroll offsets back
+      st.exp.forEach(k => { const el=_lsFind(k,root); if(el && el.dataset.exp!=='1'){ el.style.cssText=''; el.dataset.exp='1'; const b=el.nextElementSibling; if(b && b.tagName==='BUTTON') b.textContent='▲ Less'; } });
+      st.open.forEach(k => { const el=_lsFind(k,root); if(el && el.tagName==='DETAILS') el.open=true; });
+      st.scroll.forEach(([k,l,t]) => { const el=_lsFind(k,root); if(el){ el.scrollLeft=l; el.scrollTop=t; } });
+    }
+  }catch(e){ console.warn('[livesync] restore', e); }
+  window.scrollTo(st.x, st.y);
+}
+window._lsCapture=_lsCapture; window._lsRestore=_lsRestore; window._lsBusy=_lsBusy;
 let _rrTimer = null;
 function scheduleReRender(src){
   clearTimeout(_rrTimer);
-  _rrTimer = setTimeout(()=>{
+  _rrTimer = setTimeout(function _rrTick(){
     // Refresh isSuperAdmin from profile roles (covers case where role was assigned post-login)
     if(currentUser && allProfiles[currentUser.uid]?.roles?.includes('superAdmin')){
       currentUser.isSuperAdmin = true;
@@ -9809,10 +9863,12 @@ function scheduleReRender(src){
     const typing = ['INPUT','SELECT','TEXTAREA'].includes(document.activeElement?.tagName)
       && document.getElementById('main-content')?.contains(document.activeElement);
     if(!modalOpen && !inlineEditorOpen && !typing){
-      // Preserve scroll position across live-sync re-renders so the page doesn't jump to top
-      const _sx=window.scrollX, _sy=window.scrollY;
+      // LIVESYNC-20261029 — wait for the user to go idle, then rebuild once and put their UI state back (see _lsCapture/_lsRestore above)
+      if(_lsBusy() && !_lsOverdue()){ _lsDeferSince = _lsDeferSince || Date.now(); _rrTimer = setTimeout(_rrTick, LS_RETRY_MS); _updateNavBadges(); return; }
+      _lsDeferSince = 0;
+      const _st=_lsCapture();
       renderCurrentView(); checkListingRenewalReminders();
-      requestAnimationFrame(()=>window.scrollTo(_sx,_sy));
+      requestAnimationFrame(()=>_lsRestore(_st));
     }
     _updateNavBadges();
     _checkNewTaskNotif();
