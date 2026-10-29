@@ -36538,6 +36538,195 @@ function eosSave(key,val){
   }
 }
 
+/* ── TEAMEVENTS-20261029 — 🎉 Team Events on the 🎯 2026 Company Goals card ─────────────────────
+   Was a hard-coded constant in viewEOS (teamEventsDone = 2, teamEventsGoal = 4), so logging an
+   event meant a code deploy. Now it lives in Firestore:
+     eos/companyGoals = { data: { teamEvents:[{id, date:'YYYY-MM-DD', name, by, at}], teamEventsGoal:N } }
+   Everyone sees the count and can open the list (eos/* is readable by any signed-in user); only
+   admins can log / edit / delete events or change the goal (Firestore rules: eos/* writes are
+   admin-only). The tile counts events dated in TE_YEAR. The first admin session seeds the doc
+   with the three events held so far as placeholders (rename / re-date them in the modal). */
+const TE_KEY = 'companyGoals', TE_YEAR = 2026, TE_DEFAULT_GOAL = 4;
+function _teState(){
+  const cg = eosGet(TE_KEY, null);
+  const o = (cg && typeof cg==='object') ? cg : {};
+  const events = (Array.isArray(o.teamEvents) ? o.teamEvents : []).filter(e=>e && typeof e==='object' && e.id);
+  const goal = Number(o.teamEventsGoal) > 0 ? Math.round(Number(o.teamEventsGoal)) : TE_DEFAULT_GOAL;
+  return {events, goal, raw:o};
+}
+function _teYearEvents(){
+  return _teState().events
+    .filter(e=>String(e.date||'').slice(0,4)===String(TE_YEAR))
+    .sort((a,b)=>String(b.date||'').localeCompare(String(a.date||'')) || (b.at||0)-(a.at||0));
+}
+function _teCanEdit(){ return !!(currentUser && currentUser.isAdmin); }
+function _teWho(){ return (currentUser && (currentUser.name||currentUser.email)) || ''; }
+function _teFmtDate(d){ const t=new Date(String(d||'')+'T00:00:00'); return isNaN(t)?String(d||''):t.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}); }
+window._teState = _teState; window._teYearEvents = _teYearEvents;
+
+async function _teSave(next){
+  const prev = eosCache[TE_KEY];
+  eosCache[TE_KEY] = next;                                   // optimistic, same as eosSave
+  try{
+    if(DEMO_MODE){ eosSave(TE_KEY, next); return true; }
+    const {doc,setDoc} = _fbFns;
+    await setDoc(doc(_fbDb,'eos',TE_KEY), {data: next}, {merge:false});
+    return true;
+  }catch(e){
+    eosCache[TE_KEY] = prev; console.error('Team events save:', e);
+    elcAlert('Could not save — '+((e && e.code==='permission-denied') ? 'only admins can log team events.' : 'check your connection and try again.'));
+    return false;
+  }
+}
+/* One-time seed: first admin session that finds no eos/companyGoals doc writes the three events
+   held so far (2 that were hard-coded + the one logged 2026-10-29) as placeholders. Read-then-create,
+   so an existing doc is never overwritten. */
+window._teSeedOnce = async () => {
+  if(window._teSeeded || DEMO_MODE || !_fbDb || !_fbFns || !_teCanEdit()) return;
+  window._teSeeded = true;
+  try{
+    const {doc,getDoc,setDoc} = _fbFns;
+    const snap = await getDoc(doc(_fbDb,'eos',TE_KEY));
+    if(snap.exists()) return;
+    const by = _teWho(), at = Date.now();
+    const seed = { teamEventsGoal: TE_DEFAULT_GOAL, teamEvents: [
+      {id:'te_seed1', date: TE_YEAR+'-01-01', name:'Team event #1 — set the name & date', by, at, seeded:true},
+      {id:'te_seed2', date: TE_YEAR+'-01-01', name:'Team event #2 — set the name & date', by, at, seeded:true},
+      {id:'te_seed3', date: window._elcLocalDateStr(), name:'Team event #3 — set the name & date', by, at, seeded:true},
+    ]};
+    await setDoc(doc(_fbDb,'eos',TE_KEY), {data: seed}, {merge:false});
+    eosCache[TE_KEY] = seed;
+    _teRefreshTile();
+  }catch(e){ window._teSeeded = false; console.warn('Team events seed skipped:', e); }
+};
+function _teRefreshTile(){   // the tile only exists while the EOS view is on screen
+  if(document.getElementById('te-tile') && typeof window._eosRerender==='function') window._eosRerender(window._eosSub || 'rocks');
+}
+async function _teCommit(mutate, btn, busyLabel){
+  const st = _teState();
+  const next = {...st.raw, teamEventsGoal: st.goal, teamEvents: st.events.map(e=>({...e}))};
+  if(mutate(next)===false) return false;
+  const restore = (btn && typeof elcBusy==='function') ? elcBusy(btn, busyLabel||'Saving…') : ()=>{};
+  try{ return await _teSave(next); } finally { restore(); }
+}
+
+window.openTeamEventsModal = () => {
+  document.getElementById('te-modal')?.remove();
+  const m = document.createElement('div');
+  m.id = 'te-modal';
+  m.className = 'fixed inset-0 z-50 flex items-center justify-center modal-bg bg-black/40 p-4';
+  m.addEventListener('click', e=>{ if(e.target===m) window._teClose(); });
+  document.body.appendChild(m);
+  window._teEdit = null;
+  _teRenderModal();
+  setTimeout(()=>{ (document.getElementById('te-name')||document.getElementById('te-close'))?.focus(); }, 40);
+};
+window._teClose = () => { document.getElementById('te-modal')?.remove(); window._teEdit=null; };
+function _teRenderModal(){
+  const m = document.getElementById('te-modal'); if(!m) return;
+  const esc = window._scEsc, canEdit = _teCanEdit();
+  const {goal} = _teState(); const events = _teYearEvents();
+  const pct = Math.min(Math.round(events.length/goal*100),100);
+  const inp = 'border border-gray-200 rounded-lg px-3 py-2 text-sm w-full bg-white text-gray-800';
+  const rows = events.map(e=>{
+    const id = esc(e.id);
+    if(canEdit && window._teEdit===e.id) return `
+      <li class="py-2.5 flex flex-col sm:flex-row sm:items-center gap-2" data-te="${id}">
+        <input id="te-ed-date" type="date" value="${esc(e.date)}" class="${inp} sm:w-44" style="min-height:44px" aria-label="Event date"/>
+        <input id="te-ed-name" type="text" maxlength="120" value="${esc(e.name)}" class="${inp}" style="min-height:44px" aria-label="Event name"
+          onkeydown="if(event.key==='Enter'){event.preventDefault();window._teEditSave('${id}',this)}"/>
+        <div class="flex gap-2 shrink-0">
+          <button type="button" onclick="window._teEditSave('${id}',this)" class="brand-btn rounded-lg px-3 text-sm font-semibold" style="min-height:44px">Save</button>
+          <button type="button" onclick="window._teEditCancel()" class="border border-gray-200 rounded-lg px-3 text-sm text-gray-700" style="min-height:44px">Cancel</button>
+        </div>
+      </li>`;
+    return `
+      <li class="py-2.5 flex items-center gap-3" data-te="${id}">
+        <span class="text-lg shrink-0" aria-hidden="true">🎉</span>
+        <div class="min-w-0 flex-1">
+          <div class="text-sm font-semibold text-gray-800 truncate">${esc(e.name||'Team event')}</div>
+          <div class="text-xs text-gray-500">${esc(_teFmtDate(e.date))}${e.by?' · logged by '+esc(e.by):''}${e.seeded?' · <span class="font-semibold" style="color:#D97706">placeholder — tap ✏️ to set</span>':''}</div>
+        </div>
+        ${canEdit?`
+        <button type="button" onclick="window._teEditStart('${id}')" class="rounded-lg text-base text-gray-600 hover:bg-gray-100 shrink-0" style="min-height:44px;min-width:44px" aria-label="Edit ${esc(e.name||'event')}" title="Edit">✏️</button>
+        <button type="button" onclick="window._teDel('${id}',this)" class="rounded-lg text-base text-gray-600 hover:bg-gray-100 shrink-0" style="min-height:44px;min-width:44px" aria-label="Delete ${esc(e.name||'event')}" title="Delete">🗑️</button>`:''}
+      </li>`;
+  }).join('');
+  m.innerHTML = `
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[85vh] overflow-y-auto" role="document">
+      <div class="p-5 sm:p-6">
+        <div class="flex items-center justify-between mb-1">
+          <h2 class="text-base font-bold text-gray-800">🎉 Team Events — ${TE_YEAR}</h2>
+          <button id="te-close" type="button" onclick="window._teClose()" class="text-gray-600 hover:text-gray-900 text-2xl leading-none rounded-lg" style="min-height:44px;min-width:44px" aria-label="Close">&times;</button>
+        </div>
+        <p class="text-sm text-gray-500 mb-4"><strong class="text-gray-800">${events.length} of ${goal}</strong> this year (${pct}%). ${canEdit?'Log each team event here — the 🎯 Company Goals tile updates for everyone.':'Admins log team events here; the count shows on everyone’s Company Goals card.'}</p>
+        ${canEdit?`
+        <form id="te-add" onsubmit="event.preventDefault();window._teAdd(this.querySelector('button[type=submit]'))" class="rounded-xl border border-gray-200 bg-gray-50 p-3 mb-4">
+          <div class="text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Log a team event</div>
+          <div class="flex flex-col sm:flex-row gap-2">
+            <input id="te-date" type="date" value="${esc(window._elcLocalDateStr())}" required class="${inp} sm:w-44" style="min-height:44px" aria-label="Event date"/>
+            <input id="te-name" type="text" required maxlength="120" placeholder="e.g. Q3 team dinner, Rays game, offsite…" class="${inp}" style="min-height:44px" aria-label="Event name"/>
+            <button type="submit" class="brand-btn rounded-lg px-4 text-sm font-semibold shrink-0" style="min-height:44px">＋ Log event</button>
+          </div>
+        </form>`:''}
+        <ul class="divide-y divide-gray-200" role="list" aria-label="Team events">${rows || `<li class="py-6 text-sm text-gray-500 text-center">No team events logged for ${TE_YEAR} yet.</li>`}</ul>
+        ${canEdit?`
+        <div class="flex items-center gap-2 mt-4 pt-4 border-t border-gray-200">
+          <label for="te-goal" class="text-sm text-gray-700 font-semibold">Annual goal</label>
+          <input id="te-goal" type="number" min="1" max="99" inputmode="numeric" value="${goal}" class="border border-gray-200 rounded-lg px-3 py-2 text-sm w-20 bg-white text-gray-800" style="min-height:44px" aria-label="Annual team events goal"/>
+          <button type="button" onclick="window._teSaveGoal(this)" class="border border-gray-200 rounded-lg px-3 text-sm font-semibold text-gray-700" style="min-height:44px">Save goal</button>
+        </div>`:''}
+      </div>
+    </div>`;
+}
+window._teAdd = async (btn) => {
+  if(!_teCanEdit()) return;
+  const date = (document.getElementById('te-date')||{}).value||'';
+  const name = ((document.getElementById('te-name')||{}).value||'').trim();
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(date)){ elcAlert('Pick the event date.'); document.getElementById('te-date')?.focus(); return; }
+  if(!name){ elcAlert('Give the event a name.'); document.getElementById('te-name')?.focus(); return; }
+  const ev = {id:'te_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6), date, name, by:_teWho(), at:Date.now()};
+  const ok = await _teCommit(n=>{ n.teamEvents.push(ev); }, btn, 'Logging…');
+  if(!ok) return;
+  const inYear = date.slice(0,4)===String(TE_YEAR);
+  showToast('🎉 Team event logged — '+(inYear ? _teYearEvents().length+' of '+_teState().goal+' for '+TE_YEAR : 'dated '+date.slice(0,4)+', not counted toward '+TE_YEAR), 'success');
+  window._teEdit=null; _teRenderModal(); _teRefreshTile();
+  setTimeout(()=>document.getElementById('te-name')?.focus(),40);
+};
+window._teDel = async (id, btn) => {
+  if(!_teCanEdit()) return;
+  const ev = _teState().events.find(e=>e.id===id); if(!ev) return;
+  const ok = await _teCommit(n=>{ n.teamEvents = n.teamEvents.filter(e=>e.id!==id); }, btn, '…');
+  if(!ok) return;
+  _teRenderModal(); _teRefreshTile();
+  showUndoToast('Removed "'+(ev.name||'team event')+'"', async()=>{
+    const ok2 = await _teCommit(n=>{ if(!n.teamEvents.some(e=>e.id===id)) n.teamEvents.push({...ev}); });
+    if(ok2){ _teRenderModal(); _teRefreshTile(); showToast('Restored ✓','success'); }
+  });
+};
+window._teEditStart  = id => { window._teEdit=id; _teRenderModal(); setTimeout(()=>document.getElementById('te-ed-name')?.focus(),40); };
+window._teEditCancel = () => { window._teEdit=null; _teRenderModal(); };
+window._teEditSave = async (id, btn) => {
+  if(!_teCanEdit()) return;
+  const date = (document.getElementById('te-ed-date')||{}).value||'';
+  const name = ((document.getElementById('te-ed-name')||{}).value||'').trim();
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(date)){ elcAlert('Pick the event date.'); return; }
+  if(!name){ elcAlert('Give the event a name.'); return; }
+  const ok = await _teCommit(n=>{ const e=n.teamEvents.find(x=>x.id===id); if(!e) return false;
+    e.date=date; e.name=name; delete e.seeded; e.editedAt=Date.now(); e.editedBy=_teWho(); }, btn);
+  if(!ok) return;
+  window._teEdit=null; _teRenderModal(); _teRefreshTile(); showToast('Event updated ✓','success');
+};
+window._teSaveGoal = async (btn) => {
+  if(!_teCanEdit()) return;
+  const g = Math.round(Number((document.getElementById('te-goal')||{}).value));
+  if(!(g>=1 && g<=99)){ elcAlert('Goal must be between 1 and 99.'); return; }
+  const ok = await _teCommit(n=>{ n.teamEventsGoal=g; }, btn);
+  if(!ok) return;
+  _teRenderModal(); _teRefreshTile(); showToast('Team events goal set to '+g+' ✓','success');
+};
+/* ── end TEAMEVENTS-20261029 ── */
+
 // ── Scorecard hover tooltip ────────────────────────────────────────────────
 // A single body-appended floating tooltip. Any element carrying a data-sctip
 // attribute (its value is ready-to-render HTML) shows that HTML on hover. We
@@ -36606,6 +36795,7 @@ function viewEOS(sub='rocks'){
   if(activeChart){ activeChart.destroy(); activeChart=null; }
   const uid=currentUser.uid, isAdmin=currentUser.isAdmin;
   const effectiveAdminGlobal = isAdmin && !adminViewAsAdvisor && !staffViewMode;
+  if(isAdmin && typeof window._teSeedOnce==='function') window._teSeedOnce();   // TEAMEVENTS-20261029
   // OML10-20261007: a (non-admin) office manager in Manager View can host an L-10
   // locked to their own office. Anyone else without access is bounced to Rocks.
   const l10MgrAccess = !isAdmin && !!currentUser.isOfficeManager
@@ -38742,14 +38932,22 @@ function viewEOS(sub='rocks'){
     .filter(d => isContractActiveStage(d.stage) || /^closing$/i.test((d.stage||'').trim()))
     .reduce((s,d)=>s+(d.purchasePrice||d.contractPrice||d.loiPrice||0), 0);
   const activeListings = companyDeals.filter(d=>/^listing$/i.test((d.stage||'').trim())).length;
-  const teamEventsDone = 2, teamEventsGoal = 4;
+  // TEAMEVENTS-20261029: Team Events were a hard-coded constant (2 of 4). Now admin-logged in
+  // eos/companyGoals via the 🎉 tile → modal; counts events dated in the goal year.
+  const teamEventsDone = (typeof window._teYearEvents==='function' ? window._teYearEvents() : []).length;
+  const teamEventsGoal = (typeof window._teState==='function' ? window._teState().goal : 4);
 
-  const goalKpi = (icon, label, value, goal, fmtFn) => {
+  const goalKpi = (icon, label, value, goal, fmtFn, opts) => {   // TEAMEVENTS-20261029: opts {id,onclick,hint} → clickable tile
+    opts = opts || {};
+    const tag = opts.onclick ? 'button' : 'div';
+    const attrs = (opts.id ? ` id="${opts.id}"` : '') + (opts.onclick
+      ? ` type="button" onclick="${opts.onclick}" aria-label="${label}: ${fmtFn(value)} of ${fmtFn(goal)} — open details" style="cursor:pointer"`
+      : '');
     const pct = Math.min(Math.round(value / goal * 100), 100);
     const color    = pct>=100?'#059669':pct>=60?'#D97706':'#2563eb';
     const barColor = pct>=100?'#059669':pct>=60?'#f59e0b':'#3b82f6';
     return `
-      <div class="bg-white rounded-2xl border p-4 flex flex-col gap-2 min-w-0">
+      <${tag}${attrs} class="bg-white rounded-2xl border p-4 flex flex-col gap-2 min-w-0${opts.onclick?' text-left w-full hover:shadow-md transition':''}">
         <div class="flex items-center justify-between gap-2">
           <div class="flex items-center gap-2 min-w-0">
             <span class="text-lg shrink-0">${icon}</span>
@@ -38761,7 +38959,8 @@ function viewEOS(sub='rocks'){
         <div style="height:7px;background:#e5e7eb;border-radius:9999px;overflow:hidden">
           <div style="width:${pct}%;height:100%;background:${barColor};border-radius:9999px;transition:width .6s ease"></div>
         </div>
-      </div>`;
+        ${opts.hint ? `<div class="text-xs font-semibold" style="color:#2563eb">${opts.hint}</div>` : ''}
+      </${tag}>`;
   };
   const fmtM = v => v>=1e6 ? '$'+(Math.round(v/1e5)/10).toFixed(1)+'M' : v>=1e3 ? '$'+Math.round(v/1e3).toLocaleString()+'K' : '$'+v;
   const fmtN = v => v.toString();
@@ -38776,7 +38975,8 @@ function viewEOS(sub='rocks'){
         ${goalKpi('🏡','Land Sales',       landSales2026,   350000000, fmtM)}
         ${goalKpi('📝','Under Contract',   ucPipelineValue, 700000000, fmtM)}
         ${goalKpi('📋','Active Listings',  activeListings,  200,       fmtN)}
-        ${goalKpi('🎉','Team Events',      teamEventsDone,  teamEventsGoal, fmtN)}
+        ${goalKpi('🎉','Team Events',      teamEventsDone,  teamEventsGoal, fmtN,
+            {id:'te-tile', onclick:'window.openTeamEventsModal()', hint: isAdmin ? 'Tap to log an event ›' : 'Tap to see the list ›'})}   <!-- TEAMEVENTS-20261029 -->
       </div>
     </div>`;
 
@@ -48785,8 +48985,10 @@ function _mrHistoryRows(deal, activities, tasks, opt){   // opt.includeHidden �
     if(a.type==='meeting') text='Meeting'+(a.meetingTitle?(' — '+a.meetingTitle):'')+(text?': '+text:'');
     if(a.type==='stage_change') text='Stage: '+text;
     if(a.type==='attachment') text='Document: '+text;
-    text=String(text).replace(/\s+/g,' ').trim(); if(!text) return;
-    rows.push({id:a.id, ts, date:_mrFmtDate(ts), type:(a.type||'note'), by:a.createdByName||'', text, subject:a.gmailSubject||'', raw:String(a.body||'').slice(0,1200), mw:!!(mwLab&&a.mwSummary), hidden:!!a.reportHidden, movedTo:a.movedTo||'', auto:a.source==='mailwatch'||a.source==='mailwatch-reviewed', cat:a.mwCategory||'', threadId:a.gmailThreadId||''});
+    text=String(text).replace(/\s+/g,' ').trim();
+    const autoText=text; const ovText=String(a.reportText||'').replace(/\s+/g,' ').trim(); if(ovText) text=ovText;   // MRNOTES-20261029 — the advisor's saved wording prints, every month, until changed
+    if(!text) return;
+    rows.push({id:a.id, ts, date:_mrFmtDate(ts), type:(a.type||'note'), by:a.createdByName||'', text, autoText, edited:!!ovText, subject:a.gmailSubject||'', raw:String(a.body||'').slice(0,1200), mw:!!(mwLab&&a.mwSummary), hidden:!!a.reportHidden, movedTo:a.movedTo||'', auto:a.source==='mailwatch'||a.source==='mailwatch-reviewed', cat:a.mwCategory||'', threadId:a.gmailThreadId||''});
   });
   if(deal.notes){
     deal.notes.split('\n').filter(l=>/^\s*\[[^\]]+\]/.test(l)).forEach(line=>{
@@ -49469,7 +49671,7 @@ window._mrOpenEditor=async function(dealId){
           ${[['siteVisits','TheDirtDog.com visits'],['uniqueVisitors','Unique visitors'],['docsViewed','Docs viewed'],['casSigned','CAs signed'],['gaSessions','Google sessions'],['totalCommercialViews','Total Commercial views'],['loopnetViews','LoopNet views'],['crexiViews','Crexi views'],['totalLeads','Total leads']].map(([k,l])=>`<div><label class="mr-lbl" for="mr-t-${k}">${l}</label><input id="mr-t-${k}" class="mr-input" style="width:100%" inputmode="numeric" value="${st.editor.traffic&&st.editor.traffic[k]!=null?_mrEsc(st.editor.traffic[k]):''}"></div>`).join('')}
         </div>
       </div>
-      <div class="mr-sec"><h3>8 · Property notes (emails as AI summaries · calls · meetings · notes — tasks never print)</h3><div id="mr-hist-summary" class="mr-note">Counting…</div><div id="mr-hist-list" style="margin-top:.5rem"></div></div>
+      <div class="mr-sec"><h3>8 · Property notes (emails as AI summaries · calls · meetings · notes — tasks never print) — ✏️ edit any line; your wording prints every month</h3><div id="mr-hist-summary" class="mr-note">Counting…</div><div id="mr-hist-list" style="margin-top:.5rem"></div></div>
       <div class="mr-sec"><h3>9 · Contact page</h3><div id="mr-ed-advcard">${_mrEditorAdvisorCardHtml(deal)}</div></div>
     </div>
     <div class="mr-modal-f">
@@ -49488,6 +49690,78 @@ window._mrOpenEditor=async function(dealId){
   // history counts (async)
   window._mrHistLoad(dealId);   // MWFIX-20261008
 };
+/* =======================================================
+   MRNOTES-20261029 — ✏️ Edit § 8 · Property notes, editable and persistent.
+   Every logged entry on the deal can be
+   • ✏️ Edited — the wording saved prints on this and every later month's report (activities/{id}.reportText; the
+     automatic AI summary / derived line is kept as a fallback and can be restored with ↺)
+   • Hidden / Shown — activities/{id}.reportHidden; a hidden entry never prints, on any month
+   • Moved to another property — the AI filed it on the wrong listing: a copy is written to the right deal, the original is
+     hidden + stamped movedTo, and an AI-created offer from the same email moves with it.
+   Also ships the MWFIX-20261008 Hide/Move block (mreport_patch/histfix_block.js), which was written on 2026-10-08 but never
+   injected: _mrOpenEditor called window._mrHistLoad, which did not exist, so § 8 stayed at "Counting…".
+   ======================================================= */
+window._mrHistLoad=async function(dealId){
+  const deal=allDeals.find(d=>d.id===dealId); const box=document.getElementById('mr-hist-list'); const sum=document.getElementById('mr-hist-summary'); if(!deal||!box) return;
+  let acts,tasks; try{ [acts,tasks]=await Promise.all([_mrFetchActivities(dealId),_mrFetchTasks(dealId)]); }catch(e){ console.warn('[mr] hist',e); if(sum) sum.textContent='Couldn’t load this property’s history ('+(e.message||e)+').'; return; }
+  if(window._mrState.editor && window._mrState.editor.dealId!==dealId) return;   // editor moved on to another listing meanwhile
+  const h=_mrHistoryRows(deal,acts,tasks,{includeHidden:true}); const rows=h.history; const vis=rows.filter(r=>!r.hidden); const nEd=rows.filter(r=>r.edited&&!r.hidden).length;
+  if(sum) sum.innerHTML=`<b>${vis.length}</b> ${vis.length===1?'entry':'entries'} will print (${vis.filter(r=>r.type==='email').length} emails · ${vis.filter(r=>r.type==='call').length} calls · ${vis.filter(r=>r.type==='meeting').length} meetings)${rows.length-vis.length?` · <b>${rows.length-vis.length}</b> hidden`:''}${nEd?` · <b>${nEd}</b> edited by hand`:''}. Emails print as one-line AI summaries — <b>✏️ Edit</b> any line that isn’t right and your wording prints every month from now on; <b>Hide</b> anything the owner shouldn’t see; <b>Move</b> an entry filed on the wrong property.`;
+  const opts='<option value="">Move to…</option>'+allDeals.filter(d=>d.id!==dealId&&_mrIsSellerRep(d)&&!d.archived).sort((a,b)=>_mrDealName(a).localeCompare(_mrDealName(b))).map(d=>`<option value="${_mrEsc(d.id)}">${_mrEsc(_mrDealName(d))}</option>`).join('');
+  const em=rows.filter(r=>r.id); const D=_mrEsc(dealId);
+  box.innerHTML=em.length?`<details open><summary style="cursor:pointer;font-weight:700">Entries (${em.length})${em.some(r=>r.auto)?' · ⚡ = filed automatically from email':''}</summary><div style="max-height:420px;overflow:auto;margin-top:.4rem">`+
+    em.slice(0,200).map(r=>{ const I=_mrEsc(r.id); return `<div class="mr-hist-row" data-act="${I}" style="padding:.45rem 0;border-top:1px solid var(--border);${r.hidden?'opacity:.5':''}">
+      <div class="mr-row" style="gap:.4rem;align-items:flex-start;flex-wrap:wrap">
+        <div style="flex:1 1 300px;min-width:220px;font-size:.82rem"><b>${_mrEsc(r.date)}</b> · ${_mrEsc(r.type.replace('_',' '))}${r.auto?' ⚡':''}${r.edited?' · <span style="color:#0f766e;font-weight:700">✎ edited</span>':''}${r.hidden?(r.movedTo?' · <i>moved</i>':' · <i>hidden</i>'):''}<div class="mr-note" style="white-space:pre-wrap">${_mrEsc(r.text)}</div></div>
+        <span class="mr-row" style="gap:.3rem;flex-wrap:wrap">
+          ${!r.hidden?`<button type="button" class="mr-btn mr-btn-sm" onclick="window._mrHistEdit(this)" title="Change the wording that prints for the owner">✏️ Edit</button>`:''}
+          ${r.hidden&&!r.movedTo?`<button type="button" class="mr-btn mr-btn-sm" onclick="window._mrHistHide('${D}','${I}',false,this)">Show</button>`:''}
+          ${!r.hidden?`<button type="button" class="mr-btn mr-btn-sm" onclick="window._mrHistHide('${D}','${I}',true,this)">Hide</button><label class="sr-only" for="mr-mv-${I}">Move to another property</label><select id="mr-mv-${I}" class="mr-select" style="max-width:160px" onchange="window._mrHistMove('${D}','${I}',this)">${opts}</select>`:''}
+        </span></div>
+      <div class="mr-hist-editor" style="display:none;margin-top:.4rem"><label class="sr-only" for="mr-he-${I}">Wording that prints</label><textarea id="mr-he-${I}" class="mr-textarea" style="min-height:72px">${_mrEsc(r.text)}</textarea>
+        <div class="mr-row" style="gap:.4rem;margin-top:.3rem;flex-wrap:wrap;align-items:center"><button type="button" class="mr-btn mr-btn-sm mr-btn-primary" onclick="window._mrHistSave('${D}','${I}',this)">Save wording</button><button type="button" class="mr-btn mr-btn-sm" onclick="this.closest('.mr-hist-editor').style.display='none'">Cancel</button>${r.edited?`<button type="button" class="mr-btn mr-btn-sm" onclick="window._mrHistReset('${D}','${I}',this)" title="Go back to Terra’s automatic wording">↺ Use the automatic wording</button>`:''}<span class="mr-note">What you save prints on this and every later report until you change it again.</span></div>
+        ${r.edited&&r.autoText?`<div class="mr-note" style="margin-top:.3rem">Automatic wording: <i>${_mrEsc(r.autoText.slice(0,300))}</i></div>`:''}</div>
+    </div>`; }).join('')+`</div></details>`:'<div class="mr-muted">Nothing logged on this property yet.</div>';
+};
+window._mrHistEdit=function(btn){ const row=btn.closest('.mr-hist-row'); const e=row&&row.querySelector('.mr-hist-editor'); if(!e) return; const open=e.style.display==='none'; e.style.display=open?'':'none'; if(open){ const ta=e.querySelector('textarea'); if(ta) ta.focus(); } };
+window._mrHistSave=async function(dealId,actId,btn){
+  const row=btn.closest('.mr-hist-row'); const ta=row&&row.querySelector('textarea'); if(!ta) return; const txt=ta.value.replace(/\s+/g,' ').trim();
+  if(!txt){ showToast('Type the wording to print — or use Hide to keep this entry off the report','warning'); return; }
+  const done=elcBusy(btn,'Saving…');
+  try{ await _fbFns.updateDoc(_fbFns.doc(_fbDb,'deals',dealId,'activities',actId),{reportText:txt, reportTextBy:currentUser?.uid||'', reportTextByName:currentUser?.name||currentUser?.email||'', reportTextAt:Date.now()});
+    showToast('Saved — this wording prints from now on','success'); await window._mrHistLoad(dealId); }
+  catch(e){ console.warn('[mr] hist save',e); showToast('Could not save: '+(e.message||e),'error'); done(); }
+};
+window._mrHistReset=async function(dealId,actId,btn){
+  const done=elcBusy(btn,'…');
+  try{ await _fbFns.updateDoc(_fbFns.doc(_fbDb,'deals',dealId,'activities',actId),{reportText:'', reportTextBy:'', reportTextByName:'', reportTextAt:Date.now()}); await window._mrHistLoad(dealId); }
+  catch(e){ console.warn('[mr] hist reset',e); showToast('Could not reset: '+(e.message||e),'error'); done(); }
+};
+window._mrHistHide=async function(dealId,actId,hide,btn){
+  const done=elcBusy(btn,'…');
+  try{ await _fbFns.updateDoc(_fbFns.doc(_fbDb,'deals',dealId,'activities',actId),{reportHidden:!!hide, reportHiddenBy:currentUser?.uid||'', reportHiddenAt:Date.now()}); await window._mrHistLoad(dealId); }
+  catch(e){ console.warn('[mr] hide',e); showToast('Could not update: '+(e.message||e),'error'); done(); }
+};
+window._mrHistMove=async function(fromId,actId,sel){
+  const toId=sel.value; if(!toId) return; const to=allDeals.find(d=>d.id===toId), from=allDeals.find(d=>d.id===fromId); if(!to||!from) return;
+  if(!(await elcConfirm('Move this entry to “'+_mrDealName(to)+'”? It will stop printing on “'+_mrDealName(from)+'” and show on the other property’s notes instead.',{title:'Move entry',okLabel:'Move'}))){ sel.value=''; return; }
+  const {doc,getDoc,setDoc,updateDoc}=_fbFns;
+  try{
+    const ref=doc(_fbDb,'deals',fromId,'activities',actId); const snap=await getDoc(ref); if(!snap.exists()) throw new Error('entry not found');
+    const data=snap.data(); const copy={...data, reportHidden:false, movedFrom:fromId, movedAt:Date.now(), movedBy:currentUser?.uid||''}; delete copy.movedTo;
+    await setDoc(doc(_fbDb,'deals',toId,'activities',actId), copy);
+    await updateDoc(ref,{reportHidden:true, movedTo:toId, movedAt:Date.now(), movedBy:currentUser?.uid||''});
+    // an offer the nightly job created from this same email moves too
+    const tid=data.gmailThreadId; const lois=Array.isArray(from.lois)?from.lois:[];
+    const off=tid?lois.find(l=>l&&l.aiCreated&&l.gmailThreadId===tid):null;
+    if(off){ await Store.updateDeal(fromId,{lois:lois.filter(l=>l!==off)}); const tl=Array.isArray(to.lois)?to.lois.slice():[]; if(!tl.some(l=>l&&l.gmailThreadId===tid)) tl.push({...off, needsVerification:true, reportInclude:false}); await Store.updateDeal(toId,{lois:tl}); }
+    showToast('Moved to '+_mrDealName(to)+(off?' (with its offer)':''),'success');
+    await window._mrHistLoad(fromId);
+  }catch(e){ console.warn('[mr] move',e); showToast('Could not move: '+(e.message||e),'error'); sel.value=''; }
+};
+/* § 2b · an offer's "Print on the owner’s report" switch — the chip and dimming follow the box; the value is saved with the draft (reportInclude on deals/{id}.lois[]) */
+window._mrOfferIncToggle=function(cb){ const row=cb.closest('.mr-offer'); if(!row) return; const chip=row.querySelector('.mr-offer-off'); if(chip) chip.style.display=cb.checked?'none':''; row.style.opacity=cb.checked?'':'.65'; };
+
 window._mrLetterMode=function(m){ const c=m==='custom', ai=m==='ai'; const d=document.getElementById('mr-letter-default'), e=document.getElementById('mr-letter-custom'), a=document.getElementById('mr-letter-ai'); if(d) d.style.display=(c||ai)?'none':''; if(e) e.style.display=c?'':'none'; if(a) a.style.display=ai?'':'none';
   if(ai){ const ta=document.getElementById('mr-ed-ailetter'); if(ta&&!ta.value.trim()) window._mrAiLetterRedo(document.getElementById('mr-ai-letter-btn')); }   // AILETTER-20261023
   if(c){ const t=document.getElementById('mr-ed-letter'); if(t&&!t.value.trim()){ t.value=_mrLetterFor(window._mrState.editor?.ym||window._mrState.month)||''; } } };
@@ -49631,7 +49905,7 @@ const MR_TRAFFIC_KEYS=['siteVisits','uniqueVisitors','docsViewed','casSigned','g
    PDF reuses further down the page (eb, T, since, act, social, emailsSent …) — exactly the formulas the PDF used before. */
 function _mrTileCalc(ctx){
   const d=ctx.deal||{}, rep=ctx.rep||{}, T=ctx.traffic||rep.traffic||{}; const rng=_mrMonthRange(ctx.ym);
-  const offers=(Array.isArray(d.lois)&&d.lois.length)?d.lois.length:(d.loiBuyer?1:0);
+  const offers=(Array.isArray(d.lois)&&d.lois.length)?d.lois.filter(l=>l&&l.reportInclude!==false).length:(d.loiBuyer?1:0);   // MRNOTES-20261029 — offers taken off the report don't count
   const viewsParts=[T.siteVisits,T.totalCommercialViews,T.loopnetViews,T.crexiViews,T.gaSessions].filter(v=>v!=null&&v!=='');
   const totalViews=T.totalViews!=null?Number(T.totalViews):(viewsParts.length?viewsParts.reduce((a,b)=>a+Number(b),0):null);
   const eb=(rep.emailBlasts||[]).filter(r=>r.title||r.date);
@@ -49648,7 +49922,7 @@ function _mrTileCalc(ctx){
   const fmtN=v=> v==null?'—':Number(v).toLocaleString('en-US');
   const num=v=>(v==null||v==='')?null:Number(v);
   const auto={
-    offers: {n:offers,     cap:'since listing signed'},
+    offers: {n:offers,     cap:''},   // MRNOTES-20261029 — no "since listing signed" line under the number
     views:  {n:totalViews, cap:(viewsParts.length||T.totalViews!=null)?'all listing sites, this month':'traffic not yet entered'},
     emails: {n:emailsSent, cap:emailOpens!=null?fmtN(emailOpens)+' opened':'e-blast recipients this month'},
     leads:  {n:leads,      cap:'named inquiries this month'},
@@ -50102,7 +50376,7 @@ async function _mrBuildPdf(A){
   }
   /* ---- 8 · Property notes ---- */
   y=R.section('Property Notes',y,170);
-  y=R.para('Correspondence, calls, meetings, notes and marketing activity logged on the Property since the listing was signed'+(since?' ('+_mrFmtDateLong(since)+')':'')+', newest first.',R.M,y+4,R.W-2*R.M,{size:10.5})+10;
+  y=R.para('Correspondence, calls, meetings, notes and marketing activity logged on the Property.',R.M,y+4,R.W-2*R.M,{size:10.5})+10;   // MRNOTES-20261029 — no "since the listing was signed (date), newest first"
   if(A.history.length){ y=R.table({startY:y, head:[['Date','Type','By','Note']], body:A.history.map(r=>[r.date, r.type.replace('_',' '), r.by, r.text.length>420?r.text.slice(0,417)+'…':r.text]), columnStyles:{0:{cellWidth:56},1:{cellWidth:56},2:{cellWidth:86}}, styles:{font,fontSize:8.5,textColor:MR_INK,cellPadding:4,lineColor:MR_LINE,lineWidth:{bottom:0.8},overflow:'linebreak'}, contHeading:'Property Notes (cont.)'})+18; }
   else { y=R.para('No history has been logged on this property yet.',R.M,y,R.W-2*R.M,{size:10.5,color:MR_GREY})+18; }
   if(false&&A.tasks.length){ /* MRNOTASKS-20261008: tasks are internal and never print */ if(y>R.H-160){ y=R.newPage()+30; } R.text('Completed Tasks',R.M,y+6,{size:16,bold:true}); y=R.table({startY:y+16, head:[['Completed','Task','Completed by']], body:A.tasks.map(t=>[t.date,t.title,t.by]), columnStyles:{0:{cellWidth:70},2:{cellWidth:110}}, styles:{font,fontSize:8.5,textColor:MR_INK,cellPadding:4,lineColor:MR_LINE,lineWidth:{bottom:0.8}}, contHeading:'Completed Tasks (cont.)'}); }
@@ -50475,7 +50749,7 @@ function _mrMcWhyHtml(deal, c){
 function _mrHash(s){ let h=5381; s=String(s||''); for(let i=0;i<s.length;i++) h=((h<<5)+h+s.charCodeAt(i))|0; return (h>>>0).toString(36); }
 function _mrFingerprint(A){
   const d=A.deal||{};
-  return _mrHash(JSON.stringify({e:(A.emails||[]).map(e=>e.id).sort(), p:(A.posts||[]).map(p=>(p.ids||[]).map(i=>i.id).join('+')||_mrHash(p.message)).sort(), l:A.letter||'', s:A.signature||'', a:_mrDealAcres(d), c:_mrDealCounty(d), z:String(d.zoning||''), n:(A.history||[]).map(h=>h.id||h.text).join('|'), o:(d.lois||[]).length, tv:_mrTileOverrides(A.rep), sl:A.salutation||'', to:_mrRecipients(d).map(r=>r.email).sort()}));
+  return _mrHash(JSON.stringify({e:(A.emails||[]).map(e=>e.id).sort(), p:(A.posts||[]).map(p=>(p.ids||[]).map(i=>i.id).join('+')||_mrHash(p.message)).sort(), l:A.letter||'', s:A.signature||'', a:_mrDealAcres(d), c:_mrDealCounty(d), z:String(d.zoning||''), n:(A.history||[]).map(h=>(h.id||'')+'~'+h.text).join('|'), o:(d.lois||[]).length, tv:_mrTileOverrides(A.rep), sl:A.salutation||'', to:_mrRecipients(d).map(r=>r.email).sort()}));
 }
 async function _mrPreflight(A){
   const deal=A.deal, rep=A.rep||{}; const items=[]; const add=(sec,level,msg,extra)=>items.push({sec,level,msg,...(extra||{})});
@@ -50512,7 +50786,7 @@ async function _mrPreflight(A){
   // TILEOVR-20261028 · hand-set tiles are listed next to Terra's numbers so the approver sees exactly what was changed
   { const tl=_mrTileReviewLine(A); if(tl) add('Marketing tiles','warn',tl+'.'); else add('Marketing tiles','ok','All Marketing-at-a-Glance boxes use Terra’s numbers.'); }
   // 6 · notes — listed so the reviewer scans them
-  add('Property notes','ok',(A.history||[]).length+' entries print — scan them below; hide any that aren’t about this property in ✏️ Edit.');
+  { const nEd=(A.history||[]).filter(r=>r.edited).length; add('Property notes','ok',(A.history||[]).length+' entries print'+(nEd?' ('+nEd+' with hand-edited wording)':'')+' — scan them below; ✏️ Edit the wording or hide any that aren’t about this property in ✏️ Edit → § 8.'); }   // MRNOTES-20261029
   const blocks=items.filter(i=>i.level==='block');
   return {items, blocks, warns:items.filter(i=>i.level==='warn'), fp:_mrFingerprint(A)};
 }
@@ -50886,8 +51160,9 @@ function _mrCriticalDates(deal){
 window._mrOffersEditorHtml=function(deal, rep){
   const offers=_mrOffers(deal); const uc=_mrUnderContract(deal); const cds=_mrCriticalDates(deal);
   const opt=(v,cur)=>MR_OFFER_STATUSES.concat(MR_OFFER_DEAD).map(([k,l])=>`<option value="${k}" ${k===cur?'selected':''}>${l}</option>`).join('');
-  const row=(o,i)=>`<div class="mr-offer" data-i="${i}" data-id="${_mrEsc(o.id||'')}" style="border:1px solid var(--border);border-radius:12px;padding:.7rem .8rem;margin-bottom:.6rem;background:var(--surface)">
-    <div class="mr-row" style="justify-content:space-between;align-items:center;margin-bottom:.4rem"><label style="display:flex;gap:.4rem;align-items:center;font-weight:700"><input type="checkbox" data-k="reportInclude" ${o.reportInclude?'checked':''}> ${o.buyer?_mrEsc(o.buyer):'Offer '+(offers.length-i)} ${o.price?'· '+_mrFmtMoney(o.price):''}</label>
+  const row=(o,i)=>`<div class="mr-offer" data-i="${i}" data-id="${_mrEsc(o.id||'')}" style="border:1px solid var(--border);border-radius:12px;padding:.7rem .8rem;margin-bottom:.6rem;background:var(--surface);${o.reportInclude?'':'opacity:.65'}">
+    <div class="mr-row" style="justify-content:space-between;align-items:center;margin-bottom:.4rem;flex-wrap:wrap;gap:.5rem"><div style="font-weight:700">${o.buyer?_mrEsc(o.buyer):'Offer '+(offers.length-i)} ${o.price?'· '+_mrFmtMoney(o.price):''}</div>
+      <label style="display:flex;gap:.4rem;align-items:center;font-weight:600;font-size:.8rem;cursor:pointer" title="Clear this to keep the offer off the owner's report — e.g. an old or declined offer"><input type="checkbox" data-k="reportInclude" ${o.reportInclude?'checked':''} onchange="window._mrOfferIncToggle(this)"> Print on the owner’s report</label><span class="mr-offer-off" style="${o.reportInclude?'display:none;':''}font-size:.72rem;font-weight:700;color:#991b1b;background:#fee2e2;border-radius:999px;padding:.15rem .55rem">🚫 Off the report — stays off every month until re-ticked</span>   <!-- MRNOTES-20261029 -->
       <span class="mr-row" style="gap:.4rem">${o.fileUrl?`<a class="mr-btn mr-btn-sm" href="${_mrEsc(o.fileUrl)}" target="_blank" rel="noopener">📄 ${_mrEsc(o.fileName||'LOI')}</a><button class="mr-btn mr-btn-sm mr-btn-teal" onclick="window._mrOfferExtract(this,${i})">✨ Fill terms from the LOI</button>`:''}</span></div>
     ${o.needsVerification?`<div class="mr-note" style="background:#fff7e0;border:1px solid #e8c766;border-radius:8px;padding:.35rem .55rem;margin-bottom:.45rem">⚠️ Created automatically from an email${o.gmailSubject?` (“${_mrEsc(o.gmailSubject)}”)`:''}. Check the price and terms against the offer, then save — saving marks it verified.</div>`:''}
     <div class="mr-grid3">
@@ -50908,7 +51183,7 @@ window._mrOffersEditorHtml=function(deal, rep){
   return `<div class="mr-sec"><h3>2b · Offers &amp; contract (printed on their own page — newest first)</h3>
     ${uc&&cds.length?`<div class="mr-note" style="margin-bottom:.6rem"><b>Critical dates from the deal card</b> (edit them on the deal): ${cds.map(c=>_mrEsc(c.label)+' '+_mrFmtDate(c.date)).join(' · ')}</div>`:(uc?'<div class="mr-note" style="margin-bottom:.6rem;color:#b45309">Under contract but no critical dates on the deal card yet — add them on the deal so they print.</div>':'')}
     <div id="mr-offers">${offers.length?offers.map(row).join(''):'<div class="mr-muted">No LOIs or contracts on this deal yet. Add offers on the deal card (LOI stage) and they will appear here.</div>'}</div>
-    <div class="mr-note">Terms you fill in here are saved on the deal’s LOI entries when you save the draft, so they carry forward every month.</div>
+    <div class="mr-note">Terms you fill in here are saved on the deal’s LOI entries when you save the draft, so they carry forward every month. Clear <b>Print on the owner’s report</b> on an offer that shouldn’t appear (old, declined, withdrawn) — it stays off every month’s report and out of the Offers tile until re-ticked.</div>
   </div>`;
 };
 // Read the offer rows back and merge onto the deal's lois[] (returns null when nothing to write).
