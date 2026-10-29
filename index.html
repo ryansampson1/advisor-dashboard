@@ -26726,7 +26726,7 @@ function viewTasks(){
   const canManage = t => isAdmin || isStaffView() || t.createdBy===uid;
   const taskCard = (t, done=false, hideAddr=false) => (t=(window._ffView?window._ffView(t):t), `
     <div class="bg-white rounded-xl border p-4 flex gap-3 items-start ${urgency(t)} transition">
-      <button onclick="${(!done&&window._mwIsReviewTask&&window._mwIsReviewTask(t))?`window._mwTaskAnswer('${t.id}','respond')`:`toggleTask('${t.id}','${done?'pending':'complete'}')`}"
+      <button onclick="${(!done&&window._mwIsReviewTask&&window._mwIsReviewTask(t))?`window._mwTaskAnswer('${t.id}','respond')`:(!done&&window._caIsTask&&window._caIsTask(t))?`window._caOpenCreate('${t.id}')`:`toggleTask('${t.id}','${done?'pending':'complete'}')`}"
         class="mt-0.5 shrink-0 w-5 h-5 rounded border-2 ${done?'bg-blue-500 border-blue-500 text-white flex items-center justify-center':'border-gray-300 hover:border-blue-400'} text-xs">
         ${done?'✓':''}
       </button>
@@ -26744,6 +26744,7 @@ function viewTasks(){
 })()}</div>`:''}
         ${(!done&&window._ffPanel)?window._ffPanel(t):''}<!-- FFTASK-20261026 -->
         ${(window._mwIsReviewTask&&window._mwIsReviewTask(t))?window._mwTaskButtons(t):''}<!-- MWTASK-20261016 -->
+        ${(window._caIsTask&&window._caIsTask(t))?window._caTaskButtons(t):''}<!-- CARDASK-20261029 -->
         ${(t.autoCompletedEmailUrl||t.emailUrl||t.invoiceDealId||t.gmailUrl||t.attachmentUrl||t.approvePaymentDealId||(window._spIsSocialTask&&window._spIsSocialTask(t))||(window._mrIsAssetsTask&&window._mrIsAssetsTask(t))||(window._mrIsBlastTask&&window._mrIsBlastTask(t)))?`<div class="flex gap-2 mt-2 flex-wrap">
           ${(window._spIsSocialTask&&window._spIsSocialTask(t))?`<button onclick="window._spOpen('${t.dealId}','${t.id}')" class="text-xs font-semibold px-2.5 py-1 rounded-lg text-white" style="background:#0A66C2">📣 Compose post</button>`:''}
           ${(window._mrIsAssetsTask&&window._mrIsAssetsTask(t))?`<button onclick="window._mrOpenAssets('${t.dealId}','${t.id}')" class="text-xs font-semibold px-2.5 py-1 rounded-lg text-white" style="background:#DA291C">📎 Upload report assets</button>`:''}
@@ -40905,6 +40906,7 @@ window.openDealModal = (id, defaultStage) => {
 };
 window.closeDealModal = () => {
   document.getElementById('deal-modal').classList.add('hidden');
+  window._caPending=null;   // CARDASK-20261029 — a New Deal form opened from a "new card?" task was closed (saved forms clear this themselves first)
   // Clear any in-memory files staged for a NEW deal that was cancelled without saving.
   // Without this, a cancelled upload would silently attach to the NEXT new deal created.
   // Files for EXISTING deals are left intact so they survive an accidental modal close.
@@ -41698,6 +41700,7 @@ window.handleDealSubmit = async ev => {
     const newId=await Store.createDeal(data);
     const newDeal={...data,id:newId};
     if(!allDeals.find(d=>d.id===newId)) allDeals.push(newDeal);
+    if(window._caPending&&window._caAfterCreate) window._caAfterCreate(newDeal).catch(e=>console.warn('[cardask]',e));   // CARDASK-20261029 — card created from a "new card?" task
     if(_parcelDupMatch) _notifyParcelOwner(_parcelDupMatch, newDeal);   // warn + notify original advisor
     fireAutomations(newDeal,null);
     _fireMentorStageTask(newDeal, null, stage);
@@ -51057,9 +51060,10 @@ window._mwLoad=async function(force,btn){
     const st=window._mrState; const {collection,getDocs,query,where}=_fbFns;
     if(force||!st.mwRows){ const snap=await getDocs(query(collection(_fbDb,'emailReview'),where('status','==','pending'))); st.mwRows=snap.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>(b.emailDate||0)-(a.emailDate||0)); }
     const all=_mrSeesAll(); const me=String(currentUser?.email||'').toLowerCase(); const byId={}; (typeof allDeals!=='undefined'?allDeals:[]).forEach(d=>{ byId[d.id]=d; });
-    const mine=st.mwRows.filter(r=>all||String(r.mailbox||'').toLowerCase()===me||(r.candidates||[]).some(c=>byId[c.id]&&_mrIsMyDeal(byId[c.id])));
+    const isBuyerRow=r=>r.kind==='card_ask'||r.category==='buyer_rep'||(r.suggestedDealId&&byId[r.suggestedDealId]&&_mwSideOf(byId[r.suggestedDealId])==='buyer');   // MRNOBUYER-20261029 — buyer-rep never shows in the Monthly Reports tab (the advisor still answers it from the task); CARDASK-20261029 asks are answered from their task, not here
+    const mine=st.mwRows.filter(r=>!isBuyerRow(r)).filter(r=>all||String(r.mailbox||'').toLowerCase()===me||(r.candidates||[]).some(c=>byId[c.id]&&_mrIsMyDeal(byId[c.id])));
     if(!mine.length){ box.innerHTML='Nothing waiting — every email the nightly check found was either filed on its card or ignored.'; return; }
-    const optsFor=r=>_mwCardOptions(r);
+    const optsFor=r=>_mwCardOptions(r,undefined,{noBuyer:true});   // MRNOBUYER-20261029
     box.innerHTML=`<div class="mr-note" style="margin:.1rem 0 .3rem">${mine.length} waiting${all?'':' on your cards'}. “Log it” files the email on the card you pick and every later email in that chain files itself.</div>`+mine.slice(0,40).map(r=>{
       const when=r.emailDate?new Date(r.emailDate).toLocaleDateString('en-US',{month:'short',day:'numeric'}):'';
       const o=r.offer&&(r.category==='offer'||r.category==='buyer_rep')&&r.offer.price?` · ${_mrFmtMoney(r.offer.price)}`:'';
@@ -51074,13 +51078,13 @@ window._mwLoad=async function(force,btn){
   }catch(e){ console.warn('[mw] load',e); box.textContent='Could not load the review queue ('+(e.message||e)+').'; } finally{ done(); }
 };
 /* ---- shared: file a held email on a card / settle it (used by the panel and by the advisor's task) ---- */
-function _mwCardOptions(r, selected){
-  const all=_mrSeesAll(); const byId={}; (typeof allDeals!=='undefined'?allDeals:[]).forEach(d=>{ byId[d.id]=d; });
+function _mwCardOptions(r, selected, opts){
+  opts=opts||{}; const all=_mrSeesAll(); const byId={}; (typeof allDeals!=='undefined'?allDeals:[]).forEach(d=>{ byId[d.id]=d; });
   const live=_mwLiveCards().filter(d=>all||_mrIsMyDeal(d)).sort((a,b)=>_mrDealName(a).localeCompare(_mrDealName(b)));
-  const sug=((r&&r.candidates)||[]).filter(c=>byId[c.id]); const sel=selected!=null?selected:(r&&r.suggestedDealId);
+  const sug=((r&&r.candidates)||[]).filter(c=>byId[c.id]&&!(opts.noBuyer&&_mwSideOf(byId[c.id])==='buyer')); const sel=selected!=null?selected:(r&&r.suggestedDealId);   // MRNOBUYER-20261029
   const opt=(d,label)=>`<option value="${_mrEsc(d.id)}"${d.id===sel?' selected':''}>${_mrEsc(label||_mrDealName(d))}</option>`;
   return (sug.length?`<optgroup label="Suggested">${sug.map(c=>opt(byId[c.id],_mrDealName(byId[c.id])+((c.datapoints||[]).length?' — '+c.datapoints.map(_mwDpText).join(', '):''))).join('')}</optgroup>`:'')
-    +[['seller','Seller listings'],['buyer','Buyer-rep cards'],['proposal','Prospects & proposals']].map(([k,l])=>{ const ds=live.filter(d=>_mwSideOf(d)===k&&!sug.some(c=>c.id===d.id)); return ds.length?`<optgroup label="${l}">${ds.map(d=>opt(d)).join('')}</optgroup>`:''; }).join('');
+    +[['seller','Seller listings'],['buyer','Buyer-rep cards'],['proposal','Prospects & proposals']].filter(([k])=>!(opts.noBuyer&&k==='buyer')).map(([k,l])=>{ const ds=live.filter(d=>_mwSideOf(d)===k&&!sug.some(c=>c.id===d.id)); return ds.length?`<optgroup label="${l}">${ds.map(d=>opt(d)).join('')}</optgroup>`:''; }).join('');
 }
 async function _mwSiblings(r){   // other held emails from the same chain
   if(!r||!r.rootId) return [];
@@ -51141,6 +51145,129 @@ window._mwDismiss=async function(id,btn){
   catch(e){ console.warn('[mw] dismiss',e); showToast('Could not dismiss: '+(e.message||e),'error'); done(); }
 };
 /* ---- 📋 the advisor's task: answer Yes / No / Respond right in the task ---- */
+/* ---- CARDASK-20261029: "🗂️ New card for X?" tasks — the nightly email check found a property email with no card and asks the
+   advisor (the ask is an emailReview row with kind:'card_ask', so the existing rules + chain loader cover it). ✅ Yes → the normal New Deal form, prefilled from the email; saving files the email on the new card and later emails in
+   that chain follow it. ❌ No → Terra never asks about that property again. 💬 Already have a card → pick it; the email is filed
+   there and the name from the email is learned as an emailAlias so the matcher finds it next time. ---- */
+window._caIsTask=t=>!!(t&&t.taskType==='card_ask');
+async function _caLoad(t){ if(!t||!t.cardAskId) return null; const {doc,getDoc}=_fbFns; const s=await getDoc(doc(_fbDb,'emailReview',t.cardAskId)); return s.exists()?{id:s.id,...s.data()}:null; }
+const _caSideStage={seller:'Listing',buyer:'Buyer Opportunities',proposal:'Prospect',unknown:'Prospect'};
+window._caTaskButtons=function(t){
+  const b='text-xs font-semibold px-2.5 py-1 rounded-lg';
+  if(t.status==='complete'||t.status==='completed'){
+    const d=t.caDealId&&(allDeals||[]).find(x=>x.id===t.caDealId);
+    const a=t.caAnswer==='yes'?'✅ Card created'+(d?' — '+_mrDealName(d):''):t.caAnswer==='no'?'❌ No card needed':t.caAnswer==='existing'?'💬 Filed on the existing card'+(d?' — '+_mrDealName(d):''):'';
+    return a?`<div class="text-xs text-gray-600 mt-1">${_mrEsc(a)}${d?` · <a class="text-blue-500 hover:underline cursor-pointer" onclick="openPropertyDetail('${d.id}')">open card</a>`:''}</div>`:'';
+  }
+  return `<div class="flex gap-2 mt-2 flex-wrap" role="group" aria-label="Does this property need a card?">
+    <button onclick="window._caOpenCreate('${t.id}',this)" class="${b} text-white" style="background:#0f766e;min-height:32px">✅ Yes — create the card</button>
+    <button onclick="window._caOpenExisting('${t.id}')" class="${b} border border-gray-300 text-gray-700 bg-white" style="min-height:32px">💬 Already have a card</button>
+    <button onclick="window._caAnswer('${t.id}','no',this)" class="${b} border border-gray-300 text-gray-700 bg-white" style="min-height:32px">❌ No</button>
+    ${t.mwEmailUrl?`<a href="${_mrEsc(t.mwEmailUrl)}" target="_blank" rel="noopener" class="${b} border border-gray-300 text-gray-700 bg-white inline-block" style="min-height:32px">📧 Open email</a>`:''}
+  </div>`;
+};
+async function _caSettle(ask, fields){ const {doc,updateDoc}=_fbFns; await updateDoc(doc(_fbDb,'emailReview',ask.id),{reviewedBy:currentUser?.uid||'',reviewedAt:Date.now(),answeredBy:currentUser?.uid||'',answeredByName:currentUser?.name||currentUser?.email||'',answeredAt:Date.now(),...fields}); }
+/* file the ask's email on a card as a history-only email note (an advisor can show it on the report from ✏️ Edit → § 8),
+   teach the matcher the name used in the email, and mark the ask so the nightly check makes the rest of the chain follow the card */
+async function _caFileOn(ask, dealId, status){
+  const deal=(allDeals||[]).find(d=>d.id===dealId); if(!deal) throw new Error('That card is no longer available');
+  const {doc,setDoc}=_fbFns; const side=_mwSideOf(deal);
+  const act={ type:'email', source:'mailwatch-cardask', mwCategory:'correspondence', mwSummary:ask.summary||'', body:ask.summary||ask.subject||'', direction:ask.direction||'',
+    mwSide:side, mwDatapoints:['card created from this email'], rfcId:ask.rfcId||'', mwRootId:ask.rootId||'', gmailId:ask.gmailId||'', gmailThreadId:ask.gmailThreadId||'', gmailSubject:ask.subject||'',
+    gmailDate:ask.emailDate||'', gmailFrom:ask.direction==='out'?ask.mailbox:(ask.counterpartyEmail||''), counterpartyName:ask.counterpartyName||'', counterpartyCompany:ask.counterpartyCompany||'', mailbox:ask.mailbox||'',
+    createdBy:currentUser?.uid||'', createdByName:currentUser?.name||currentUser?.displayName||'', cardAskId:ask.id, createdAt:ask.emailDate||Date.now(), reportHidden:true, reportHiddenBy:'mailwatch' };
+  await setDoc(doc(_fbDb,'deals',dealId,'activities','ca_'+String(ask.id).replace(/^ca_/,'')),act);
+  try{   // learn the wording the email used, so the matcher finds this card next time
+    const have=new Set((Array.isArray(deal.emailAliases)?deal.emailAliases:[]).map(x=>String(x).trim().toLowerCase()));
+    const own=new Set([deal.projectName,deal.propertyAddress,deal.address].filter(Boolean).map(x=>String(x).trim().toLowerCase()));
+    const add=[ask.name,ask.address].map(x=>String(x||'').trim()).filter(x=>x.length>=6&&!have.has(x.toLowerCase())&&!own.has(x.toLowerCase()));
+    if(add.length){ const next=[...(Array.isArray(deal.emailAliases)?deal.emailAliases:[]),...add].slice(0,20); await Store.updateDeal(dealId,{emailAliases:next}); deal.emailAliases=next; }
+  }catch(e){ console.warn('[cardask] alias',e); }
+  await _caSettle(ask,{status:status==='created'?'approved':'merged',caOutcome:status,dealId});   // approved / merged + dealId = the nightly check makes later emails in this chain follow the card
+}
+window._caAnswer=async function(taskId,ans,btn){
+  const t=(typeof allTasks!=='undefined'?allTasks:[]).find(x=>x.id===taskId); if(!t) return;
+  const done=btn?elcBusy(btn,'…'):()=>{};
+  try{
+    const ask=await _caLoad(t);
+    if(ask&&ask.status!=='pending'){ await _mwCloseTask(taskId,{caAnswer:ask.caOutcome==='declined'?'no':ask.caOutcome==='created'?'yes':'existing',caDealId:ask.dealId||''}); showToast('This one was already answered — task closed','info'); _mwRerenderTasks(t); return; }
+    if(ans==='no'){ if(ask) await _caSettle(ask,{status:'dismissed',caOutcome:'declined'}); await _mwCloseTask(taskId,{caAnswer:'no'}); showToast('Got it — no card. Terra won’t ask about this property again.','success'); }
+    _mwRerenderTasks(t);
+  }catch(e){ console.warn('[cardask] answer',e); showToast('Could not save your answer: '+(e.message||e),'error'); } finally{ done(); }
+};
+function _caPickStage(ask){   // which column does the new card start in? (the New Deal form has no stage picker of its own)
+  return new Promise(resolve=>{
+    const def=_caSideStage[ask.side]||'Prospect'; const stages=(typeof STAGES!=='undefined'&&STAGES.length?STAGES:DEFAULT_STAGES).filter(s=>!/^closed/i.test(s));
+    const ov=document.createElement('div'); ov.id='ca-stage'; ov.className='fixed inset-0 z-50 flex items-center justify-center'; ov.style.background='rgba(0,0,0,.45)';
+    ov.innerHTML=`<div class="bg-white rounded-xl shadow-xl p-5 w-full" style="max-width:460px;margin:16px" role="dialog" aria-modal="true" aria-labelledby="ca-st-h">
+      <h3 id="ca-st-h" class="text-base font-semibold text-gray-800">🗂️ New card — ${_mrEsc(ask.name||'property')}</h3>
+      <div class="text-xs text-gray-500 mt-1">${_mrEsc(ask.summary||ask.subject||'')}</div>
+      <label class="block text-xs font-semibold text-gray-600 mt-3" for="ca-st-sel">Start the card in</label>
+      <select id="ca-st-sel" class="w-full mt-1" style="width:100%;font-size:16px;min-height:44px;border:1px solid #d1d5db;border-radius:8px;padding:.4rem .5rem">${stages.map(s=>`<option value="${_mrEsc(s)}"${s===def?' selected':''}>${_mrEsc(s)}</option>`).join('')}</select>
+      <div class="text-xs text-gray-500 mt-2">The email suggests ${_mrEsc(ask.side==='buyer'?'a buyer-rep assignment':ask.side==='seller'?'a seller listing':ask.side==='proposal'?'a listing proposal':'— side unclear')}. Next you get the normal New Deal form, filled in from the email — check it and save.</div>
+      <div class="flex justify-end gap-2 mt-4">
+        <button class="px-3 py-2 text-sm rounded-lg border border-gray-300" style="min-height:44px" id="ca-st-x">Cancel</button>
+        <button class="px-3 py-2 text-sm rounded-lg text-white font-semibold" style="background:#0f766e;min-height:44px" id="ca-st-go">Continue</button>
+      </div></div>`;
+    const close=v=>{ ov.remove(); resolve(v); };
+    ov.querySelector('#ca-st-x').onclick=()=>close(null); ov.querySelector('#ca-st-go').onclick=()=>close(ov.querySelector('#ca-st-sel').value);
+    ov.addEventListener('click',e=>{ if(e.target===ov) close(null); });
+    document.body.appendChild(ov); setTimeout(()=>{ const s=ov.querySelector('#ca-st-sel'); if(s) s.focus(); },30);
+  });
+}
+window._caOpenCreate=async function(taskId,btn){
+  const t=(typeof allTasks!=='undefined'?allTasks:[]).find(x=>x.id===taskId); if(!t) return;
+  const done=btn?elcBusy(btn,'…'):()=>{};
+  try{
+    const ask=await _caLoad(t); if(!ask){ showToast('Could not load the email details for this task','error'); return; }
+    if(ask.status!=='pending'){ await _mwCloseTask(taskId,{caAnswer:ask.caOutcome==='declined'?'no':ask.caOutcome==='created'?'yes':'existing',caDealId:ask.dealId||''}); showToast('This one was already answered — task closed','info'); _mwRerenderTasks(t); return; }
+    const stage=await _caPickStage(ask); if(!stage) return;
+    window._caPending={taskId,ask};
+    openDealModal(null,stage);
+    const set=(id,v)=>{ const el=document.getElementById(id); if(el&&v!=null&&v!=='') el.value=v; };
+    set('f-project-name',ask.name); set('f-address',[ask.address,ask.city].filter(Boolean).join(', ')||ask.name); set('f-county',ask.county); set('f-acreage',ask.acreage);
+    if(ask.side==='seller'&&ask.price) set('f-price',ask.price);
+    const rep=document.getElementById('f-representation'); if(rep) rep.value=ask.side==='buyer'?'buyer':'seller';
+    set('f-notes','Created from an email'+(ask.subject?' — “'+ask.subject+'”':'')+(ask.summary?'\n'+ask.summary:''));
+    showToast('Check the details and save — the email will be filed on the new card','info',6000);
+  }catch(e){ console.warn('[cardask] create',e); showToast('Could not open the form: '+(e.message||e),'error'); } finally{ done(); }
+};
+window._caAfterCreate=async function(newDeal){   // called by the deal form right after Store.createDeal
+  const p=window._caPending; window._caPending=null; if(!p||!newDeal||!newDeal.id) return;
+  try{ await _caFileOn(p.ask,newDeal.id,'created'); await _mwCloseTask(p.taskId,{caAnswer:'yes',caDealId:newDeal.id,dealId:newDeal.id,dealAddress:_mrDealName(newDeal)}); showToast('Card created and the email filed on it','success'); const t=(typeof allTasks!=='undefined'?allTasks:[]).find(x=>x.id===p.taskId); _mwRerenderTasks(t); }
+  catch(e){ console.warn('[cardask] after create',e); showToast('Card created, but the email could not be filed on it: '+(e.message||e),'warning',7000); }
+};
+window._caOpenExisting=async function(taskId){
+  const t=(typeof allTasks!=='undefined'?allTasks:[]).find(x=>x.id===taskId); if(!t) return;
+  let ask=null; try{ ask=await _caLoad(t); }catch(e){}
+  if(!ask){ showToast('Could not load the email details for this task','error'); return; }
+  const ov=document.createElement('div'); ov.id='ca-existing'; ov.className='fixed inset-0 z-50 flex items-center justify-center'; ov.style.background='rgba(0,0,0,.45)';
+  ov.innerHTML=`<div class="bg-white rounded-xl shadow-xl p-5 w-full" style="max-width:520px;margin:16px;max-height:90vh;overflow:auto" role="dialog" aria-modal="true" aria-labelledby="ca-ex-h">
+    <h3 id="ca-ex-h" class="text-base font-semibold text-gray-800">💬 Which card is this?</h3>
+    <div class="text-xs text-gray-500 mt-1">${_mrEsc(ask.subject||t.title)}${ask.summary?' — '+_mrEsc(ask.summary):''}</div>
+    <label class="block text-xs font-semibold text-gray-600 mt-3" for="ca-ex-card">File this email on</label>
+    <select id="ca-ex-card" class="mr-select w-full mt-1" style="width:100%;font-size:16px;min-height:44px;border:1px solid #d1d5db;border-radius:8px;padding:.4rem .5rem"><option value="">Choose card…</option>${_mwCardOptions({candidates:[],suggestedDealId:''},'')}</select>
+    <div class="text-xs text-gray-500 mt-2">Terra also learns “${_mrEsc(ask.name||'')}” as a name for that card, so the next email like this files itself.</div>
+    <div class="flex justify-end gap-2 mt-4">
+      <button class="px-3 py-2 text-sm rounded-lg border border-gray-300" style="min-height:44px" onclick="document.getElementById('ca-existing').remove()">Cancel</button>
+      <button class="px-3 py-2 text-sm rounded-lg text-white font-semibold" style="background:#0f766e;min-height:44px" onclick="window._caSubmitExisting('${t.id}',this)">File it there</button>
+    </div></div>`;
+  ov.addEventListener('click',e=>{ if(e.target===ov) ov.remove(); });
+  document.body.appendChild(ov); setTimeout(()=>{ const s=document.getElementById('ca-ex-card'); if(s) s.focus(); },30);
+};
+window._caSubmitExisting=async function(taskId,btn){
+  const t=(typeof allTasks!=='undefined'?allTasks:[]).find(x=>x.id===taskId); if(!t) return;
+  const dealId=document.getElementById('ca-ex-card').value; if(!dealId){ showToast('Pick a card','warning'); return; }
+  const done=elcBusy(btn,'Saving…');
+  try{
+    const ask=await _caLoad(t);
+    if(ask&&ask.status==='pending') await _caFileOn(ask,dealId,'merged');
+    const d=(allDeals||[]).find(x=>x.id===dealId);
+    await _mwCloseTask(taskId,{caAnswer:'existing',caDealId:dealId,dealId,dealAddress:d?_mrDealName(d):''});
+    const ov=document.getElementById('ca-existing'); if(ov) ov.remove(); showToast('Filed on '+(d?_mrDealName(d):'the card'),'success'); _mwRerenderTasks(t);
+  }catch(e){ console.warn('[cardask] existing',e); showToast('Could not file it: '+(e.message||e),'error'); done(); }
+};
+
 window._mwIsReviewTask=t=>!!(t&&t.taskType==='email_review');
 window._mwTaskButtons=function(t){
   if(t.status==='complete'||t.status==='completed'){
@@ -51443,7 +51570,7 @@ window._mrDrawOffers=function(R,doc,font,A,y){
   const d=A.deal; const offers=_mrOffers(d).filter(o=>o.reportInclude); const uc=_mrUnderContract(d); const cds=uc?_mrCriticalDates(d):[];
   if(!offers.length && !cds.length) return y;
   y=R.newPage(); y=R.title(uc?'Contract & Offers':'Offers Received',y+30);
-  y=R.para(uc?'The Property is under contract. The critical dates below come from the executed agreement; every offer received is summarized underneath, newest first.':'Every letter of intent or contract received on the Property, newest first, with the terms that matter to you and what each would net after commission.',R.M,y+4,R.W-2*R.M,{size:10.5})+10;
+  y=R.para(uc?'The Property is under contract. The critical dates below come from the executed agreement; every offer received is summarized underneath, newest first.':'Every letter of intent or contract received on the Property, newest first, with the price and timeline of each.'   /* OFFERNET-20261029 */,R.M,y+4,R.W-2*R.M,{size:10.5})+10;
   if(cds.length){
     R.text('CRITICAL DATES',R.M,y+6,{size:9,bold:true,color:MR_GREY}); R.line(R.M,y+12,R.W-R.M,y+12,MR_TEAL,1.5); y+=18;
     y=R.table({startY:y, head:[['Milestone','Date','Status']], body:cds.map(c=>[c.label,_mrFmtDateLong(c.date), c.days<0?'Passed':(c.days===0?'Today':'In '+c.days+' day'+(c.days===1?'':'s'))]), columnStyles:{0:{cellWidth:230},1:{cellWidth:150}}, styles:{font,fontSize:9.5,textColor:MR_INK,cellPadding:5,lineColor:MR_LINE,lineWidth:{bottom:0.8}}})+16;
@@ -51451,9 +51578,11 @@ window._mrDrawOffers=function(R,doc,font,A,y){
   }
   const cw=R.W-2*R.M, pad=12; const nz=v=>(v==null||v==='')?'—':String(v);
   offers.forEach((o,idx)=>{
-    const net=_mrOfferNet(o); const dead=MR_OFFER_DEAD.some(x=>x[0]===o.status);
-    const terms=[['Date received',o.receivedAt?_mrFmtDateLong(o.receivedAt):'—'],['Deposit',o.deposit?_mrFmtMoney(o.deposit):'—'],['Due-diligence period',nz(o.ddTerms)],['Contingencies',nz(o.contingencies)],['Est. closing',o.estClose?(/^\d{4}-\d{2}-\d{2}$/.test(o.estClose)?_mrFmtDateLong(o.estClose):o.estClose):'—'],['Buyer’s broker',o.buyerBroker?o.buyerBroker:'None stated'],['Commission',o.commissionPct!=null&&o.commissionPct!==''?(o.commissionPct+'%'+(net?' ≈ '+_mrFmtMoney(net.commission):'')):'—'],['Est. net to seller',net?_mrFmtMoney(net.net)+' (before closing costs)':'—']];
-    const colW=(cw-2*pad-14)/2; const lines=terms.map(t=>R.split(t[1],colW-90,9)); const rh=Array.from({length:4},(_,r)=>Math.max(lines[r].length,lines[r+4].length)*11.5+7); const rowsH=rh.reduce((a,b)=>a+b,0)+4;
+    const dead=MR_OFFER_DEAD.some(x=>x[0]===o.status);
+    /* OFFERNET-20261029 — price + timeline only; no Commission / Est. net to seller on the owner's report */
+    const terms=[['Date received',o.receivedAt?_mrFmtDateLong(o.receivedAt):'—'],['Deposit',o.deposit?_mrFmtMoney(o.deposit):'—'],['Due-diligence period',nz(o.ddTerms)],['Contingencies',nz(o.contingencies)],['Est. closing',o.estClose?(/^\d{4}-\d{2}-\d{2}$/.test(o.estClose)?_mrFmtDateLong(o.estClose):o.estClose):'—'],['Buyer’s broker',o.buyerBroker?o.buyerBroker:'None stated']];
+    const nR=Math.ceil(terms.length/2);
+    const colW=(cw-2*pad-14)/2; const lines=terms.map(t=>R.split(t[1],colW-90,9)); const rh=Array.from({length:nR},(_,r)=>Math.max(lines[r].length,(lines[r+nR]||['']).length)*11.5+7); const rowsH=rh.reduce((a,b)=>a+b,0)+4;
     const notesLines=o.reportNotes?R.split(o.reportNotes,cw-2*pad,9):[];
     const h=pad+44+26+rowsH+(notesLines.length?notesLines.length*12+8:0)+pad;
     if(y+h>R.H-56){ y=R.newPage(); R.text((uc?'Contract & Offers':'Offers Received')+' (cont.)',R.M,y+10,{size:16,bold:true}); y+=30; }
@@ -51469,10 +51598,10 @@ window._mrDrawOffers=function(R,doc,font,A,y){
     steps.forEach((s,k)=>{ const sx=x+pad+k*sw; const on=!dead&&k<=cur; R.rect(sx,cy,sw-3,6,on?(k===cur?MR_RED:MR_TEAL):[226,232,240]); R.text(s[1],sx,cy+16,{size:6.5,bold:k===cur&&!dead,color:on?MR_INK:[160,160,160]}); });
     if(dead){ R.rrect(x+cw-pad-70,cy-2,70,14,7,[107,114,128]); R.text(_mrOfferStatusLabel(o.status).toUpperCase(),x+cw-pad-35,cy+8,{size:7,bold:true,color:[255,255,255],align:'center'}); }
     cy+=26;
-    // terms grid 2×4
+    // terms grid 2 columns × nR rows (OFFERNET-20261029)
     const rowTop=r=>rh.slice(0,r).reduce((a,b)=>a+b,0);
-    terms.forEach((t,k)=>{ const col=k<4?0:1, r=k%4; const tx=x+pad+col*(colW+14); const ty=cy+rowTop(r)+10;
-      R.text(t[0].toUpperCase(),tx,ty,{size:6.5,bold:true,color:MR_GREY}); R.text(lines[k],tx+90,ty,{size:9,bold:k===7,color:k===7?MR_INK:MR_INK,lh:1.25}); });
+    terms.forEach((t,k)=>{ const col=k<nR?0:1, r=k%nR; const tx=x+pad+col*(colW+14); const ty=cy+rowTop(r)+10;
+      R.text(t[0].toUpperCase(),tx,ty,{size:6.5,bold:true,color:MR_GREY}); R.text(lines[k],tx+90,ty,{size:9,color:MR_INK,lh:1.25}); });
     cy+=rowsH;
     if(notesLines.length){ R.text(notesLines,x+pad,cy+4,{size:9,color:MR_INK,lh:1.3}); cy+=notesLines.length*12+8; }
     y+=h+14;
