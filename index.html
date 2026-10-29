@@ -49010,7 +49010,7 @@ async function _mrWorkerPost(path, body){
   const tok=await _mrIdToken(); if(!tok) throw new Error('Not signed in.');
   const r=await fetch(base+path,{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+tok},body:JSON.stringify(body||{})});
   const data=await r.json().catch(()=>({}));
-  if(!r.ok) throw new Error((data.error&&data.error.message)||('Worker '+r.status));
+  if(!r.ok){ const e=new Error((data.error&&data.error.message)||('Worker '+r.status)); e.status=r.status; throw e; }   // LIFEVIEWS-20261029: status lets callers tell 'not issued yet' from a failure
   return data;
 }
 function _mrSplitCsvLine(line){
@@ -49051,7 +49051,7 @@ function _mrNormalizeTraffic(j){
     docsViewed:pick('docsViewed','docs_viewed','documents_viewed'), casSigned:pick('casSigned','cas_signed'),
     gaSessions:pick('gaSessions','ga_sessions','sessions'), gaUsers:pick('gaActiveUsers','active_users','gaUsers'), gaNewUsers:pick('gaNewUsers','new_users'),
     gaPageViews:pick('gaPageViews','page_views','pageviews'), gaEngaged:pick('gaEngagedSessions','engaged_sessions'), gaEvents:pick('gaEvents','events'),
-    totalCommercialViews:pick('totalCommercialViews','total_commercial_views','marketplace_views'), loopnetViews:pick('loopnetViews','loopnet_views'), crexiViews:pick('crexiViews','crexi_views'),
+    totalCommercialViews:pick('totalCommercialViews','total_commercial_views','marketplace_views'), loopnetViews:pick('loopnetViews','loopnet_views'), crexiViews:pick('crexiViews','crexi_views'), landcomViews:pick('landcomViews','landcom_views'),
     daysOnMarket:pick('daysOnMarket','days_on_market'), totalViews:pick('totalViews','total_views'), totalLeads:pick('totalLeads','total_leads','leads'),
     sources:Array.isArray(j.sources)?j.sources.map(s=>({source:s.source||s.name||'', label:s.label||s.description||'', primary:s.primary||'', secondary:s.secondary||''})):[],
     gaSources:Array.isArray(j.gaSources||j.ga_sources)?(j.gaSources||j.ga_sources).map(s=>({label:s.label||((s.source||'')+' / '+(s.medium||'')), channel:s.channel||'', sessions:_mrNum(s.sessions)})):[],
@@ -49111,7 +49111,7 @@ async function _mrAppProps(force){
   st.appProps=list; st.appPropsAt=Date.now(); return list;
 }
 async function _mrSaveAppId(deal, prop){
-  const patch={reportAppPropertyId:prop?prop.id:'', reportAppPropertyName:prop?prop.name:'', reportAppMatchedAt:Date.now(), reportAppMatchedBy:currentUser?.name||currentUser?.email||'', updatedAt:Date.now()};
+  const patch={reportAppPropertyId:prop?prop.id:'', reportAppPropertyName:prop?prop.name:'', reportAppListingStart:prop?(prop.listingStartDate||''):'', reportAppMatchedAt:Date.now(), reportAppMatchedBy:currentUser?.name||currentUser?.email||'', updatedAt:Date.now()};
   await Store.updateDeal(deal.id, patch);
   Object.assign(deal, patch); const live=(allDeals||[]).find(x=>x.id===deal.id); if(live&&live!==deal) Object.assign(live, patch);
   const ed=window._mrState.editor; if(ed&&ed.deal&&ed.deal.id===deal.id&&ed.deal!==deal) Object.assign(ed.deal, patch);
@@ -49185,12 +49185,13 @@ window._mrFindAppId=async function(btn){
 // Called from _mrAssemble: pull the month from the feed if nothing was pulled/pasted yet. Returns an error string ('' = fine / nothing to do).
 async function _mrAutoTraffic(deal, ym, rep){
   if(!deal.reportAppPropertyId) return '';
+  if(rep.traffic && rep.traffic.source==='api'){ await _mrPullLifetimeViews(deal, ym, {deep:false, seed:{ym, traffic:rep.traffic}}).catch(()=>{}); }   // LIFEVIEWS-20261029 — month already pulled: still top up the lifetime cache
   if(rep.traffic && rep.traffic.source==='api') return '';
   if(!_mrTrafficEmpty(rep.traffic)) return '';
-  try{ const t=await _mrFetchTraffic(deal, ym); await _mrSaveReport(deal.id, ym, {traffic:t}); rep.traffic=t; return ''; }
+  try{ const t=await _mrFetchTraffic(deal, ym); await _mrSaveReport(deal.id, ym, {traffic:t}); rep.traffic=t; await _mrPullLifetimeViews(deal, ym, {deep:false, seed:{ym, traffic:t}}).catch(()=>{}); return ''; }
   catch(e){ const msg=e.message||String(e); console.warn('[mr] traffic auto-pull', msg); return msg; }
 }
-function _mrTrafficReviewLine(A){
+function _mrTrafficReviewLine0(A){   // LIFEVIEWS-20261029: wrapped by _mrTrafficReviewLine below
   const T=A.traffic||{}; const n=(T.activity||[]).length; const d=A.deal||{};
   if(!d.reportAppPropertyId) return ['warn','Not linked to app.thedirtdog.com — the web-traffic page prints only what was typed or pasted. Use 🔗 Match property IDs on the list.'];
   if(T.source==='api') return ['ok','Pulled from app.thedirtdog.com'+(T.fetchedAt?' '+_mrFmtDate(T.fetchedAt):'')+' — '+n+' activity row'+(n===1?'':'s')+(T.siteVisits!=null?', '+Number(T.siteVisits).toLocaleString('en-US')+' site visits':'')+(T.totalLeads!=null?', '+T.totalLeads+' leads':'')+'.'];
@@ -49198,6 +49199,117 @@ function _mrTrafficReviewLine(A){
   return ['warn', A.trafficErr?('Couldn’t pull from app.thedirtdog.com: '+A.trafficErr):'No web traffic yet — open ✏️ Edit → ⬇ Pull from app.thedirtdog.com.'];
 }
 window._mrAppScore=_mrAppScore; window._mrAppMatchRows=_mrAppMatchRows; window._mrTrafficReviewLine=_mrTrafficReviewLine; window._mrTrafficEmpty=_mrTrafficEmpty;
+
+/* =======================================================
+   📈 LIFEVIEWS-20261029 — "Total web views" over the life of the property
+   Ryan (2026-10-29): drop the Days-on-market tile from every report going
+   forward and make the web-views tile a lifetime total — every view from every
+   website app.thedirtdog.com pulls (TheDirtDog.com, Google Analytics sessions,
+   Total Commercial, LoopNet, Crexi, Land.com), summed over all issued months.
+
+   The feed serves one month per call and locks a month once issued, so Terra
+   pulls each month once and caches it on the deal:
+     deals/{id}.reportWebViews = { months:{ 'YYYY-MM': {views:n, at} | {miss:true, at} }, fetchedAt, lastError? }
+     deals/{id}.reportAppListingStart — the app's listingStartDate (floor for the walk)
+   · Preview / Review / Send top up only the newest month (≤ 3 feed calls) so bulk Send stays fast.
+   · ✏️ Edit → 📈 Pull lifetime web views walks back through every issued month for one listing.
+   · trafficfeed_patch/backfill_webviews.command does the one-time catch-up for every linked listing.
+   The tile prints the sum through the report month, captioned with the span it covers.
+   ======================================================= */
+function _mrYmAdd(ym, n){ const [y,m]=String(ym).split('-').map(Number); const d=new Date(Date.UTC(y, m-1+n, 1)); return d.getUTCFullYear()+'-'+String(d.getUTCMonth()+1).padStart(2,'0'); }
+function _mrYmOf(ts){ const d=new Date(ts); return isNaN(d)?'':d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); }
+function _mrMonthShort(ym){ if(!ym) return ''; const [y,m]=ym.split('-').map(Number); return new Date(y,m-1,1).toLocaleDateString('en-US',{month:'short',year:'numeric'}); }
+function _mrLastIssuedYm(now){ const d=now?new Date(now):new Date(); return _mrYmAdd(d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'), -1); }
+// Views in one month's normalized traffic: the feed's cross-site totalViews, else the sum of the site figures it did give.
+function _mrViewsOf(t){
+  if(!t) return null;
+  if(t.totalViews!=null && t.totalViews!=='') return Number(t.totalViews);
+  const parts=[t.siteVisits,t.totalCommercialViews,t.loopnetViews,t.crexiViews,t.landcomViews,t.gaSessions].filter(v=>v!=null&&v!=='');
+  return parts.length?parts.reduce((a,b)=>a+Number(b),0):null;
+}
+// Earliest month worth asking the feed for: the app's listing date, else Terra's listing start, else unknown (null).
+function _mrStartYm(d){
+  const app=d&&d.reportAppListingStart?_mrYmOf(/^\d{4}-\d{2}-\d{2}$/.test(d.reportAppListingStart)?d.reportAppListingStart+'T12:00:00':d.reportAppListingStart):'';
+  if(app) return app;
+  const terra=_mrListingStart(d); return terra?_mrYmOf(terra):null;
+}
+// Cached lifetime summary through a report month: {total, from, through, months} or null when nothing has been pulled.
+function _mrLifetimeViews(d, ym){
+  const w=d&&d.reportWebViews; if(!w||!w.months||typeof w.months!=='object') return null;
+  const ks=Object.keys(w.months).filter(k=>/^\d{4}-\d{2}$/.test(k) && w.months[k] && w.months[k].views!=null && (!ym || k<=ym)).sort();
+  if(!ks.length) return null;
+  return {total:ks.reduce((a,k)=>a+Number(w.months[k].views||0),0), from:ks[0], through:ks[ks.length-1], months:ks.length, fetchedAt:w.fetchedAt||0};
+}
+function _mrLifetimeText(d, ym){
+  const L=_mrLifetimeViews(d, ym);
+  if(L) return L.total.toLocaleString('en-US')+' lifetime web views · '+_mrMonthShort(L.from)+' – '+_mrMonthShort(L.through)+' ('+L.months+' month'+(L.months===1?'':'s')+')';
+  return d&&d.reportAppPropertyId?'lifetime web views not pulled yet':'not linked to app.thedirtdog.com';
+}
+// The tile: lifetime total when we have it; otherwise this month's figure with an honest caption.
+function _mrLifetimeTile(d, ym, monthViews, viewsParts, T){
+  const L=_mrLifetimeViews(d, ym);
+  if(L) return {n:L.total, cap:'all listing sites, '+_mrMonthShort(L.from)+' – '+_mrMonthShort(L.through)};
+  if(viewsParts.length||(T&&T.totalViews!=null)) return {n:monthViews, cap:d&&d.reportAppPropertyId?'all listing sites, this month only':'all listing sites, this month (not linked to app.thedirtdog.com)'};
+  return {n:null, cap:'traffic not yet entered'};
+}
+/* Pull months the cache doesn't have. Walks back from the report month (or the last issued month if the report month
+   isn't issued yet). opts: {deep:false → at most 3 calls (top-up); deep:true → up to maxCalls}, {seed:{ym, traffic}} to
+   record a month already fetched, {onProgress(done, ym)}, {now} for tests. Saves to the deal when anything changed.
+   Returns {calls, added, total, error}. */
+async function _mrPullLifetimeViews(deal, ym, opts){
+  opts=opts||{}; if(!deal||!deal.reportAppPropertyId) return {calls:0, added:0, skipped:'not linked'};
+  const w=(deal.reportWebViews&&typeof deal.reportWebViews==='object'&&deal.reportWebViews.months)?JSON.parse(JSON.stringify(deal.reportWebViews)):{months:{}};
+  let changed=false;
+  if(opts.seed&&opts.seed.ym&&opts.seed.traffic){ const v=_mrViewsOf(opts.seed.traffic); if(v!=null && !(w.months[opts.seed.ym]&&w.months[opts.seed.ym].views!=null)){ w.months[opts.seed.ym]={views:v, at:Date.now()}; changed=true; } }
+  const last=_mrLastIssuedYm(opts.now); let m=(ym&&ym<last)?ym:last;
+  const floor=_mrStartYm(deal); const maxCalls=opts.deep?(opts.maxCalls||48):3; const gap=opts.gapMs!=null?opts.gapMs:1050;
+  let calls=0, added=0, misses=0, error='';
+  const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+  while(m && calls<maxCalls){
+    const have=w.months[m];
+    const settled=!!(have && (have.views!=null || (have.miss && m<last)));   // issued months are locked; a miss on an older month is final, the newest month is retried
+    if(!settled){
+      if(calls) await sleep(gap);
+      try{ const t=await _mrFetchTraffic(deal, m); const v=_mrViewsOf(t); w.months[m]={views:v==null?0:v, at:Date.now()}; changed=true; added++; misses=0; }
+      catch(e){ const st=e&&e.status; const msg=(e&&e.message)||String(e);
+        if(st===404){ w.months[m]={miss:true, at:Date.now()}; changed=true; misses++; }
+        else { error=msg; break; } }
+      calls++; if(opts.onProgress) opts.onProgress(calls, m);
+    } else if(have.miss) misses++; else misses=0;
+    if(floor && m<=floor) break;
+    if(misses>=6) break;   // six empty months in a row = before the app had this property
+    m=_mrYmAdd(m,-1);
+  }
+  if(error) w.lastError=error; else delete w.lastError;
+  if(changed||error){ w.fetchedAt=Date.now();
+    try{ await Store.updateDeal(deal.id,{reportWebViews:w, updatedAt:Date.now()}); deal.reportWebViews=w; const live=(allDeals||[]).find(x=>x.id===deal.id); if(live&&live!==deal) live.reportWebViews=w; }
+    catch(e){ console.warn('[mr] lifetime save',e); error=error||(e.message||String(e)); } }
+  const L=_mrLifetimeViews(deal, ym);
+  return {calls, added, total:L?L.total:null, from:L?L.from:'', through:L?L.through:'', error};
+}
+// ✏️ Edit → 📈 Pull lifetime web views (one listing, deep walk)
+window._mrPullLifetime=async function(btn){
+  const ed=window._mrState.editor; if(!ed) return;
+  const id=(document.getElementById('mr-ed-appid')?.value||'').trim(); if(id) ed.deal.reportAppPropertyId=id;
+  if(!ed.deal.reportAppPropertyId){ showToast('Link this listing to app.thedirtdog.com first (🔗 Find)','warning'); return; }
+  const done=elcBusy(btn,'Pulling…'); const st=document.getElementById('mr-life-status');
+  try{
+    const r=await _mrPullLifetimeViews(ed.deal, ed.ym, {deep:true, seed:(ed.traffic&&ed.traffic.source==='api')?{ym:ed.ym, traffic:ed.traffic}:null, onProgress:(n,m)=>{ if(st) st.textContent='pulling '+_mrMonthShort(m)+'… ('+n+')'; }});
+    if(st) st.textContent=_mrLifetimeText(ed.deal, ed.ym);
+    if(r.error) showToast('Stopped after '+r.calls+' month'+(r.calls===1?'':'s')+': '+r.error,'warning',8000);
+    else showToast((r.total!=null?r.total.toLocaleString('en-US')+' lifetime web views':'No issued months yet')+' · '+r.added+' month'+(r.added===1?'':'s')+' pulled','success',5000);
+    if(typeof window._mrTileRefresh==='function'){ const b=document.querySelector('#mr-tiles-sec .mr-btn'); window._mrTileRefresh(b||null); }
+  }catch(e){ console.warn('[mr] lifetime',e); showToast(e.message,'warning',7000); }
+  finally{ done(); }
+};
+// Review line: the TRAFFICFEED line plus the lifetime figure the tile will print.
+function _mrTrafficReviewLine(A){
+  const [lv,msg]=_mrTrafficReviewLine0(A); const d=A.deal||{}; const L=_mrLifetimeViews(d, A.ym);
+  if(L) return [lv, msg+' Total web views tile: '+L.total.toLocaleString('en-US')+' over '+_mrMonthShort(L.from)+' – '+_mrMonthShort(L.through)+'.'];
+  if(d.reportAppPropertyId) return [lv==='ok'?'warn':lv, msg+' Lifetime web views not pulled yet — the tile shows this month only (✏️ Edit → 📈 Pull lifetime web views).'];
+  return [lv,msg];
+}
+window._mrLifetimeViews=_mrLifetimeViews; window._mrViewsOf=_mrViewsOf; window._mrPullLifetimeViews=_mrPullLifetimeViews; window._mrLifetimeText=_mrLifetimeText; window._mrYmAdd=_mrYmAdd;
 
 /* ---------- VIEW: list of active listings for the month ---------- */
 function _mrStatusChip(rep, d){
@@ -49670,6 +49782,7 @@ window._mrOpenEditor=async function(dealId){
           <button class="mr-btn mr-btn-sm mr-btn-teal" onclick="window._mrPullTraffic(this)">⬇ Pull from app.thedirtdog.com</button>
           <label class="mr-btn mr-btn-sm" style="cursor:pointer">📄 Upload CSV<input type="file" accept=".csv,text/csv,.txt" style="display:none" onchange="window._mrTrafficFile(this)"></label>
           <span id="mr-traffic-status" class="mr-muted">${st.editor.traffic?((st.editor.traffic.activity||[]).length+' activity rows · '+(st.editor.traffic.source==='api'?'from feed':'pasted')):'nothing yet'}</span>
+          <button class="mr-btn mr-btn-sm" onclick="window._mrPullLifetime(this)" title="Pull every issued month from app.thedirtdog.com so the Total web views tile shows the life-of-listing total">📈 Pull lifetime web views</button><span id="mr-life-status" class="mr-muted">${_mrLifetimeText(deal, st.editor.ym)}</span>
         </div>
         <div style="margin-top:.6rem"><label class="mr-lbl" for="mr-traffic-paste">Or paste the activity table (Performed At · Performed By · Email · Company · Role · Activity)</label><textarea id="mr-traffic-paste" class="mr-textarea" style="min-height:80px;font-family:ui-monospace,monospace;font-size:.75rem" placeholder="Copy the rows from the Leads & Website Activity table and paste here" onchange="window._mrTrafficPaste(this.value)"></textarea></div>
         <div class="mr-grid3" style="margin-top:.6rem">
@@ -49872,7 +49985,7 @@ window._mrPullTraffic=async function(btn){
   const ed=window._mrState.editor; if(!ed) return;
   const id=(document.getElementById('mr-ed-appid')?.value||'').trim(); if(id) ed.deal.reportAppPropertyId=id;
   const done=elcBusy(btn,'Pulling…');
-  try{ const t=await _mrFetchTraffic(ed.deal, ed.ym); _mrApplyTraffic(t,'from feed · '+new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})); showToast('Traffic pulled ✓','success'); }
+  try{ const t=await _mrFetchTraffic(ed.deal, ed.ym); _mrPullLifetimeViews(ed.deal, ed.ym, {deep:false, seed:{ym:ed.ym, traffic:t}}).then(()=>{ const s=document.getElementById('mr-life-status'); if(s) s.textContent=_mrLifetimeText(ed.deal, ed.ym); }).catch(e=>console.warn('[mr] lifetime top-up',e)); _mrApplyTraffic(t,'from feed · '+new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})); showToast('Traffic pulled ✓','success'); }
   catch(e){ console.warn('[mr] traffic',e); showToast(e.message,'warning',6000); }
   finally{ done(); }
 };
@@ -49896,10 +50009,10 @@ window._mrAiDraft=async function(btn){
    with per-month hand-set overrides. Blank override = Terra's number; a hand-set 0 leaves that box off the report. ---------- */
 const MR_TILE_DEFS=[
   {key:'offers',  label:'OFFERS RECEIVED',     color:'red',  help:'Offers / LOIs on the deal card'},
-  {key:'views',   label:'TOTAL WEBSITE VIEWS', color:'teal', help:'Sum of the listing-site views entered in § 7'},
+  {key:'views',   label:'TOTAL WEB VIEWS',     color:'teal', help:'Every view app.thedirtdog.com has recorded on every listing site over the life of the property — all issued months summed (LIFEVIEWS-20261029)'},
   {key:'emails',  label:'EMAILS SENT',         color:'teal', help:'E-blast recipients this month (Mailchimp + § 4 rows)'},
   {key:'leads',   label:'BUYER LEADS',         color:'teal', help:'Total leads in § 7, or named inquiries in the activity table'},
-  {key:'dom',     label:'DAYS ON MARKET',      color:'red',  help:'From the listing start date on the deal card'},
+  /* 'dom' DAYS ON MARKET removed from every report going forward (LIFEVIEWS-20261029); an old dom override on a report doc is ignored */
   {key:'social',  label:'SOCIAL REACH',        color:'teal', help:'Facebook reach + LinkedIn impressions from § 5'},
   {key:'docs',    label:'DOCS VIEWED',         color:'teal', help:'Docs viewed in § 7'},
   {key:'cas',     label:'CAs SIGNED',          color:'red',  help:'CAs signed in § 7'},
@@ -49911,7 +50024,7 @@ const MR_TRAFFIC_KEYS=['siteVisits','uniqueVisitors','docsViewed','casSigned','g
 function _mrTileCalc(ctx){
   const d=ctx.deal||{}, rep=ctx.rep||{}, T=ctx.traffic||rep.traffic||{}; const rng=_mrMonthRange(ctx.ym);
   const offers=(Array.isArray(d.lois)&&d.lois.length)?d.lois.filter(l=>l&&l.reportInclude!==false).length:(d.loiBuyer?1:0);   // MRNOTES-20261029 — offers taken off the report don't count
-  const viewsParts=[T.siteVisits,T.totalCommercialViews,T.loopnetViews,T.crexiViews,T.gaSessions].filter(v=>v!=null&&v!=='');
+  const viewsParts=[T.siteVisits,T.totalCommercialViews,T.loopnetViews,T.crexiViews,T.landcomViews,T.gaSessions].filter(v=>v!=null&&v!=='');   // LIFEVIEWS-20261029 + Land.com
   const totalViews=T.totalViews!=null?Number(T.totalViews):(viewsParts.length?viewsParts.reduce((a,b)=>a+Number(b),0):null);
   const eb=(rep.emailBlasts||[]).filter(r=>r.title||r.date);
   (ctx.emails||[]).map(_mrMcRow).forEach(r=>{ if(!eb.some(x=>x.date===r.date && String(x.title||'').trim().toLowerCase()===String(r.title||'').trim().toLowerCase())) eb.push(r); });   // Mailchimp campaigns count too (MCREPORT-20261007)
@@ -49928,7 +50041,7 @@ function _mrTileCalc(ctx){
   const num=v=>(v==null||v==='')?null:Number(v);
   const auto={
     offers: {n:offers,     cap:''},   // MRNOTES-20261029 — no "since listing signed" line under the number
-    views:  {n:totalViews, cap:(viewsParts.length||T.totalViews!=null)?'all listing sites, this month':'traffic not yet entered'},
+    views:  _mrLifetimeTile(d, ctx.ym, totalViews, viewsParts, T),   // LIFEVIEWS-20261029 — lifetime total from the cached feed months
     emails: {n:emailsSent, cap:emailOpens!=null?fmtN(emailOpens)+' opened':'e-blast recipients this month'},
     leads:  {n:leads,      cap:'named inquiries this month'},
     dom:    {n:dom,        cap:since?'listed '+_mrFmtDate(since):'listing start not set'},
@@ -49955,7 +50068,7 @@ function _mrTileRows(calc, rep){
 function _mrTileEditorHtml(rep){
   rep=rep||{}; const ov=_mrTileOverrides(rep); const n=Object.keys(ov).length;
   return `<div class="mr-sec" id="mr-tiles-sec"><h3>2b · Marketing at a Glance — tiles <span class="mr-muted" style="font-weight:400;text-transform:none;letter-spacing:0">(override any box)</span></h3>
-    <p class="mr-note" style="margin:0 0 .55rem">These are the nine info-graphic boxes on the report. Terra fills each one from the deal card and this editor. Type a number to <b>override</b> it on this month’s report only — leave it blank to use Terra’s number, enter <b>0</b> to leave that box off. The caption is the small line printed under the number.</p>
+    <p class="mr-note" style="margin:0 0 .55rem">These are the eight info-graphic boxes on the report. Terra fills each one from the deal card and this editor. Type a number to <b>override</b> it on this month’s report only — leave it blank to use Terra’s number, enter <b>0</b> to leave that box off. The caption is the small line printed under the number.</p>
     <div class="mr-row" style="gap:.4rem;flex-wrap:wrap;margin-bottom:.55rem"><button type="button" class="mr-btn mr-btn-sm" onclick="window._mrTileRefresh(this)">↻ Recalculate Terra’s numbers</button><button type="button" class="mr-btn mr-btn-sm" onclick="window._mrTileClear()">Clear all overrides</button><span class="mr-muted" id="mr-tiles-status" style="font-size:.75rem">${n?_mrEsc(n+' tile'+(n===1?'':'s')+' hand-set'+(rep.tileOverridesByName?' by '+rep.tileOverridesByName:'')+(rep.tileOverridesAt?' · '+_mrFmtDate(rep.tileOverridesAt):'')):''}</span></div>
     <div class="mr-grid3">${MR_TILE_DEFS.map(t=>{ const o=ov[t.key]||{}; const set=(o.n!=null||!!o.cap); return `<div class="mr-tile ${t.color==='red'?'mr-tile-red':'mr-tile-teal'}" data-key="${t.key}">
       <div class="mr-tile-h"><span>${_mrEsc(t.label)}</span><span class="mr-tile-flag" id="mr-tf-${t.key}" ${set?'':'hidden'}>✎ overridden</span></div>
@@ -49967,7 +50080,7 @@ function _mrTileEditorHtml(rep){
 }
 window._mrTileFlag=function(key){ const n=(document.getElementById('mr-tv-'+key)?.value||'').trim(), c=(document.getElementById('mr-tc-'+key)?.value||'').trim(); const f=document.getElementById('mr-tf-'+key); if(f) f.hidden=!(n||c); };
 window._mrTileClear=function(){ MR_TILE_DEFS.forEach(t=>{ const a=document.getElementById('mr-tv-'+t.key), b=document.getElementById('mr-tc-'+t.key); if(a) a.value=''; if(b) b.value=''; window._mrTileFlag(t.key); }); const s=document.getElementById('mr-tiles-status'); if(s) s.textContent='Overrides cleared — press 💾 Save draft to apply'; };
-/* What the editor screen says → always all nine keys, so a cleared override really clears in Firestore (setDoc merge is deep). */
+/* What the editor screen says → always all eight keys, so a cleared override really clears in Firestore (setDoc merge is deep). */
 function _mrTileCollect(){
   const out={}; MR_TILE_DEFS.forEach(t=>{ const nEl=document.getElementById('mr-tv-'+t.key), cEl=document.getElementById('mr-tc-'+t.key); if(!nEl&&!cEl) return;
     const raw=(nEl?.value||'').trim(); let n=null; if(raw!==''){ const v=Number(raw.replace(/[^0-9.\-]/g,'')); if(isFinite(v)) n=v; }
@@ -50320,14 +50433,14 @@ async function _mrBuildPdf(A){
   if(fb.length||li.length||A.social.length||(A.posts&&A.posts.length)){
     y=R.section('Social Media Report',y,300);
     if(fb.length||li.length){
-      const colW=(R.W-2*R.M-24)/2; const xl=R.M, xr=R.M+colW+24; const top=y+10;
-      R.text('Facebook',xl+colW/2,top+14,{size:20,bold:true,align:'center'}); R.text('LinkedIn',xr+colW/2,top+14,{size:20,bold:true,align:'center'});
-      R.line(xl,top+26,xl+colW,top+26,MR_TEAL,2.2); R.line(xr,top+26,xr+colW,top+26,MR_TEAL,2.2);
+      /* SOCIALZERO-20261029 — only the networks that were posted on get a table (one network → full width); a 0 prints blank */
+      const nz0=v=>(v==null||v===''||Number(String(v).replace('%',''))===0)?'':String(v);
+      const both=fb.length&&li.length; const full=R.W-2*R.M; const colW=both?(full-24)/2:full; const xl=R.M, xr=both?R.M+colW+24:R.M; const top=y+10;
+      const tbl=(x,title,head,body)=>{ R.text(title,x+colW/2,top+14,{size:20,bold:true,align:'center'}); R.line(x,top+26,x+colW,top+26,MR_TEAL,2.2);
+        return R.table({startY:top+40, margin:{left:x,right:R.W-(x+colW)}, tableWidth:colW, head:[head], body, styles:{font,fontSize:9,textColor:MR_INK,cellPadding:4,lineColor:MR_LINE,lineWidth:{bottom:0.8}}})+14; };
       let yl=top+40, yr=top+40;
-      if(fb.length) yl=R.table({startY:yl, margin:{left:xl,right:R.W-(xl+colW)}, tableWidth:colW, head:[['Date','Reach','Interactions','Clicks']], body:fb.map(r=>[_mrFmtDate(r.date),nz(r.reach),nz(r.interactions),nz(r.clicks)]), styles:{font,fontSize:9,textColor:MR_INK,cellPadding:4,lineColor:MR_LINE,lineWidth:{bottom:0.8}}})+14;
-      else { R.text('No Facebook posts this month.',xl+colW/2,yl+10,{size:9,color:MR_GREY,align:'center'}); yl+=24; }
-      if(li.length) yr=R.table({startY:yr, margin:{left:xr,right:R.M}, tableWidth:colW, head:[['Date','Impressions','Eng. Rate','Clicks']], body:li.map(r=>[_mrFmtDate(r.date),nz(r.impressions),nz(r.engRate),nz(r.clicks)]), styles:{font,fontSize:9,textColor:MR_INK,cellPadding:4,lineColor:MR_LINE,lineWidth:{bottom:0.8}}})+14;
-      else { R.text('No LinkedIn posts this month.',xr+colW/2,yr+10,{size:9,color:MR_GREY,align:'center'}); yr+=24; }
+      if(fb.length) yl=tbl(xl,'Facebook',['Date','Reach','Interactions','Clicks'],fb.map(r=>[_mrFmtDate(r.date),nz0(r.reach),nz0(r.interactions),nz0(r.clicks)]));
+      if(li.length) yr=tbl(xr,'LinkedIn',['Date','Impressions','Eng. Rate','Clicks'],li.map(r=>[_mrFmtDate(r.date),nz0(r.impressions),nz0(r.engRate),nz0(r.clicks)]));
       y=Math.max(yl,yr)+6;
     }
     /* Post cards — one per post, drawn the way the post looks on the Page (name, date, caption, photo, results). */
@@ -50338,10 +50451,12 @@ async function _mrBuildPdf(A){
         const lines=R.split(p.message||'',textW,9); const shown=lines.slice(0,18); if(lines.length>18) shown[17]=shown[17].replace(/\s*\S*$/,'')+' …';
         const imgH=p.img?Math.min(maxImgH,p.img.h*(textW/p.img.w)):0;
         const m=p.metrics||{}; const stats=[];
-        if(m.facebook){ stats.push('Facebook — reach '+nz(m.facebook.reach)+' · interactions '+nz(m.facebook.interactions)+' · link clicks '+nz(m.facebook.clicks)); }
-        if(m.linkedin){ stats.push('LinkedIn — impressions '+nz(m.linkedin.impressions)+(m.linkedin.engagementRate!=null?' · engagement '+m.linkedin.engagementRate+'%':'')+' · clicks '+nz(m.linkedin.clicks)); }
+        /* SOCIALZERO-20261029 — a zero figure is left out of the results line; a line with nothing left is not printed */
+        const nzp=(label,v)=>(v==null||v===''||Number(v)===0)?'':(label+' '+v);
+        if(m.facebook){ const parts=[nzp('reach',m.facebook.reach),nzp('interactions',m.facebook.interactions),nzp('link clicks',m.facebook.clicks)].filter(Boolean); if(parts.length) stats.push('Facebook — '+parts.join(' · ')); }
+        if(m.linkedin){ const parts=[nzp('impressions',m.linkedin.impressions),(m.linkedin.engagementRate!=null&&Number(m.linkedin.engagementRate)!==0)?('engagement '+m.linkedin.engagementRate+'%'):'',nzp('clicks',m.linkedin.clicks)].filter(Boolean); if(parts.length) stats.push('LinkedIn — '+parts.join(' · ')); }
         const eng=[m.facebook,m.linkedin].filter(Boolean).reduce((o,x)=>({likes:(o.likes||0)+(+x.likes||0), comments:(o.comments||0)+(+x.comments||0), shares:(o.shares||0)+(+x.shares||0)}),{});
-        if(eng.likes||eng.comments||eng.shares) stats.push('Likes '+(eng.likes||0)+' · Comments '+(eng.comments||0)+' · Shares '+(eng.shares||0)+' (24 hours after posting)');
+        if(eng.likes||eng.comments||eng.shares) stats.push([nzp('Likes',eng.likes),nzp('Comments',eng.comments),nzp('Shares',eng.shares)].filter(Boolean).join(' · ')+' (24 hours after posting)');
         const comments=(p.comments||[]).slice(0,4).map(c=>{ const who=(c.name||'Someone')+': '; const ln=R.split(who+c.message.replace(/\s+/g,' '),textW-10,8.5); return ln.slice(0,2); });
         const cH=comments.length?comments.reduce((a,l)=>a+l.length*11,0)+16:0;
         const h=pad+34+shown.length*lineH+(imgH?imgH+10:0)+(stats.length?stats.length*12+6:0)+cH+30+pad;
