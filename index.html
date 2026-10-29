@@ -19622,28 +19622,42 @@ function viewBoard(){
                  </button>
                </div>`
             : '';
-        return `
+        // PROSPLIT-20261029: one column template, drawn once per stage — twice for Prospect (Short-Term / Long-Term)
+        const colHtml = (o) => `
           <div style="min-width:240px;width:240px;flex-shrink:0;display:flex;flex-direction:column;">
             <div class="${sc.hdr} ${sc.txt} col-hdr-sticky rounded-t-xl px-3 py-2">
               <div class="flex items-center justify-between">
-                <span class="${sc.txt} stage-name font-semibold text-xs uppercase tracking-wide">${stage}</span>
+                <span class="${sc.txt} stage-name font-semibold text-xs uppercase tracking-wide"${o.title?` title="${o.title}"`:''}>${o.label}</span>
                 <div class="flex items-center gap-2">
-                  <span class="${sc.txt} text-xs opacity-70">${allSd.length}</span>
-                  ${addBtn}
+                  <span class="${sc.txt} text-xs opacity-70">${o.count}</span>
+                  ${o.addBtn}
                 </div>
               </div>
-              ${total>0?`<div class="stage-total">${fmtM$(total)}</div>`:''}
+              ${o.total>0?`<div class="stage-total">${fmtM$(o.total)}</div>`:''}
               ${window._boardSortHint&&window._boardSortHint(stage)?`<div class="col-sort-hint ${sc.txt}" title="Cards in this column are ordered by this date">⇅ ${window._boardSortHint(stage)}</div>`:''}<!-- BOARDDATE-20261026 -->
             </div>
             <div class="kanban-col ${sc.col} rounded-b-xl p-2 space-y-2" style="flex:1;"
-              data-stage="${stage}"
+              data-stage="${stage}"${o.term?` data-pt-term="${o.term}"`:''}
               ondragover="event.preventDefault();this.classList.add('drag-over')"
               ondragleave="this.classList.remove('drag-over')"
-              ondrop="handleDrop(event,'${stage}')">
+              ondrop="${o.onDrop}">
               ${toggleRow}
-              ${(stage==='Prospect' && window._ptColumnHtml) ? window._ptColumnHtml(sd, d=>renderCard(d), true) : sd.map(d=>renderCard(d)).join('')}<!-- PROSTERM-20261027 -->
+              ${o.body}
             </div>
           </div>`;
+        if(stage==='Prospect' && window._ptSplitColumns){   // PROSPLIT-20261029
+          const g = window._ptSplitColumns(sd);
+          const mk = k => colHtml({
+            label: window._PT_COL_LABEL[k], term: k, title: window._PT_COL_TITLE[k], count: g[k].length,
+            total: g[k].reduce((s,d)=>s+dealProjected(d),0),
+            addBtn: `<button onclick="openDealModal(null,'Prospect');window._ptPreselect&&window._ptPreselect('${k}')"
+              class="${sc.txt} text-xs opacity-80 hover:opacity-100 font-bold px-1.5 py-0.5 rounded hover:bg-black/10 transition leading-none">+ Add</button>`,
+            onDrop: `window._ptColDrop(event,'${k}')`,
+            body: g[k].length ? g[k].map(d=>renderCard(d)).join('') : `<div class="pt-empty">${window._PT_COL_EMPTY[k]}</div>` });
+          return mk('short') + mk('long');
+        }
+        return colHtml({ label: stage, count: allSd.length, total, addBtn, onDrop: `handleDrop(event,'${stage}')`,
+          body: (stage==='Prospect' && window._ptColumnHtml) ? window._ptColumnHtml(sd, d=>renderCard(d), true) : sd.map(d=>renderCard(d)).join('') });   // PROSTERM-20261027
       }).join('')}
       </div>
     </div>`}
@@ -23127,6 +23141,20 @@ function viewBoardStaff(){
       ${STAGES.map(stage => {
         const sd = (byStage[stage] || []).slice().sort(window._boardColumnCmp?window._boardColumnCmp(stage):_boardOrderCmp);   // BOARDDATE-20261026
         const sc = SC[stage];
+        const colHtml = (label, cards, term) => `
+          <div style="${_colStyle}">
+            <div class="${sc.hdr} ${sc.txt} col-hdr-sticky rounded-t-xl px-3 py-2 flex items-center justify-between">
+              <span class="${sc.txt} stage-name font-semibold text-xs uppercase tracking-wide"${term?` title="${window._PT_COL_TITLE[term]}"`:''}>${label}</span>
+              <span class="${sc.txt} text-xs opacity-70">${cards.length}</span>
+            </div>
+            <div class="kanban-col ${sc.col} rounded-b-xl p-2 space-y-2" style="flex:1;"${term?` data-pt-term="${term}"`:''}>
+              ${cards.length ? cards.map(d => renderStaffCard(d)).join('') : (term ? `<div class="pt-empty">None</div>` : '')}
+            </div>
+          </div>`;   // PROSPLIT-20261029
+        if(stage==='Prospect' && window._ptSplitColumns){   // PROSPLIT-20261029: Short-Term / Long-Term as two columns (read-only here)
+          const g = window._ptSplitColumns(sd);
+          return colHtml(window._PT_COL_LABEL.short, g.short, 'short') + colHtml(window._PT_COL_LABEL.long, g.long, 'long');
+        }
         return `
           <div style="${_colStyle}">
             <div class="${sc.hdr} ${sc.txt} col-hdr-sticky rounded-t-xl px-3 py-2 flex items-center justify-between">
@@ -33573,6 +33601,66 @@ window.applyTaskAutomation = async function(dealId, key, opts){
     return sec('short', window._PT_LABEL.short, 'ready to sell', g.short, droppable?'Drag a prospect here when they’re ready':'None')
          + sec('long',  window._PT_LABEL.long,  'check in', g.long, droppable?'Drag a prospect here to check in later':'None')
          + sec('unset', '⚪ No timeline', 'set one', g.unset, '');
+  };
+
+  /* ── PROSPLIT-20261029 — Prospect drawn as TWO board columns ──────────────
+     Ryan (2026-10-29): split the Prospect column into Short-Term Prospects and
+     Long-Term Prospects; a prospect with no timeline sits in Long-Term. The stage
+     itself is unchanged (deal.stage === 'Prospect'), so stage lists, automations,
+     scorecards and task sets are untouched — only the board layout differs.
+     Unset is a DISPLAY default: nothing is written to the deal until someone
+     picks a timeline (chip, deal modal, or a drop onto the other column), so
+     pre-PROSTERM prospects keep their old scorecard rule. */
+  window._PT_COL_LABEL = { short:'🔥 Short-Term Prospects', long:'🌱 Long-Term Prospects' };
+  window._PT_COL_TITLE = { short:'Sellers ready to sell now — weekly follow-ups, counts on the scorecard',
+                           long:'Not ready yet — periodic check-ins, no scorecard points. Prospects with no timeline land here.' };
+  window._PT_COL_EMPTY = { short:'Drag a prospect here when they’re ready to sell', long:'Drag a prospect here to check in later' };
+  // Which column a Prospect card belongs in. Anything not explicitly 'short' is Long-Term.
+  window._ptColumnOf = d => (d && d.prospectTerm==='short') ? 'short' : 'long';
+  window._ptSplitColumns = (sd) => {
+    const g = { short:[], long:[] };
+    for(const d of (sd||[])) g[window._ptColumnOf(d)].push(d);
+    return g;
+  };
+  // Drop onto one of the two Prospect columns.
+  //  • already a Prospect, same column  → plain reorder (handleDrop)
+  //  • already a Prospect, other column → switch timeline (_ptSetTerm: tasks swap, Undo toast)
+  //  • coming from another stage        → normal stage move, then the timeline is applied once it lands
+  window._ptColDrop = (ev, term) => {
+    const col = ev.currentTarget;
+    const id = (ev.dataTransfer && ev.dataTransfer.getData('text/plain')) || (typeof draggedDealId!=='undefined' ? draggedDealId : '');
+    const deal = id && _dealOf(id);
+    if(!deal){ ev.preventDefault(); col.classList.remove('drag-over'); return; }
+    if(_isPros(deal)){
+      if(window._ptColumnOf(deal)===term) return handleDrop(ev, 'Prospect');
+      ev.preventDefault(); col.classList.remove('drag-over');
+      return window._ptSetTerm(id, term);
+    }
+    window._ptDropTerm = term;
+    try{ return handleDrop(ev, 'Prospect'); }
+    finally{ setTimeout(()=>{ window._ptDropTerm = null; }, 0); }   // only the synchronous move below may claim it
+  };
+  // A card dragged in from another stage lands via _moveDealBackward (Prospect is the first stage);
+  // once that write resolves, give it the timeline of the column it was dropped on.
+  const _ptOrigBack = window._moveDealBackward;
+  if(typeof _ptOrigBack==='function'){
+    window._moveDealBackward = (id, deal, newStage, desiredIds) => {
+      const term = window._ptDropTerm || ''; window._ptDropTerm = null;
+      const p = _ptOrigBack(id, deal, newStage, desiredIds);
+      if(term && /^prospect$/i.test(String(newStage||'')) && p && typeof p.then==='function')
+        p.then(()=>{ const d = _dealOf(id); if(d && _isPros(d) && d.prospectTerm!==term) return window._ptSetTerm(id, term); }).catch(e=>console.warn('[prosplit] term after move', e));
+      return p;
+    };
+  }
+  // "+ Add" on a split column pre-ticks that column's timeline in the new-deal form (still changeable).
+  window._ptPreselect = (term) => {
+    if(!window._PT_LABEL[term]) return;
+    setTimeout(()=>{
+      const f = document.getElementById('pt-field'); if(!f) return;
+      if(f.querySelector('input[name="sf-prospect-term"]:checked')) return;
+      const r = f.querySelector(`input[name="sf-prospect-term"][value="${term}"]`);
+      if(r){ r.checked = true; try{ window._ptFieldChange(); }catch(e){} }
+    }, 60);
   };
 })();
 
