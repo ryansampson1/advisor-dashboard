@@ -5962,6 +5962,7 @@ async function handleProposalOutstandingAutomation(deal){
 }
 
 async function handleContractTerminatedAutomation(deal){
+  if(deal && deal.representation==='buyer' && window._brDealDied) return window._brDealDied(deal, 'Contract terminated', {hadContract:true});   // BUYERREP-20261102
   const dueDate=n=>{ const d=new Date(); d.setDate(d.getDate()+n); return d.toISOString().slice(0,10); };
   const addr=deal.propertyAddress||deal.projectName||'property';
   const apiKey=APP_CONFIG.ai?.anthropicKey;
@@ -6081,6 +6082,7 @@ async function handleContractTerminatedAutomation(deal){
 }
 
 function handleLostListingAutomation(deal){
+  if(deal && deal.representation==='buyer' && window._brDealDied){ window._brDealDied(deal, 'Marked lost / terminated'); return; }   // BUYERREP-20261102
   const addr    = deal.propertyAddress||deal.projectName||'property';
   const dueDate = n=>{ const d=new Date(); d.setDate(d.getDate()+n); return d.toISOString().slice(0,10); };
 
@@ -9916,13 +9918,16 @@ function scheduleReRender(src){
 // A task someone types by hand in the task modal is never blocked.
 const DNM_MKT_RE = /(social\s*media|social\s*post|facebook|linkedin|instagram|e-?\s?mail\s*blast|e-?blast|dl\s*groups|marketing\s*groups|groups\s*for\s*e-?mail|direct\s*mail|remarketing|marketing\s*plan|marketing\s*ideas|websites?|buildout|\bmls\b|loopnet|costar|crexi|land\.com|landandfarm|land\s*listings\s*report|available\s*land|monthly\s*report\s*assets|qr\s*code|check\s*signs?|order\s*(a\s*)?signs?|telzio|press\s*release|drone\s*photos)/i;
 const DNM_TEARDOWN_RE = /(remove|take\s*down|pick\s*up|off\s*market|mark(ed)?\s*as\s*sold|archive)/i;
-function _dnmIsMarketingTitle(t){ t=String(t||''); return DNM_MKT_RE.test(t) && !DNM_TEARDOWN_RE.test(t); }
+// BUYERREP-20261102 (DNM) — also aerial photography, OM / call top 10 buyers, "marketing prep" client email (aerials still allowed while a prospect / proposal)
+const DNM_MKT2_RE = /(aerial|\bom\b|offering\s*memo|top\s*10\s*buyers|marketing\s*prep)/i;
+function _dnmIsMarketingTitle(t, d){ t=String(t||''); if(DNM_TEARDOWN_RE.test(t)) return false; if(DNM_MKT_RE.test(t)) return true;
+  if(!DNM_MKT2_RE.test(t)) return false; return !(/aerial/i.test(t) && d && /^(prospect|proposal)/i.test(String(d.stage||'').trim())); }
 function _dnmDeal(id){ return id ? ((typeof allDeals!=='undefined' && allDeals) || []).find(d=>d.id===id) : null; }
 function _dnmOn(dOrId){ const d = (typeof dOrId==='string') ? _dnmDeal(dOrId) : dOrId; return !!(d && d.doNotMarket); }
 function _dnmBlocksTask(data){
   if(!data || !data.dealId || data.manualEntry || data.dnmAllow) return false;
   if(!_dnmOn(data.dealId)) return false;
-  return _dnmIsMarketingTitle(data.title);
+  return _dnmIsMarketingTitle(data.title, _dnmDeal(data.dealId));
 }
 function _dnmGuard(dOrId, what){
   const d = (typeof dOrId==='string') ? _dnmDeal(dOrId) : dOrId;
@@ -9932,12 +9937,20 @@ function _dnmGuard(dOrId, what){
   return true;
 }
 function _dnmShow(d){ return !!d && ((d.representation||'seller')!=='buyer') && (d.doNotMarket || !(typeof isWonStage==='function' && isWonStage(d.stage||'')) && !(typeof isLostStage==='function' && isLostStage(d.stage||''))); }
-function _dnmOpenMarketingTasks(dealId){ return ((typeof allTasks!=='undefined' && allTasks) || []).filter(t=>t && t.dealId===dealId && t.status!=='complete' && _dnmIsMarketingTitle(t.title)); }
+function _dnmOpenMarketingTasks(dealId){ return ((typeof allTasks!=='undefined' && allTasks) || []).filter(t=>t && t.dealId===dealId && t.status!=='complete' && _dnmIsMarketingTitle(t.title, _dnmDeal(dealId))); }
 window._dnmIsMarketingTitle=_dnmIsMarketingTitle; window._dnmOn=_dnmOn; window._dnmGuard=_dnmGuard; window._dnmBlocksTask=_dnmBlocksTask;
+// BUYERREP-20261102 (DNM) — only tell Krissy / Nick to pull a property that was actually out there: a seller-rep
+// listing (in Listing, has a listing date or a listing website, or had a marketing task). Never a buyer rep deal.
+window._dnmWasMarketed = function(d){
+  if(!d || (d.representation||'seller')==='buyer') return false;
+  if(/^listing$/i.test(String(d.stage||'').trim()) || d.listingEffectiveDate || d.listingSiteId || d.listingPublished) return true;
+  return ((typeof allTasks!=='undefined'&&allTasks)||[]).some(t=>t && t.dealId===d.id && t.source!=='dnm' && DNM_MKT_RE.test(String(t.title||'')));
+};
 // DNMNOTIFY-20261016 — checking Do Not Market on an existing deal tells Krissy to
 // pull it from every website and Nick to cancel/halt any marketing in flight.
 window._dnmNotifyStaff = async function(dealId){
   const deal=_dnmDeal(dealId); if(!deal) return 0;
+  if(window._dnmWasMarketed && !window._dnmWasMarketed(deal)) return 0;   // BUYERREP-20261102 — never marketed → nothing to pull
   const already=((typeof allTasks!=='undefined'&&allTasks)||[]).some(t=>t&&t.dealId===dealId&&t.source==='dnm'&&t.status!=='complete');
   if(already) return 0;
   const nm=deal.projectName||deal.propertyAddress||'Property';
@@ -21847,6 +21860,46 @@ window._logAttachmentActivity = async (dealId, fileObj, docType, downloadUrl, ex
   };
 })();
 
+/* ── BUYERREP-20261102 — buyer rep deals get only buyer-side tasks; every task shows Buyer Rep / Seller Rep ──
+   Ryan (2026-11-02): "for buyer rep, it is still assigning tasks that aren't relevant to a buyer rep deal, only a
+   seller rep deal. So for buyer rep only assign certain tasks. Also, in the tasks, … have it labeled in the task view
+   as buyer or seller rep." Decisions: LOI → follow-up only; Sold → no websites / Land Listings Report rows; a buyer
+   rep deal that dies (falls out, contract terminated, lost) → "just notify krissy it died and remove financial
+   projections". Sets loi_buyer_rep / sold_buyer_rep / deal_died_buyer_rep are editable in the ⚡ editor. */
+window._brHadContract = d => !!(d && (d.contractAttachedAt || d.psaEffectiveDate || d.effectiveDate || d.contractUrl || d.psaUrl || d.ddExpirationDate || d.contractFileName));
+window._brDealDied = function(deal, why, o){
+  o = o || {};
+  if(!deal || !deal.id || !window.applyTaskAutomation) return;
+  const had = !!(o.hadContract || window._brHadContract(deal));
+  const name = (typeof _taskHeadlineName==='function') ? _taskHeadlineName(deal) : (deal.projectName||deal.propertyAddress||'This deal');
+  const who  = (typeof currentUser!=='undefined' && currentUser && (currentUser.name||currentUser.email)) || 'someone';
+  const when = new Date().toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+  const lines = ['🔻 BUYER REP DEAL DIED — '+name, '',
+    (why||'Deal died')+(o.from?' (moved from "'+o.from+'" to "'+o.to+'")':'')+' by '+who+' on '+when+'.'];
+  if(deal.propertyAddress) lines.push('Property: '+deal.propertyAddress);
+  const client = deal.clientName || deal.contactPerson || deal.buyer || '';
+  if(client) lines.push('Client (buyer): '+client);
+  lines.push('', had ? 'Update tracking, and take this deal out of the Excel projected revenue sheet.' : 'Update tracking.');
+  try{ showToast('🔻 '+name+' died — notifying Krissy'+(had?' & removing projections':''), 'warning', 5000); }catch(_){}
+  return window.applyTaskAutomation(deal.id, 'deal_died_buyer_rep', { note: lines.join('\n'), toast:false,
+    rowFilter: had ? null : (r => !/projected\s*revenue|projection/i.test(String(r && r[0] || ''))) });
+};
+/* 🤝 Buyer Rep / 🏷️ Seller Rep chip for the Tasks view (light + dark). */
+window._taskRepChip = function(dealId){
+  if(!dealId) return '';
+  const d = ((typeof allDeals!=='undefined' && allDeals) || []).find(x => x && x.id === dealId);
+  if(!d) return '';
+  const b = d.representation === 'buyer';
+  return '<span class="rep-chip '+(b?'rep-buyer':'rep-seller')+'" title="'+(b?'Buyer representation':'Seller representation')+'">'+(b?'🤝 Buyer Rep':'🏷️ Seller Rep')+'</span>';
+};
+if(typeof document!=='undefined' && !document.getElementById('rep-chip-style')){
+  const st = document.createElement('style'); st.id = 'rep-chip-style';
+  st.textContent = '.rep-chip{display:inline-flex;align-items:center;font-size:.68rem;font-weight:700;padding:.1rem .5rem;border-radius:99px;line-height:1.4;white-space:nowrap;flex-shrink:0}'
+    + '.rep-buyer{background:#EDE9FE;color:#5B21B6}.rep-seller{background:#E0F2FE;color:#075985}'
+    + 'html.dark .rep-buyer{background:rgba(139,92,246,.24);color:#DDD6FE}html.dark .rep-seller{background:rgba(14,165,233,.22);color:#BAE6FD}';
+  document.head.appendChild(st);
+}
+
 // ── Global user activity logger (writes to top-level userActivity collection) ────────────
 // type: 'login' | 'stage_change' | 'deal_created' | 'task_created' | 'note_added' | etc.
 window.logUserActivity = async function(type, description, meta={}) {
@@ -23939,6 +23992,9 @@ window._offerBackwardTasks = (deal, oldStage, newStage) => {
   // This is the one backward move that DOES fire something: the property is back
   // on the market and marketing/tracking have to know. Everything else about a
   // backward move stays silent (no dates, no inputs, no EOS credit).
+  if(window._fellOutOfContract(oldStage, newStage) && deal && deal.representation==='buyer' && window._brDealDied){   // BUYERREP-20261102
+    window._brDealDied(deal, 'Fell out of contract', {hadContract:true, from:oldStage, to:newStage}); return;
+  }
   if(window._fellOutOfContract(oldStage, newStage)){
     const _nm = (typeof _taskHeadlineName==='function') ? _taskHeadlineName(deal) : (deal.projectName||deal.propertyAddress||'This deal');
     showToast(`🔻 Fell out of contract — ${_nm} is back available. Notifying Nick & Krissy…`, 'warning', 6000);
@@ -27102,6 +27158,7 @@ function viewTasks(){
       <div class="flex-1 min-w-0">
         <div class="flex items-start gap-2 flex-wrap">
           <span class="text-sm font-medium ${done?'line-through text-gray-400':'text-gray-800'}">${t.title}</span>
+          ${!hideAddr&&window._taskRepChip?window._taskRepChip(t.dealId):''}
           ${t.dealAddress&&!hideAddr?`<a onclick="${t.dealId&&(allDeals||[]).some(d=>d.id===t.dealId)?`openPropertyDetail('${t.dealId}')`:`switchView('board')`}" class="text-xs text-blue-500 hover:underline cursor-pointer shrink-0" title="Open this property's card">${t.dealAddress}</a>`:''}
         </div>
         ${t.description?`<div class="text-xs text-gray-500 mt-0.5">${(()=>{
@@ -27187,6 +27244,7 @@ function viewTasks(){
               <span class="text-base shrink-0">${g._noProp?'📋':'🏠'}</span>
               <span class="font-semibold ${g._noProp?'text-gray-500':'text-gray-800'} truncate">${esc(g.label)}</span>
               <span class="text-xs text-gray-400 shrink-0">${g.tasks.length} task${g.tasks.length!==1?'s':''}</span>
+              ${g.dealId&&window._taskRepChip?window._taskRepChip(g.dealId):''}
               ${g.dealId?`<button type="button" onclick="event.preventDefault();event.stopPropagation();openPropertyDetail('${g.dealId}')" class="text-xs text-blue-600 hover:text-blue-800 hover:underline font-semibold shrink-0 whitespace-nowrap px-1.5 py-0.5 rounded" title="Open this property's card">Property Card ↗</button>`:''}
             </div>
             ${grpDueBadge(g.tasks)}
@@ -33054,6 +33112,19 @@ const TASK_AUTOMATIONS_DEFAULT = {
     ['Remove from websites + archive Google Drive', _TA.KRISSY, 7],
     ['Mark as Sold on Land Listings Report + remove from Available Land', _TA.MKTG, 7],
   ]},
+  // BUYERREP-20261102 — buyer rep deals: only the buyer-side work (Ryan 2026-11-02)
+  loi_buyer_rep: { label:'LOI — Buyer Rep', terminal:false, tasks:[
+    ['Follow up with listing broker / seller on LOI response', _TA.ADV, 3],
+  ]},
+  sold_buyer_rep: { label:'Sold — Buyer Rep', terminal:true, tasks:[
+    ['Send closing statement', _TA.ADV, 3],
+    ['Archive Google Drive folder', _TA.KRISSY, 7],
+    ['Send Survey to Client', _TA.NICK, 3],
+  ]},
+  deal_died_buyer_rep: { label:'Buyer Rep Deal Died', terminal:true, tasks:[
+    ['🔻 Buyer rep deal died — update tracking', _TA.KRISSY, 1],
+    ['📉 Remove from Excel projected revenue', _TA.MICHAEL, 1],
+  ]},
   uc_buyer_rep: { label:'Under Contract — Buyer Rep', terminal:false, tasks:[
     ['Remind advisor to verify deposit', _TA.KELLIE, 2],
     ['Create list of critical dates', _TA.KELLIE, 2],
@@ -33092,7 +33163,7 @@ const TASK_AUTOMATIONS_DEFAULT = {
   ]},
 };
 // Order shown in the dropdown (matches how Ryan listed them).
-const TASK_AUTOMATION_ORDER = ['prospect_short','prospect_long','prospect','new_listing','loi','under_contract','uc_seller_rep','uc_buyer_rep','proposal_todo','begin_marketing','price_change','listing_renewed','closing','sold','fell_out','listing_canceled','expired_listing'];
+const TASK_AUTOMATION_ORDER = ['prospect_short','prospect_long','prospect','new_listing','loi','loi_buyer_rep','under_contract','uc_seller_rep','uc_buyer_rep','proposal_todo','begin_marketing','price_change','listing_renewed','closing','sold','sold_buyer_rep','fell_out','deal_died_buyer_rep','listing_canceled','expired_listing'];
 
 // ── Editable config: default merged with any admin-saved overrides ──────────
 function _mergeTaskAutomations(stored){
@@ -33314,8 +33385,9 @@ window.saveTaskAutomations = saveTaskAutomations;
 function _taStageToKey(deal){
   const s = String(deal && deal.stage || '');
   if(/^prospect$/i.test(s)) return deal.prospectTerm==='short' ? 'prospect_short' : deal.prospectTerm==='long' ? 'prospect_long' : 'prospect';   // PROSTERM-20261027
-  if(/^listing$/i.test(s)) return 'new_listing';
-  if(/^loi$/i.test(s))     return 'loi';
+  const _br = deal && deal.representation === 'buyer';   // BUYERREP-20261102
+  if(/^listing$/i.test(s)) return _br ? null : 'new_listing';   // no listing / marketing set for a buyer rep deal
+  if(/^loi$/i.test(s))     return _br ? 'loi_buyer_rep' : 'loi';
   if(/due.?diligence|under.?contract/i.test(s)){
     if(deal.representation === 'buyer') return 'uc_buyer_rep';
     if(deal.representation)             return 'uc_seller_rep';
@@ -33323,7 +33395,7 @@ function _taStageToKey(deal){
   }
   if(/^closing$/i.test(s)) return 'closing';
   // Won / Sold columns → the (terminal) Sold checklist set.
-  if(typeof isWonStage === 'function' ? isWonStage(s) : /closed.?won|^sold$/i.test(s)) return 'sold';
+  if(typeof isWonStage === 'function' ? isWonStage(s) : /closed.?won|^sold$/i.test(s)) return _br ? 'sold_buyer_rep' : 'sold';   // BUYERREP-20261102
   return null;
   // NOTE (elc-v421): Buyer Opportunities (rolling weekly-follow-up chain,
   // handleBuyerOpportunityAutomation) and Lost / Terminated (AI listing-extension
@@ -33476,6 +33548,7 @@ window.applyTaskAutomation = async function(dealId, key, opts){
   const _madeThisRun = new Set();
   for(const row of _rows){
     const base=row[0], token=row[1], dueDays=row[2]||3;
+    if(opts.rowFilter && !opts.rowFilter(row)){ skipped++; continue; }   // BUYERREP-20261102
     const _nb=_taNorm(base);
     if(_madeThisRun.has(_nb)){ skipped++; continue; }
     // Any task already on this deal for the same activity counts — including one
