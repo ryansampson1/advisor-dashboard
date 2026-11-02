@@ -10576,6 +10576,22 @@ function visibleDeals(){
   return allDeals.filter(d => isDealAdvisor(d, currentUser.uid));
 }
 
+// DEALPICK-20261102 — Ryan (2026-11-02): any advisor can add notes / history / email to ANY deal,
+// co-advisor or not. Every picker used to ADD to a deal (Log Call/Note, Inbox + Apple Mail
+// "link to property", Calendar meeting -> property, Gmail sync review) lists ALL deals: the
+// user's own first, anyone else's tagged with its advisor's name. The board, KPIs, map and
+// board search still use visibleDeals(). Firestore already lets any signed-in user add
+// deals/{id}/activities (deal-record edits stay limited to the deal's advisors).
+window._elcPickDeals = function(labelFn){
+  const all = ((typeof allDeals!=='undefined' && allDeals) || []).slice();
+  let vis = null;
+  try { vis = new Set((visibleDeals()||[]).map(d => d.id)); } catch(_) {}
+  const own = d => !vis || vis.has(d.id);
+  const lbl = labelFn || (d => d.projectName || d.propertyAddress || d.address || '');
+  all.sort((a,b) => (own(b)?1:0)-(own(a)?1:0) || String(lbl(a)||'').localeCompare(String(lbl(b)||''), undefined, {numeric:true, sensitivity:'base'}));
+  all.tag = d => (d && !own(d)) ? String(d.advisorName || d.advisorEmail || 'another advisor') : '';
+  return all;
+};
 // Returns true when the current user should see the staff-restricted view
 function isStaffView(){
   if(!currentUser) return false;
@@ -20888,10 +20904,9 @@ window._propGmailSyncAll = async () => {
     rows.sort((a,b) => b.dateMs - a.dateMs);
 
     // Build deal options for dropdowns (sorted A-Z)
-    const sortedDeals = deals.slice().sort((a,b) =>
-      (a.projectName||a.propertyAddress||'').localeCompare(b.projectName||b.propertyAddress||''));
+    const sortedDeals = window._elcPickDeals(d => d.projectName||d.propertyAddress||'');   // DEALPICK-20261102 — any deal can receive the email
     const dealOptsHtml = `<option value="">— Select property —</option>` +
-      sortedDeals.map(d => `<option value="${d.id}">${(d.projectName||d.propertyAddress||'').replace(/"/g,'&quot;')}</option>`).join('');
+      sortedDeals.map(d => { const o = sortedDeals.tag(d); return `<option value="${d.id}">${((d.projectName||d.propertyAddress||'')+(o?' — '+o:'')).replace(/"/g,'&quot;').replace(/</g,'&lt;')}</option>`; }).join('');
 
     // Show paginated review modal — static shell, tbody populated by _pgaRenderPage()
     const modal = document.createElement('div');
@@ -26526,14 +26541,11 @@ async function _calPersistMove(arg){
 
 // ── Link meetings to CRM properties ──────────────────────────────────────────
 // Build <option>s for the property picker, sorted by label, with selectedId chosen.
-window._calDealOptions = function(selectedId){
-  const deals = (typeof visibleDeals === 'function' ? visibleDeals() : (allDeals || []));
-  const opts = deals.slice().sort((a,b)=>{
-    const la=(a.projectName||a.propertyAddress||a.address||'').toLowerCase();
-    const lb=(b.projectName||b.propertyAddress||b.address||'').toLowerCase();
-    return la<lb?-1:la>lb?1:0;
-  }).map(d=>{
-    const label=(d.projectName||d.propertyAddress||d.address||'(unnamed property)').replace(/</g,'&lt;');
+window._calDealOptions = function(selectedId){   // DEALPICK-20261102 — every deal, yours first
+  const deals = window._elcPickDeals(d => (d.projectName||d.propertyAddress||d.address||'').toLowerCase());
+  const opts = deals.map(d=>{
+    const o = deals.tag(d);
+    const label=((d.projectName||d.propertyAddress||d.address||'(unnamed property)')+(o?' — '+o:'')).replace(/</g,'&lt;');
     return `<option value="${d.id}" ${d.id===selectedId?'selected':''}>${label}</option>`;
   }).join('');
   return `<option value="">— Not linked —</option>` + opts;
@@ -26559,9 +26571,10 @@ window._calSuggestDealFromAttendees = function(emails){
   const visible = (typeof visibleDeals === 'function' ? visibleDeals() : (allDeals || []));
   const visibleIds = new Set(visible.map(d=>d.id));
   ids.sort((a,b)=>dealCount[b]-dealCount[a]);
-  const best = ids.find(id=>visibleIds.has(id));
+  const _allD = (typeof allDeals!=='undefined' && allDeals) || [];   // DEALPICK-20261102 — your own deal wins; otherwise any deal
+  const best = ids.find(id=>visibleIds.has(id)) || ids.find(id=>_allD.some(d=>d.id===id));
   if(!best) return null;
-  const deal = visible.find(d=>d.id===best);
+  const deal = _allD.find(d=>d.id===best);
   return { dealId: best, label: deal ? (deal.projectName||deal.propertyAddress||deal.address||'') : '', contactName: firstContactName };
 };
 
@@ -28719,10 +28732,11 @@ window._lc = window._lc || { type:'call', dealId:'', contactId:'', newContact:fa
 function _lcDealLabel(d){ return d ? (d.projectName || d.propertyAddress || d.address || 'Untitled property') : ''; }
 function _lcContactLabel(c){ if(!c) return ''; const n=[c.firstName,c.lastName].filter(Boolean).join(' '); return n || c.company || c.email || c.phone || 'Unnamed contact'; }
 const _LC_CLOSED = /sold|closed|dead|cancel|lost|expired|fell/i;
-function _lcDeals(){
-  return (visibleDeals()||[]).slice().sort((a,b)=>{
+function _lcDeals(){   // DEALPICK-20261102 — every deal (yours first), not just your board
+  const all=window._elcPickDeals(_lcDealLabel), tag=all.tag; window._lcOwner=tag;
+  return all.slice().sort((a,b)=>{
     const ca=_LC_CLOSED.test(a.stage||'')?1:0, cb=_LC_CLOSED.test(b.stage||'')?1:0;
-    return ca-cb || _lcDealLabel(a).localeCompare(_lcDealLabel(b));
+    return ca-cb || (tag(a)?1:0)-(tag(b)?1:0) || _lcDealLabel(a).localeCompare(_lcDealLabel(b));
   });
 }
 function viewLogCall(){
@@ -28764,10 +28778,10 @@ function viewLogCall(){
         <span class="${lbl}">Property <span class="normal-case font-normal text-gray-500">— shows on its Monthly Report</span></span>
         ${deal ? `
           <div class="flex items-center gap-2 mt-1 p-2 border rounded-lg bg-gray-50">
-            <span class="text-sm font-semibold text-gray-800 flex-1">🏞 ${_lcEsc(_lcDealLabel(deal))} <span class="text-xs font-normal text-gray-500">· ${_lcEsc(deal.stage||'')}</span></span>
+            <span class="text-sm font-semibold text-gray-800 flex-1">🏞 ${_lcEsc(_lcDealLabel(deal))} <span class="text-xs font-normal text-gray-500">· ${_lcEsc(deal.stage||'')}${(()=>{ const o=window._elcPickDeals().tag(deal); return o?' · 👤 '+_lcEsc(o):''; })()}</span></span>
             <button type="button" onclick="window._lcPickDeal('')" aria-label="Remove property" class="text-sm text-gray-600 px-3 border rounded-lg bg-white" style="min-height:44px">✕</button>
           </div>` : `
-          <input id="lc-deal-q" type="search" autocomplete="off" placeholder="Search your properties… (leave blank for a ${kind} not tied to a property)"
+          <input id="lc-deal-q" type="search" autocomplete="off" placeholder="Search all properties… (leave blank for a ${kind} not tied to a property)"
             oninput="window._lcDealSearch(this.value)" class="${inp} mt-1" style="min-height:44px"/>
           <div id="lc-deal-results" class="mt-1"></div>`}
       </div>
@@ -28848,7 +28862,7 @@ window._lcDealSearch = q => {
   box.innerHTML = hits.length ? `<div class="border rounded-lg divide-y divide-gray-100 bg-white">${hits.map(d=>`
       <button type="button" onclick="window._lcPickDeal('${_lcEsc(d.id)}')" class="w-full text-left px-3 py-2 hover:bg-gray-50" style="min-height:44px">
         <span class="text-sm font-semibold text-gray-800">${_lcEsc(_lcDealLabel(d))}</span>
-        <span class="text-xs text-gray-500"> · ${_lcEsc(d.stage||'')}${d.propertyAddress&&d.projectName?' · '+_lcEsc(d.propertyAddress):''}</span>
+        <span class="text-xs text-gray-500"> · ${_lcEsc(d.stage||'')}${d.propertyAddress&&d.projectName?' · '+_lcEsc(d.propertyAddress):''}${window._lcOwner&&window._lcOwner(d)?' · 👤 '+_lcEsc(window._lcOwner(d)):''}</span>
       </button>`).join('')}</div>`
     : `<div class="text-sm text-gray-500 px-1 py-2">No property matches “${_lcEsc(q)}”.</div>`;
 };
@@ -48895,10 +48909,11 @@ window._siJunkById = async function(emailId){
 /* ─────────── Property linking (manual + thread auto-link) ─────────── */
 function _siDealLabel(d){ return (d.projectName||d.propertyAddress||'Untitled deal'); }
 function _siDealAddr(id){ const d=(allDeals||[]).find(x=>x.id===id); return d?(d.projectName||d.propertyAddress||''):''; }
-function _siDealsSorted(){ return visibleDeals().slice().sort((a,b)=>_siDealLabel(a).localeCompare(_siDealLabel(b), undefined, {numeric:true, sensitivity:'base'})); }
+function _siDealsSorted(){ return window._elcPickDeals(_siDealLabel); }   // DEALPICK-20261102 — every deal, yours first (.tag(d) = other advisor's name)
 function _siDealOptionList(sel, placeholder){
+  const _l=_siDealsSorted();   // DEALPICK-20261102
   return (placeholder!=null?'<option value="">'+placeholder+'</option>':'')+
-    _siDealsSorted().map(function(d){ return '<option value="'+d.id+'"'+(sel===d.id?' selected':'')+'>'+_siEsc(_siDealLabel(d))+'</option>'; }).join('');
+    _l.map(function(d){ const o=_l.tag(d); return '<option value="'+d.id+'"'+(sel===d.id?' selected':'')+'>'+_siEsc(_siDealLabel(d)+(o?' — '+o:''))+'</option>'; }).join('');
 }
 function _siRefreshDealFeed(dealId){ try{ if(typeof window._propLoadActivities==='function' && document.getElementById('prop-act-feed-'+dealId)) window._propLoadActivities(dealId,'prop-act-feed-'+dealId); }catch(_){} }
 // thread → deal map, persisted so future emails in the chain follow the same property
@@ -49120,7 +49135,7 @@ window._mailLinkOpen = function(p){
           style="width:100%;border:1px solid #d1d5db;border-radius:10px;padding:10px 12px;font-size:16px;outline:none;box-sizing:border-box"/>
         <select id="ml-deal-list" size="8" aria-label="Choose a property"
           style="width:100%;border:1px solid #d1d5db;border-radius:10px;padding:6px;font-size:.85rem;flex:1;min-height:150px">
-          ${deals.map(d=>`<option value="${d.id}"${d.id===suggested?' selected':''}>${_mlEsc(_siDealLabel(d))}</option>`).join('')}
+          ${deals.map(d=>`<option value="${d.id}"${d.id===suggested?' selected':''}>${_mlEsc(_siDealLabel(d))}${deals.tag(d)?' — '+_mlEsc(deals.tag(d)):''}</option>`).join('')}
         </select>
       </div>
       <div style="padding:14px 22px;border-top:1px solid #f1f5f9;display:flex;gap:10px;justify-content:flex-end">
@@ -49136,8 +49151,9 @@ window._mailLinkFilter = function(){
   const q = (document.getElementById('ml-filter')?.value||'').toLowerCase().trim();
   const sel = document.getElementById('ml-deal-list'); if(!sel) return;
   const cur = sel.value;
-  const deals = _siDealsSorted().filter(d => !q || (_siDealLabel(d)+' '+(d.county||'')).toLowerCase().includes(q));
-  sel.innerHTML = deals.map(d=>`<option value="${d.id}"${d.id===cur?' selected':''}>${_mlEsc(_siDealLabel(d))}</option>`).join('');
+  const _all = _siDealsSorted(), _tag = _all.tag;   // DEALPICK-20261102
+  const deals = _all.filter(d => !q || (_siDealLabel(d)+' '+(d.county||'')+' '+_tag(d)).toLowerCase().includes(q));
+  sel.innerHTML = deals.map(d=>`<option value="${d.id}"${d.id===cur?' selected':''}>${_mlEsc(_siDealLabel(d))}${_tag(d)?' — '+_mlEsc(_tag(d)):''}</option>`).join('');
   if(deals.length===1) sel.value = deals[0].id;
 };
 
