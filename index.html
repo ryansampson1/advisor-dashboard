@@ -21773,6 +21773,80 @@ window._logAttachmentActivity = async (dealId, fileObj, docType, downloadUrl, ex
   } catch(e) { console.warn('[logAttachmentActivity]', e); }
 };
 
+/* ── KRISSYDOC-20261102 — every new LOI / contract uploaded to Terra → a task for Krissy with the document attached ──
+   Ryan (2026-11-02): "when a new LOI or contract is uploaded to terra, please automatically send it to Krissy as a
+   task with the document in the task so she can download it."
+   Fires from every place a user puts an LOI or contract on a card:
+     • deal form / stage modal — the LOI file, PSA file, contract file, and each newly attached offer in the multi-LOI list
+     • 📎 drop zone and 📄 LOI box — when the type is LOI / Offer or Contract / PSA (🏷️ re-typing counts only for a
+       file uploaded in the last 3 days, so tagging an old attachment doesn't send Krissy history)
+     • email attachments saved onto a card (Inbox tab / Email review) whose file name reads as an LOI or contract
+   One task per document: keyed by the file's Storage path, checked in this session, in allTasks and in Firestore
+   (tasks.kdocKey). Never for a file Krissy uploaded herself. The document rides on the task's 📎 download button
+   (attachmentUrl). Additive only — the 🗂️ "Add to Tracking List" task at Under Contract is unchanged. */
+(function(){
+  const KRISSY = 'krissy@thedirtdog.com';
+  const _sent = new Set();
+  const _path = u => String(u||'').split('?')[0];
+  const _key = u => { const s=_path(u); let h=5381; for(let i=0;i<s.length;i++) h=((h<<5)+h+s.charCodeAt(i))|0; return 'kdoc_'+(h>>>0).toString(36)+s.length.toString(36); };
+  const _nextBizDay = () => { const d=new Date(); do{ d.setDate(d.getDate()+1); }while(d.getDay()===0||d.getDay()===6);
+    return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); };
+  window._krissyDocKey = _key;
+  window._krissyDocTask = async function(dealOrId, doc){
+    try{
+      if(!doc || !doc.url) return null;
+      const kind = doc.kind==='loi' ? 'loi' : (/^(contract|psa)$/.test(doc.kind||'') ? 'contract' : '');
+      if(!kind) return null;
+      const me = ((typeof currentUser!=='undefined' && currentUser && currentUser.email) || '').toLowerCase();
+      if(me === KRISSY) return null;                                    // she uploaded it — nothing to send her
+      const deals = (typeof allDeals!=='undefined' && allDeals) || [];
+      const deal = typeof dealOrId==='string' ? (deals.find(d=>d.id===dealOrId) || {id:dealOrId}) : dealOrId;
+      if(!deal || !deal.id) return null;
+      const key = _key(doc.url), name = String(doc.name || (kind==='loi'?'LOI':'Contract')).trim();
+      const nameKey = deal.id+'|'+kind+'|'+name.toLowerCase();         // same file through two paths of one save
+      if(_sent.has(key) || _sent.has(nameKey)) return null;
+      _sent.add(key); _sent.add(nameKey);
+      const base = _path(doc.url);
+      const tasks = (typeof allTasks!=='undefined' && allTasks) || [];
+      if(tasks.some(t => t && (t.kdocKey===key || ((t.assignedToEmail||'').toLowerCase()===KRISSY && t.attachmentUrl && _path(t.attachmentUrl)===base)))) return null;
+      if(_fbDb && _fbFns && _fbFns.getDocs){
+        try{ const {collection,query,where,getDocs,limit}=_fbFns;
+             const s = await getDocs(query(collection(_fbDb,'tasks'), where('kdocKey','==',key), limit(1)));
+             if(!s.empty) return null; }
+        catch(e){ console.warn('[krissydoc] lookup skipped', e && (e.code||e.message)); }
+      }
+      const profs = (typeof allProfiles!=='undefined' && allProfiles) || {};
+      const km = Object.entries(profs).find(([,p]) => (p && p.email || '').toLowerCase() === KRISSY);
+      const isLoi = kind==='loi', label = isLoi ? 'LOI' : 'Contract';
+      const who = (typeof currentUser!=='undefined' && currentUser && (currentUser.name||currentUser.displayName||currentUser.email)) || '';
+      const src = {form:'the deal card', card:'card attachments', email:'an email linked to the card'}[doc.source] || 'Terra';
+      const price = Number(String(doc.price==null?'':doc.price).replace(/[$,\s]/g,''));
+      const lines = [
+        'A new '+(isLoi?'LOI':'contract')+' was uploaded to Terra.', '',
+        'Property: '+(deal.propertyAddress||deal.projectName||'—'),
+        'Advisor: '+(deal.advisorName||deal.advisorEmail||'—'),
+        'Uploaded by: '+(who||'—')+' (from '+src+')',
+        'Document: '+name,
+      ];
+      if(doc.buyer) lines.push('Buyer: '+String(doc.buyer).trim());
+      if(price>0) lines.push('Price: $'+price.toLocaleString());
+      lines.push('', '⬇️ Download it with the 📎 button on this task.');
+      const id = await Store.createTask({
+        title: '📥 New '+label+' — '+_taskHeadlineName(deal),
+        description: lines.join('\n'),
+        attachmentUrl: doc.url, attachmentName: name,
+        assignedTo: km ? km[0] : null, assignedToName: km ? (km[1].name||'Krissy') : 'Krissy', assignedToEmail: KRISSY,
+        dealId: deal.id, dealAddress: deal.propertyAddress||'',
+        dueDate: _nextBizDay(), status: 'pending',
+        taskType: 'krissy_doc', kdocKey: key, kdocKind: kind, auto: true,
+        createdBy: (typeof currentUser!=='undefined' && currentUser && currentUser.uid) || 'system', createdByName: 'Automation', createdAt: Date.now(),
+      });
+      if(id && typeof showToast==='function') showToast('📥 '+label+' sent to Krissy', 'success', 3000);
+      return id || null;
+    }catch(e){ console.warn('[krissydoc]', e); return null; }
+  };
+})();
+
 // ── Global user activity logger (writes to top-level userActivity collection) ────────────
 // type: 'login' | 'stage_change' | 'deal_created' | 'task_created' | 'note_added' | etc.
 window.logUserActivity = async function(type, description, meta={}) {
@@ -23082,6 +23156,8 @@ window._classifySkip = async (dealId, encName, encUrl, o = {}) => {
   const name = decodeURIComponent(encName), url = decodeURIComponent(encUrl);
   const file = window._pdwPendingDriveFiles[url]; delete window._pdwPendingDriveFiles[url];
   const deal = (typeof allDeals!=='undefined') ? allDeals.find(d => d.id === dealId) : null;
+  if (file && deal && window._krissyDocTask) { const _kg = window._docTypeGuess(name, deal.stage);   // KRISSYDOC-20261102
+    if (_kg === 'loi' || _kg === 'contract') window._krissyDocTask(deal, { kind: _kg, url, name, source: 'card' }); }
   if (file && deal && (deal.driveUrl || deal.driveFolderId)) {
     const g = window._docTypeGuess(name, deal.stage);
     if (g) { try { await window._attPatch(deal, url, { kind: g }); } catch(_){} }
@@ -23122,6 +23198,9 @@ window._classifyPick = async (dealId, encName, encUrl, kind) => {
       Object.assign(deal, patch);
       showToast('📝 Logged as the contract (+30 pts this week).', 'success', 4500);
     }
+    // KRISSYDOC-20261102 — LOI / Contract picked → Krissy gets it (re-typing only counts for a file uploaded in the last 3 days)
+    if ((t.score === 'loi' || t.score === 'contract') && window._krissyDocTask && (!att || (+att.uploadedAt || 0) > Date.now() - 3*86400000))
+      window._krissyDocTask(deal, { kind: t.score, url, name, source: (att && att.source === 'email') ? 'email' : 'card' });
     // ── Listing extension / amendment → the 📑 reader owns it (terms, Drive copy, activity line) ──
     if (t.handoff === 'la' && window._laUpload && window._laShow && window._laShow(deal)) {
       let file = pending;
@@ -41805,6 +41884,7 @@ window.handleDealSubmit = async ev => {
   // Determines the winner (explicit pick → existing selection → top-ranked) and
   // syncs the legacy single-LOI fields so existing automations keep working.
   let _loisToSave = null, _winnerObj = null, _winnerId = null;
+  const _kdocNewLois = [];   // KRISSYDOC-20261102
   {
     const _draft = getLoiDraft(fileKey);
     if(_draft.length){
@@ -41813,7 +41893,7 @@ window.handleDealSubmit = async ev => {
         let url = l.fileUrl || '';
         if(l.dataUrl && _fbStorage){
           const u = await _uploadDealFile({dataUrl:l.dataUrl, name:l.fileName}, _uploadId, 'loi');
-          if(u) url = u;
+          if(u){ url = u; _kdocNewLois.push({ url:u, name:l.fileName||'', buyer:l.buyer||'', price:l.price }); }   // KRISSYDOC-20261102
         }
         _loisToSave.push({
           id: l.id,
@@ -41995,6 +42075,12 @@ window.handleDealSubmit = async ev => {
     if(csUploadUrl  && _snapCs)  window._logAttachmentActivity(id, _snapCs,  'closing', csUploadUrl);
     if(lfUrl && lfData)          window._logAttachmentActivity(id, lfData,   'listing', lfUrl);
     if(cfUrl && cfData)          window._logAttachmentActivity(id, cfData,   'contract', cfUrl);
+    if(window._krissyDocTask){   // KRISSYDOC-20261102 — new LOI / contract → Krissy task with the file
+      if(loiUploadUrl && _snapLoi) window._krissyDocTask(id, {kind:'loi', url:loiUploadUrl, name:_snapLoi.name, source:'form'});
+      if(psaUploadUrl && _snapPsa) window._krissyDocTask(id, {kind:'contract', url:psaUploadUrl, name:_snapPsa.name, source:'form'});
+      if(cfUrl && cfData)          window._krissyDocTask(id, {kind:'contract', url:cfUrl, name:cfData.name, source:'form'});
+      _kdocNewLois.forEach(l => window._krissyDocTask(id, {...l, kind:'loi', source:'form'}));
+    }
     // ── Structured Drive workflow on stage change ──────────────────────────
     // Capture files synchronously NOW before async cleanup runs later
     const _driveSnap = {
@@ -42061,6 +42147,12 @@ window.handleDealSubmit = async ev => {
     if(csUploadUrl  && _snapCs)  window._logAttachmentActivity(newId, _snapCs,  'closing', csUploadUrl);
     if(lfUrl && lfData)          window._logAttachmentActivity(newId, lfData,   'listing', lfUrl);
     if(cfUrl && cfData)          window._logAttachmentActivity(newId, cfData,   'contract', cfUrl);
+    if(window._krissyDocTask){   // KRISSYDOC-20261102 — new LOI / contract → Krissy task with the file
+      if(loiUploadUrl && _snapLoi) window._krissyDocTask(newId, {kind:'loi', url:loiUploadUrl, name:_snapLoi.name, source:'form'});
+      if(psaUploadUrl && _snapPsa) window._krissyDocTask(newId, {kind:'contract', url:psaUploadUrl, name:_snapPsa.name, source:'form'});
+      if(cfUrl && cfData)          window._krissyDocTask(newId, {kind:'contract', url:cfUrl, name:cfData.name, source:'form'});
+      _kdocNewLois.forEach(l => window._krissyDocTask(newId, {...l, kind:'loi', source:'form'}));
+    }
     // ── Structured Drive workflow on new deal create ───────────────────────
     const _driveSnapNew = {
       loi: stageFiles[`${fileKey}__loi`] || stageFiles[`new__loi`],
@@ -48771,6 +48863,7 @@ window._siSaveEmailAttachments = async function(dealId, email, tokenOverride){
     const deal=(allDeals||[]).find(d=>d.id===dealId);
     let existing=(deal && deal.dealAttachments)?deal.dealAttachments.slice():[];
     let added=0; const _toDrive=[];   // DOCTYPE-20261030
+    const _kdocMail=[];   // KRISSYDOC-20261102
     for(const att of atts){
       if(!att.attachmentId || !att.filename) continue;
       if(existing.some(a=>a.gmailId===email.id && a.gmailAttachmentId===att.attachmentId)) continue;
@@ -48788,6 +48881,7 @@ window._siSaveEmailAttachments = async function(dealId, email, tokenOverride){
         const snap=await uploadBytes(fbRef(_fbStorage, storePath), blob);
         const url=await getDownloadURL(snap.ref);
         const _kind = (window._docTypeGuess && window._DOC_FILEABLE && window._DOC_FILEABLE.test(att.filename)) ? (window._docTypeGuess(att.filename, deal && deal.stage) || '') : '';   // DOCTYPE-20261030
+        if(_kind==='loi' || _kind==='contract') _kdocMail.push({ kind:_kind, url, name:att.filename, source:'email' });   // KRISSYDOC-20261102
         existing.push({ name:att.filename, url, uploadedAt:Date.now(),
           uploadedBy:(currentUser && (currentUser.displayName||currentUser.name||currentUser.email))||'',
           source:'email', gmailId:email.id, gmailAttachmentId:att.attachmentId, ...(_kind?{kind:_kind}:{}) });
@@ -48797,6 +48891,7 @@ window._siSaveEmailAttachments = async function(dealId, email, tokenOverride){
     }
     if(added){
       await Store.updateDeal(dealId, { dealAttachments: existing, updatedAt: Date.now() });
+      if(window._krissyDocTask) _kdocMail.forEach(d => window._krissyDocTask(deal || dealId, d));   // KRISSYDOC-20261102
       if(deal) deal.dealAttachments = existing;
       // DOCTYPE-20261030 — file the documents to the deal's Drive folder too (after the card write, so the
       // ☁️ stamp patches the saved entries; one at a time so two files of a new type share one sub-folder).
