@@ -2660,6 +2660,21 @@ function _elcScorecardExcluded(uid, email){
 }
 function _elcScorecardAdvisors(list){ return (list||[]).filter(a=>!_elcScorecardExcluded(a.uid, a.email)); }
 window._elcScorecardAdvisors = _elcScorecardAdvisors;
+/* TASKONLY-20261103 — Ryan (2026-11-03): "for Pat and Andrew, change their scorecard to just be
+   tasks. If all tasks are complete they get 100 points; if they only complete a percentage, the
+   scorecard is the percentage completed. It closes Sunday night at midnight for the prior week,
+   and any task assigned to them on a Friday or due on a weekend pushes to the next week and is
+   not penalized." Applies from the week of Mon Oct 26 2026; earlier weeks are left as graded.
+   Their grade comes from window._elcTaskOnlyWeek (via _elcWeekScore), so history, report card,
+   L-10 and the auto-lock sweep all agree. They are shown on the Staff Weekly Scorecard, not the
+   advisor table. Their deals, pay, leaderboard and compliance role are untouched. */
+const TASK_ONLY_SCORECARD_EMAILS = ['pat@thedirtdog.com','andrew@thedirtdog.com'];
+window._ELC_TASKONLY_FROM = new Date(2026,9,26).getTime();
+window._ELC_TASKONLY_FROM_KEY = '2026-10-26';
+window._elcIsTaskOnly = (uid, email) => {
+  const em = String(((typeof allProfiles!=='undefined' && allProfiles && allProfiles[uid]) || {}).email || email || '').toLowerCase();
+  return TASK_ONLY_SCORECARD_EMAILS.includes(em);
+};
 
 /* =======================================================
    SEED DATA
@@ -22326,8 +22341,10 @@ window._ELC_SCORECARD_VER = 7;   // EFFDATE-20261026: v7 = effective-date credit
    Earlier locked rows stay frozen at v6 so past grades don't move. Callers pass
    wKey (YYYY-MM-DD week start); without it a row is held to the current version. */
 window._ELC_SCORECARD_V7_FROM = '2026-10-19';
-window._elcRowFresh = (row, docVer, wKey) => {
+window._elcRowFresh = (row, docVer, wKey, uid) => {
   if(!row || row.score === undefined) return false;
+  // TASKONLY-20261103 — a tasks-only person's week from Oct 26 on must have been locked by the tasks formula
+  if(uid && window._elcIsTaskOnly(uid) && wKey && String(wKey) >= window._ELC_TASKONLY_FROM_KEY && !row.taskOnly) return false;
   const need = (wKey && String(wKey) < window._ELC_SCORECARD_V7_FROM) ? 6 : window._ELC_SCORECARD_VER;
   return (+row.v || 0) >= need;
 };
@@ -22355,6 +22372,36 @@ window._elcWeekScore = (uid, wS, wE, wKey) => {
   window._elcScoreCache.set(_ck, _v);
   return _v;
 };
+/* TASKONLY-20261103 — which week a task is graded in. Monday of the LATER of:
+   · its due date — a Saturday/Sunday due date counts as the next Monday (the original date is
+     used if the app rolled a weekend due date back to Friday);
+   · the day it was assigned — a task assigned on Fri/Sat/Sun belongs to next week.
+   No due date → the assignment rule alone. */
+window._elcTaskWeekStartTs = t => {
+  const mon = x => { const d = new Date(x); d.setHours(0,0,0,0); d.setDate(d.getDate() - ((d.getDay()+6)%7)); return d.getTime(); };
+  const nextMonIfWeekend = (x, fri) => { const g = new Date(x).getDay(); return (g===6 || g===0 || (fri && g===5)) ? mon(x) + 7*864e5 : x; };
+  let a = +t.createdAt || 0;
+  if(a) a = nextMonIfWeekend(a, true);
+  let due = window._elcYmdTs(t.dueDateRolledFrom || t.dueDate);
+  if(due) due = nextMonIfWeekend(due, false);
+  const b = Math.max(a, due);
+  return b ? mon(b) : 0;
+};
+/* % of the week's tasks done by Sunday 11:59:59 pm. No tasks that week = 100. Cancelled
+   tasks don't count. A task finished after the week closed doesn't rescue it. */
+window._elcTaskOnlyWeek = (uid, wS, wE) => {
+  const mine = allTasks.filter(t => t.assignedTo===uid && (t.status==='pending' || t.status==='complete'));
+  const inWk = mine.filter(t => { const b = window._elcTaskWeekStartTs(t); return b>=wS && b<=wE; });
+  const doneAt = t => +t.completedAt || +t.updatedAt || 0;
+  const done = inWk.filter(t => t.status==='complete' && doneAt(t) <= wE);
+  const open = inWk.filter(t => !done.includes(t));
+  const total = inWk.length;
+  const score = total ? Math.round(done.length/total*100) : 100;
+  return {score, pts:[0,score,0,0,0,0,0,0,0], wQPct:0, pLen:0, lLen:0, prLen:0, lstLen:0, cLen:0,
+          netEv:'', drPr:'', doneT:done.length, openT:open.length, caN:0, taskOnly:true, tTotal:total,
+          det:{qDeals:[], overdueTasks:open, prospectDeals:[], calls:[], loiRows:[], propDeals:[],
+               lstDeals:[], ctRows:[], weekTasks:inWk, doneTasks:done, openTasks:open}};
+};
 /* SCWEIGHTS-20261103 — Ryan (2026-11-03), effective immediately: Listings 30 · Proposals 20 ·
    LOIs 15 (each offer). Applies to weeks starting Mon Nov 2 2026 and later; earlier weeks keep
    Listings 20 · Proposals 10 · LOIs 10 so no past grade moves. Every scorecard surface reads
@@ -22364,6 +22411,7 @@ window._elcScW = wS => (+wS >= window._ELC_SCW_FROM)
   ? {loi:15, prop:20, lst:30, ct:30}
   : {loi:10, prop:10, lst:20, ct:30};
 window._elcWeekScoreRaw = (uid, wS, wE, wKey) => {
+  if(window._elcIsTaskOnly(uid) && +wS >= window._ELC_TASKONLY_FROM) return window._elcTaskOnlyWeek(uid, wS, wE);   // TASKONLY-20261103
   const prof     = allProfiles[uid] || {};
   const Q_GOAL   = prof.quarterlyUCGoal || 10000000;
   const myDeals  = allDeals.filter(d => isDealAdvisor(d, uid));
@@ -22505,7 +22553,7 @@ window._elcSweepScoreHistory = async () => {
       let dirty = false;
       weeks.forEach(({wS,wE,wKey})=>{
         if(wE >= Date.now())   return;             // not finished — stays live
-        if(window._elcRowFresh(mine[wKey], hist.__ver, wKey)) return;  // frozen by the CURRENT formula
+        if(window._elcRowFresh(mine[wKey], hist.__ver, wKey, aUid)) return;  // frozen by the CURRENT formula
         if(window._elcOnVacation(aUid,wS,wE)) return; // time off is never graded
         const _r = window._elcWeekScore(aUid,wS,wE,wKey); delete _r.det; delete _r.pts;
         mine[wKey] = {..._r, v:SCORECARD_VER, autoLocked:true};
@@ -36776,7 +36824,7 @@ function viewOfficeOverview(){
      and listings at 10 while the EOS scorecard scored them 10 and 20, and it
      read LOIs from the CURRENT week. An advisor could be a B here and a C on
      their own scorecard for the very same week. One formula now. */
-  const scRowsSorted = _elcScorecardAdvisors(allAdvs).map(adv => {   // SCEXCL-20261005
+  const scRowsSorted = _elcScorecardAdvisors(allAdvs).filter(a=>!window._elcIsTaskOnly(a.uid, a.email)).map(adv => {   // SCEXCL-20261005
     const _vacOv = window._elcOnVacation(adv.uid, pwS, pwE);   // elc-v437 (VACMODE-20260824)
     const S      = window._elcWeekScore(adv.uid, pwS, pwE, weekKey);
     const qGoal  = allProfiles[adv.uid]?.quarterlyUCGoal || 10000000;
@@ -37948,8 +37996,8 @@ function viewEOS(sub='rocks'){
 
     const effectiveAdmin = isAdmin && !adminViewAsAdvisor && !staffViewMode;
     const advisors = effectiveAdmin
-      ? _elcScorecardAdvisors(getDistinctAdvisors())   // SCEXCL-20261005
-      : [{uid, name: currentUser.name||currentUser.email}];
+      ? _elcScorecardAdvisors(getDistinctAdvisors()).filter(a=>!window._elcIsTaskOnly(a.uid, a.email))   // SCEXCL-20261005 · TASKONLY-20261103
+      : (window._elcIsTaskOnly(uid) ? [] : [{uid, name: currentUser.name||currentUser.email}]);
 
     /* Sort key. elc-v443: this used to be a FOURTH hand-copy of the formula —
        and a drifted one (contracts 20 instead of 30, a 10-pt task-completion
@@ -37966,9 +38014,9 @@ function viewEOS(sub='rocks'){
     const staffScorecard = (standalone=true) => {
       // Prior-week window (same as above)
       const staffUsers = Object.entries(allProfiles)
-        .filter(([sUid,p])=>(p.roles||[]).includes('staff'))
+        .filter(([sUid,p])=>(p.roles||[]).includes('staff') || window._elcIsTaskOnly(sUid, p.email))   // TASKONLY-20261103
         // Staff members only see their own row; admins see all staff
-        .filter(([sUid])=> !isStaffView() || sUid===currentUser.uid)
+        .filter(([sUid])=> (effectiveAdmin && !isStaffView()) || sUid===currentUser.uid)
         .map(([sUid,p])=>({uid:sUid, name:p.name||p.email||sUid}))
         .sort((a,b)=>a.name.localeCompare(b.name));
 
@@ -37979,6 +38027,26 @@ function viewEOS(sub='rocks'){
       const allRocks = eosGet('myRocks',{});
 
       const staffRow = (sUid, sName) => {
+        // TASKONLY-20261103 — Pat & Andrew: grade = % of the week's tasks done by Sunday midnight
+        const _T = window._elcIsTaskOnly(sUid) ? window._elcWeekScore(sUid, pwS, pwE, weekKey) : null;
+        if(_T && _T.taskOnly){
+          const g = weekGrade(_T.score), v = window._elcOnVacation(sUid, pwS, pwE);
+          const tip = window._scTipHtml("Prior week's tasks", _T.det.weekTasks.map(t=>window._scEsc(t.title||'Untitled')+(_T.det.doneTasks.includes(t)?' ✓':' — open')));
+          return `<tr class="border-b border-gray-100 hover:bg-gray-50 transition-colors">
+          <td class="px-5 py-4"><span class="text-sm font-semibold text-gray-800">${sName}</span><div class="text-xs text-gray-400">Tasks-only scorecard</div></td>
+          <td class="px-4 py-4 text-center">
+            ${v ? window._elcVacBadge(v,48) : `<div style="display:inline-flex;flex-direction:column;align-items:center;gap:3px">
+              <div style="width:48px;height:48px;border-radius:50%;background:${g.bg};border:2px solid ${g.color};display:flex;flex-direction:column;align-items:center;justify-content:center;line-height:1">
+                <span style="font-size:1.2rem;font-weight:800;color:${g.color}">${g.letter}</span>
+              </div>
+              <span style="font-size:.7rem;color:${g.color};font-weight:700">${_T.score}%</span>
+            </div>`}
+          </td>
+          <td class="px-4 py-4 text-center"><span class="text-sm font-bold text-gray-700">${_T.openT}</span></td>
+          <td class="px-4 py-4 text-center" data-sctip="${tip}" style="cursor:help"><span class="text-sm font-bold" style="color:${_T.openT===0?'#059669':'#DA291C'}">${_T.doneT}/${_T.tTotal}</span></td>
+          <td class="px-4 py-4 text-center"><span class="text-xs text-gray-400">Not scored</span></td>
+        </tr>`;
+        }
         const sTasks    = allTasks.filter(t=>t.assignedTo===sUid);
         const openTasks = sTasks.filter(t=>t.status==='pending').length;
         // Tasks completed in the prior week
@@ -38063,6 +38131,7 @@ function viewEOS(sub='rocks'){
           </div>
           <div class="px-6 py-3 border-t bg-gray-50 flex flex-wrap gap-5 text-xs text-gray-400">
             <span>Grade = 33% Rocks + 33% Prior-week tasks + 34% Open tasks</span>
+            <span>Tasks-only (Pat, Andrew): grade = % of the week's tasks done by Sunday midnight · assigned Fri or due Sat/Sun → next week</span>
             <span>Full credit if no tasks or all done</span>
             <span><span style="color:#059669;font-weight:700">●</span> Green = on track</span>
             <span><span style="color:#DA291C;font-weight:700">●</span> Red = needs attention</span>
@@ -38148,8 +38217,9 @@ function viewEOS(sub='rocks'){
       </div>`;
 
     // Staff users only ever see the staff scorecard; never the advisor scorecard
-    const showAdv   = !isStaffView() && (!effectiveAdmin || scView==='advisor' || scView==='both');
-    const showStaff = (effectiveAdmin && (scView==='staff'||scView==='both')) || isStaffView();
+    const _selfTaskOnly = !effectiveAdmin && window._elcIsTaskOnly(uid);   // TASKONLY-20261103
+    const showAdv   = !_selfTaskOnly && !isStaffView() && (!effectiveAdmin || scView==='advisor' || scView==='both');
+    const showStaff = _selfTaskOnly || (effectiveAdmin && (scView==='staff'||scView==='both')) || isStaffView();
 
 
     // ── Trailing 12-week history (individual / non-admin view only) ──────────
@@ -38197,7 +38267,7 @@ function viewEOS(sub='rocks'){
       let _histDirty   = false;
       const _saveHist  = () => { if(_histDirty){ const _l=eosGet('scoreHistory',{}); eosSave('scoreHistory',{..._l,[uid]:_myHist,__ver:SCORECARD_VER}); } };
 
-      if(isStaffView()){
+      if(isStaffView() || window._elcIsTaskOnly(uid)){   // TASKONLY-20261103
         // ── Staff history ──────────────────────────────────────────────────
         const rows = weekWindows.map(({wKey,wLabel,wS,wE})=>{
           const isCurr = wKey===weekKey;
@@ -38210,9 +38280,13 @@ function viewEOS(sub='rocks'){
           </tr>`;
           const openTasks = myTasks.filter(t=>t.status==='pending').length; // current count, by design
           let score, doneTasks;
-          const locked = window._elcRowFresh(_myHist[wKey], _storedVer, wKey) ? _myHist[wKey] : null;
+          const locked = window._elcRowFresh(_myHist[wKey], _storedVer, wKey, uid) ? _myHist[wKey] : null;
           if(locked){
             ({score, doneTasks} = locked);
+          } else if(window._elcIsTaskOnly(uid) && wS >= window._ELC_TASKONLY_FROM){   // TASKONLY-20261103
+            const _T = window._elcWeekScore(uid, wS, wE, wKey);
+            score = _T.score; doneTasks = _T.doneT;
+            if(wE < _nowMs && window._elcScoreDataReady(uid)){ _myHist[wKey] = {score, doneTasks, doneT:_T.doneT, openT:_T.openT, tTotal:_T.tTotal, taskOnly:true, v:SCORECARD_VER}; _histDirty = true; }
           } else {
             doneTasks = myTasks.filter(t=>t.status==='complete'&&(t.updatedAt||0)>=wS&&(t.updatedAt||0)<=wE).length;
             const pwPending = myTasks.filter(t=>t.status==='pending'&&(t.createdAt||0)>=wS&&(t.createdAt||0)<=wE).length;
@@ -38282,7 +38356,7 @@ function viewEOS(sub='rocks'){
         </tr>`;
         let score, wQPct, pLen, lLen, prLen, lstLen, cLen, netEv, drPr, doneT, openT, caN;
 
-        const locked = window._elcRowFresh(_myHist[wKey], _storedVer, wKey) ? _myHist[wKey] : null;
+        const locked = window._elcRowFresh(_myHist[wKey], _storedVer, wKey, uid) ? _myHist[wKey] : null;
         if(locked){
           // Frozen week — render exactly what was stored, never recompute.
           ({score, wQPct, pLen, lLen, prLen, lstLen, cLen, netEv, drPr, doneT, openT, caN} = locked);
@@ -38301,7 +38375,7 @@ function viewEOS(sub='rocks'){
           // admins — Firestore denies eos/* writes to everyone else. It is a
           // best-effort freeze, never what the display depends on.
           if(wE < _nowMs && window._elcScoreDataReady(uid)){   // SCGUARD-20261016
-            _myHist[wKey] = {score, wQPct, pLen, lLen, prLen, lstLen, cLen, netEv, drPr, doneT, openT, caN, v:SCORECARD_VER};
+            _myHist[wKey] = {score, wQPct, pLen, lLen, prLen, lstLen, cLen, netEv, drPr, doneT, openT, caN, ...((window._elcIsTaskOnly(uid) && wS >= window._ELC_TASKONLY_FROM) ? {taskOnly:true} : {}), v:SCORECARD_VER};   // TASKONLY-20261103
             _histDirty = true;
           }
         }
@@ -38454,7 +38528,7 @@ function viewEOS(sub='rocks'){
           const scores = qWeeks2
             .filter(({wKey})=>!window._elcOnVacationWeek(aUid,wKey))
             .map(({wKey,wS,wE})=>{
-              const locked = window._elcRowFresh(hist[wKey], _sv2, wKey) ? hist[wKey] : null;
+              const locked = window._elcRowFresh(hist[wKey], _sv2, wKey, aUid) ? hist[wKey] : null;
               if(locked) return locked.score;
               live++;   // never recorded (or recorded by a session without write rights)
               return window._elcWeekScore(aUid,wS,wE,wKey).score;
@@ -39143,8 +39217,8 @@ function viewEOS(sub='rocks'){
               return {score, html: '<tr class="border-b border-gray-100">'
                 +'<td class="py-2 pr-2 text-sm font-semibold text-gray-800" style="min-width:90px">'+a.name+'</td>'
                 +'<td class="py-2 px-2 text-center"><span style="display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;border-radius:50%;background:'+g.c+'22;border:2px solid '+g.c+';font-size:.72rem;font-weight:800;color:'+g.c+'">'+g.l+'</span></td>'
-                +'<td class="py-2 px-2 text-center"><span class="text-xs font-bold" style="color:'+qColor+'">'+qPct+'%</span></td>'
-                +'<td class="py-2 px-2 text-center"><span class="text-xs font-bold '+(overdueT===0?'text-green-600':'text-red-600')+'">'+(overdueT===0?'✓ Clear':overdueT+' overdue')+'</span></td>'
+                +'<td class="py-2 px-2 text-center"><span class="text-xs font-bold" style="color:'+qColor+'">'+(S.taskOnly?'—':qPct+'%')+'</span></td>'
+                +'<td class="py-2 px-2 text-center"><span class="text-xs font-bold '+(overdueT===0?'text-green-600':'text-red-600')+'">'+(S.taskOnly?(S.doneT+'/'+S.tTotal+' done'):overdueT===0?'✓ Clear':overdueT+' overdue')+'</span></td>'
                 +'<td class="py-2 pl-2 text-center"><span class="text-xs text-gray-500">'+pwMoves+' moves</span></td>'
                 +'</tr>'};
             }).sort((a,b)=>b.score-a.score).map(r=>r.html).join('');
@@ -39614,8 +39688,17 @@ function viewEOS(sub='rocks'){
     const _ptB=p=>{if(p==null||_vacNow)return'';const r=Math.round(p*10)/10;const c=p>=10?'#059669':p>=5?'#D97706':'#DA291C';return `<div style="font-size:.6rem;font-weight:700;color:${c};line-height:1;margin-top:3px">${r} pts</div>`;};
     const _mc=(lbl,val,good,pts,tip)=>`<div class="bg-gray-50 rounded-xl p-2.5 text-center min-w-0"${tip?` data-sctip="${tip}" style="cursor:help"`:''}><div class="text-xs font-bold text-gray-400 uppercase tracking-wide leading-none mb-1" style="font-size:.6rem">${lbl}</div><div class="text-sm font-bold" style="color:${good?'#059669':'var(--text-1)'}">${val}</div>${_ptB(pts)}</div>`;
     const _isStaff=isStaffView();
+    const _isTaskOnly=window._elcIsTaskOnly(uid);   // TASKONLY-20261103
     let _sc=0,_gObj={l:'F',c:'#DA291C',b:'#fef2f2'},_mHtml='',_ttl='';
-    if(!_isStaff){
+    if(_isTaskOnly){   // TASKONLY-20261103
+      _vacNow=window._elcOnVacation(uid,_pwS,_pwE);
+      const _T=window._elcWeekScore(uid,_pwS,_pwE,_wk);
+      const _tt=window._scTipHtml("This week's tasks",_T.det.weekTasks.map(t=>window._scEsc(t.title||'Untitled')+(_T.det.doneTasks.includes(t)?' ✓':' — open')));
+      _sc=_T.score; _gObj=_gr(_sc); _ttl='✅ My Weekly Scorecard · Tasks';
+      _mHtml=`<div class="flex-1 min-w-0"><div class="grid gap-2" style="grid-template-columns:repeat(3,minmax(80px,1fr))">
+        ${_mc('Tasks This Week',_T.tTotal,true,null,_tt)}${_mc('Done ✓',_T.doneT,_T.doneT>0||_T.tTotal===0)}${_mc('Still Open',_T.openT,_T.openT===0)}
+      </div><p class="text-xs text-gray-400 mt-2">Score = % of this week's tasks done by Sunday midnight. Tasks assigned on a Friday or due on a weekend count next week.</p></div>`;
+    } else if(!_isStaff){
       /* elc-v443 (SCUNIFY-20260901) — the FIFTH copy of the week formula lived
          here, and it was the one advisors look at daily: it scored LOIs only
          when a card sat in the LOI column, so uploading three offers to a
