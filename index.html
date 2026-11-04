@@ -27303,7 +27303,7 @@ function viewTasks(){
   const canManage = t => isAdmin || isStaffView() || t.createdBy===uid;
   const taskCard = (t, done=false, hideAddr=false) => (t=(window._ffView?window._ffView(t):t), `
     <div class="bg-white rounded-xl border p-4 flex gap-3 items-start ${urgency(t)} transition">
-      <button onclick="${(!done&&window._mwIsReviewTask&&window._mwIsReviewTask(t))?`window._mwTaskAnswer('${t.id}','respond')`:(!done&&window._caIsTask&&window._caIsTask(t))?`window._caOpenCreate('${t.id}')`:`toggleTask('${t.id}','${done?'pending':'complete'}')`}"
+      <button onclick="${(!done&&window._mwIsReviewTask&&window._mwIsReviewTask(t))?`window._mwTaskAnswer('${t.id}','respond')`:(!done&&window._caIsTask&&window._caIsTask(t))?`window._caOpenCreate('${t.id}')`:(!done&&window._crIsTask&&window._crIsTask(t))?`window._crToggle('${t.id}')`:`toggleTask('${t.id}','${done?'pending':'complete'}')`}"
         class="mt-0.5 shrink-0 w-5 h-5 rounded border-2 ${done?'bg-blue-500 border-blue-500 text-white flex items-center justify-center':'border-gray-300 hover:border-blue-400'} text-xs">
         ${done?'✓':''}
       </button>
@@ -27323,6 +27323,7 @@ function viewTasks(){
         ${(!done&&window._ffPanel)?window._ffPanel(t):''}<!-- FFTASK-20261026 -->
         ${(window._mwIsReviewTask&&window._mwIsReviewTask(t))?window._mwTaskButtons(t):''}<!-- MWTASK-20261016 -->
         ${(window._caIsTask&&window._caIsTask(t))?window._caTaskButtons(t):''}<!-- CARDASK-20261029 -->
+        ${(window._crIsTask&&window._crIsTask(t))?`<div data-cr-box="${t.id}">${window._crTaskButtons(t)}</div>`:''}<!-- CRMASK-20261104 -->
         ${(t.autoCompletedEmailUrl||t.emailUrl||t.invoiceDealId||t.gmailUrl||t.attachmentUrl||t.approvePaymentDealId||(window._spIsSocialTask&&window._spIsSocialTask(t))||(window._mrIsAssetsTask&&window._mrIsAssetsTask(t))||(window._mrIsBlastTask&&window._mrIsBlastTask(t)))?`<div class="flex gap-2 mt-2 flex-wrap">
           ${(window._spIsSocialTask&&window._spIsSocialTask(t))?`<button onclick="window._spOpen('${t.dealId}','${t.id}')" class="text-xs font-semibold px-2.5 py-1 rounded-lg text-white" style="background:#0A66C2">📣 Compose post</button>`:''}
           ${(window._mrIsAssetsTask&&window._mrIsAssetsTask(t))?`<button onclick="window._mrOpenAssets('${t.dealId}','${t.id}')" class="text-xs font-semibold px-2.5 py-1 rounded-lg text-white" style="background:#DA291C">📎 Upload report assets</button>`:''}
@@ -52032,12 +52033,162 @@ window._caSubmitExisting=async function(taskId,btn){
   }catch(e){ console.warn('[cardask] existing',e); showToast('Could not file it: '+(e.message||e),'error'); done(); }
 };
 
+/* ---- CRMASK-20261104: "👤 Add X to the CRM?" tasks — the nightly email check (elc-mailwatch-worker) counts the emails each advisor
+   trades with people who are NOT in the CRM; at the 3rd (at least one each way) the mailbox owner gets this task. Answered right in
+   the task box: ✅ Add to CRM opens an inline form (name / title / company / phone prefilled from their signature, CRM groups,
+   property cards — the cards those emails were filed on come pre-ticked) → creates the contact (or tags the existing one if the
+   email is already in the CRM) assigned to that advisor · ❌ No → never asked about that person again. The answer is stored on the
+   task (crmAnswer / crmContactId); the next nightly run copies it to crmAsk/{id}.
+   Someone already in the CRM but in NO group gets "🏷️ Add X to a CRM group?" (crmKind:'group') — 🏷️ Add to a group (groups + cards) or Ignore (never asked again). ---- */
+window._crIsTask=t=>!!(t&&t.taskType==='crm_ask');
+window._crDraft=window._crDraft||{};   // taskId → {first,last,…,groups:Set,deals:Set,gq,dq} — survives live-sync re-renders
+window._crOpen=window._crOpen||{};     // taskId → inline form expanded (stays open until the advisor closes it)
+function _crContactFor(t){ const C=(typeof allContacts!=='undefined'?allContacts:[]); if(t.crmContactId){ const c=C.find(x=>x.id===t.crmContactId&&!x._deleted); if(c) return c; } const e=String(t.crmEmail||'').toLowerCase(); if(!e) return null; return (typeof allContacts!=='undefined'?allContacts:[]).find(c=>!c._deleted&&[c.email,c.email2,...(Array.isArray(c.emails)?c.emails:[])].some(x=>String(x||'').toLowerCase()===e))||null; }
+function _crD(t){
+  let d=window._crDraft[t.id];
+  if(!d){ const valid=new Set((typeof allDeals!=='undefined'?allDeals:[]).map(x=>x.id));
+    d=window._crDraft[t.id]={ first:t.crmFirstName||'', last:t.crmLastName||'', title:t.crmTitle||'', company:t.crmCompany||'', phone:t.crmPhone||'', groups:new Set(), deals:new Set((t.crmDealIds||[]).filter(id=>valid.has(id))), gq:'', dq:'' }; }
+  return d;
+}
+function _crName(c){ return [c.firstName,c.lastName].filter(Boolean).join(' ')||c.email||'contact'; }
+window._crTaskButtons=function(t){
+  const b='text-xs font-semibold px-2.5 py-1 rounded-lg'; const E=_mrEsc;
+  if(t.status==='complete'||t.status==='completed'){
+    const c=t.crmContactId&&(typeof allContacts!=='undefined'?allContacts:[]).find(x=>x.id===t.crmContactId);
+    const grp=t.crmKind==='group'; const gN=(t.crmGroups||[]).map(g=>((typeof allCRMGroups!=='undefined'?allCRMGroups:[]).find(x=>x.id===g)||{}).name).filter(Boolean);
+    const a=t.crmAnswer==='yes'?(grp?'🏷️ Added to '+(gN.join(', ')||'groups'):'✅ Added to the CRM'+(c?' — '+_crName(c):'')):t.crmAnswer==='no'?(grp?'Ignored — Terra won’t ask again':'❌ Not added — Terra won’t ask again'):t.crmAnswer==='in_crm'?'Already in the CRM'+(grp?' with a group':''):'';
+    return a?`<div class="text-xs text-gray-600 mt-1">${E(a)}${c?` · <a class="text-blue-500 hover:underline cursor-pointer" onclick="window._crOpenContact('${c.id}')">open contact</a>`:''}</div>`:'';
+  }
+  const ex=_crContactFor(t);
+  if(ex){
+    const link=`<a class="text-blue-500 hover:underline cursor-pointer" onclick="window._crOpenContact('${ex.id}')">${E(_crName(ex))}</a>`;
+    if((ex.groups||[]).length&&t.crmKind==='group') return `<div class="text-xs text-gray-600 mt-2">${link} is in a group now.</div><div class="flex gap-2 mt-2"><button onclick="window._crAnswerNo('${t.id}',this,'in_crm')" class="${b} border border-gray-300 text-gray-700 bg-white" style="min-height:32px">Close task</button></div>`;
+    const noGrp=!(ex.groups||[]).length;
+    return `<div class="text-xs text-gray-600 mt-2">In the CRM as ${link}${noGrp?' — not in any group':''}.</div>
+    <div class="flex gap-2 mt-2 flex-wrap" role="group" aria-label="Add this contact to a CRM group?"><button onclick="window._crToggle('${t.id}')" aria-expanded="${window._crOpen[t.id]?'true':'false'}" class="${b} text-white" style="background:#0f766e;min-height:32px">🏷️ Add to a group${window._crOpen[t.id]?' ▲':'…'}</button>
+    ${noGrp?`<button onclick="window._crAnswerNo('${t.id}',this)" class="${b} border border-gray-300 text-gray-700 bg-white" style="min-height:32px">Ignore</button>`:`<button onclick="window._crAnswerNo('${t.id}',this,'in_crm')" class="${b} border border-gray-300 text-gray-700 bg-white" style="min-height:32px">Close task</button>`}
+    ${t.mwEmailUrl?`<a href="${E(t.mwEmailUrl)}" target="_blank" rel="noopener" class="${b} border border-gray-300 text-gray-700 bg-white inline-block" style="min-height:32px">📧 Open email</a>`:''}</div>${window._crOpen[t.id]?_crForm(t,ex):''}`;
+  }
+  return `<div class="flex gap-2 mt-2 flex-wrap" role="group" aria-label="Add this person to the CRM?">
+    <button onclick="window._crToggle('${t.id}')" aria-expanded="${window._crOpen[t.id]?'true':'false'}" class="${b} text-white" style="background:#0f766e;min-height:32px">✅ Add to CRM${window._crOpen[t.id]?' ▲':'…'}</button>
+    <button onclick="window._crAnswerNo('${t.id}',this)" class="${b} border border-gray-300 text-gray-700 bg-white" style="min-height:32px">❌ No</button>
+    ${t.mwEmailUrl?`<a href="${E(t.mwEmailUrl)}" target="_blank" rel="noopener" class="${b} border border-gray-300 text-gray-700 bg-white inline-block" style="min-height:32px">📧 Open email</a>`:''}
+  </div>${window._crOpen[t.id]?_crForm(t,null):''}`;
+};
+function _crForm(t,ex){
+  const d=_crD(t); const E=_mrEsc; const id=t.id;
+  const inp=(k,label,ph)=>`<div class="min-w-0"><label class="block text-xs font-medium text-gray-600 mb-1" for="cr-${id}-${k}">${label}</label><input id="cr-${id}-${k}" value="${E(d[k])}" placeholder="${ph||''}" oninput="window._crKeep('${id}','${k}',this.value)" class="cr-in w-full border rounded-lg px-3 py-2 text-sm bg-white outline-none focus:ring-2 focus:ring-emerald-200"/></div>`;
+  return `<div class="mt-3 p-3 border rounded-xl bg-gray-50" id="cr-form-${id}" onclick="event.stopPropagation()">
+    ${ex?`<div class="text-xs text-gray-600 mb-2">Adds the groups and cards you pick to <b>${E(_crName(ex))}</b> — their existing details are kept.</div>`:`
+    <div class="grid grid-cols-2 gap-2 cr-grid" style="min-width:0">${inp('first','First name')}${inp('last','Last name')}${inp('title','Title')}${inp('company','Company')}${inp('phone','Phone','813-555-0100')}
+      <div><span class="block text-xs font-medium text-gray-600 mb-1">Email</span><div class="text-sm text-gray-700 px-1 py-2 break-all">${E(t.crmEmail||'')}</div></div></div>`}
+    <div class="mt-3"><div class="flex items-center justify-between gap-2"><span class="text-xs font-semibold text-gray-600">CRM groups <span id="cr-${id}-gn" class="font-normal text-gray-500">${d.groups.size?'· '+d.groups.size+' picked':''}</span></span>
+      <input id="cr-${id}-gq" value="${E(d.gq)}" placeholder="Search groups…" aria-label="Search CRM groups" oninput="window._crFilter('${id}','g',this.value)" class="cr-in border rounded-lg px-2 py-1 text-sm bg-white" style="width:12rem;max-width:55%"/></div>
+      <div id="cr-${id}-gl" class="mt-1 flex flex-wrap gap-1.5 overflow-y-auto p-2 border rounded-lg bg-white" style="max-height:9.5rem">${_crList(t,'g')}</div>
+      <div class="flex gap-2 mt-1.5"><input id="cr-${id}-ng" placeholder="New group name…" aria-label="New group name" onkeydown="if(event.key==='Enter'){event.preventDefault();window._crNewGroup('${id}',this);}" class="cr-in flex-1 min-w-0 border rounded-lg px-2 py-1 text-sm bg-white"/>
+      <button onclick="window._crNewGroup('${id}',document.getElementById('cr-${id}-ng'),this)" class="text-xs border border-emerald-300 text-emerald-700 rounded-lg px-2.5 py-1 whitespace-nowrap" style="min-height:32px">+ Create &amp; tag</button></div></div>
+    <div class="mt-3"><div class="flex items-center justify-between gap-2"><span class="text-xs font-semibold text-gray-600">Property cards <span id="cr-${id}-dn" class="font-normal text-gray-500">${d.deals.size?'· '+d.deals.size+' picked':''}</span></span>
+      <input id="cr-${id}-dq" value="${E(d.dq)}" placeholder="Search cards…" aria-label="Search property cards" oninput="window._crFilter('${id}','d',this.value)" class="cr-in border rounded-lg px-2 py-1 text-sm bg-white" style="width:12rem;max-width:55%"/></div>
+      <div id="cr-${id}-dl" class="mt-1 overflow-y-auto p-1 border rounded-lg bg-white" style="max-height:11rem">${_crList(t,'d')}</div></div>
+    <div class="flex justify-end gap-2 mt-3">
+      <button onclick="window._crToggle('${id}')" class="px-3 py-2 text-sm rounded-lg border border-gray-300 bg-white text-gray-700" style="min-height:40px">Cancel</button>
+      <button onclick="window._crSave('${id}',this)" class="px-3 py-2 text-sm rounded-lg text-white font-semibold" style="background:#0f766e;min-height:40px">${ex?'Save tags':'Save to CRM'}</button></div>
+  </div>`;
+}
+function _crList(t,kind){
+  const d=_crD(t); const E=_mrEsc; const id=t.id;
+  if(kind==='g'){
+    const q=String(d.gq||'').toLowerCase().trim();
+    const gs=(typeof allCRMGroups!=='undefined'?allCRMGroups:[]).filter(g=>typeof _isGroupVisible==='function'?_isGroupVisible(g):true)
+      .filter(g=>d.groups.has(g.id)||!q||String(g.name||'').toLowerCase().includes(q)).sort((a,b)=>(d.groups.has(b.id)-d.groups.has(a.id))||String(a.name||'').localeCompare(String(b.name||'')));
+    if(!gs.length) return `<span class="text-xs text-gray-500 italic px-1">${q?'No group matches “'+E(q)+'” — create it below':'No groups yet — create one below'}</span>`;
+    return gs.map(g=>`<label class="flex items-center gap-1.5 cursor-pointer bg-white border rounded-lg px-2 py-1 hover:bg-gray-50" style="min-height:32px"><input type="checkbox" ${d.groups.has(g.id)?'checked':''} onchange="window._crPick('${id}','g','${g.id}',this.checked)" class="accent-emerald-600"/><span class="inline-block w-2.5 h-2.5 rounded-full" style="background:${E(g.color||'#e5e7eb')}"></span><span class="text-sm text-gray-700">${E(g.emoji||'')} ${E(g.name||'')}${g.visibility==='private'?' 🔒':''}</span></label>`).join('');
+  }
+  const q=String(d.dq||'').toLowerCase().trim(); const sug=new Set(t.crmDealIds||[]);
+  const all=(typeof allDeals!=='undefined'?allDeals:[]).filter(x=>!x._deleted&&!x.deleted);
+  const hit=x=>[x.projectName,x.propertyAddress,x.address,x.county,x.city].filter(Boolean).join(' ').toLowerCase().includes(q);
+  const mine=x=>typeof _mrIsMyDeal==='function'&&_mrIsMyDeal(x);
+  let rows=all.filter(x=>d.deals.has(x.id)||sug.has(x.id)||(q?hit(x):mine(x)));
+  rows.sort((a,b)=>(d.deals.has(b.id)-d.deals.has(a.id))||(sug.has(b.id)-sug.has(a.id))||_mrDealName(a).localeCompare(_mrDealName(b)));
+  const extra=rows.length>40?rows.length-40:0; rows=rows.slice(0,40);
+  if(!rows.length) return `<div class="text-xs text-gray-500 italic px-2 py-1">${q?'No card matches “'+E(q)+'”':'Search to find a card'}</div>`;
+  return rows.map(x=>`<label class="flex items-center gap-2 cursor-pointer px-2 py-1 rounded hover:bg-gray-50" style="min-height:34px"><input type="checkbox" ${d.deals.has(x.id)?'checked':''} onchange="window._crPick('${id}','d','${x.id}',this.checked)" class="accent-emerald-600 shrink-0"/><span class="text-sm text-gray-700 truncate flex-1 min-w-0">${E(_mrDealName(x))}</span><span class="text-xs text-gray-500 truncate text-right" style="max-width:42%">${E(x.stage||'')}${sug.has(x.id)?' · from the emails':''}</span></label>`).join('')
+    +(extra?`<div class="text-xs text-gray-500 px-2 py-1">+${extra} more — refine the search</div>`:'')
+    +(!q?`<div class="text-xs text-gray-500 px-2 py-1">Showing your cards — search to find any card.</div>`:'');
+}
+window._crToggle=function(id){ window._crOpen[id]=!window._crOpen[id]; _crRerender(id); if(window._crOpen[id]) setTimeout(()=>{ const el=document.getElementById('cr-'+id+'-first')||document.getElementById('cr-'+id+'-gq'); if(el) el.focus(); },30); };
+window._crKeep=function(id,k,v){ const t=_crTask(id); if(t) _crD(t)[k]=v; };
+window._crFilter=function(id,kind,v){ const t=_crTask(id); if(!t) return; const d=_crD(t); d[kind==='g'?'gq':'dq']=v; const box=document.getElementById('cr-'+id+'-'+kind+'l'); if(box) box.innerHTML=_crList(t,kind); };
+window._crPick=function(id,kind,val,on){ const t=_crTask(id); if(!t) return; const s=_crD(t)[kind==='g'?'groups':'deals']; on?s.add(val):s.delete(val); const n=document.getElementById('cr-'+id+'-'+kind+'n'); if(n) n.textContent=s.size?'· '+s.size+' picked':''; };
+function _crTask(id){ return (typeof allTasks!=='undefined'?allTasks:[]).find(x=>x.id===id)||null; }
+function _crRerender(id){   // redraw just this task's CRM box in place (every list that shows the task)
+  const t=_crTask(id); if(!t) return;
+  document.querySelectorAll('[data-cr-box="'+id+'"]').forEach(el=>{ el.innerHTML=window._crTaskButtons(t); });
+}
+window._crOpenContact=function(cid){ try{ if(typeof bootCRM==='function') bootCRM(); }catch(_){} setTimeout(()=>{ if(window.openContactPanel) window.openContactPanel(cid); },60); };
+window._crNewGroup=async function(id,inp,btn){
+  const t=_crTask(id); if(!t||!inp) return; const name=String(inp.value||'').trim(); if(!name){ inp.focus(); return; }
+  const d=_crD(t); const dup=(allCRMGroups||[]).find(g=>String(g.name||'').toLowerCase().trim()===name.toLowerCase());
+  const done=btn?elcBusy(btn,'…'):()=>{};
+  try{
+    let g=dup;
+    if(!g){ const {collection,addDoc}=_fbFns; const data={ name, emoji:'👥', color:'#dcfce7', textColor:'#166534', description:'', visibility:'public', allowedUsers:[], createdAt:Date.now(), createdBy:currentUser?.uid||'' };
+      const ref=await addDoc(collection(_fbDb,'crmGroups'),data); g={id:ref.id,...data}; if(!(allCRMGroups||[]).some(x=>x.id===ref.id)) allCRMGroups.push(g); showToast('Group “'+name+'” created','success'); }
+    else showToast('That group already exists — tagged it','info');
+    d.groups.add(g.id); d.gq=''; inp.value='';
+    const q=document.getElementById('cr-'+id+'-gq'); if(q) q.value=''; window._crFilter(id,'g',''); window._crPick(id,'g',g.id,true);
+  }catch(e){ showToast('Could not create the group: '+(e.message||e),'error'); } finally{ done(); }
+};
+window._crSave=async function(id,btn){
+  const t=_crTask(id); if(!t) return; const d=_crD(t);
+  const ex=_crContactFor(t);
+  if(!ex&&!String(d.first||'').trim()&&!String(d.last||'').trim()){ showToast('Add a first or last name','warning'); const el=document.getElementById('cr-'+id+'-first'); if(el) el.focus(); return; }
+  if(ex&&!(ex.groups||[]).length&&!d.groups.size){ showToast('Pick a group — or tap Ignore','warning'); const el=document.getElementById('cr-'+id+'-gq'); if(el) el.focus(); return; }
+  const done=elcBusy(btn,'Saving…');
+  try{
+    const {collection,addDoc,doc,updateDoc}=_fbFns; const groups=[...d.groups], deals=[...d.deals];
+    const email=String(t.crmEmail||'').trim().toLowerCase(); const mc=!!(email&&APP_CONFIG.mailchimp?.listId);
+    let cid;
+    if(ex){
+      cid=ex.id;
+      const patch={ groups:[...new Set([...(ex.groups||[]),...groups])], linkedDeals:[...new Set([...(ex.linkedDeals||[]),...deals])], updatedAt:Date.now() };
+      if(!ex.assignedAdvisor&&t.assignedTo) patch.assignedAdvisor=t.assignedTo;
+      await updateDoc(doc(_fbDb,'contacts',cid),patch); Object.assign(ex,patch);
+    } else {
+      const phone=window._fmtPhone?window._fmtPhone(String(d.phone||'').trim()):String(d.phone||'').trim();
+      const data={ firstName:String(d.first||'').trim(), lastName:String(d.last||'').trim(), title:String(d.title||'').trim(), email, phone, company:String(d.company||'').trim(),
+        source:'Email — '+(t.crmCount||3)+' emails traded (Terra)', groups, linkedDeals:deals, assignedAdvisor:t.assignedTo||currentUser?.uid||'',
+        createdAt:Date.now(), updatedAt:Date.now(), createdBy:currentUser?.uid||'', crmAskId:t.crmAskId||'', ...(mc?{mailchimpPendingSync:true}:{}) };
+      if(!data.title) delete data.title;
+      const ref=await addDoc(collection(_fbDb,'contacts'),data); cid=ref.id;
+      if(!(allContacts||[]).some(c=>c.id===cid)) allContacts.push({id:cid,...data});
+      try{ if(window._crmLogActivity) await window._crmLogActivity(cid,'note',{ autoLogged:true, body:'Added from Terra’s email check — '+(t.crmCount||3)+' emails traded with '+(t.crmMailbox||t.assignedToEmail||'the advisor')+'.' }); }catch(_){}
+    }
+    await _mwCloseTask(id,{crmAnswer:'yes',crmContactId:cid,crmGroups:groups,crmDealIds:deals});
+    delete window._crDraft[id]; delete window._crOpen[id];
+    const gN=groups.map(g=>(allCRMGroups.find(x=>x.id===g)||{}).name).filter(Boolean);
+    showToast((ex?'Tagged ':'Added ')+(ex?_crName(ex):[d.first,d.last].filter(Boolean).join(' '))+(gN.length?' · '+gN.join(', '):'')+(deals.length?' · '+deals.length+' card'+(deals.length>1?'s':''):''),'success',5000);
+    _crRerender(id); _mwRerenderTasks(t);
+  }catch(e){ console.warn('[crmask] save',e); showToast('Could not save to the CRM: '+(e.message||e),'error'); done(); }
+};
+window._crAnswerNo=async function(id,btn,why){
+  const t=_crTask(id); if(!t) return; const done=btn?elcBusy(btn,'…'):()=>{};
+  try{
+    const ans=why==='in_crm'?'in_crm':'no'; const ex=why==='in_crm'?_crContactFor(t):null;
+    await _mwCloseTask(id,{crmAnswer:ans,...(ex?{crmContactId:ex.id}:{})}); delete window._crOpen[id];
+    _crRerender(id); _mwRerenderTasks(t);
+    if(ans==='no'&&typeof showUndoToast==='function') showUndoToast((t.crmKind==='group'?'Ignored':'Not added')+' — Terra won’t ask about '+(t.crmEmail||'them')+' again',async()=>{ await Store.updateTask(id,{status:'pending',completedAt:null,completedBy:'',completedByName:'',crmAnswer:''}); Object.assign(t,{status:'pending',crmAnswer:''}); _crRerender(id); _mwRerenderTasks(t); });
+    else showToast('Task closed','success');
+  }catch(e){ showToast('Could not save your answer: '+(e.message||e),'error'); } finally{ done(); }
+};
+
 window._mwIsReviewTask=t=>!!(t&&t.taskType==='email_review');
 /* MWSETTLE-20261029 — a held-email task (📧 Confirm email / 🗂️ New card?) is never completed without its answer */
-window._mwNeedsAnswer=function(id){ const t=(typeof allTasks!=='undefined'?allTasks:[]).find(x=>x.id===id); return !!(t&&(t.taskType==='email_review'||t.taskType==='card_ask')&&!(t.mwAnswer||t.caAnswer)); };
+window._mwNeedsAnswer=function(id){ const t=(typeof allTasks!=='undefined'?allTasks:[]).find(x=>x.id===id); return !!(t&&(t.taskType==='email_review'||t.taskType==='card_ask')&&!(t.mwAnswer||t.caAnswer))||!!(t&&t.taskType==='crm_ask'&&!t.crmAnswer); };   // CRMASK-20261104
 window._mwRouteToAnswer=function(id){
   const t=(typeof allTasks!=='undefined'?allTasks:[]).find(x=>x.id===id); if(!t) return;
   try{ document.querySelectorAll('input[type=checkbox]').forEach(cb=>{ if(String(cb.getAttribute('onchange')||'').includes("'"+id+"'")) cb.checked=false; }); }catch(_){}
+  if(t.taskType==='crm_ask'){ showToast(t.crmKind==='group'?'Answer this one — add them to a group, or Ignore':'Answer this one — add them to the CRM, or No','info',5000); if(!window._crOpen[id]) window._crToggle(id); return; }   // CRMASK-20261104
   showToast(t.taskType==='card_ask'?'Answer this one — does the email need a new card?':'Answer this one — is the email about that property? (Yes / No / Respond)','info',5000);
   if(t.taskType==='card_ask'){ if(window._caOpenCreate) window._caOpenCreate(id); return; }
   if(window._mwOpenRespond) window._mwOpenRespond(id);
