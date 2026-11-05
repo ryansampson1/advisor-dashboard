@@ -49546,7 +49546,7 @@ function _mrAmendEditorHtml(d){
 }
 function _mrIsSellerRep(d){ return (d.representation||'seller')!=='buyer'; }
 function _mrStageOf(d){ return (typeof STAGE_ALIAS!=='undefined' && STAGE_ALIAS[d.stage]) || d.stage; }
-function _mrIsActiveListing(d){ return MR_ACTIVE_STAGES.includes(_mrStageOf(d)) && _mrIsSellerRep(d); }   // LEASEOK-20261008: a lease LISTING is reported like a sale; only buyer-rep is excluded
+function _mrIsActiveListing(d){ return _mrIsReportStage(_mrStageOf(d)) && _mrIsSellerRep(d); }   // LEASEOK-20261008: a lease LISTING is reported like a sale; only buyer-rep is excluded
 function _mrFirstName(n){ return String(n||'').trim().split(/\s+/)[0]||''; }
 function _mrCanAccess(){
   if(!currentUser) return false;
@@ -49674,7 +49674,7 @@ async function _mrAiLetterDraft(deal, ym, rep, ctx){
   const posts=ctx.posts||((typeof _mrMonthPosts==='function')?_mrMonthPosts(deal,ym):[]);
   const rng=_mrMonthRange(ym); const t=(rep&&rep.traffic)||{};
   const acts=(history||[]).filter(r=>r.ts>=rng.start&&r.ts<rng.end).slice(0,40).map(r=>r.date+' '+r.type+': '+String(r.text||'').slice(0,180)).join('\n');
-  const offers=(Array.isArray(deal.lois)?deal.lois:[]).filter(l=>l&&l.reportInclude!==false).slice(0,6).map(l=>'- '+[l.receivedAt?('received '+l.receivedAt):'', l.buyer?('buyer '+l.buyer):'', l.price?('price '+_mrFmtMoney(l.price)):'', l.status?('status '+l.status):'', l.estClose?('est. closing '+l.estClose):'', l.ddTerms?('due diligence '+l.ddTerms):''].filter(Boolean).join(', ')).join('\n');
+  const offers=(Array.isArray(deal.lois)?deal.lois:[]).filter(l=>l&&l.reportInclude!==false).slice(0,6).map(l=>'- '+[l.receivedAt?('received '+l.receivedAt):'', l.buyer?('buyer '+l.buyer):'', l.price?('price '+_mrFmtMoney(l.price)):'', l.status?('status '+((l.status==='under_contract'&&!_mrUnderContract(deal))?'LOI signed (not under contract)':l.status)):'', l.estClose?('est. closing '+l.estClose):'', l.ddTerms?('due diligence '+l.ddTerms):''].filter(Boolean).join(', ')).join('\n');
   const blasts=(emails||[]).slice(0,8).map(e=>'- '+(e.title||e.subject||'E-blast')+(e.date?(' ('+e.date+')'):'')+(e.recipients?(', sent to '+e.recipients):'')+(e.opens?(', '+e.opens+' opens'):'')+(e.clicks?(', '+e.clicks+' clicks'):'')).join('\n');
   const sc=(deal.signCallsByMonth||{})[ym]; const signCalls=sc&&Number(sc.calls)>0?Number(sc.calls):0;
   const tr=[['site visits',t.siteVisits],['unique visitors',t.uniqueVisitors],['documents viewed',t.docsViewed],['confidentiality agreements signed',t.casSigned],['LoopNet views',t.loopnetViews],['Crexi views',t.crexiViews],['leads',t.totalLeads]].filter(x=>x[1]!=null&&x[1]!==''&&Number(x[1])>0).map(x=>x[1]+' '+x[0]).join(', ');
@@ -49682,7 +49682,7 @@ async function _mrAiLetterDraft(deal, ym, rep, ctx){
   const user='Property: '+_mrDealName(deal)+' — '+_mrDealAddr(deal)
     +'\nMonth covered: '+_mrMonthLabel(ym)
     +'\nAcreage: '+(_mrDealAcres(deal)||'n/a')+'   County: '+(deal.county||'n/a')+'   Zoning: '+(deal.zoning||'n/a')
-    +'\nAsking price: '+(_mrFmtMoney(_mrDealPrice(deal))||'n/a')+'   Current stage: '+_mrStageOf(deal)
+    +'\nAsking price: '+(_mrFmtMoney(_mrDealPrice(deal))||'n/a')+'\nCurrent status: '+_mrStatusForAI(deal)   /* MRSTATUS-20261105 */
     +'\nListing expiration: '+(deal.listingExpiration||'n/a')
     +'\nE-blasts this month:\n'+(blasts||'(none)')
     +'\nSocial media posts this month: '+((posts||[]).length||0)
@@ -50766,7 +50766,7 @@ window._mrAiDraft=async function(btn){
     const month=h.history.filter(r=>r.ts>=rng.start&&r.ts<rng.end).slice(0,40).map(r=>r.date+' '+r.type+': '+r.text.slice(0,160)).join('\n');
     const t=ed.traffic||{};
     const sys='You write short, factual property-marketing updates for a Florida land brokerage (Eshenbaugh Land Company). Write ONE paragraph (90-140 words), first person plural, addressed to the property owner, summarizing this month\'s marketing activity and buyer interest for their listing. No greeting, no sign-off, no bullet points, no invented numbers — only use facts given.';
-    const user='Property: '+_mrDealName(ed.deal)+' — '+_mrDealAddr(ed.deal)+'\nMonth: '+_mrMonthLabel(ed.ym)+'\nAsking price: '+(_mrFmtMoney(_mrDealPrice(ed.deal))||'n/a')+'\nStage: '+_mrStageOf(ed.deal)+'\nWeb traffic: site visits '+(t.siteVisits??'n/a')+', unique '+(t.uniqueVisitors??'n/a')+', docs viewed '+(t.docsViewed??'n/a')+', CAs signed '+(t.casSigned??'n/a')+', leads '+(t.totalLeads??'n/a')+'\nActivity this month:\n'+(month||'(no logged activity this month)');
+    const user='Property: '+_mrDealName(ed.deal)+' — '+_mrDealAddr(ed.deal)+'\nMonth: '+_mrMonthLabel(ed.ym)+'\nAsking price: '+(_mrFmtMoney(_mrDealPrice(ed.deal))||'n/a')+'\nStatus: '+_mrStatusForAI(ed.deal)+'\nWeb traffic: site visits '+(t.siteVisits??'n/a')+', unique '+(t.uniqueVisitors??'n/a')+', docs viewed '+(t.docsViewed??'n/a')+', CAs signed '+(t.casSigned??'n/a')+', leads '+(t.totalLeads??'n/a')+'\nActivity this month:\n'+(month||'(no logged activity this month)');
     const txt=await leadAI(sys,user,500);
     const ta=document.getElementById('mr-ed-note'); if(ta) ta.value=txt.trim();
   }catch(e){ console.warn('[mr] ai',e); showToast('AI draft failed: '+e.message,'error'); }
@@ -51865,7 +51865,7 @@ async function _mwFileReview(r, dealId, note){
   const deal=(allDeals||[]).find(d=>d.id===dealId); if(!deal) throw new Error('That card is no longer available');
   const {doc,setDoc,updateDoc}=_fbFns; const side=_mwSideOf(deal);
   let cat=r.category; if(side==='buyer'&&_mwMarketing.includes(cat)) cat='buyer_rep'; if(side==='proposal'&&_mwMarketing.includes(cat)&&cat!=='offer') cat='proposal';
-  const prints=side==='seller'&&MR_ACTIVE_STAGES.includes(_mrStageOf(deal));
+  const prints=side==='seller'&&_mrIsReportStage(_mrStageOf(deal));   // MRSTATUS-20261105
   const act={ type:'email', source:'mailwatch-reviewed', mwCategory:cat, mwSummary:r.summary||'', body:r.summary||r.subject||'', direction:r.direction||'',
     mwSide:side, mwDatapoints:r.datapoints||[], rfcId:r.rfcId||'', mwRootId:r.rootId||'', gmailId:r.gmailId||r.id, gmailThreadId:r.gmailThreadId||'', gmailSubject:r.subject||'',
     gmailDate:r.emailDate||'', gmailFrom:r.direction==='out'?r.mailbox:(r.counterpartyEmail||''), counterpartyName:r.counterpartyName||'', counterpartyCompany:r.counterpartyCompany||'', mailbox:r.mailbox||'',
@@ -52415,7 +52415,14 @@ window._mrMcApplyPick=function(){
 const MR_OFFER_STATUSES=[['received','Received'],['reviewing','Under review'],['countered','Countered'],['accepted','Accepted'],['signed','LOI signed'],['under_contract','Under contract'],['closed','Closed']];
 const MR_OFFER_DEAD=[['rejected','Rejected'],['withdrawn','Withdrawn'],['expired','Expired']];
 function _mrOfferStatusLabel(s){ const all=MR_OFFER_STATUSES.concat(MR_OFFER_DEAD); return (all.find(x=>x[0]===s)||[])[1]||'Received'; }
-function _mrUnderContract(deal){ return /due diligence|under contract|closing|signed loi|contract drafting/i.test(String(_mrStageOf(deal)||'')); }
+/* MRSTATUS-20261105 — report status follows the board: LOI and Signed LOI/Contract Drafting = "LOI";
+   only Due Diligence, Rezoning, Permitting or Closing (= executed contract) = "Under Contract". */
+const _MR_UC_RE=/under.?contract|due.?diligence|rezoning|permitting|closing/i;
+function _mrUnderContract(deal){ const s=String(_mrStageOf(deal)||''); return _MR_UC_RE.test(s) && !/closed|lost|terminated|sold/i.test(s); }
+function _mrIsLoiStage(deal){ const s=String(_mrStageOf(deal)||''); return !_mrUnderContract(deal) && (/^loi$/i.test(s.trim()) || /signed loi|contract drafting|negotiat/i.test(s)); }
+function _mrReportStatus(deal){ return _mrUnderContract(deal)?'Under Contract':(_mrIsLoiStage(deal)?'LOI':'Listed / Available'); }
+function _mrStatusForAI(deal){ const st=_mrReportStatus(deal); return st==='Under Contract'?'Under Contract (executed purchase contract)':(st==='LOI'?'LOI: a letter of intent is in place and a contract is being negotiated. The property is NOT under contract; never describe it as under contract':'Listed and available, with no LOI or contract in place'); }
+function _mrIsReportStage(s){ s=String(s||''); return MR_ACTIVE_STAGES.includes(s) || (/rezoning|permitting/i.test(s) && !/closed|lost|terminated/i.test(s)); }   // MRSTATUS-20261105: Rezoning / Permitting deals are under contract and get a report too
 // The deal's offers with sensible defaults filled from the deal when the LOI row is thin.
 function _mrOffers(deal){
   const arr=Array.isArray(deal.lois)?deal.lois.slice():[];
@@ -52423,7 +52430,9 @@ function _mrOffers(deal){
   return arr.map(l=>{ const o={...l};
     o.receivedAt=o.receivedAt||(o.addedAt?_mrLocalDate(o.addedAt):'');
     o.buyer=o.buyer||o.buyerName||'';
-    if(!o.status){ o.status = (uc && (win?o.id===win:arr.length===1)) ? 'under_contract' : 'received'; }
+    const _isWin=(win?o.id===win:arr.length===1);
+    if(!o.status){ o.status = (uc && _isWin) ? 'under_contract' : ((_mrIsLoiStage(deal) && _isWin && /signed loi|contract drafting|negotiat/i.test(String(_mrStageOf(deal)||''))) ? 'signed' : 'received'); }
+    if(!uc && o.status==='under_contract') o.status='signed';   // MRSTATUS-20261105: not under contract until the card reaches DD / Rezoning / Permitting / Closing
     if(o.status==='under_contract'||o.status==='signed'||o.status==='accepted'){ // borrow contract terms from the deal card when the row is blank
       if(!o.price && (deal.contractPrice||deal.purchasePrice)) o.price=deal.contractPrice||deal.purchasePrice;
       if(!o.deposit && deal.earnestMoney) o.deposit=deal.earnestMoney;
