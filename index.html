@@ -1874,6 +1874,29 @@ html.dark .sr-juri-warn{color:#fde68a;background:rgba(245,158,11,.14);border-col
 html.dark .sr-juri-links a{color:#93c5fd}
 html.dark .sr-juri-links a:hover{background:rgba(59,130,246,.16)}
 html.dark .sr-juri-links a span{color:var(--text-3,#9ca3af)}
+/* MAPWISE-20261107 — Site Research MapWise card */
+.mw-actions{display:flex;flex-wrap:wrap;gap:.4rem;margin:.5rem 0 .2rem}
+.mw-btn{display:inline-flex;align-items:center;gap:.3rem;min-height:32px;padding:.3rem .6rem;border-radius:7px;border:1px solid #d1d5db;background:#fff;color:#1f2937;font-size:.72rem;font-weight:600;cursor:pointer}
+.mw-btn:hover{background:#eff6ff;border-color:#93c5fd}
+.mw-btn:focus-visible{outline:2px solid #2563eb;outline-offset:1px}
+.mw-btn[disabled]{opacity:.55;cursor:default}
+.mw-btn .mw-cost{color:#6b7280;font-weight:400;font-size:.66rem}
+.mw-sub{font-size:.74rem;font-weight:800;color:#374151;margin:.55rem 0 .2rem}
+.mw-table{width:100%;border-collapse:collapse;font-size:.72rem;margin-top:.2rem}
+.mw-table th{text-align:left;font-weight:700;color:#6b7280;padding:.22rem .3rem;border-bottom:1px solid #e5e7eb;white-space:nowrap}
+.mw-table td{padding:.22rem .3rem;border-bottom:1px solid #f1f5f9;color:#111827;vertical-align:top}
+.mw-table td.num,.mw-table th.num{text-align:right;white-space:nowrap}
+.mw-note{font-size:.7rem;color:#6b7280;padding:.25rem 0;line-height:1.4}
+.mw-err{font-size:.74rem;color:#92400e;background:#fef3c7;border:1px solid #fcd34d;border-radius:7px;padding:.4rem .55rem;margin:.3rem 0;line-height:1.4}
+.mw-pre{font-size:.7rem;white-space:pre-wrap;word-break:break-word;color:#374151;background:#f9fafb;border-radius:6px;padding:.4rem .5rem;max-height:260px;overflow:auto}
+.mw-spin{display:inline-block;animation:spin 1.2s linear infinite}
+html.dark .mw-btn{background:var(--bg-2,#1f2937);color:var(--text-1,#f3f4f6);border-color:var(--border,#374151)}
+html.dark .mw-btn:hover{background:rgba(59,130,246,.16)}
+html.dark .mw-sub{color:var(--text-2,#d1d5db)}
+html.dark .mw-table th{color:var(--text-3,#9ca3af);border-color:var(--border,#374151)}
+html.dark .mw-table td{color:var(--text-1,#f3f4f6);border-color:rgba(255,255,255,.06)}
+html.dark .mw-err{color:#fde68a;background:rgba(245,158,11,.14);border-color:rgba(245,158,11,.45)}
+html.dark .mw-pre{background:rgba(255,255,255,.04);color:var(--text-2,#d1d5db)}
 </style>
 </head>
 <body class="min-h-screen" style="background:var(--bg);color:var(--text-1)">
@@ -2366,7 +2389,9 @@ const APP_CONFIG = {
   // 📬 Monthly Owner Reports (MREPORT-20261006). access: 'owner' | 'admins' | 'all' — overridden from eos/settings.monthlyReports
   monthlyReports: { access: 'all',   /* REPORTSALL-20261016 — opened to all users */ workerUrl: 'https://elc-report-worker.dirtdog.workers.dev' },
   social: { workerUrl: 'https://elc-social-worker.dirtdog.workers.dev', defaultLink: 'https://www.thedirtdog.com' },   // SOCIAL-20261006-hooks
-  mcBlast: { enabled: true, dueDay: 20, autoDay: 25, autoResend: true },   // MCBLAST-20261007-hooks — monthly e-blast guarantee
+  mcBlast: { enabled: true, dueDay: 20, autoDay: 25, autoResend: true },
+  // MAPWISE-20261107 — Site Research → MapWise parcel sales/ownership via the elc-ai-proxy worker (/mapwise). Billed per record to ELC's MapWise account.
+  mapwise: { enabled: true, workerUrl: 'https://elc-ai-proxy.dirtdog.workers.dev/mapwise', cacheDays: 30, nearbyMonths: 24, nearbyRadiusMiles: 1, nearbyLimit: 25, holdingsLimit: 25 },   // MCBLAST-20261007-hooks — monthly e-blast guarantee
   firebase: {
     apiKey:            "AIzaSyC1cKWQnk4TeH3EMeX-sF4RejGPYL9xyYw",
     authDomain:        "eshenbaugh-dashboard.firebaseapp.com",
@@ -4830,6 +4855,301 @@ function _vcCard(emoji, title, rowsHtml, footHtml){
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+   MAPWISE-20261107 — MAPWISE SALES & OWNERSHIP (Site Research)
+   MapWise's MCP server (https://www.mapwise.com/mcp) answers for all 67 Florida
+   counties with the three things the free government layers above cannot: the
+   parcel's full sales history, recent land sales nearby, and everything else the
+   owner holds. It bills ELC's MapWise account per record ($0.06/parcel record,
+   $1.00/PDF report), so:
+     • the key lives ONLY in the elc-ai-proxy Cloudflare Worker (/mapwise route);
+     • the one-record parcel detail loads automatically with every research run;
+     • the multi-record pulls (nearby sales, owner holdings) and the PDF report
+       sit behind buttons that say what they cost;
+     • every answer is cached 30 days (browser + Firestore mapwiseCache) so the
+       same parcel is never billed twice.
+   Same rule as the rest of Site Research: Terra renders what the service
+   returned and labels its source — the model never supplies a value.
+   ═══════════════════════════════════════════════════════════════════════════ */
+const _MW = () => (APP_CONFIG.mapwise||{});
+const _MW_MEM = new Map();
+
+function _mwKey(tool,args){ return tool+':'+JSON.stringify(args||{}, Object.keys(args||{}).sort()); }
+function _mwDocId(key){ return key.replace(/[^A-Za-z0-9_-]/g,'_').slice(0,900); }
+
+async function _mwCacheGet(key){
+  if(_MW_MEM.has(key)) return _MW_MEM.get(key);
+  const ttl=(_MW().cacheDays||30)*864e5;
+  try{ const raw=localStorage.getItem('terra.mw.'+key); if(raw){ const o=JSON.parse(raw); if(o && o.ts && Date.now()-o.ts<ttl){ _MW_MEM.set(key,o.v); return o.v; } } }catch(e){}
+  try{
+    if(_fbDb && _fbFns && _fbFns.getDoc){
+      const snap=await _fbFns.getDoc(_fbFns.doc(_fbDb,'mapwiseCache',_mwDocId(key)));
+      if(snap.exists()){ const o=snap.data(); if(o && o.ts && Date.now()-o.ts<ttl && o.json){ const v=JSON.parse(o.json); _MW_MEM.set(key,v); try{ localStorage.setItem('terra.mw.'+key, JSON.stringify({ts:o.ts,v})); }catch(e){} return v; } }
+    }
+  }catch(e){ console.warn('[mapwise] cache read',e&&e.message||e); }
+  return undefined;
+}
+async function _mwCacheSet(key,v){
+  _MW_MEM.set(key,v);
+  const rec={ts:Date.now(),v};
+  try{ localStorage.setItem('terra.mw.'+key, JSON.stringify(rec)); }catch(e){}
+  try{
+    if(_fbDb && _fbFns && _fbFns.setDoc){
+      await _fbFns.setDoc(_fbFns.doc(_fbDb,'mapwiseCache',_mwDocId(key)), {key, ts:rec.ts, json:JSON.stringify(v), by:(typeof currentUser!=='undefined'&&currentUser&&currentUser.email)||null}, {merge:false});
+    }
+  }catch(e){ console.warn('[mapwise] cache write (rules?)',e&&e.message||e); }
+}
+
+// MCP tool results arrive as {content:[{type:'text',text}], structuredContent?}.
+// Prefer the structured payload; otherwise parse the text as JSON if it is JSON.
+function _mwUnwrap(result){
+  if(!result) return null;
+  const texts=(result.content||[]).filter(c=>c&&c.type==='text').map(c=>c.text);
+  for(const t of texts){ try{ const o=JSON.parse(t); if(o&&typeof o==='object') return o; }catch(e){} }
+  if(result.structuredContent) return result.structuredContent;
+  return texts.length?texts.join('\n'):result;
+}
+async function _mwCall(tool,args,opts){
+  opts=opts||{};
+  const cfg=_MW();
+  if(!cfg.enabled || !cfg.workerUrl) throw new Error('MapWise is not configured');
+  const key=_mwKey(tool,args);
+  if(!opts.noCache){ const hit=await _mwCacheGet(key); if(hit!==undefined) return {data:hit, cached:true}; }
+  const ctrl=new AbortController(); const t=setTimeout(()=>ctrl.abort(),45000);
+  let r,j;
+  try{
+    r=await fetch(cfg.workerUrl,{method:'POST',headers:{'Content-Type':'application/json'},signal:ctrl.signal,
+      body:JSON.stringify({tool,args:args||{},confirmCost:opts.confirmCost===true})});
+    j=await r.json().catch(()=>null);
+  } finally { clearTimeout(t); }
+  if(!r.ok || !j || !j.ok){
+    const msg=(j&&j.error)||('HTTP '+(r&&r.status));
+    throw new Error(msg);
+  }
+  const res=j.result||{};
+  if(res.isError){ throw new Error(_mwText(res)||'MapWise returned an error'); }
+  const data=_mwUnwrap(res);
+  if(!opts.noCache) _mwCacheSet(key,data);
+  return {data, cached:false};
+}
+function _mwText(res){ return ((res&&res.content)||[]).filter(c=>c&&c.type==='text').map(c=>c.text).join('\n'); }
+
+// ── Schema (verified live 2026-11-07 against parcels-mcp 2.1.0 via tools/list) ──
+//   get_parcel_detail  { pin*, county?, outputRaw, includeHazards }  — accepts the FDOR roll PARCEL_ID (matches MapWise pin2)
+//   find_recent_sales  { bufferLat, bufferLon, bufferMeters, saleDateMin, saleAmountMin, landUse[], limit, outputRaw }
+//   find_owner_holdings{ owner, county:'ALL', aggregationType:'NOAGG', limit, outputRaw }
+//   generate_parcel_report { type:'property'|'flood', pin, county }
+// With outputRaw:true the text content is the full nested api_v2 record; structuredContent is a flat summary.
+const _MW_VACANT_DOR = ['00','10','40','70','99'];   // vacant res, vacant comm, vacant ind, vacant institutional, acreage not zoned ag
+function _mwCounty(c){ return c ? String(c).toUpperCase().replace(/\./g,'').replace(/\s+/g,'_').trim() : undefined; }
+function _mwDateMinus(months){ const d=new Date(); d.setMonth(d.getMonth()-months); return d.toISOString().slice(0,10); }
+const _MW_ARGS = {
+  parcelDetail(d){ return { pin:String(d.parcel.parcelId), county:_mwCounty(d.county), outputRaw:true, includeHazards:true }; },
+  parcelAtPoint(d){ return { lat:d.lat, lon:d.lon, outputRaw:true }; },
+  nearbySales(d, landOnly){
+    const cfg=_MW();
+    const a={ bufferLat:d.lat, bufferLon:d.lon, bufferMeters:Math.round((cfg.nearbyRadiusMiles||1)*1609.34),
+      saleDateMin:_mwDateMinus(cfg.nearbyMonths||24), saleAmountMin:10000, limit:cfg.nearbyLimit||25, sortBy:'sale_date', order:'DESC', outputRaw:true };
+    if(landOnly) a.landUse=_MW_VACANT_DOR;
+    return a;
+  },
+  ownerHoldings(d){ return { owner:String(d.parcel.owner), county:'ALL', aggregationType:'NOAGG', limit:_MW().holdingsLimit||25, outputRaw:true }; },
+  report(d, kind){ return { type:kind||'property', pin:String(d.parcel.parcelId), county:_mwCounty(d.county) }; },
+};
+// Records come back as {data:[...], meta:{record_count,total_count}} — nested when parsed from text, flat in structuredContent.
+function _mwRecords(data){ if(Array.isArray(data)) return data; if(data&&Array.isArray(data.data)) return data.data; return data?[data]:[]; }
+function _mwMeta(data){ return (data&&data.meta)||{}; }
+const _mwGet=(o,path)=>path.split('.').reduce((a,k)=>(a&&a[k]!==undefined&&a[k]!==null)?a[k]:undefined,o);
+const _mwPick=(o,...paths)=>{ for(const p of paths){ const v=_mwGet(o,p); if(v!==undefined&&v!=='') return v; } return undefined; };
+
+// ── Rendering ───────────────────────────────────────────────────────────────
+const _mwMoney=v=>(v==null||v==='')?'—':('$'+Number(v).toLocaleString(undefined,{maximumFractionDigits:0}));
+const _mwAcres=v=>(v==null||v==='')?'—':(Number(v).toLocaleString(undefined,{maximumFractionDigits:2})+' ac');
+const _mwDate=v=>{ if(!v) return '—'; const dt=new Date(v); return isNaN(dt)?String(v):dt.toLocaleDateString(); };
+const _mwPPA=(amt,ac)=>(amt>0&&ac>=0.05)?('$'+Math.round(amt/ac).toLocaleString()+'/ac'):'—';   // sub-0.05-ac rows (condo units) make $/ac meaningless
+function _mwQualLabel(sale){
+  const st=_mwPick(sale,'qualification.status'); const q=_mwPick(sale,'qual','sale_qual');
+  if(st) return st==='qualified'?'Qualified':st==='disqualified'?'Unqualified':String(st);
+  return q==='Q'?'Qualified':q==='U'?'Unqualified':(q||'—');
+}
+function _mwTableHtml(cols, rows){
+  if(!rows.length) return `<div class="mw-note">No records returned.</div>`;
+  return `<div style="overflow-x:auto"><table class="mw-table"><thead><tr>${cols.map(c=>`<th class="${c.num?'num':''}">${_vcEsc(c.h)}</th>`).join('')}</tr></thead><tbody>${
+    rows.map(r=>`<tr>${cols.map(c=>`<td class="${c.num?'num':''}">${c.html?c.f(r):_vcEsc(c.f(r))}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+}
+function _mwLink(url,label){ return url?`<a href="${_vcEsc(url)}" target="_blank" rel="noopener" style="color:#2563eb;text-decoration:underline">${_vcEsc(label)}</a>`:'—'; }
+function _mwNominalNote(rows){
+  return rows.some(s=>Number(_mwPick(s,'amount','sale_amount'))>0&&Number(_mwPick(s,'amount','sale_amount'))<1000)
+    ? `<div class="mw-note">Amounts of $100 or less are quitclaim / intra-family transfers, not trades — don’t quote them as sales.</div>` : '';
+}
+
+// Parcel detail: full sale history + the MapWise record, with deed and PA links.
+function _mwRenderDetail(rec, cached){
+  const sales=(()=>{ const s=rec.sales||{}; for(const k of ['history','all','list','sales']) if(Array.isArray(s[k])&&s[k].length) return s[k];
+    const arr=Object.values(s).find(v=>Array.isArray(v)&&v.length); if(arr) return arr; return s.recent?[s.recent]:[]; })();
+  const salesHtml = sales.length ? _mwTableHtml([
+      {h:'Date', f:r=>_mwDate(_mwPick(r,'date','sale_date'))},
+      {h:'Price', num:true, f:r=>_mwMoney(_mwPick(r,'amount','sale_amount'))},
+      {h:'Type', f:r=>_mwPick(r,'type_label','type','sale_type')||'—'},
+      {h:'Qual.', f:r=>_mwQualLabel(r)},
+      {h:'Vac/Imp', f:r=>{ const v=_mwPick(r,'vacant_improved','vac','sale_vac'); return v==='V'?'Vacant':v==='I'?'Improved':(v?String(v).replace(/^\w/,c=>c.toUpperCase()):'—'); }},
+      {h:'Grantor', f:r=>_mwPick(r,'grantor','sale_grantor')||'—'},
+      {h:'OR Book/Page', html:true, f:r=>{ const b=_mwPick(r,'book'), pg=_mwPick(r,'page'); const lbl=b?`${b}/${pg||''}`:(_mwPick(r,'docnum')||'—'); return _mwLink(_mwPick(r,'or_url'), lbl); }},
+    ], sales) + _mwNominalNote(sales)
+    : `<div class="mw-note">No recorded sales on this parcel in MapWise.</div>`;
+  const own=rec.owner||{}, site=rec.site||{}, land=rec.land||{}, val=rec.valuation||{}, bld=rec.building||{}, fl=_mwGet(rec,'hazards.flood.summary');
+  const ownerName=[own.primary_name,own.secondary_name,own.tertiary_name].filter(Boolean).join('; ');
+  const ownerMail=[own.address_line1,own.address_line2,[own.city,own.state].filter(Boolean).join(', '),own.zipcode].filter(Boolean).join(', ');
+  const rows=[
+    _vcRow('MapWise PIN', _mwPick(rec,'identifiers.pin'), 'MapWise'),
+    _vcRow('Owner', ownerName, 'MapWise'),
+    _vcRow('Owner mailing', ownerMail, 'MapWise'),
+    _vcRow('Site address', [site.address,site.city,site.zipcode].filter(Boolean).join(', '), 'MapWise', 'No site address (vacant)'),
+    _vcRow('Acres (GIS / deed)', (land.acres_gis!=null||land.acres_deed!=null)?`${_mwAcres(land.acres_gis)}${land.acres_deed!=null?' / '+_mwAcres(land.acres_deed):''}`:null, 'MapWise'),
+    _vcRow('DOR land use', _mwPick(land,'land_use.lusedor_desc') ? `${_mwPick(land,'land_use.lusedor')||''} — ${_mwPick(land,'land_use.lusedor_desc')}` : _mwPick(land,'land_use.lusedor'), 'MapWise'),
+    _vcRow('Zoning (PA)', land.zoning, 'MapWise', '—'),
+    _vcRow('Market total', _mwPick(val,'market.total')!=null?_mwMoney(_mwPick(val,'market.total')):null, 'MapWise'),
+    _vcRow('Land / building', _mwPick(val,'market.land')!=null?`${_mwMoney(_mwPick(val,'market.land'))} / ${_mwMoney(_mwPick(val,'market.building'))}`:null, 'MapWise'),
+    _vcRow('Taxable', val.taxable_total!=null?_mwMoney(val.taxable_total):null, 'MapWise'),
+    (bld.num_buildings||bld.year_built_actual) ? _vcRow('Buildings', `${bld.num_buildings||1} · ${bld.heated_sqft?Number(bld.heated_sqft).toLocaleString()+' sf heated':''}${bld.year_built_actual?' · built '+bld.year_built_actual:''}`, 'MapWise') : '',
+    fl ? _vcRow('FEMA (MapWise)', `${fl.in_sfha?'In SFHA':'Outside SFHA'} · worst zone ${fl.worst_zone||'—'}${fl.sfha_pct_of_parcel?' · '+Math.round(fl.sfha_pct_of_parcel)+'% of parcel in SFHA':''}`, 'FEMA via MapWise') : '',
+    _vcRow('Legal', _mwPick(rec,'legal.full'), 'MapWise'),
+  ].join('');
+  const links=[]; const pa=_mwPick(rec,'meta.pa_pin_link'); if(pa) links.push({url:pa,label:'🏛 Open on the property appraiser site'});
+  const linksHtml=links.length?`<div class="sr-juri-links">${links.map(l=>`<a href="${_vcEsc(l.url)}" target="_blank" rel="noopener">${_vcEsc(l.label)} <span aria-hidden="true">↗</span></a>`).join('')}</div>`:'';
+  const ex=_mwPick(rec,'meta.extracted_at'); const exStr=ex&&/^\d{8}$/.test(ex)?`${ex.slice(4,6)}/${ex.slice(6,8)}/${ex.slice(0,4)}`:ex;
+  return `<div class="mw-sub">Sales history</div>${salesHtml}
+    <details style="margin-top:.45rem"><summary style="cursor:pointer;font-size:.72rem;color:#6b7280">MapWise parcel record${exStr?' · county data as of '+_vcEsc(exStr):''}${cached?' · cached':''}</summary>${rows}${linksHtml}</details>`;
+}
+
+// Nearby sales (flat rows from structuredContent or nested from text — handle both).
+function _mwRenderSales(data, cached, landOnly){
+  const rows=_mwRecords(data), meta=_mwMeta(data), cfg=_MW();
+  const amt=r=>Number(_mwPick(r,'sale_amount','sales.recent.amount'))||0, ac=r=>Number(_mwPick(r,'acres_gis','land.acres_gis'))||0;
+  const tbl=_mwTableHtml([
+    {h:'Date', f:r=>_mwDate(_mwPick(r,'sale_date','sales.recent.date'))},
+    {h:'Price', num:true, f:r=>_mwMoney(amt(r))},
+    {h:'$/acre', num:true, f:r=>_mwPPA(amt(r),ac(r))},
+    {h:'Acres', num:true, f:r=>_mwAcres(ac(r))},
+    {h:'Site', f:r=>[_mwPick(r,'site_address','site.address'),_mwPick(r,'site_city','site.city')].filter(Boolean).join(', ')||'—'},
+    {h:'Use', f:r=>_mwPick(r,'land.land_use.lusedor_desc','land_use')||(_mwPick(r,'sale_vac','sales.recent.vac')==='V'?'Vacant':_mwPick(r,'sale_vac','sales.recent.vac')==='I'?'Improved':'—')},
+    {h:'Buyer (owner)', f:r=>{ const o=_mwPick(r,'owner.primary_name','owner'); return typeof o==='string'?o:'—'; }},
+    {h:'Seller', f:r=>_mwPick(r,'sale_grantor','sales.recent.grantor')||'—'},
+    {h:'Qual.', f:r=>_mwQualLabel({qual:_mwPick(r,'sale_qual','sales.recent.qual'), qualification:_mwPick(r,'sales.recent.qualification')})},
+    {h:'PIN', f:r=>_mwPick(r,'pin','identifiers.pin')||'—'},
+  ], rows);
+  const shown=rows.length, total=meta.total_count;
+  return `<div class="mw-sub">${landOnly?'Land':'All'} sales within ${cfg.nearbyRadiusMiles||1} mi · last ${cfg.nearbyMonths||24} months · ≥ $10,000${cached?' · cached':''}</div>${tbl}
+    <div class="mw-note">${total!=null?`Showing ${shown} of ${total} matching sales, newest first.`:`${shown} sales.`}${landOnly?` Land = DOR vacant codes ${_MW_VACANT_DOR.join(', ')}.`:''} $/acre uses GIS acreage.</div>
+    <div class="mw-actions">${landOnly
+      ? `<button type="button" class="mw-btn" data-mw-action="nearby-all">Include improved sales <span class="mw-cost">≈ $0.06 / record</span></button>`
+      : `<button type="button" class="mw-btn" data-mw-action="nearby">Land sales only <span class="mw-cost">≈ $0.06 / record</span></button>`}</div>`;
+}
+
+function _mwRenderHoldings(data, cached, ownerName){
+  const rows=_mwRecords(data), meta=_mwMeta(data);
+  const tbl=_mwTableHtml([
+    {h:'County', f:r=>_mwPick(r,'county','meta.county')||'—'},
+    {h:'PIN', f:r=>_mwPick(r,'pin','identifiers.pin')||'—'},
+    {h:'Site', f:r=>[_mwPick(r,'site_address','site.address'),_mwPick(r,'site_city','site.city')].filter(Boolean).join(', ')||'—'},
+    {h:'Acres', num:true, f:r=>_mwAcres(_mwPick(r,'acres_gis','land.acres_gis'))},
+    {h:'Use', f:r=>_mwPick(r,'land.land_use.lusedor_desc','land_use')||'—'},
+    {h:'Market', num:true, f:r=>_mwMoney(_mwPick(r,'market_total','valuation.market.total'))},
+    {h:'Last sale', f:r=>{ const d=_mwPick(r,'sale_date','sales.recent.date'); return d?`${_mwDate(d)} · ${_mwMoney(_mwPick(r,'sale_amount','sales.recent.amount'))}`:'—'; }},
+  ], rows);
+  const totalAc=rows.reduce((a,r)=>a+(Number(_mwPick(r,'acres_gis','land.acres_gis'))||0),0);
+  return `<div class="mw-sub">Statewide holdings — ${_vcEsc(ownerName)}${cached?' · cached':''}</div>${tbl}
+    <div class="mw-note">${meta.total_count!=null?`Showing ${rows.length} of ${meta.total_count} parcels`:`${rows.length} parcels`} · ${_mwAcres(totalAc)} shown. Name-substring match on the FDOR owner field — the same person behind an LLC or a slightly different spelling will not appear.</div>`;
+}
+
+function _mwCardHtml(d){
+  const cfg=_MW();
+  if(!cfg.enabled) return '';
+  const hasParcel=!!(d.parcel&&d.parcel.parcelId), hasPt=!!(d.lat&&d.lon), hasOwner=!!(d.parcel&&d.parcel.owner);
+  const cost=(n)=>`<span class="mw-cost">${n}</span>`;
+  const body=`
+    <div id="mw-detail"><div class="mw-note"><span class="mw-spin">⏳</span> Pulling sales history from MapWise…</div></div>
+    <div class="mw-actions" role="group" aria-label="MapWise lookups">
+      <button type="button" class="mw-btn" data-mw-action="nearby" ${hasPt?'':'disabled'} title="Recorded land sales ≥ $10,000 within ${cfg.nearbyRadiusMiles||1} mi, last ${cfg.nearbyMonths||24} months">📍 Nearby land sales ${cost('≈ $0.06 / record, max '+(cfg.nearbyLimit||25))}</button>
+      <button type="button" class="mw-btn" data-mw-action="holdings" ${hasOwner?'':'disabled'} title="Every other Florida parcel under this owner name">🧑‍🌾 Owner's other holdings ${cost('≈ $0.06 / record, max '+(cfg.holdingsLimit||25))}</button>
+      <button type="button" class="mw-btn" data-mw-action="report" ${hasParcel?'':'disabled'} title="MapWise PDF property report (owner, valuation, buildings, sales)">📄 PDF property report ${cost('$1.00')}</button>
+    </div>
+    <div id="mw-nearby"></div>
+    <div id="mw-holdings"></div>
+    <div id="mw-report"></div>`;
+  const foot=`Source: MapWise (mapwise.com) statewide parcel &amp; sales database, built from county property appraiser rolls. Billed to ELC's MapWise account per record; results are cached ${cfg.cacheDays||30} days so a parcel is only billed once. Sale amounts are recorded-deed figures, not verified arm's-length — check the qualification column and read the deed before quoting a price.`;
+  return _vcCard('📊','MapWise — Sales & Ownership', body, foot);
+}
+
+function _mwErr(el,e,retryAction){
+  if(!el) return;
+  const msg=String(e&&e.message||e);
+  const notSet=/MAPWISE_API_KEY|not configured|503/.test(msg);
+  el.innerHTML=`<div class="mw-err">${notSet?'MapWise isn’t connected yet — the API key hasn’t been added to the worker.':'MapWise didn’t answer: '+_vcEsc(msg)}
+    ${retryAction&&!notSet?` <button type="button" class="mw-btn" style="min-height:26px;padding:.1rem .45rem;margin-left:.3rem" data-mw-action="${retryAction}" data-mw-retry="1">Retry</button>`:''}</div>`;
+}
+
+async function _mwAutoLoad(d){
+  const el=document.getElementById('mw-detail'); if(!el||!_MW().enabled) return;
+  if(!(d.parcel&&d.parcel.parcelId)&&!(d.lat&&d.lon)){ el.innerHTML=`<div class="mw-note">Drop the pin on a parcel to pull its sales history.</div>`; return; }
+  try{
+    let out, rec;
+    if(d.parcel&&d.parcel.parcelId){
+      out=await _mwCall('get_parcel_detail', _MW_ARGS.parcelDetail(d));
+      rec=_mwRecords(out.data)[0];
+    }
+    // The roll's PARCEL_ID normally matches MapWise pin2; when it doesn't, resolve by point and retry by MapWise's own PIN.
+    if(!rec && d.lat && d.lon){
+      const at=await _mwCall('get_parcel', _MW_ARGS.parcelAtPoint(d));
+      const found=_mwRecords(at.data)[0]; const pin=found&&_mwPick(found,'identifiers.pin','pin');
+      if(pin){ out=await _mwCall('get_parcel_detail', {pin, county:_mwCounty(_mwPick(found,'meta.county','county')||d.county), outputRaw:true, includeHazards:true}); rec=_mwRecords(out.data)[0]; }
+    }
+    if(!rec){ el.innerHTML=`<div class="mw-note">MapWise has no record for this parcel.</div>`; return; }
+    d._mwPin=_mwPick(rec,'identifiers.pin')||d.parcel.parcelId; d._mwCounty=_mwPick(rec,'meta.county');
+    el.innerHTML=_mwRenderDetail(rec, out.cached)+(out.cached?`<div class="mw-note">Served from Terra’s ${_MW().cacheDays||30}-day cache — not billed.</div>`:'');
+  }catch(e){ console.warn('[mapwise] detail',e); _mwErr(el,e,'detail'); }
+}
+
+async function _mwAction(action, btn){
+  const d=window._valConfirmed; if(!d) return;
+  const map={nearby:'mw-nearby', 'nearby-all':'mw-nearby', holdings:'mw-holdings', report:'mw-report', detail:'mw-detail'};
+  const el=document.getElementById(map[action]); if(!el) return;
+  if(action==='detail'){ el.innerHTML=`<div class="mw-note"><span class="mw-spin">⏳</span> Pulling sales history from MapWise…</div>`; return _mwAutoLoad(d); }
+  if(action==='report'){
+    const ok = typeof elcConfirm==='function'
+      ? await elcConfirm('Generate a MapWise PDF property report for this parcel? This bills $1.00 to ELC’s MapWise account.', {okLabel:'Generate ($1.00)', title:'MapWise PDF report', icon:'📄', danger:false})
+      : confirm('Generate the MapWise PDF property report? Bills $1.00.');
+    if(!ok) return;
+  }
+  if(btn){ btn.disabled=true; }
+  el.innerHTML=`<div class="mw-note"><span class="mw-spin">⏳</span> Asking MapWise…</div>`;
+  try{
+    if(action==='nearby'||action==='nearby-all'){
+      const landOnly=action==='nearby';
+      const out=await _mwCall('find_recent_sales', _MW_ARGS.nearbySales(d, landOnly));
+      el.innerHTML=_mwRenderSales(out.data, out.cached, landOnly);
+    } else if(action==='holdings'){
+      const out=await _mwCall('find_owner_holdings', _MW_ARGS.ownerHoldings(d));
+      el.innerHTML=_mwRenderHoldings(out.data, out.cached, d.parcel.owner);
+    } else if(action==='report'){
+      const args=_MW_ARGS.report(d,'property'); if(d._mwPin) args.pin=d._mwPin; if(d._mwCounty) args.county=d._mwCounty;
+      const out=await _mwCall('generate_parcel_report', args, {confirmCost:true, noCache:true});
+      const data=out.data; let link=null, rid=null;
+      const scan=(o)=>{ if(!o) return; if(typeof o==='string'){ if(!link&&/^https?:\/\//.test(o)) link=o; if(!rid&&/^rpt_/.test(o)) rid=o; } else if(typeof o==='object') Object.values(o).forEach(scan); };
+      scan(data); if(!link&&typeof data==='string'){ const m=data.match(/https?:\/\/\S+/); if(m) link=m[0]; }
+      el.innerHTML=link
+        ? `<div class="sr-juri-links"><a href="${_vcEsc(link)}" target="_blank" rel="noopener">📄 Open MapWise property report (PDF) <span aria-hidden="true">↗</span></a></div><div class="mw-note">Link is valid 15 minutes — save it to the deal’s Drive folder now if it belongs in the file.${rid?' Report id '+_vcEsc(rid)+'.':''}</div>`
+        : `<div class="mw-pre">${_vcEsc(typeof data==='string'?data:JSON.stringify(data,null,1))}</div>`;
+    }
+  }catch(e){ console.warn('[mapwise] '+action,e); _mwErr(el,e,action); }
+  finally{ if(btn) btn.disabled=false; }
+}
+document.addEventListener('click', e=>{
+  const b=e.target.closest&&e.target.closest('[data-mw-action]'); if(!b) return;
+  e.preventDefault(); _mwAction(b.getAttribute('data-mw-action'), b.hasAttribute('data-mw-retry')?null:b);
+});
+window._mwCall=_mwCall; window._mwAutoLoad=_mwAutoLoad;
+
+/* ═══════════════════════════════════════════════════════════════════════════
    TAXDIST-20261019 — TAXING DISTRICT → MUNICIPALITY → MUNICODE
    The property appraiser's taxing district says which government taxes the
    parcel, and therefore whose land development code governs it. Inside a city
@@ -5162,6 +5482,9 @@ function _valRenderConfirmed(d){
     _vcRow('Qualified Census Tract', d.qct?'Yes':'No', 'HUD 2026'),
   ].join('');
 
+  // MAPWISE-20261107 — the MapWise card renders with a spinner; fill it once the
+  // HTML is in the DOM. Both call sites (pin click, Research button) come through here.
+  setTimeout(()=>{ if(document.getElementById('mw-detail')) _mwAutoLoad(d); }, 60);
   return `
     <div style="display:flex;align-items:center;justify-content:space-between;gap:.5rem;margin-bottom:.6rem;flex-wrap:wrap">
       <div style="font-size:.82rem;font-weight:800;color:#065f46">✅ Confirmed public records${d.juris&&d.juris.incorporated?' — '+_vcEsc(d.juris.label)+',':''}${d.county?' '+(d.juris&&d.juris.incorporated?'':'— ')+_vcEsc(d.county)+' County':''}</div>
@@ -5176,7 +5499,8 @@ function _valRenderConfirmed(d){
     ${_vcCard('🌊','Flood',floodRows,'Source: FEMA National Flood Hazard Layer. Pull a FIRMette at msc.fema.gov for anything going in a file.')}
     ${_vcCard('🐸','Wetlands',wetRows,'NWI is a desktop screen only — it is not a jurisdictional determination. A formal delineation is still required.')}
     ${_vcCard('🗻','Site Conditions',siteRows,'')}
-    ${_vcCard('🎯','Incentives',incRows,'')}`;
+    ${_vcCard('🎯','Incentives',incRows,'')}
+    ${_mwCardHtml(d)}`;
 }
 
 // Guard against a fast second click landing after a slow first lookup.
