@@ -49820,6 +49820,8 @@ window._siAddSenderToCrm = async function(){
      deals/{id}.reportRecipients[]      — [{name,email,contactId}]
      deals/{id}.reportAppPropertyId     — app.thedirtdog.com property UUID (set by hand, 🔗 Find, or 🔗 Match property IDs — TRAFFICFEED-20261028)
      deals/{id}.reportAppPropertyName   — that property's name on the app, + reportAppMatchedAt/By
+     deals/{id}.portalStats             — {months:{YYYY-MM:{loopnet:{…},landcom:{…}}}, loopnetKey, landcomId} from the monthly export upload (PORTALSTATS-20261109)
+     deals/{id}/monthlyReports/{ym}.portal — {loopnet, landcom} hand overrides of that month's portal boxes
      deals/{id}.reportSendOff           — true = 'Send to client' switched off for this listing (no report can be sent until turned back on)
      deals/{id}.reportSignPhotoUrl      — sign photo (remembered month to month)
      deals/{id}.reportWebsitePhotoUrl   — Buildout property-website screenshot (remembered month to month)
@@ -50326,7 +50328,7 @@ function _mrStartYm(d){
   const terra=_mrListingStart(d); return terra?_mrYmOf(terra):null;
 }
 // Cached lifetime summary through a report month: {total, from, through, months} or null when nothing has been pulled.
-function _mrLifetimeViews(d, ym){
+function _mrLifetimeViews0(d, ym){   // PORTALSTATS-20261109 — wrapped by _mrLifetimeViews in the PORTALSTATS block (adds LoopNet / Land.com detail views)
   const w=d&&d.reportWebViews; if(!w||!w.months||typeof w.months!=='object') return null;
   const ks=Object.keys(w.months).filter(k=>/^\d{4}-\d{2}$/.test(k) && w.months[k] && w.months[k].views!=null && (!ym || k<=ym)).sort();
   if(!ks.length) return null;
@@ -50403,6 +50405,326 @@ function _mrTrafficReviewLine(A){
 }
 window._mrLifetimeViews=_mrLifetimeViews; window._mrViewsOf=_mrViewsOf; window._mrPullLifetimeViews=_mrPullLifetimeViews; window._mrLifetimeText=_mrLifetimeText; window._mrYmAdd=_mrYmAdd;
 
+/* =======================================================
+   📊 PORTAL STATS UPLOAD — marker PORTALSTATS-20261109
+   Ryan (2026-11-09): app.thedirtdog.com's feed has no LoopNet / Land.com integration (those metrics come back null), so
+   each month (any day 1–10) Krissy downloads the two portal exports and uploads them here:
+     · CoStar / LoopNet  "active listings" .xlsx — Listing (address / city, FL zip / title) · Type · Property Type ·
+                          Exposure Level · Total Views (search views) · Detail Page Views · Unique Viewers · Leads
+     · Land.com          "active listings" .xlsx — Listing ID · Listing Name · City · County · Search Views ·
+                          Detail Page Views · Actions · Leads
+   Terra matches every row to an active listing (street number + street tokens + city/county + acreage, with the keys
+   saved from an earlier confirmed upload winning outright), shows a review screen (confident rows pre-checked), and on
+   Apply writes the month onto the deal:
+     deals/{id}.portalStats = { months:{ 'YYYY-MM': { loopnet:{searchViews,detailViews,uniqueViewers,leads,exposure,type,listing,at,by},
+                                                      landcom:{searchViews,detailViews,actions,leads,listingId,name,at,by} } },
+                               loopnetKey:'<normalized portal listing string>', landcomId:'<Listing ID>', updatedAt }
+   The report prints EVERY stat of each portal as a box on the Leads & Website Activity page (Ryan: "show all the stats,
+   not just some"), the ✏️ Edit screen gets a box per stat (hand edits override the upload for that month), and
+   Detail Page Views (people who opened the listing — not search impressions) roll into the TOTAL WEB VIEWS lifetime tile.
+   Staff (Krissy / Nick) + admins can upload; advisors only see the result on their reports.
+   ======================================================= */
+/* ===== PORTALSTATS_BLOCK_START ===== */
+/* PORTALSTATS_CORE_START */
+const PST_PORTALS={
+  loopnet:{ label:'LoopNet / CoStar', short:'LoopNet', stats:[['searchViews','Search views'],['detailViews','Detail page views'],['uniqueViewers','Unique viewers'],['leads','Leads']] },
+  landcom:{ label:'Land.com', short:'Land.com', stats:[['searchViews','Search views'],['detailViews','Detail page views'],['actions','Actions'],['leads','Leads']] },
+};
+const PST_STREET_ABBR={ rd:'road', st:'street', ave:'avenue', av:'avenue', blvd:'boulevard', hwy:'highway', dr:'drive', ln:'lane', ct:'court', pkwy:'parkway', pky:'parkway', cir:'circle', trl:'trail', ter:'terrace', pl:'place', way:'way', n:'north', s:'south', e:'east', w:'west', ne:'northeast', nw:'northwest', se:'southeast', sw:'southwest', cr:'cr', sr:'sr', us:'us', fl:'' , mt:'mount', ft:'fort', pt:'point', hwys:'highway' };
+const PST_STOP=new Set(['','the','and','for','of','on','in','at','ac','acre','acres','lot','lots','parcel','parcels','land','site','sale','lease','commercial','retail','industrial','residential','development','dev','zoned','county','florida','fl','ave','rd','st','road','street','avenue','boulevard','highway','drive','lane','north','south','east','west','northeast','northwest','southeast','southwest','pad','ready','ac.','acs','near','off','&','w/','with','from','to','by','or','mf','sfd','sf','pud','a','an']);
+function _pstNorm(s){ return String(s==null?'':s).toLowerCase().replace(/[’'`]/g,'').replace(/(\d),(\d{3})\b/g,'$1$2').replace(/\+\/-|\+-|±/g,' ').replace(/[^a-z0-9.&/ ]+/g,' ').replace(/\s+/g,' ').trim(); }
+function _pstTokens(s){ return _pstNorm(s).split(/[\s/&]+/).map(t=>t.replace(/\.$/,'')).map(t=>PST_STREET_ABBR[t]!==undefined?PST_STREET_ABBR[t]:t).filter(t=>t&&t.length>1); }
+// Street tokens = words worth matching an address on (no stop words, no bare numbers under 2 digits)
+function _pstStreetTokens(s){ return new Set(_pstTokens(s).filter(t=>!PST_STOP.has(t) && !/^\d+(\.\d+)?$/.test(t) && t.length>=3)); }
+function _pstNumbers(s){ return new Set((_pstNorm(s).replace(/\d*\.\d+/g,' ').match(/\b\d{2,6}\b/g)||[]).filter(n=>!/^(19|20)\d{2}$/.test(n) && !/^3[2-4]\d{3}$/.test(n))); }   // skip decimals (acreage), years and FL zips
+function _pstNameTokens(s){ return new Set(_pstTokens(s).filter(t=>!PST_STOP.has(t) && !/^\d+(\.\d+)?$/.test(t) && t.length>=3)); }
+// How much of the portal's listing NAME is the Terra project name (Land.com names are often copied from Terra): 0..1
+function _pstNameSim(a, b){ const A=_pstNameTokens(a), B=_pstNameTokens(b); if(A.size<2||B.size<2) return 0; let inter=0; A.forEach(t=>{ if(B.has(t)) inter++; }); return inter/Math.max(A.size,B.size); }
+function _pstAcres(s){ const m=_pstNorm(s).match(/(\d*\.?\d+)\s*(?:\+\/?-?\s*)?(?:ac\b|acs\b|acre|acres|ac\.)/); return m?Number(m[1]):0; }
+function _pstZip(s){ const m=String(s||'').match(/\b(3[2-4]\d{3})\b/); return m?m[1]:''; }
+function _pstCityIn(city, hay){ city=_pstNorm(city).replace(/\bst\b/,'saint'); if(!city) return false; hay=_pstNorm(hay).replace(/\bst\.?\b/g,'saint'); return hay.includes(city); }
+function _pstCountyKey(c){ return _pstNorm(c).replace(/\bcounty\b/,'').trim(); }
+
+/* ---- parse the two exports (rows = array of arrays, header row first) ---- */
+function _pstHeaderIndex(hdr){ const h=hdr.map(x=>_pstNorm(x)); const find=(...pats)=>{ for(const p of pats){ const i=h.findIndex(x=>p.test(x)); if(i>=0) return i; } return -1; }; return {h, find}; }
+function _pstDetectPortal(hdr){
+  const {h}=_pstHeaderIndex(hdr||[]);
+  if(h.some(x=>/listing id/.test(x)) && h.some(x=>/listing name/.test(x))) return 'landcom';
+  if(h.some(x=>/exposure/.test(x)) || h.some(x=>/unique viewers/.test(x)) || (h[0]==='listing' && h.some(x=>/property type/.test(x)))) return 'loopnet';
+  if(h.some(x=>/actions/.test(x)) && h.some(x=>/county/.test(x))) return 'landcom';
+  return '';
+}
+function _pstParseRows(rows, portal){
+  rows=(rows||[]).filter(r=>Array.isArray(r)&&r.some(c=>c!=null&&String(c).trim()!==''));
+  if(!rows.length) return [];
+  const hdr=rows[0]; portal=portal||_pstDetectPortal(hdr); if(!portal) return [];
+  const {find}=_pstHeaderIndex(hdr);
+  const get=(r,i)=> i>=0&&i<r.length&&r[i]!=null ? String(r[i]).trim() : '';
+  const num=(r,i)=>{ const v=get(r,i); if(v==='') return null; const n=Number(v.replace(/[^0-9.\-]/g,'')); return isFinite(n)?n:null; };
+  const out=[];
+  if(portal==='landcom'){
+    const iId=find(/listing id/), iName=find(/listing name|^name$|title/), iCity=find(/city/), iCounty=find(/county/), iSV=find(/search views|^views$|impressions/), iDV=find(/detail page views|detail views|page views/), iAct=find(/actions/), iLd=find(/leads/);
+    rows.slice(1).forEach(r=>{ const name=get(r,iName), id=get(r,iId); if(!name&&!id) return;
+      out.push({portal, key:id||_pstNorm(name), listingId:id, name, city:get(r,iCity), county:get(r,iCounty), acres:_pstAcres(name),
+        stats:{searchViews:num(r,iSV), detailViews:num(r,iDV), actions:num(r,iAct), leads:num(r,iLd)}, raw:r.slice(0,8)}); });
+  } else {
+    const iL=find(/^listing$|^listing\b/), iType=find(/^type$/), iPT=find(/property type/), iExp=find(/exposure/), iSV=find(/total views|search views|^views$/), iDV=find(/detail page views|detail views/), iUV=find(/unique viewers|unique/), iLd=find(/leads/);
+    rows.slice(1).forEach(r=>{ const listing=get(r,iL); if(!listing) return;
+      const seg=listing.split(/\s*\/\s*/); const address=seg[0]||'', cityZip=seg[1]||'', title=seg.slice(2).join(' / ');
+      const cm=cityZip.match(/^(.*?),\s*FL\b/i); const city=cm?cm[1].trim():cityZip.replace(/,.*$/,'').trim();
+      out.push({portal, key:_pstNorm(address+' '+city), listing, address, city, zip:_pstZip(cityZip), title, type:get(r,iType), propertyType:get(r,iPT), exposure:get(r,iExp), acres:_pstAcres(title)||_pstAcres(listing),
+        stats:{searchViews:num(r,iSV), detailViews:num(r,iDV), uniqueViewers:num(r,iUV), leads:num(r,iLd)}, raw:r.slice(0,8)}); });
+  }
+  return out;
+}
+// Report month from the sheet name ("October 2026"), the file name (…_2026-10.xlsx / …October-2026…) or null.
+function _pstMonthFrom(sheetName, fileName){
+  const MON={january:1,february:2,march:3,april:4,may:5,june:6,july:7,august:8,september:9,october:10,november:11,december:12,jan:1,feb:2,mar:3,apr:4,jun:6,jul:7,aug:8,sep:9,sept:9,oct:10,nov:11,dec:12};
+  for(const s of [sheetName, fileName]){ if(!s) continue; let m=String(s).match(/(20\d{2})[-_ .]?(0[1-9]|1[0-2])(?!\d)/); if(m) return m[1]+'-'+m[2];
+    m=String(s).toLowerCase().match(/\b(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept|sep|oct|nov|dec)\b[^0-9]{0,6}(20\d{2})/); if(m) return m[2]+'-'+String(MON[m[1]]).padStart(2,'0'); }
+  return null;
+}
+
+/* ---- matching: one portal row → best Terra listing ---- */
+// deal shape used here: {id, name, address, city, county, acres, savedKeys:{loopnet, landcom}} — built by _pstDealIndex from allDeals
+function _pstDealIndex(deals){
+  return (deals||[]).map(d=>{ const ps=d.portalStats||{};
+    const name=d.projectName||d.name||'', address=d.propertyAddress||d.address||'';
+    const hay=name+' '+address+' '+(d.city||'')+' '+(d.county||'');
+    return { id:d.id, deal:d, name, address, city:d.city||'', county:d.county||'', acres:Number(String(d.acres||d.acreage||'').replace(/[^0-9.]/g,''))||0,
+      nums:_pstNumbers(address+' '+name), street:_pstStreetTokens(address+' '+name), hay, zip:_pstZip(address),
+      saved:{loopnet:ps.loopnetKey||'', landcom:ps.landcomId||''} }; });
+}
+function _pstScore(row, D){
+  if(row.portal==='landcom' && row.listingId && D.saved.landcom && D.saved.landcom===row.listingId) return 2;
+  if(row.portal==='loopnet' && row.key && D.saved.loopnet && D.saved.loopnet===row.key) return 2;
+  const text=row.portal==='landcom'?row.name:(row.address+' '+row.title);
+  const rNums=_pstNumbers(row.portal==='landcom'?row.name:row.address), rStreet=_pstStreetTokens(text);
+  let s=0, numHit=false, streetHits=0;
+  rNums.forEach(n=>{ if(D.nums.has(n)){ numHit=true; } });
+  rStreet.forEach(t=>{ if(D.street.has(t)) streetHits++; });
+  const nameSim=_pstNameSim(row.portal==='landcom'?row.name:row.title, D.name);
+  if(numHit) s+=0.45;
+  s+=Math.min(3,streetHits)*0.17;
+  if(nameSim>=0.99) s+=0.6; else if(nameSim>=0.66) s+=0.35;
+  if(streetHits===0 && !numHit && nameSim<0.66) return 0;   // nothing in common on the ground → not a match whatever the acreage says
+  if(row.city && _pstCityIn(row.city, D.hay)) s+=0.14;
+  if(row.county && D.county && _pstCountyKey(row.county)===_pstCountyKey(D.county)) s+=0.08;
+  if(row.zip && D.zip && row.zip===D.zip) s+=0.12;
+  if(row.acres>0 && D.acres>0){ const diff=Math.abs(row.acres-D.acres)/Math.max(row.acres,D.acres); if(diff<=0.03) s+=0.3; else if(diff<=0.12) s+=0.12; else if(diff>0.35) s-=0.55; }
+  return Math.max(0, Math.min(1.5, s));
+}
+// Greedy one-to-one assignment, best scores first. Returns rows decorated with {dealId, score, conf:'saved'|'high'|'check'|'none', alts:[{id,score}]}
+function _pstMatch(rows, dealIdx){
+  const scored=rows.map(r=>{ const cand=dealIdx.map(D=>({id:D.id, score:_pstScore(r,D)})).filter(c=>c.score>=0.4).sort((a,b)=>b.score-a.score); return {row:r, cand}; });
+  const taken=new Map();   // dealId → row
+  const pairs=[]; scored.forEach((s,i)=>s.cand.forEach(c=>pairs.push({i, id:c.id, score:c.score}))); pairs.sort((a,b)=>b.score-a.score);
+  const pick=new Array(rows.length).fill(null);
+  pairs.forEach(p=>{ if(pick[p.i]) return; if(taken.has(p.id)) return; pick[p.i]=p; taken.set(p.id,p.i); });
+  return scored.map((s,i)=>{ const p=pick[i]; const score=p?p.score:0;
+    const conf=!p?'none':(score>=2?'saved':(score>=0.85?'high':'check'));
+    return Object.assign({}, s.row, {dealId:p?p.id:'', score:Math.round(score*100)/100, conf, alts:s.cand.slice(0,4)}); });
+}
+/* PORTALSTATS_CORE_END */
+/* ---- effective per-month values (hand edit on the report doc beats the upload) ---- */
+function _pstUpload(deal, ym, portal){ const m=deal&&deal.portalStats&&deal.portalStats.months; const e=m&&m[ym]&&m[ym][portal]; return (e&&typeof e==='object')?e:null; }
+function _pstHasAny(o){ return !!o && Object.keys(o).some(k=>k!=='source'&&k!=='at'&&k!=='by'&&k!=='byName'&&o[k]!=null&&o[k]!==''); }
+function _pstEffective(deal, ym, rep){
+  const out={};
+  Object.keys(PST_PORTALS).forEach(p=>{
+    const man=rep&&rep.portal&&rep.portal[p]; const up=_pstUpload(deal, ym, p);
+    if(_pstHasAny(man)) out[p]={...man, src:'manual', upload:up};
+    else if(_pstHasAny(up)) out[p]={...up, src:'upload', upload:up};
+    else out[p]=null;
+  });
+  return out;
+}
+const PST_VIEW_STAT='detailViews';   // what rolls into TOTAL WEB VIEWS: people who opened the listing, not search-result impressions
+function _pstViewsOfEntry(e){ return (e&&e[PST_VIEW_STAT]!=null&&e[PST_VIEW_STAT]!=='')?Number(e[PST_VIEW_STAT]):null; }
+// This month's portal view figures that belong in the Total-web-views sum (skipped when the feed already gave that site's number)
+function _pstMonthViewParts(deal, ym, rep, T){
+  const E=_pstEffective(deal, ym, rep); const out=[]; T=T||{};
+  if(E.loopnet && (T.loopnetViews==null||T.loopnetViews==='')){ const v=_pstViewsOfEntry(E.loopnet); if(v!=null) out.push(v); }
+  if(E.landcom && (T.landcomViews==null||T.landcomViews==='')){ const v=_pstViewsOfEntry(E.landcom); if(v!=null) out.push(v); }
+  return out;
+}
+// LIFEVIEWS-20261029 wrapper: the lifetime Total-web-views tile = app.thedirtdog.com months (cached on the deal) + every uploaded portal month ≤ the report month
+function _mrLifetimeViews(d, ym){
+  const L=_mrLifetimeViews0(d, ym);
+  const m=d&&d.portalStats&&d.portalStats.months; if(!m||typeof m!=='object') return L;
+  const ks=Object.keys(m).filter(k=>/^\d{4}-\d{2}$/.test(k) && (!ym||k<=ym)).sort();
+  let add=0, n=0, from='', through='';
+  ks.forEach(k=>{ let any=false; Object.keys(PST_PORTALS).forEach(p=>{ const v=_pstViewsOfEntry(m[k][p]); if(v!=null){ add+=v; any=true; } }); if(any){ n++; from=from||k; through=k; } });
+  if(!n) return L;
+  if(!L) return {total:add, from, through, months:n, fetchedAt:(d.portalStats.updatedAt||0), portalOnly:true};
+  return {...L, total:L.total+add, from:L.from<from?L.from:from, through:L.through>through?L.through:through, months:Math.max(L.months,n), portalViews:add};
+}
+function _pstFmt(v){ return (v==null||v==='')?'—':Number(v).toLocaleString('en-US'); }
+function _pstEntryLine(p, e){ const def=PST_PORTALS[p]; const bits=def.stats.map(([k,l])=>_pstFmt(e[k])+' '+l.toLowerCase()); const meta=p==='loopnet'?[e.exposure?e.exposure+' exposure':'', e.type||''].filter(Boolean).join(', '):''; return def.short+(meta?' ('+meta+')':'')+': '+bits.join(' · '); }
+function _pstReviewLine(A){
+  const E=_pstEffective(A.deal||{}, A.ym, A.rep||{}); const parts=[]; let who='';
+  Object.keys(PST_PORTALS).forEach(p=>{ const e=E[p]; if(!e) return; parts.push(_pstEntryLine(p,e)+(e.src==='manual'?' (hand-edited)':'')); if(!who&&e.byName) who=e.byName; if(!who&&e.at) who=_mrFmtDate(e.at); });
+  if(!parts.length) return ['warn','No LoopNet / Land.com stats for '+_mrMonthLabel(A.ym)+' yet — staff upload the two portal exports with 📊 Upload portal stats on the Monthly Reports list (any day 1–10).'];
+  const up=Object.values(E).find(e=>e&&e.at); return ['ok', parts.join(' · ')+(up?' — uploaded '+_mrFmtDate(up.at)+(up.byName?' by '+_mrFirstName(up.byName):''):'')+'.'];
+}
+window._pstEffective=_pstEffective; window._pstReviewLine=_pstReviewLine; window._pstMonthViewParts=_pstMonthViewParts;
+
+/* ---- PDF: every portal stat as a box on the Leads & Website Activity page ---- */
+function _pstDrawPortals(R, doc, E, y){
+  const portals=Object.keys(PST_PORTALS).filter(p=>E[p]); if(!portals.length) return y;
+  const need=portals.length*(22+50+14)+30; if(y+need>R.H-56){ y=R.newPage()+30; }
+  R.text('LISTING PORTAL PERFORMANCE',R.M,y+10,{size:9,bold:true,color:MR_GREY}); R.line(R.M,y+16,R.W-R.M,y+16,MR_TEAL,1.5); y+=28;
+  portals.forEach(p=>{ const def=PST_PORTALS[p], e=E[p];
+    const meta=p==='loopnet'?[e.exposure?e.exposure+' exposure':'', e.type?e.type+' listing':''].filter(Boolean).join(' · '):(e.name?String(e.name).slice(0,70):'');
+    R.text(def.label.toUpperCase()+(meta?'  —  '+meta.toUpperCase():''),R.M,y+8,{size:8,bold:true,color:MR_INK}); y+=14;
+    const n=def.stats.length, bw=(R.W-2*R.M-(n-1)*10)/n;
+    def.stats.forEach(([k,l],i)=>{ const cx=R.M+i*(bw+10); R.rect(cx,y,bw,50,MR_TEAL); R.text(l.toUpperCase(),cx+10,y+14,{size:6.5,bold:true,color:[235,250,250]}); R.text(_pstFmt(e[k]),cx+10,y+34,{size:18,bold:true,color:[255,255,255]}); });
+    y+=50+12; });
+  return y+4;
+}
+window._pstDrawPortals=_pstDrawPortals;
+
+/* ---- ✏️ Edit screen: a box per stat, prefilled from the upload; a changed box becomes this month's hand override ---- */
+function _pstEditorHtml(deal, ed){
+  const ym=ed&&ed.ym, rep=(ed&&ed.rep)||{}; const E=_pstEffective(deal, ym, rep); const can=_pstCanUpload();
+  const row=p=>{ const def=PST_PORTALS[p], e=E[p]||{}, up=_pstUpload(deal, ym, p);
+    const src=e.src==='manual'?'<span class="mr-chip mr-chip-draft" title="These boxes were edited by hand for this month">hand-edited</span>':(up?'<span class="mr-chip mr-chip-sent">uploaded '+_mrEsc(_mrFmtDate(up.at))+(up.byName?' · '+_mrEsc(_mrFirstName(up.byName)):'')+'</span>':'<span class="mr-chip mr-chip-new">not uploaded for '+_mrEsc(_mrMonthLabel(ym))+'</span>');
+    const inputs=def.stats.map(([k,l])=>`<div><label class="mr-lbl" for="pst-ed-${p}-${k}">${l}</label><input id="pst-ed-${p}-${k}" class="mr-input pst-ed-in" data-portal="${p}" data-k="${k}" style="width:100%" inputmode="numeric" value="${e[k]!=null&&e[k]!==''?_mrEsc(e[k]):''}"></div>`).join('');
+    const extra=p==='loopnet'?`<div><label class="mr-lbl" for="pst-ed-${p}-exposure">Exposure level</label><input id="pst-ed-${p}-exposure" class="mr-input pst-ed-in" data-portal="${p}" data-k="exposure" style="width:100%" placeholder="Silver / Basic" value="${_mrEsc(e.exposure||'')}"></div>`:`<div><label class="mr-lbl" for="pst-ed-${p}-name">Land.com listing name</label><input id="pst-ed-${p}-name" class="mr-input pst-ed-in" data-portal="${p}" data-k="name" style="width:100%" value="${_mrEsc(e.name||'')}"></div>`;
+    return `<div class="pst-ed-row"><div class="pst-ed-lbl"><b>${_mrEsc(def.label)}</b><div style="margin-top:.25rem">${src}</div></div>${inputs}${extra}</div>`; };
+  return `<div style="margin-top:.8rem" id="pst-ed-block"><span class="mr-lbl">Listing portals — LoopNet / CoStar and Land.com (from the monthly upload; edit a box to override it on this report)</span>
+    ${row('loopnet')}${row('landcom')}
+    <div class="mr-note">All of these print as boxes under “Listing portal performance” on the Leads &amp; Website Activity page. Detail page views also count toward the Total Web Views tile.${can?' Staff upload the two portal exports from the list with <b>📊 Upload portal stats</b>.':''} Clear every box of a portal to go back to the uploaded numbers.</div>
+  </div>`;
+}
+function _pstEditorCollect(ed){
+  const out={loopnet:null, landcom:null}; if(!ed||!document.getElementById('pst-ed-block')) return null;
+  Object.keys(PST_PORTALS).forEach(p=>{
+    const o={}; document.querySelectorAll('.pst-ed-in[data-portal="'+p+'"]').forEach(i=>{ const k=i.dataset.k, v=i.value.trim(); o[k]= v===''?null:((k==='exposure'||k==='name'||k==='type')?v:_mrNum(v)); });
+    const up=_pstUpload(ed.deal, ed.ym, p)||{}; const prev=(ed.rep&&ed.rep.portal&&ed.rep.portal[p])||null;
+    const keys=Object.keys(o); const same=keys.every(k=>{ const a=o[k], b=up[k]==null||up[k]===''?null:up[k]; return (a==null&&b==null)||(a!=null&&b!=null&&String(a)===String(b)); });
+    if(!_pstHasAny(o)||same){ out[p]=null; return; }   // blank, or identical to the upload → no override
+    if(up.type&&o.type===undefined) o.type=up.type;
+    out[p]={...o, source:'manual', at:(prev&&prev.source==='manual'&&JSON.stringify({...prev,at:0,by:0,byName:0})===JSON.stringify({...o,source:'manual',at:0,by:0,byName:0}))?prev.at:Date.now(), by:currentUser?.uid||'', byName:currentUser?.name||currentUser?.email||''};
+  });
+  return out;
+}
+
+/* ---- the upload (staff + admins) ---- */
+function _pstCanUpload(){ return typeof _mrSocialOps==='function' && _mrSocialOps(); }
+window._pstUploadBtnHtml=function(){ return _pstCanUpload()?`<button class="mr-btn mr-btn-sm" onclick="window._pstOpen()" title="Upload the month's LoopNet/CoStar and Land.com active-listing exports (.xlsx) — Terra matches each row to its listing and prints every stat on the report">📊 Upload portal stats</button>`:''; };
+async function _pstEnsureXlsx(){ if(window.XLSX) return; await _mrLoadScript('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js'); if(!window.XLSX) throw new Error('The spreadsheet reader did not load — check the connection and try again.'); }
+async function _pstReadFile(f){
+  const name=f.name||'';
+  if(/\.csv$|\.txt$/i.test(name)){ const txt=await f.text(); const rows=txt.split(/\r?\n/).filter(l=>l.trim()).map(l=>_mrSplitCsvLine(l)); return {rows, sheet:'', name}; }
+  await _pstEnsureXlsx(); const buf=await f.arrayBuffer(); const wb=window.XLSX.read(buf,{type:'array'}); const sn=wb.SheetNames[0]; const ws=wb.Sheets[sn];
+  const rows=window.XLSX.utils.sheet_to_json(ws,{header:1, raw:false, defval:''}); return {rows, sheet:sn, name};
+}
+function _pstDealChoices(){ return (allDeals||[]).filter(_mrIsActiveListing).sort((a,b)=>_mrDealName(a).localeCompare(_mrDealName(b))); }
+window._pstOpen=function(){
+  if(!_pstCanUpload()){ showToast('Only staff and admins upload portal stats.','warning'); return; }
+  document.getElementById('pst-ov')?.remove();
+  const ym=window._mrState.month||_mrDefaultMonth();
+  const monthOpts=(()=>{ const o=[]; const d=new Date(); d.setDate(1); for(let i=0;i<14;i++){ const v=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); o.push(`<option value="${v}" ${v===ym?'selected':''}>${_mrMonthLabel(v)}</option>`); d.setMonth(d.getMonth()-1);} return o.join(''); })();
+  const ov=document.createElement('div'); ov.className='mr-ov fixed inset-0 flex items-center justify-center'; ov.id='pst-ov';
+  ov.innerHTML=`<div class="mr-modal" style="width:min(1120px,100%)" role="dialog" aria-label="Upload portal stats">
+    <div class="mr-modal-h"><h2>📊 Upload portal stats</h2><span class="mr-muted" id="pst-sub">LoopNet / CoStar + Land.com monthly exports</span><span style="flex:1"></span><button class="mr-x" aria-label="Close" onclick="window._pstClose()">✕</button></div>
+    <div class="mr-modal-b" id="pst-body">
+      <div class="mr-row" style="gap:.8rem;flex-wrap:wrap;align-items:flex-end">
+        <div><label class="mr-lbl" for="pst-month">Report month</label><select id="pst-month" class="mr-select">${monthOpts}</select></div>
+        <label class="mr-btn mr-btn-teal" style="cursor:pointer">📂 Choose the export file(s)<input id="pst-files" type="file" accept=".xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" multiple style="display:none" onchange="window._pstFiles(this)"></label>
+        <span class="mr-note" style="flex:1;min-width:220px">Download “Active listings” for the month from <b>LoopNet / CoStar</b> and from <b>Land.com</b>, then pick both files here (one at a time is fine). Terra reads the month from the sheet name; change it above if it guessed wrong.</span>
+      </div>
+      <div id="pst-review" class="mr-note">No file chosen yet.</div>
+    </div>
+    <div class="mr-modal-f"><span class="mr-muted" id="pst-foot"></span><span style="flex:1"></span><button class="mr-btn" onclick="window._pstClose()">Cancel</button><button class="mr-btn mr-btn-primary" id="pst-apply" onclick="window._pstApply(this)" disabled>💾 Apply to reports</button></div>
+  </div>`;
+  document.body.appendChild(ov); window._pstState={rows:[], files:[], filter:'check'};
+};
+window._pstClose=function(){ document.getElementById('pst-ov')?.remove(); window._pstState=null; };
+window._pstFiles=async function(input){
+  const st=window._pstState; const files=[...(input.files||[])]; if(!st||!files.length) return;
+  const rv=document.getElementById('pst-review'); if(rv) rv.innerHTML='<span class="mr-muted">Reading…</span>';
+  try{
+    const idx=_pstDealIndex(_pstDealChoices());
+    for(const f of files){
+      const {rows, sheet, name}=await _pstReadFile(f);
+      const portal=_pstDetectPortal(rows.find(r=>Array.isArray(r)&&r.some(c=>String(c||'').trim()))||[]);
+      if(!portal){ showToast('“'+name+'” doesn’t look like a LoopNet/CoStar or Land.com export (header row not recognized).','warning',8000); continue; }
+      const parsed=_pstParseRows(rows, portal); if(!parsed.length){ showToast('No listing rows found in “'+name+'”.','warning'); continue; }
+      const m=_pstMonthFrom(sheet, name); if(m){ const sel=document.getElementById('pst-month'); if(sel&&[...sel.options].some(o=>o.value===m)) sel.value=m; }
+      st.rows=st.rows.filter(r=>r.portal!==portal);   // re-picking the same portal's file replaces its rows
+      st.rows=st.rows.concat(_pstMatch(parsed, idx).map(r=>({...r, file:name, checked:r.conf==='saved'||r.conf==='high'})));
+      st.files=st.files.filter(x=>x.portal!==portal).concat([{portal, name, n:parsed.length}]);
+    }
+  }catch(e){ console.error('[pst] read',e); showToast('Could not read that file: '+e.message,'error',8000); }
+  input.value=''; _pstRender();
+};
+function _pstRender(){
+  const st=window._pstState; if(!st) return; const rv=document.getElementById('pst-review'); if(!rv) return;
+  const rows=st.rows; if(!rows.length){ rv.innerHTML='<span class="mr-muted">No file chosen yet.</span>'; return; }
+  const deals=_pstDealChoices(); const byId=new Map(deals.map(d=>[d.id,d]));
+  const cnt={check:0, sure:0, none:0}; rows.forEach(r=>{ if(!r.dealId) cnt.none++; else if(r.conf==='check') cnt.check++; else cnt.sure++; });
+  const f=st.filter; const show=rows.map((r,i)=>({r,i})).filter(({r})=> f==='all' || (f==='check'&&r.dealId&&r.conf==='check') || (f==='sure'&&r.dealId&&r.conf!=='check') || (f==='none'&&!r.dealId));
+  const chip=(k,label,n)=>`<button type="button" class="mr-btn mr-btn-sm ${f===k?'mr-btn-teal':''}" onclick="window._pstState.filter='${k}';window._pstRenderNow()" aria-pressed="${f===k}">${label} <b>${n}</b></button>`;
+  const statsLine=r=>PST_PORTALS[r.portal].stats.map(([k,l])=>'<span title="'+_mrEsc(l)+'">'+_pstFmt(r.stats[k])+'</span> '+_mrEsc(l.toLowerCase())).join(' · ');
+  const opt=(d,sel,tag)=>`<option value="${_mrEsc(d.id)}" ${sel?'selected':''}>${_mrEsc(_mrDealName(d))}${_mrDealAddr(d)&&_mrDealAddr(d)!==_mrDealName(d)?' · '+_mrEsc(String(_mrDealAddr(d)).slice(0,48)):''}${tag?' · '+tag:''}</option>`;
+  rv.innerHTML=`
+    <div class="mr-row" style="gap:.4rem;flex-wrap:wrap;align-items:center;margin-bottom:.5rem">
+      ${st.files.map(x=>`<span class="mr-chip mr-chip-sent" title="${_mrEsc(x.name)}">${_mrEsc(PST_PORTALS[x.portal].short)} · ${x.n} rows</span>`).join('')}
+      <span style="flex:1"></span>
+      ${chip('check','Needs a look',cnt.check)}${chip('sure','Confident',cnt.sure)}${chip('none','Not matched',cnt.none)}${chip('all','All',rows.length)}
+    </div>
+    <p class="mr-note" style="margin:0 0 .5rem">Checked rows are written to the Terra listing shown. <b>Needs a look</b> rows have a likely match but aren’t ticked — confirm the listing (or pick the right one) and tick them. <b>Not matched</b> rows are listings Terra couldn’t place: pick a listing if it is one of ours, or leave them (sold deals and other brokers’ listings end up here). Once a row is applied, Terra remembers the portal listing so next month it matches on its own.</p>
+    <div style="overflow:auto"><table class="mr-table pst-table" aria-label="Portal rows">
+      <thead><tr><th style="width:34px"><input type="checkbox" aria-label="Tick all shown" onchange="window._pstTickShown(this.checked)"></th><th>Portal listing</th><th>${_mrEsc(_mrMonthLabel(document.getElementById('pst-month')?.value||''))} stats</th><th>Terra listing</th></tr></thead>
+      <tbody>${show.length?show.map(({r,i})=>{ const d=r.dealId?byId.get(r.dealId):null; const alts=r.alts.filter(a=>byId.has(a.id));
+        return `<tr class="${r.checked?'pst-on':''}">
+          <td><input type="checkbox" ${r.checked?'checked':''} ${r.dealId?'':'disabled'} aria-label="Apply this row" onchange="window._pstState.rows[${i}].checked=this.checked;this.closest('tr').classList.toggle('pst-on',this.checked);window._pstFoot()"></td>
+          <td><span class="pst-badge">${_mrEsc(PST_PORTALS[r.portal].short)}</span> <b>${_mrEsc(r.portal==='landcom'?r.name:r.address)}</b><div class="mr-muted">${_mrEsc(r.portal==='landcom'?[r.city,r.county].filter(Boolean).join(', '):[r.city, r.zip, r.title].filter(Boolean).join(' · '))}${r.portal==='loopnet'&&(r.exposure||r.type)?' · '+_mrEsc([r.exposure,r.type].filter(Boolean).join(', ')):''}</div></td>
+          <td class="pst-stats">${statsLine(r)}</td>
+          <td><select class="mr-select" style="width:100%;max-width:420px" aria-label="Terra listing for this row" onchange="window._pstPick(${i},this.value)">
+            <option value="" ${r.dealId?'':'selected'}>— not a Terra listing —</option>
+            ${alts.length?`<optgroup label="Suggested">${alts.map(a=>opt(byId.get(a.id), r.dealId===a.id, a.score>=0.85?'likely':'possible')).join('')}</optgroup>`:''}
+            <optgroup label="All active listings">${deals.filter(d=>!alts.some(a=>a.id===d.id)).map(d=>opt(d, r.dealId===d.id, '')).join('')}</optgroup>
+          </select>${r.conf==='saved'?'<div class="mr-muted" style="font-size:.7rem">remembered from an earlier upload</div>':(r.conf==='check'?'<div class="mr-noweb" style="font-size:.7rem">please confirm</div>':'')}</td></tr>`; }).join(''):`<tr><td colspan="4" class="mr-muted" style="padding:1rem">Nothing in this group.</td></tr>`}</tbody></table></div>`;
+  window._pstFoot();
+}
+window._pstRenderNow=_pstRender;
+window._pstPick=function(i, id){ const st=window._pstState; if(!st||!st.rows[i]) return; const r=st.rows[i]; r.dealId=id||''; if(id){ r.conf=r.conf==='none'||!r.conf?'check':r.conf; r.checked=true; } else { r.checked=false; } _pstRender(); };
+window._pstTickShown=function(on){ const st=window._pstState; if(!st) return; document.querySelectorAll('#pst-review tbody input[type=checkbox]:not(:disabled)').forEach(cb=>{ cb.checked=on; cb.dispatchEvent(new Event('change')); }); };
+window._pstFoot=function(){ const st=window._pstState; if(!st) return; const n=st.rows.filter(r=>r.checked&&r.dealId).length; const ft=document.getElementById('pst-foot'); const btn=document.getElementById('pst-apply'); const ym=document.getElementById('pst-month')?.value||''; if(ft) ft.textContent=n?n+' row'+(n===1?'':'s')+' will be written to '+_mrMonthLabel(ym)+' reports':'Tick the rows to apply'; if(btn) btn.disabled=!n; };
+window._pstApply=async function(btn){
+  const st=window._pstState; if(!st) return; const ym=document.getElementById('pst-month')?.value||''; if(!/^\d{4}-\d{2}$/.test(ym)){ showToast('Pick the report month first.','warning'); return; }
+  const picked=st.rows.filter(r=>r.checked&&r.dealId); if(!picked.length){ showToast('Nothing ticked.','info'); return; }
+  const byDeal={}; picked.forEach(r=>{ (byDeal[r.dealId]=byDeal[r.dealId]||{}); const slot=byDeal[r.dealId]; (slot[r.portal]=slot[r.portal]||[]).push(r); });
+  const nDeals=Object.keys(byDeal).length;
+  if(!(await elcConfirm('Write '+picked.length+' portal row'+(picked.length===1?'':'s')+' to '+nDeals+' listing'+(nDeals===1?'':'s')+' for '+_mrMonthLabel(ym)+'?\n\nEvery stat prints as a box on that month’s owner report, and detail page views count toward Total Web Views. Re-uploading the same month replaces these numbers.',{title:'Apply portal stats',okLabel:'Apply',icon:'📊'}))) return;
+  const done=elcBusy(btn,'Writing…'); const ft=document.getElementById('pst-foot'); let ok=0, fail=[]; const me={at:Date.now(), by:currentUser?.uid||'', byName:currentUser?.name||currentUser?.email||''};
+  for(const [dealId, slots] of Object.entries(byDeal)){
+    const deal=(allDeals||[]).find(d=>d.id===dealId); if(!deal){ fail.push(dealId); continue; }
+    try{
+      const ps=JSON.parse(JSON.stringify((deal.portalStats&&typeof deal.portalStats==='object')?deal.portalStats:{months:{}})); ps.months=ps.months||{}; ps.months[ym]=ps.months[ym]||{};
+      Object.entries(slots).forEach(([portal, rows])=>{
+        const def=PST_PORTALS[portal]; const e={...me, source:'upload'}; def.stats.forEach(([k])=>{ const vals=rows.map(r=>r.stats[k]).filter(v=>v!=null); e[k]=vals.length?vals.reduce((a,b)=>a+Number(b),0):null; });
+        if(portal==='loopnet'){ e.exposure=rows.map(r=>r.exposure).filter(Boolean).join(' / '); e.type=[...new Set(rows.map(r=>r.type).filter(Boolean))].join(' / '); e.listing=rows.map(r=>r.listing).join(' + '); ps.loopnetKey=rows[0].key||ps.loopnetKey||''; }
+        else { e.listingId=rows.map(r=>r.listingId).filter(Boolean).join(' + '); e.name=rows.map(r=>r.name).join(' + '); ps.landcomId=rows[0].listingId||ps.landcomId||''; }
+        ps.months[ym][portal]=e; });
+      ps.updatedAt=Date.now();
+      const patch={portalStats:ps, updatedAt:Date.now()}; await Store.updateDeal(dealId, patch); Object.assign(deal, patch);
+      const ed=window._mrState.editor; if(ed&&ed.deal&&ed.deal.id===dealId&&ed.deal!==deal) Object.assign(ed.deal, patch);
+      ok++;
+    }catch(e){ console.error('[pst] apply',dealId,e); fail.push(_mrDealName(deal)); }
+    if(ft) ft.textContent='Written '+ok+' of '+nDeals+(fail.length?' · '+fail.length+' failed':'')+'…';
+  }
+  done();
+  const left=st.rows.filter(r=>!r.dealId).length;
+  showToast('📊 '+_mrMonthLabel(ym)+' portal stats written to '+ok+' listing'+(ok===1?'':'s')+(fail.length?' · could not save: '+fail.join(', '):'')+(left?' · '+left+' row'+(left===1?'':'s')+' left unmatched':''), fail.length?'warning':'success', 9000);
+  try{ if(typeof logActivity==='function') logActivity('portal_stats_upload','Portal stats uploaded for '+_mrMonthLabel(ym)+': '+picked.length+' rows → '+ok+' listings ('+st.files.map(x=>PST_PORTALS[x.portal].short).join(' + ')+')'); }catch(_){}
+  window._pstClose(); if(typeof window._mrRenderRows==='function') window._mrRenderRows();
+};
+/* ===== PORTALSTATS_BLOCK_END ===== */
+
 /* ---------- VIEW: list of active listings for the month ---------- */
 function _mrStatusChip(rep, d){
   const recips=_mrRecipients(d).length;
@@ -50470,6 +50792,12 @@ function _mrInjectStyles(){
   .mr-prog{height:8px;background:var(--bg);border-radius:999px;overflow:hidden}.mr-prog>div{height:100%;background:var(--brand-teal);transition:width .2s}
   .mr-note{font-size:.78rem;color:var(--text-2);line-height:1.4}
   .mr-noweb{color:#b45309;font-weight:600;white-space:nowrap} html.dark .mr-noweb{color:#fbbf24}   /* TRAFFICFEED-20261028 */
+  .pst-badge{display:inline-block;font-size:.66rem;font-weight:700;border-radius:4px;padding:.1rem .35rem;background:var(--surface-2);color:var(--text-1);border:1px solid var(--border);margin-right:.25rem}   /* PORTALSTATS-20261109 */
+  .pst-table td.pst-stats{white-space:nowrap;font-size:.78rem;color:var(--text-2)} .pst-table td.pst-stats span{font-weight:700;color:var(--text-1)}
+  .pst-table tr.pst-on td{background:rgba(79,195,201,.10)}
+  .pst-ed-row{display:grid;grid-template-columns:170px repeat(5,1fr);gap:.5rem;align-items:end;margin-top:.5rem;padding:.5rem .6rem;border:1px solid var(--border);border-radius:10px;background:var(--surface-1)}
+  .pst-ed-lbl{font-size:.85rem;align-self:center;color:var(--text-1)}
+  @media(max-width:767px){.pst-ed-row{grid-template-columns:1fr 1fr}.pst-ed-lbl{grid-column:1/-1}#pst-ov .pst-table thead{display:none}#pst-ov .pst-table tr{display:grid;grid-template-columns:auto 1fr;gap:.25rem .5rem;padding:.5rem 0;border-bottom:1px solid var(--border);align-items:start}#pst-ov .pst-table td{display:block;border:0;padding:.1rem .3rem}#pst-ov .pst-table td:nth-child(n+2){grid-column:2}#pst-ov .pst-table td.pst-stats{white-space:normal}#pst-ov .mr-select{max-width:none}}
   @media(max-width:767px){#mr-appmatch-ov .mr-table thead{display:none}#mr-appmatch-ov .mr-table tr{display:grid;grid-template-columns:1fr auto;gap:.25rem .5rem;padding:.5rem 0;border-bottom:1px solid var(--border);align-items:center}#mr-appmatch-ov .mr-table td{display:block;border:0;padding:.1rem .3rem}#mr-appmatch-ov .mr-table td:last-child{grid-column:1/-1}#mr-appmatch-ov .mr-select{max-width:none}}   /* TRAFFICFEED-20261028 — match modal stacks on phones */
   html.dark .mr-chip-sent{background:#14532d;color:#bbf7d0}html.dark .mr-chip-draft{background:#78350f;color:#fde68a}html.dark .mr-chip-new{background:#374151;color:#e5e7eb}html.dark .mr-chip-warn{background:#7f1d1d;color:#fecaca}
   `; document.head.appendChild(s);
@@ -50519,6 +50847,7 @@ function viewMonthlyReports(){
         <button class="mr-btn mr-btn-sm" onclick="window._mrSelectAll(true)">Select all</button>
         <button class="mr-btn mr-btn-sm" onclick="window._mrSelectAll(false)">Clear</button>
         ${_mrSeesAll()?`<button class="mr-btn mr-btn-sm" onclick="window._mrMatchAppIds(this)" title="Link each listing to its app.thedirtdog.com property so the web-traffic page pulls automatically">🔗 Match property IDs</button>`:''}   <!-- TRAFFICFEED-20261028 -->
+        ${window._pstUploadBtnHtml?window._pstUploadBtnHtml():''}   <!-- PORTALSTATS-20261109 -->
         <button class="mr-btn mr-btn-sm" onclick="window._mrAssignAllAssets(this)" title="One task per active listing missing a sign photo, QR code or website links">📬 Assign missing assets to Nick</button>
         <button class="mr-btn mr-btn-primary mr-btn-sm" id="mr-send-selected" onclick="window._mrSendSelected()" ${sel.length?'':'disabled'}>📤 Send selected (${sel.length})</button>
       </div>
@@ -50880,6 +51209,7 @@ window._mrOpenEditor=async function(dealId){
         <div class="mr-grid3" style="margin-top:.6rem">
           ${[['siteVisits','TheDirtDog.com visits'],['uniqueVisitors','Unique visitors'],['docsViewed','Docs viewed'],['casSigned','CAs signed'],['gaSessions','Google sessions'],['totalCommercialViews','Total Commercial views'],['loopnetViews','LoopNet views'],['crexiViews','Crexi views'],['totalLeads','Total leads']].map(([k,l])=>`<div><label class="mr-lbl" for="mr-t-${k}">${l}</label><input id="mr-t-${k}" class="mr-input" style="width:100%" inputmode="numeric" value="${st.editor.traffic&&st.editor.traffic[k]!=null?_mrEsc(st.editor.traffic[k]):''}"></div>`).join('')}
         </div>
+        ${_pstEditorHtml(deal, st.editor)}   <!-- PORTALSTATS-20261109 -->
       </div>
       <div class="mr-sec"><h3>8 · Property notes (emails as AI summaries · calls · meetings · notes — tasks never print) — ✏️ edit any line; your wording prints every month</h3><div id="mr-hist-summary" class="mr-note">Counting…</div><div id="mr-hist-list" style="margin-top:.5rem"></div></div>
       <div class="mr-sec"><h3>9 · Contact page</h3><div id="mr-ed-advcard">${_mrEditorAdvisorCardHtml(deal)}</div></div>
@@ -51004,7 +51334,7 @@ function _mrCollectEditor(){
       ...(()=>{ const m=document.querySelector('input[name=mr-letter-mode]:checked')?.value||'ai'; const ai=document.getElementById('mr-ed-ailetter'); const o={letterChoice:m==='default'?'firm':m, letterMode:m==='custom'?'custom':'default', letterBody:(document.getElementById('mr-ed-letter')?.value||'').trim(), letterSignature:((m==='ai'?document.getElementById('mr-ed-sig-ai'):document.getElementById('mr-ed-sig'))?.value||'').trim()}; if(ai){ o.aiLetterBody=ai.value.trim(); if(o.aiLetterBody&&(window._mrState.editor||{})._aiDrafted) o.aiLetterAt=window._mrState.editor._aiDrafted; } return o; })(),   // AILETTER-20261023
       ...(()=>{ const tv=_mrTileCollect(); const o={tileOverrides:tv}; if(JSON.stringify(_mrTileOverrides({tileOverrides:tv}))!==JSON.stringify(_mrTileOverrides(ed.rep))){ o.tileOverridesAt=Date.now(); o.tileOverridesBy=currentUser?.uid||''; o.tileOverridesByName=currentUser?.name||currentUser?.email||''; } return o; })(),   // TILEOVR-20261028
       emailBlasts:_mrReadRows('mr-emails'), emailCampaigns:(ed.emailCampaigns||[]).slice(0,20), emailCampaignsPicked:!!ed.emailCampaignsPicked, facebook:_mrReadRows('mr-fb'), linkedin:_mrReadRows('mr-li'),
-      emailScreenshotUrl:ed.shots.email||'', socialPhotos:ed.socialPhotos.slice(0,12), traffic }
+      emailScreenshotUrl:ed.shots.email||'', socialPhotos:ed.socialPhotos.slice(0,12), traffic, ...(()=>{ const p=_pstEditorCollect(ed); return p?{portal:p}:{}; })() }   // PORTALSTATS-20261109
   };
 }
 window._mrSaveEditor=async function(btn){
@@ -51116,7 +51446,7 @@ const MR_TRAFFIC_KEYS=['siteVisits','uniqueVisitors','docsViewed','casSigned','g
 function _mrTileCalc(ctx){
   const d=ctx.deal||{}, rep=ctx.rep||{}, T=ctx.traffic||rep.traffic||{}; const rng=_mrMonthRange(ctx.ym);
   const offers=(Array.isArray(d.lois)&&d.lois.length)?d.lois.filter(l=>l&&l.reportInclude!==false).length:(d.loiBuyer?1:0);   // MRNOTES-20261029 — offers taken off the report don't count
-  const viewsParts=[T.siteVisits,T.totalCommercialViews,T.loopnetViews,T.crexiViews,T.landcomViews,T.gaSessions].filter(v=>v!=null&&v!=='');   // LIFEVIEWS-20261029 + Land.com
+  const viewsParts=[T.siteVisits,T.totalCommercialViews,T.loopnetViews,T.crexiViews,T.landcomViews,T.gaSessions].filter(v=>v!=null&&v!=='').concat(_pstMonthViewParts(d, ctx.ym, rep, T));   // LIFEVIEWS-20261029 + Land.com; PORTALSTATS-20261109 adds the uploaded portal detail views
   const totalViews=T.totalViews!=null?Number(T.totalViews):(viewsParts.length?viewsParts.reduce((a,b)=>a+Number(b),0):null);
   const eb=(rep.emailBlasts||[]).filter(r=>r.title||r.date);
   (ctx.emails||[]).map(_mrMcRow).forEach(r=>{ if(!eb.some(x=>x.date===r.date && String(x.title||'').trim().toLowerCase()===String(r.title||'').trim().toLowerCase())) eb.push(r); });   // Mailchimp campaigns count too (MCREPORT-20261007)
@@ -51455,10 +51785,12 @@ async function _mrBuildPdf(A){
   if(false&&A.tasks.length){ /* MRNOTASKS-20261008: tasks are internal and never print */ if(y>R.H-160){ y=R.newPage()+30; } R.text('Completed Tasks',R.M,y+6,{size:16,bold:true}); y=R.table({startY:y+16, head:[['Completed','Task','Completed by']], body:A.tasks.map(t=>[t.date,t.title,t.by]), columnStyles:{0:{cellWidth:70},2:{cellWidth:110}}, styles:{font,fontSize:8.5,textColor:MR_INK,cellPadding:4,lineColor:MR_LINE,lineWidth:{bottom:0.8}}, contHeading:'Completed Tasks (cont.)'}); }
   /* ---- 9 · Leads & website activity ---- */
   const stats=[['TheDirtDog.com visits',T.siteVisits],['Unique visitors',T.uniqueVisitors],['Docs viewed',T.docsViewed],['CAs signed',T.casSigned],['Google sessions',T.gaSessions],['Total Commercial views',T.totalCommercialViews],['LoopNet views',T.loopnetViews],['Crexi views',T.crexiViews]].filter(s=>s[1]!=null&&s[1]!=='');
-  if(act.length||stats.length){
+  const _pstE=_pstEffective(d, A.ym, A.rep), _pstHas=!!(_pstE.loopnet||_pstE.landcom);   // PORTALSTATS-20261109
+  if(act.length||stats.length||_pstHas){
     y=R.section('Leads and Website Activity',y,170);
     y=R.para('The following inquiries are a result of our property’s website traffic and listing-service exposure during '+_mrMonthLabel(A.ym)+'. Each named individual has requested further information.',R.M,y+4,R.W-2*R.M,{size:10.5})+8;
     if(stats.length){ const bw=(R.W-2*R.M-3*10)/4; stats.slice(0,8).forEach((s,i)=>{ const cx=R.M+(i%4)*(bw+10), cy=y+Math.floor(i/4)*58; R.rect(cx,cy,bw,50,MR_RED); R.text(String(s[1]),cx+10,cy+34,{size:18,bold:true,color:[255,255,255]}); R.text(s[0].toUpperCase(),cx+10,cy+14,{size:6.5,bold:true,color:[255,230,230]}); }); y+=Math.ceil(Math.min(stats.length,8)/4)*58+8; }
+    if(_pstHas) y=_pstDrawPortals(R, doc, _pstE, y);   // PORTALSTATS-20261109 — every LoopNet / Land.com stat as a box
     if(act.length) y=R.table({startY:y, head:[['Performed At','Performed By','Email','Company','Role','Activity']], body:act.map(a=>[a.at,a.by,a.email,a.company,a.role,a.activity]), styles:{font,fontSize:7,textColor:MR_INK,cellPadding:2.5,lineColor:[203,213,225],lineWidth:0.4,overflow:'linebreak'}, headStyles:{fillColor:[229,231,235],textColor:MR_INK,fontStyle:'bold',fontSize:7.5,lineWidth:0.4,lineColor:[203,213,225]}, alternateRowStyles:{fillColor:[248,250,252]}, columnStyles:{0:{cellWidth:84},1:{cellWidth:74},2:{cellWidth:112},3:{cellWidth:78},4:{cellWidth:54}}, theme:'grid', contHeading:'Leads and Website Activity (cont.)'})+18;   // MRORDER-20261102 — sections now follow the table, so keep its end y
   }
   /* ---- 3b · Property website: Buildout screenshot, QR code and the links the property is listed under ---- */
@@ -52097,6 +52429,7 @@ async function _mrPreflight(A){
   if(!A.hero) add('Photos','block','No parcel photo on the cover.');
   if(!A.sign) add('Photos','warn','No sign photo.');
   { const [lv,msg]=_mrTrafficReviewLine(A); add('Web traffic',lv,msg); }   // TRAFFICFEED-20261028
+  { const [lv,msg]=_pstReviewLine(A); add('Portal stats',lv,msg); }   // PORTALSTATS-20261109
   // TILEOVR-20261028 · hand-set tiles are listed next to Terra's numbers so the approver sees exactly what was changed
   { const tl=_mrTileReviewLine(A); if(tl) add('Marketing tiles','warn',tl+'.'); else add('Marketing tiles','ok','All Marketing-at-a-Glance boxes use Terra’s numbers.'); }
   // 6 · notes — listed so the reviewer scans them
