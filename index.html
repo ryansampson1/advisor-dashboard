@@ -49820,6 +49820,7 @@ window._siAddSenderToCrm = async function(){
      deals/{id}.reportRecipients[]      — [{name,email,contactId}]
      deals/{id}.reportAppPropertyId     — app.thedirtdog.com property UUID (set by hand, 🔗 Find, or 🔗 Match property IDs — TRAFFICFEED-20261028)
      deals/{id}.reportAppPropertyName   — that property's name on the app, + reportAppMatchedAt/By
+     deals/{id}.reportPriceText         — asking price as printed on the owner report ("Unpriced", a figure…); blank = Listed Price (REPORTPRICE-20261109)
      deals/{id}.portalStats             — {months:{YYYY-MM:{loopnet:{…},landcom:{…}}}, loopnetKey, landcomId} from the monthly export upload (PORTALSTATS-20261109)
      deals/{id}/monthlyReports/{ym}.portal — {loopnet, landcom} hand overrides of that month's portal boxes
      deals/{id}.reportSendOff           — true = 'Send to client' switched off for this listing (no report can be sent until turned back on)
@@ -49859,6 +49860,10 @@ function _mrDealAddr(d){ return d.propertyAddress||d.address||d.projectName||'Pr
 function _mrDealName(d){ return d.projectName||d.propertyAddress||d.address||'Property'; }
 function _mrListingStart(d){ if(d.listingEffectiveDate) return new Date(d.listingEffectiveDate+'T12:00:00').getTime(); if(d.listingEnteredAt) return d.listingEnteredAt; return d.createdAt||0; }
 function _mrDealPrice(d){ return Number(d.listedPrice||d.listPrice||d.askingPrice||d.purchasePrice||0); }
+/* REPORTPRICE-20261109 — the price the OWNER sees: deals/{id}.reportPriceText (e.g. "Unpriced", "Call for details", "$1,950,000") beats Terra's internal Listed Price; blank = Listed Price */
+function _mrReportPrice(d){ const t=String((d&&d.reportPriceText)||'').trim(); if(t) return t; return _mrFmtMoney(_mrDealPrice(d))||'Call for details'; }
+function _mrReportPriceOverridden(d){ const t=String((d&&d.reportPriceText)||'').trim(); return !!t && t!==_mrFmtMoney(_mrDealPrice(d)); }
+window._mrReportPrice=_mrReportPrice;
 /* LISTAMEND-20261021: listing extensions / amendments on the owner report (amendments live on the deal card) */
 function _mrAmendments(d){ return window._laList ? window._laList(d) : []; }
 function _mrAmendLine(a,i){ return '#'+(i+1)+' '+(a.title||(window._laTypeLabel?window._laTypeLabel(a.type):'Amendment'))+(a.effectiveDate?' ('+_mrFmtDateLong(a.effectiveDate)+')':'')+(window._laSummary&&window._laSummary(a)?' — '+window._laSummary(a):''); }
@@ -50008,7 +50013,7 @@ async function _mrAiLetterDraft(deal, ym, rep, ctx){
   const user='Property: '+_mrDealName(deal)+' — '+_mrDealAddr(deal)
     +'\nMonth covered: '+_mrMonthLabel(ym)
     +'\nAcreage: '+(_mrDealAcres(deal)||'n/a')+'   County: '+(deal.county||'n/a')+'   Zoning: '+(deal.zoning||'n/a')
-    +'\nAsking price: '+(_mrFmtMoney(_mrDealPrice(deal))||'n/a')+'\nCurrent status: '+_mrStatusForAI(deal)   /* MRSTATUS-20261105 */
+    +'\nAsking price (as shown to the owner): '+_mrReportPrice(deal)+'\nCurrent status: '+_mrStatusForAI(deal)   /* MRSTATUS-20261105 */
     +'\nListing expiration: '+(deal.listingExpiration||'n/a')
     +'\nE-blasts this month:\n'+(blasts||'(none)')
     +'\nSocial media posts this month: '+((posts||[]).length||0)
@@ -51138,7 +51143,7 @@ window._mrOpenEditor=async function(dealId){
       </div>
       <div class="mr-sec"><h3>2 · Listing details (from the deal card)</h3>
         <div class="mr-grid3">
-          <div><span class="mr-lbl">Asking price</span><div>${_mrDealPrice(deal)?_mrFmtMoney(_mrDealPrice(deal)):'<span style="color:#b91c1c">Not set — edit the deal’s Listed Price</span>'}</div></div>
+          <div><label class="mr-lbl" for="mr-ed-price">Asking price on the report</label><div style="display:flex;gap:.35rem;align-items:center"><input id="mr-ed-price" class="mr-input" style="width:100%" value="${_mrEsc(deal.reportPriceText||'')}" placeholder="${_mrEsc(_mrFmtMoney(_mrDealPrice(deal))||'Call for details')}" aria-describedby="mr-ed-price-note"><button type="button" class="mr-btn mr-btn-sm" onclick="document.getElementById('mr-ed-price').value='Unpriced'" title="Print “Unpriced” instead of a number">Unpriced</button></div><div class="mr-note" id="mr-ed-price-note">Terra (internal): ${_mrDealPrice(deal)?_mrEsc(_mrFmtMoney(_mrDealPrice(deal))):'<span style="color:#b91c1c">not set</span>'} · blank = print Terra’s price · type “Unpriced”, “Call for details” or a different figure — kept month to month. <!-- REPORTPRICE-20261109 --></div></div>
           <div><span class="mr-lbl">Listing start</span><div>${deal.listingEffectiveDate?_mrFmtDateLong(deal.listingEffectiveDate):(deal.listingEnteredAt?_mrFmtDateLong(deal.listingEnteredAt)+' <span class="mr-muted">(entered Listing)</span>':'<span style="color:#b91c1c">Not set</span>')}</div></div>
           <div><span class="mr-lbl">Listing expiration</span><div>${deal.listingExpiration?_mrFmtDateLong(deal.listingExpiration):'<span style="color:#b91c1c">Not set — edit the deal</span>'}</div></div>
         </div>
@@ -51342,6 +51347,7 @@ window._mrSaveEditor=async function(btn){
   const c=_mrCollectEditor(); const done=btn?elcBusy(btn,'Saving…'):()=>{};
   try{
     const dealPatch={reportRecipients:c.recips, reportAppPropertyId:c.appId, updatedAt:Date.now()};
+    { const pe=document.getElementById('mr-ed-price'); if(pe){ const v=pe.value.trim(); if(v!==String(ed.deal.reportPriceText||'')){ dealPatch.reportPriceText=v; dealPatch.reportPriceTextAt=Date.now(); dealPatch.reportPriceTextBy=currentUser?.name||currentUser?.email||''; } } }   // REPORTPRICE-20261109
     { const mf=document.getElementById('mr-ed-folders'); if(mf){ const v=[...new Set(mf.value.split(',').map(s=>s.trim()).filter(Boolean))]; const cur=Array.isArray(ed.deal.mailFolders)?ed.deal.mailFolders:[]; if(v.join('|')!==cur.join('|')){ dealPatch.mailFolders=v; dealPatch.mailFoldersSetAt=Date.now(); dealPatch.mailFoldersSetBy=currentUser?.email||''; } } }   // MAILFOLDERS-20261023
     if(c.sendOn!==_mrSendOn(ed.deal)){ dealPatch.reportSendOff=!c.sendOn; dealPatch.reportSendOffAt=Date.now(); dealPatch.reportSendOffBy=currentUser?.name||currentUser?.email||''; }
     if(ed.signUrl) dealPatch.reportSignPhotoUrl=ed.signUrl;
@@ -51420,7 +51426,7 @@ window._mrAiDraft=async function(btn){
     const month=h.history.filter(r=>r.ts>=rng.start&&r.ts<rng.end).slice(0,40).map(r=>r.date+' '+r.type+': '+r.text.slice(0,160)).join('\n');
     const t=ed.traffic||{};
     const sys='You write short, factual property-marketing updates for a Florida land brokerage (Eshenbaugh Land Company). Write ONE paragraph (90-140 words), first person plural, addressed to the property owner, summarizing this month\'s marketing activity and buyer interest for their listing. No greeting, no sign-off, no bullet points, no invented numbers — only use facts given.';
-    const user='Property: '+_mrDealName(ed.deal)+' — '+_mrDealAddr(ed.deal)+'\nMonth: '+_mrMonthLabel(ed.ym)+'\nAsking price: '+(_mrFmtMoney(_mrDealPrice(ed.deal))||'n/a')+'\nStatus: '+_mrStatusForAI(ed.deal)+'\nWeb traffic: site visits '+(t.siteVisits??'n/a')+', unique '+(t.uniqueVisitors??'n/a')+', docs viewed '+(t.docsViewed??'n/a')+', CAs signed '+(t.casSigned??'n/a')+', leads '+(t.totalLeads??'n/a')+'\nActivity this month:\n'+(month||'(no logged activity this month)');
+    const user='Property: '+_mrDealName(ed.deal)+' — '+_mrDealAddr(ed.deal)+'\nMonth: '+_mrMonthLabel(ed.ym)+'\nAsking price (as shown to the owner): '+_mrReportPrice(ed.deal)+'\nStatus: '+_mrStatusForAI(ed.deal)+'\nWeb traffic: site visits '+(t.siteVisits??'n/a')+', unique '+(t.uniqueVisitors??'n/a')+', docs viewed '+(t.docsViewed??'n/a')+', CAs signed '+(t.casSigned??'n/a')+', leads '+(t.totalLeads??'n/a')+'\nActivity this month:\n'+(month||'(no logged activity this month)');
     const txt=await leadAI(sys,user,500);
     const ta=document.getElementById('mr-ed-note'); if(ta) ta.value=txt.trim();
   }catch(e){ console.warn('[mr] ai',e); showToast('AI draft failed: '+e.message,'error'); }
@@ -51747,7 +51753,7 @@ async function _mrBuildPdf(A){
   const lead=A.advisors[0]||{};
   const intro='This reporting letter provides a comprehensive overview of Eshenbaugh Land Company\'s marketing efforts in the promotion of the property located at '+addr+' (hereafter referred to as the “Property”). The assignment is being managed by Eshenbaugh Land Company’s Land Services team under the direction of '+(lead.name||'your advisor')+(lead.designations?', '+lead.designations:'')+', who serves as the exclusive listing broker for the Property.';
   y=R.para(intro,R.M,y+4,R.W-2*R.M-40,{size:10.5,lh:1.5})+16;
-  const dl=[['Listing Start Date:',d.listingEffectiveDate?_mrFmtDateLong(d.listingEffectiveDate):(d.listingEnteredAt?_mrFmtDateLong(d.listingEnteredAt):'—')],['Listing Expiration Date:',d.listingExpiration?_mrFmtDateLong(d.listingExpiration):'—'],['Asking Price:',_mrFmtMoney(_mrDealPrice(d))||'Call for details']];
+  const dl=[['Listing Start Date:',d.listingEffectiveDate?_mrFmtDateLong(d.listingEffectiveDate):(d.listingEnteredAt?_mrFmtDateLong(d.listingEnteredAt):'—')],['Listing Expiration Date:',d.listingExpiration?_mrFmtDateLong(d.listingExpiration):'—'],['Asking Price:',_mrReportPrice(d)]   /* REPORTPRICE-20261109 */];
   dl.forEach(([k,v])=>{ R.text(k,R.M,y,{size:14,bold:true}); R.text(v,R.M+200,y,{size:14}); y+=22; });
   /* LISTAMEND-20261021: original terms + every extension / amendment, oldest first */
   const _amL=_mrAmendments(d);
@@ -52404,6 +52410,7 @@ async function _mrPreflight(A){
   if(!da) add('Listing facts','block','Acreage is blank on the deal card — Terra can’t check the e-blasts and posts against it.',{fix:'facts'});
   if(!dc) add('Listing facts','block','County is blank on the deal card.',{fix:'facts'});
   if(!dz) add('Listing facts','warn','Zoning is blank on the deal card.',{fix:'facts'});
+  add('Asking price', _mrReportPriceOverridden(deal)?'warn':'ok', 'Prints “'+_mrReportPrice(deal)+'”'+(_mrReportPriceOverridden(deal)?' — Terra’s internal price is '+(_mrFmtMoney(_mrDealPrice(deal))||'not set')+' (override set in ✏️ Edit § 2)':''));   // REPORTPRICE-20261109
   if(da&&dc) add('Listing facts','ok',da+' ac · '+_mrCap(dc)+' County'+(dz?' · '+dz:'')+' · '+_mrDealAddr(deal));
   // 2 · e-blasts
   const emails=A.emails||[]; const pinnedIds=new Set(((rep.emailCampaignsPinned)||[]).map(p=>p.id));
