@@ -50085,8 +50085,23 @@ function _mrLetterReady(dealId,ym){
   if(c==='custom') return !!String((r&&r.letterBody)||'').trim();
   return !!_mrLetterFor(ym);
 }
+/* STAGELETTER-20261111 — Ryan: the AI letter must follow the card's stage. Only a property still in the Listing phase gets the
+   full AI summary of the month. LOI / Signed LOI = "we have an active LOI". Due Diligence, Rezoning / Permitting and Closing =
+   "under contract, in the X phase, we are tracking critical dates" — nothing else is summarised (fixed wording, no AI call, so it
+   can never say the owner "passed on the offers"). monthlyReports/{ym}.aiLetterPhase records the phase a letter was drafted for;
+   when the card has since moved to a different phase the letter is redrafted (never on a report already sent). */
+function _mrLetterPhase(deal){ const s=String(_mrStageOf(deal)||''); if(_mrUnderContract(deal)){ if(/closing/i.test(s)) return 'closing'; if(/rezoning|permitting/i.test(s)) return 'entitlement'; return 'dd'; } return _mrIsLoiStage(deal)?'loi':'listing'; }
+function _mrStageLetter(deal, ph){
+  const nm=_mrDealName(deal); const n=(!nm||nm==='Property')?'the property':nm; const N=n==='the property'?'The property':n; const s=String(_mrStageOf(deal)||'');
+  if(ph==='loi') return 'We have an active LOI on '+n+'. We will keep you updated as it progresses.';
+  const phase= ph==='closing' ? 'Closing' : ph==='entitlement' ? ((/rezoning/i.test(s)&&/permitting/i.test(s))?'Rezoning / Permitting':(/permitting/i.test(s)?'Permitting':'Rezoning')) : 'Due Diligence';
+  return N+' is under contract and is currently in the '+phase+' phase. We are tracking the critical dates under the contract and will keep you updated as they approach.';
+}
+function _mrAiLetterStale(deal, rep){ return !!(rep && rep.status!=='sent' && String(rep.aiLetterBody||'').trim() && (rep.aiLetterPhase||'listing')!==_mrLetterPhase(deal)); }
+window._mrLetterPhase=_mrLetterPhase; window._mrStageLetter=_mrStageLetter; window._mrAiLetterStale=_mrAiLetterStale;
 async function _mrAiLetterDraft(deal, ym, rep, ctx){
   ctx=ctx||{};
+  { const ph=_mrLetterPhase(deal); if(ph!=='listing') return _mrStageLetter(deal, ph); }   // STAGELETTER-20261111
   let history=ctx.history;
   if(!history){ const [acts,tasks]=await Promise.all([_mrFetchActivities(deal.id),_mrFetchTasks(deal.id)]); history=_mrHistoryRows(deal,acts,tasks).history; }
   let emails=ctx.emails;
@@ -51350,7 +51365,7 @@ window._mrOpenEditor=async function(dealId){
   document.body.appendChild(ov);
   try{ window._mrTileRefresh(); }catch(e){ console.warn('[mr] tiles',e); }   // TILEOVR-20261028
   if(window._mrMcAutoFill) window._mrMcAutoFill();   // MCREPORT-20261007
-  { const r=document.querySelector('input[name=mr-letter-mode][value=ai]'); const ta=document.getElementById('mr-ed-ailetter'); if(r&&r.checked&&ta&&!ta.value.trim()) window._mrAiLetterRedo(document.getElementById('mr-ai-letter-btn')); }   // AILETTER-20261023
+  { const r=document.querySelector('input[name=mr-letter-mode][value=ai]'); const ta=document.getElementById('mr-ed-ailetter'); const _ed=window._mrState.editor||{}; if(r&&r.checked&&ta&&(!ta.value.trim()||_mrAiLetterStale(_ed.deal||{}, _ed.rep))) window._mrAiLetterRedo(document.getElementById('mr-ai-letter-btn')); }   // AILETTER-20261023 · STAGELETTER-20261111
   // history counts (async)
   window._mrHistLoad(dealId);   // MWFIX-20261008
 };
@@ -51455,7 +51470,7 @@ function _mrCollectEditor(){
     appId:(document.getElementById('mr-ed-appid')?.value||'').trim(),
     sendOn:(document.getElementById('mr-ed-sendon')?document.getElementById('mr-ed-sendon').checked:true),
     report:{ preparedFor:(document.getElementById('mr-ed-owner')?.value||'').trim(), salutation:(document.getElementById('mr-ed-salut')?.value||'').trim(), advisorNote:(document.getElementById('mr-ed-note')?.value||'').trim(),
-      ...(()=>{ const m=document.querySelector('input[name=mr-letter-mode]:checked')?.value||'ai'; const ai=document.getElementById('mr-ed-ailetter'); const o={letterChoice:m==='default'?'firm':m, letterMode:m==='custom'?'custom':'default', letterBody:(document.getElementById('mr-ed-letter')?.value||'').trim(), letterSignature:((m==='ai'?document.getElementById('mr-ed-sig-ai'):document.getElementById('mr-ed-sig'))?.value||'').trim()}; if(ai){ o.aiLetterBody=ai.value.trim(); if(o.aiLetterBody&&(window._mrState.editor||{})._aiDrafted) o.aiLetterAt=window._mrState.editor._aiDrafted; } return o; })(),   // AILETTER-20261023
+      ...(()=>{ const m=document.querySelector('input[name=mr-letter-mode]:checked')?.value||'ai'; const ai=document.getElementById('mr-ed-ailetter'); const o={letterChoice:m==='default'?'firm':m, letterMode:m==='custom'?'custom':'default', letterBody:(document.getElementById('mr-ed-letter')?.value||'').trim(), letterSignature:((m==='ai'?document.getElementById('mr-ed-sig-ai'):document.getElementById('mr-ed-sig'))?.value||'').trim()}; if(ai){ o.aiLetterBody=ai.value.trim(); if(o.aiLetterBody&&(window._mrState.editor||{})._aiDrafted){ o.aiLetterAt=window._mrState.editor._aiDrafted; o.aiLetterPhase=_mrLetterPhase(window._mrState.editor.deal); } } return o; })(),   // AILETTER-20261023
       ...(()=>{ const tv=_mrTileCollect(); const o={tileOverrides:tv}; if(JSON.stringify(_mrTileOverrides({tileOverrides:tv}))!==JSON.stringify(_mrTileOverrides(ed.rep))){ o.tileOverridesAt=Date.now(); o.tileOverridesBy=currentUser?.uid||''; o.tileOverridesByName=currentUser?.name||currentUser?.email||''; } return o; })(),   // TILEOVR-20261028
       emailBlasts:_mrReadRows('mr-emails'), emailCampaigns:(ed.emailCampaigns||[]).slice(0,20), emailCampaignsPicked:!!ed.emailCampaignsPicked, facebook:_mrReadRows('mr-fb'), linkedin:_mrReadRows('mr-li'),
       emailScreenshotUrl:ed.shots.email||'', socialPhotos:ed.socialPhotos.slice(0,12), traffic, ...(()=>{ const p=_pstEditorCollect(ed); return p?{portal:p}:{}; })() }   // PORTALSTATS-20261109
@@ -51827,8 +51842,8 @@ async function _mrAssemble(deal, ym){
   ]);
   advisors.forEach((a,i)=>a.head=heads[i]);
   const lchoice=_mrLetterChoice(rep); let aiErr='';   // AILETTER-20261023
-  if(lchoice==='ai' && !String(rep.aiLetterBody||'').trim()){
-    try{ const body=await _mrAiLetterDraft(deal, ym, rep, {history:h.history, emails, posts}); const at=Date.now(); rep.aiLetterBody=body; rep.aiLetterAt=at; await _mrSaveReport(deal.id, ym, {aiLetterBody:body, aiLetterAt:at}); }
+  if(lchoice==='ai' && (!String(rep.aiLetterBody||'').trim() || _mrAiLetterStale(deal, rep))){   // STAGELETTER-20261111: also redraft when the card changed phase since the draft
+    try{ const body=await _mrAiLetterDraft(deal, ym, rep, {history:h.history, emails, posts}); const at=Date.now(); const ph=_mrLetterPhase(deal); rep.aiLetterBody=body; rep.aiLetterAt=at; rep.aiLetterPhase=ph; await _mrSaveReport(deal.id, ym, {aiLetterBody:body, aiLetterAt:at, aiLetterPhase:ph}); }
     catch(e){ console.warn('[mr] ai letter',e); aiErr=e.message||String(e); }
   }
   const custom=lchoice==='custom' && String(rep.letterBody||'').trim(); const aiL=lchoice==='ai' && String(rep.aiLetterBody||'').trim();
