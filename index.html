@@ -2522,6 +2522,85 @@ const SEED_ALL_STAGES = DEFAULT_STAGES.map(name=>({
   ...(name==='Closed Lost' ? {closedLost:true} : {}),
 }));
 
+/* PROPSELLER-20261110 — "Proposal To Do" prompt asks who the seller is.
+   Andrew (proposal team) via Ryan, 2026-11-10: besides Suggested Listing Price / Commission Structure / etc. the prompt
+   must capture (1) Exact Selling Entity, (2) Seller Name — who exactly is asking us to prepare the proposal, and
+   (3) Seller Email — optional, in case the advisor wants the proposal team to send the finished proposal.
+   The prompt is the admin-editable stage gate stored in eos/stageConfig, so this is a ONE-TIME migration of that gate
+   (stage.ptdSellerV = 1 marks it done — an admin can still re-word, re-order or remove the fields afterwards in
+   Manage Stages → Gate). Answers are written onto the deal so they flow into the listing agreement, the proposal-team
+   email and the deal card:  Exact Selling Entity → deal.ownershipEntity · Seller Name → deal.sellerContactName ·
+   Seller Email → deal.sellerEmail. Known values are pre-filled so the advisor only confirms them. */
+const PTD_SELLER_MAPS = ['ownershipEntity','sellerContactName','sellerEmail'];
+function _ptdSellerGateMigrate(list){
+  if(!Array.isArray(list)) return list;
+  const i = list.findIndex(s => s && s.name === 'Proposal To Do');
+  if(i < 0 || (list[i].ptdSellerV||0) >= 1) return list;
+  const st = {...list[i]};
+  const g  = st.gate ? {...st.gate} : {enabled:true,title:'',instructions:'',fields:[],notifyEmails:'',emailSubject:'',emailBody:''};
+  const f  = (Array.isArray(g.fields) ? g.fields : []).map(x => ({...x}));
+  const find = re => f.find(x => re.test(String(x.label||'')));
+  let ent = find(/selling\s*entity|exact.*entity|ownership\s*entity/i);
+  if(ent){
+    if(!ent.mapsTo) ent.mapsTo = 'ownershipEntity';
+    if(!ent.hint)   ent.hint   = 'Exact legal name of the owner as it should appear on the listing agreement';
+  } else {
+    ent = {id:'ptd_selling_entity', label:'Exact Selling Entity', type:'text', required:true, mapsTo:'ownershipEntity', options:'',
+           hint:'Exact legal name of the owner as it should appear on the listing agreement'};
+    f.push(ent);
+  }
+  let nm = find(/seller.{0,3}\bname|seller\s*contact/i);
+  if(!nm){
+    nm = {id:'ptd_seller_name', label:'Seller Name', type:'text', required:true, mapsTo:'sellerContactName', options:'',
+          hint:'Who exactly is asking us to prepare this proposal?'};
+    f.splice(f.indexOf(ent)+1, 0, nm);
+  }
+  if(!find(/seller.{0,3}\be-?mail/i)){
+    f.splice(f.indexOf(nm)+1, 0, {id:'ptd_seller_email', label:'Seller Email', type:'email', required:false, mapsTo:'sellerEmail', options:'',
+          hint:'Optional — add it if you would like the proposal team to send the finished proposal to the seller'});
+  }
+  g.fields = f; st.gate = g; st.ptdSellerV = 1;
+  const out = [...list]; out[i] = st; return out;
+}
+// What we already know about the seller, so the prompt only asks the advisor to confirm it.
+function _ptdSellerKnown(deal, mapsTo){
+  const d = deal || {};
+  if(mapsTo === 'ownershipEntity')   return d.ownershipEntity || '';
+  if(mapsTo === 'sellerContactName') return d.sellerContactName || d.contactPerson || (Array.isArray(d.sellers) && d.sellers[0]) || '';
+  if(mapsTo === 'sellerEmail')       return d.sellerEmail || d.contactEmail || '';
+  return '';
+}
+function _ptdPrefillGate(gate, deal){
+  try{
+    ((gate && gate.fields) || []).forEach(f => {
+      if(!PTD_SELLER_MAPS.includes(f.mapsTo)) return;
+      const el = document.getElementById('gf-' + f.id);
+      if(el && !el.value){ const v = _ptdSellerKnown(deal, f.mapsTo); if(v) el.value = String(v); }
+    });
+  }catch(e){ console.warn('[PROPSELLER prefill]', e); }
+}
+// Deal-form path (stage changed inside the card): copy the seller answers onto the deal, same as the pop-up does.
+function _ptdInlineMapped(gate, gateData){
+  const r = {};
+  if(!gate || !gateData) return r;
+  (gate.fields || []).forEach(f => {
+    if(f.mapsTo !== 'sellerContactName' && f.mapsTo !== 'sellerEmail') return;
+    if(typeof document === 'undefined' || !document.getElementById('gf-' + f.id)) return;   // only what the user actually saw
+    const v = String(gateData[f.id] || '').trim();
+    if(v) r[f.mapsTo] = v;
+  });
+  return r;
+}
+// Lines added to the "Send Property Details to Proposal Team" email.
+function _ptdSellerLines(deal){
+  const d = deal || {};
+  const em = String(d.sellerEmail || '').trim();
+  return '\nExact Selling Entity: ' + (d.ownershipEntity || '[not provided]')
+       + '\nSeller Name: ' + (d.sellerContactName || '[not provided]')
+       + '\nSeller Email: ' + (em ? em : '[not provided — advisor will deliver the proposal]');
+}
+window._ptdSellerGateMigrate = _ptdSellerGateMigrate;
+
 // Migrate old stage names → "Lost / Terminated" (runs on both localStorage and Firestore paths)
 // Also ensures "Signed LOI/Contract Drafting" exists (inserted after LOI).
 // Returns the SAME reference when nothing changed (callers use !== to detect changes).
@@ -2545,6 +2624,7 @@ function migrateStagesList(list){
     if(out === list) out = [...out]; // copy so callers' !== change-detection works
     out.splice(insertAt, 0, {name:'Signed LOI/Contract Drafting'});
   }
+  out = _ptdSellerGateMigrate(out);   // PROPSELLER-20261110 (returns a new array only when it changed)
   return out;
 }
 
@@ -5836,7 +5916,7 @@ async function handleProposalTodoAutomation(deal){
 
   // ── 2. Proposal email → Gmail draft task ──────────────────────────────────
   const propSubject=`New Proposal: ${addr}`;
-  const propBody=`Hi Proposal Team,\n\nPlease start the following property:\n\nProperty: ${addr}\nProject: ${deal.projectName||addr}\nClient/Seller: ${clientName}\nCounty: ${county}, FL\nAcres: ${acres}\nSuggested Price: ${priceFmt}\nListing Period: ${listingPeriod}\nCommission: ${commPct}%\nAdvisor: ${deal.advisorName||deal.advisorEmail}\n\nNotes:\n${deal.notes||'(none)'}\n\nThank you`;
+  const propBody=`Hi Proposal Team,\n\nPlease start the following property:\n\nProperty: ${addr}\nProject: ${deal.projectName||addr}\nClient/Seller: ${clientName}${_ptdSellerLines(deal)}\nCounty: ${county}, FL\nAcres: ${acres}\nSuggested Price: ${priceFmt}\nListing Period: ${listingPeriod}\nCommission: ${commPct}%\nAdvisor: ${deal.advisorName||deal.advisorEmail}\n\nNotes:\n${deal.notes||'(none)'}\n\nThank you`;
   const gmailUrl=`https://mail.google.com/mail/?view=cm&to=proposal%40thedirtdog.com&su=${encodeURIComponent(propSubject)}&body=${encodeURIComponent(propBody)}`;
   Store.createTask({
     title:`📧 Send Property Details to Proposal Team — ${_taskHeadlineName(deal)}`,
@@ -7347,6 +7427,7 @@ function appendInlineGateFields(container, stage, data, dealKey){
       </div>
     </div>`;
   container.appendChild(wrap.firstElementChild);
+  _ptdPrefillGate({fields:uncovered}, data);   // PROPSELLER-20261110
   uncovered.forEach(f=>{
     const saved = existingGateData[f.id];
     if(saved==null) return;
@@ -36637,6 +36718,7 @@ window.openGateModal = (dealId, newStage) => {
 
   document.getElementById('gate-fields').innerHTML =
     (gate.fields||[]).map(f=>renderGateField(f,dealId,newStage)).join('');
+  _ptdPrefillGate(gate, deal);   // PROPSELLER-20261110
   document.getElementById('gate-modal').classList.remove('hidden');
   return true;
 };
@@ -36652,6 +36734,9 @@ function renderGateField(f, dealId, stageName){
       break;
     case 'date':
       input=`<input id="gf-${f.id}" type="date" class="${cls}" ${f.required?'required':''}/>`;
+      break;
+    case 'email':   // PROPSELLER-20261110
+      input=`<input id="gf-${f.id}" type="email" inputmode="email" autocomplete="off" autocapitalize="off" spellcheck="false" class="${cls}" ${f.required?'required':''} placeholder="name@example.com"/>`;
       break;
     case 'textarea':
       input=`<textarea id="gf-${f.id}" rows="3" class="${cls} resize-none" ${f.required?'required':''}></textarea>`;
@@ -36804,6 +36889,9 @@ const GATE_MAPS_TO = [
   {v:'escrowAgent', l:'Escrow Agent'},
   {v:'escrowAgentEmail',l:'Escrow Email'},
   {v:'notes',       l:'Notes (append)'},
+  {v:'ownershipEntity',  l:'Seller — Ownership / Selling Entity'},   // PROPSELLER-20261110
+  {v:'sellerContactName',l:'Seller — Contact Name'},
+  {v:'sellerEmail',      l:'Seller — Email'},
 ];
 
 window.editStageGate = i => {
@@ -36901,7 +36989,7 @@ window.editStageGate = i => {
 };
 
 function gateFieldEditorRow(fi, f={}){
-  const typeOpts=['text','number','date','select','file','textarea'];
+  const typeOpts=['text','email','number','date','select','file','textarea'];   // PROPSELLER-20261110 (+email)
   return `
     <div class="border rounded-xl p-4 bg-gray-50 space-y-2" id="gfr-${fi}">
       <div class="flex items-center justify-between">
@@ -42607,6 +42695,7 @@ window.handleDealSubmit = async ev => {
       return r;
     })(),
     ...(inlineGateData?{gateData:{[stage]:inlineGateData}}:{}),
+    ..._ptdInlineMapped(inlineGate, inlineGateData),   // PROPSELLER-20261110
     // ── Multi-LOI: persist the ranked LOI list, winner id, and sync legacy fields ──
     ...(_loisToSave ? {lois:_loisToSave} : {}),
     ...(_winnerId ? {selectedLoiId:_winnerId} : {}),
@@ -50528,7 +50617,7 @@ function _pstMatch(rows, dealIdx){
   pairs.forEach(p=>{ if(pick[p.i]) return; if(taken.has(p.id)) return; pick[p.i]=p; taken.set(p.id,p.i); });
   return scored.map((s,i)=>{ const p=pick[i]; const score=p?p.score:0;
     const conf=!p?'none':(score>=2?'saved':(score>=0.85?'high':'check'));
-    return Object.assign({}, s.row, {dealId:p?p.id:'', score:Math.round(score*100)/100, conf, alts:s.cand.slice(0,4)}); });
+    return Object.assign({}, s.row, {dealId:p?p.id:'', savedDealId:(p&&score>=2)?p.id:'', score:Math.round(score*100)/100, conf, alts:s.cand.slice(0,4)}); });   // PSTFIX-20261111: savedDealId = the listing the remembered key matched
 }
 /* PORTALSTATS_CORE_END */
 /* ---- effective per-month values (hand edit on the report doc beats the upload) ---- */
@@ -50596,12 +50685,23 @@ function _pstEditorHtml(deal, ed){
     const src=e.src==='manual'?'<span class="mr-chip mr-chip-draft" title="These boxes were edited by hand for this month">hand-edited</span>':(up?'<span class="mr-chip mr-chip-sent">uploaded '+_mrEsc(_mrFmtDate(up.at))+(up.byName?' · '+_mrEsc(_mrFirstName(up.byName)):'')+'</span>':'<span class="mr-chip mr-chip-new">not uploaded for '+_mrEsc(_mrMonthLabel(ym))+'</span>');
     const inputs=def.stats.map(([k,l])=>`<div><label class="mr-lbl" for="pst-ed-${p}-${k}">${l}</label><input id="pst-ed-${p}-${k}" class="mr-input pst-ed-in" data-portal="${p}" data-k="${k}" style="width:100%" inputmode="numeric" value="${e[k]!=null&&e[k]!==''?_mrEsc(e[k]):''}"></div>`).join('');
     const extra=p==='loopnet'?`<div><label class="mr-lbl" for="pst-ed-${p}-exposure">Exposure level</label><input id="pst-ed-${p}-exposure" class="mr-input pst-ed-in" data-portal="${p}" data-k="exposure" style="width:100%" placeholder="Silver / Basic" value="${_mrEsc(e.exposure||'')}"></div>`:`<div><label class="mr-lbl" for="pst-ed-${p}-name">Land.com listing name</label><input id="pst-ed-${p}-name" class="mr-input pst-ed-in" data-portal="${p}" data-k="name" style="width:100%" value="${_mrEsc(e.name||'')}"></div>`;
-    return `<div class="pst-ed-row"><div class="pst-ed-lbl"><b>${_mrEsc(def.label)}</b><div style="margin-top:.25rem">${src}</div></div>${inputs}${extra}</div>`; };
+    const rm=(up&&_pstCanUpload())?`<button type="button" class="mr-btn mr-btn-sm" style="margin-top:.3rem" onclick="window._pstRemoveUpload('${p}')" title="This listing was matched to the wrong ${_mrEsc(def.short)} row — drop ${_mrEsc(_mrMonthLabel(ym))}'s upload and the remembered match, then re-upload the file and pick the right listing">🗑 Remove ${_mrEsc(_mrMonthLabel(ym))} upload</button>`:'';   // PSTFIX-20261111
+    return `<div class="pst-ed-row"><div class="pst-ed-lbl"><b>${_mrEsc(def.label)}</b><div style="margin-top:.25rem">${src}</div>${rm}</div>${inputs}${extra}</div>`; };
   return `<div style="margin-top:.8rem" id="pst-ed-block"><span class="mr-lbl">Listing portals — LoopNet / CoStar and Land.com (from the monthly upload; edit a box to override it on this report)</span>
     ${row('loopnet')}${row('landcom')}
     <div class="mr-note">All of these print as boxes under “Listing portal performance” on the Leads &amp; Website Activity page. Detail page views also count toward the Total Web Views tile.${can?' Staff upload the two portal exports from the list with <b>📊 Upload portal stats</b>.':''} Clear every box of a portal to go back to the uploaded numbers.</div>
   </div>`;
 }
+// PSTFIX-20261111 — ✏️ Edit § 7: drop this month's upload for one portal (and the remembered match) from the open listing
+window._pstRemoveUpload=async function(portal){
+  const ed=window._mrState.editor; if(!ed||!ed.deal||!PST_PORTALS[portal]) return; const d=ed.deal, ym=ed.ym; const up=_pstUpload(d, ym, portal); if(!up){ showToast('Nothing uploaded for this portal this month.','info'); return; }
+  if(!(await elcConfirm('Remove the '+PST_PORTALS[portal].short+' numbers for '+_mrMonthLabel(ym)+' from '+_mrDealName(d)+'?\n\nThe boxes go blank on this report and Terra forgets this match, so the next upload will ask again. Re-upload the file afterwards and pick the right listing for that row.',{title:'Remove portal upload',okLabel:'Remove',danger:true,icon:'🗑'}))) return;
+  try{ const ps=JSON.parse(JSON.stringify(d.portalStats||{months:{}})); ps.months=ps.months||{}; if(ps.months[ym]) delete ps.months[ym][portal]; if(ps.months[ym]&&!Object.keys(ps.months[ym]).length) delete ps.months[ym]; if(portal==='loopnet') delete ps.loopnetKey; else delete ps.landcomId; ps.updatedAt=Date.now();
+    const patch={portalStats:ps, updatedAt:Date.now()}; await Store.updateDeal(d.id, patch); Object.assign(d, patch); const live=(allDeals||[]).find(x=>x.id===d.id); if(live&&live!==d) Object.assign(live, patch);
+    document.querySelectorAll('.pst-ed-in[data-portal="'+portal+'"]').forEach(i=>{ i.value=''; }); const blk=document.getElementById('pst-ed-block'); if(blk) blk.outerHTML=_pstEditorHtml(d, ed);
+    showToast(PST_PORTALS[portal].short+' upload removed from this listing for '+_mrMonthLabel(ym)+' — re-upload the file and pick the right listing.','success',8000);
+  }catch(e){ console.error('[pst] remove',e); showToast('Could not remove: '+e.message,'error'); }
+};
 function _pstEditorCollect(ed){
   const out={loopnet:null, landcom:null}; if(!ed||!document.getElementById('pst-ed-block')) return null;
   Object.keys(PST_PORTALS).forEach(p=>{
@@ -50706,6 +50806,20 @@ window._pstApply=async function(btn){
   const nDeals=Object.keys(byDeal).length;
   if(!(await elcConfirm('Write '+picked.length+' portal row'+(picked.length===1?'':'s')+' to '+nDeals+' listing'+(nDeals===1?'':'s')+' for '+_mrMonthLabel(ym)+'?\n\nEvery stat prints as a box on that month’s owner report, and detail page views count toward Total Web Views. Re-uploading the same month replaces these numbers.',{title:'Apply portal stats',okLabel:'Apply',icon:'📊'}))) return;
   const done=elcBusy(btn,'Writing…'); const ft=document.getElementById('pst-foot'); let ok=0, fail=[]; const me={at:Date.now(), by:currentUser?.uid||'', byName:currentUser?.name||currentUser?.email||''};
+  /* PSTFIX-20261111 — a wrong earlier match is undone here: the listing a remembered key pointed at (when the row now goes elsewhere or
+     nowhere) and any other listing holding the same portal key lose this month's entry for that portal and the remembered key. */
+  const clear={}; const mark=(id,portal)=>{ if(!id) return; (clear[id]=clear[id]||new Set()).add(portal); };
+  st.rows.forEach(r=>{ if(r.savedDealId && r.savedDealId!==r.dealId && (r.checked||!r.dealId)) mark(r.savedDealId, r.portal); });
+  picked.forEach(r=>{ const key=r.portal==='loopnet'?r.key:r.listingId; if(!key) return; (allDeals||[]).forEach(d=>{ if(d.id===r.dealId||!d.portalStats) return; const k=r.portal==='loopnet'?d.portalStats.loopnetKey:d.portalStats.landcomId; if(k&&k===key) mark(d.id, r.portal); }); });
+  let cleared=0;
+  for(const [id, portals] of Object.entries(clear)){ if(byDeal[id]&&[...portals].every(p=>byDeal[id][p])) continue;   // being rewritten anyway
+    const d=(allDeals||[]).find(x=>x.id===id); if(!d||!d.portalStats) continue;
+    try{ const ps=JSON.parse(JSON.stringify(d.portalStats)); ps.months=ps.months||{}; let ch=false;
+      portals.forEach(p=>{ if(byDeal[id]&&byDeal[id][p]) return; if(ps.months[ym]&&ps.months[ym][p]){ delete ps.months[ym][p]; ch=true; } if(p==='loopnet'&&ps.loopnetKey){ delete ps.loopnetKey; ch=true; } if(p==='landcom'&&ps.landcomId){ delete ps.landcomId; ch=true; } });
+      if(ps.months[ym]&&!Object.keys(ps.months[ym]).length) delete ps.months[ym];
+      if(ch){ ps.updatedAt=Date.now(); const patch={portalStats:ps, updatedAt:Date.now()}; await Store.updateDeal(id, patch); Object.assign(d, patch); cleared++; }
+    }catch(e){ console.error('[pst] clear',id,e); }
+  }
   for(const [dealId, slots] of Object.entries(byDeal)){
     const deal=(allDeals||[]).find(d=>d.id===dealId); if(!deal){ fail.push(dealId); continue; }
     try{
@@ -50724,7 +50838,7 @@ window._pstApply=async function(btn){
   }
   done();
   const left=st.rows.filter(r=>!r.dealId).length;
-  showToast('📊 '+_mrMonthLabel(ym)+' portal stats written to '+ok+' listing'+(ok===1?'':'s')+(fail.length?' · could not save: '+fail.join(', '):'')+(left?' · '+left+' row'+(left===1?'':'s')+' left unmatched':''), fail.length?'warning':'success', 9000);
+  showToast('📊 '+_mrMonthLabel(ym)+' portal stats written to '+ok+' listing'+(ok===1?'':'s')+(fail.length?' · could not save: '+fail.join(', '):'')+(left?' · '+left+' row'+(left===1?'':'s')+' left unmatched':'')+(cleared?' · removed from '+cleared+' previously matched listing'+(cleared===1?'':'s'):''), fail.length?'warning':'success', 9000);   // PSTFIX-20261111
   try{ if(typeof logActivity==='function') logActivity('portal_stats_upload','Portal stats uploaded for '+_mrMonthLabel(ym)+': '+picked.length+' rows → '+ok+' listings ('+st.files.map(x=>PST_PORTALS[x.portal].short).join(' + ')+')'); }catch(_){}
   window._pstClose(); if(typeof window._mrRenderRows==='function') window._mrRenderRows();
 };
