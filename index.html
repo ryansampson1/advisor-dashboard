@@ -50106,7 +50106,7 @@ async function _mrAiLetterDraft(deal, ym, rep, ctx){
   if(!history){ const [acts,tasks]=await Promise.all([_mrFetchActivities(deal.id),_mrFetchTasks(deal.id)]); history=_mrHistoryRows(deal,acts,tasks).history; }
   let emails=ctx.emails;
   if(!emails){ try{ emails=(typeof _mrMcForReport==='function')?await _mrMcForReport(deal,ym,rep):[]; }catch(e){ emails=[]; } }
-  const posts=ctx.posts||((typeof _mrMonthPosts==='function')?_mrMonthPosts(deal,ym):[]);
+  const posts=(ctx.posts||((typeof _mrMonthPosts==='function')?_mrMonthPosts(deal,ym):[])).filter(p=>_mrPostAction(rep,p)!=='drop');   // POSTOK-20261111
   const rng=_mrMonthRange(ym); const t=(rep&&rep.traffic)||{};
   const acts=(history||[]).filter(r=>r.ts>=rng.start&&r.ts<rng.end).slice(0,40).map(r=>r.date+' '+r.type+': '+String(r.text||'').slice(0,180)).join('\n');
   const offers=(Array.isArray(deal.lois)?deal.lois:[]).filter(l=>l&&l.reportInclude!==false).slice(0,6).map(l=>'- '+[l.receivedAt?('received '+l.receivedAt):'', l.buyer?('buyer '+l.buyer):'', l.price?('price '+_mrFmtMoney(l.price)):'', l.status?('status '+((l.status==='under_contract'&&!_mrUnderContract(deal))?'LOI signed (not under contract)':l.status)):'', l.estClose?('est. closing '+l.estClose):'', l.ddTerms?('due diligence '+l.ddTerms):''].filter(Boolean).join(', ')).join('\n');
@@ -51513,7 +51513,7 @@ function _mrSocialPostsHtml(){
   const ed=window._mrState.editor; if(!ed) return '';
   const posts=(typeof _mrMonthPosts==='function')?_mrMonthPosts(ed.deal,ed.ym):[];
   if(!posts.length) return '<span class="mr-muted">None yet — posts made with 📣 Post to social on this listing this month will appear here.</span>';
-  return posts.map(p=>`<div style="display:flex;gap:.5rem;align-items:center;border:1px solid var(--border);border-radius:10px;padding:.35rem .5rem;max-width:340px">${p.imageUrl?`<img class="mr-thumb" src="${_mrEsc(p.imageUrl)}" alt="Post photo" style="width:54px;height:54px;object-fit:cover">`:''}<div style="font-size:.75rem;line-height:1.3"><div style="font-weight:600">${_mrEsc(_mrFmtDateLong(p.at))} · ${p.platforms.map(q=>q==='facebook'?'Facebook':'LinkedIn').join(' + ')}</div><div class="mr-muted" style="max-width:250px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${_mrEsc((p.message||'').split('\n')[0])}</div>${Object.values(p.urls||{}).slice(0,1).map(u=>`<a href="${_mrEsc(u)}" target="_blank" rel="noopener" style="color:var(--brand-teal)">Open post ↗</a>`).join('')}</div></div>`).join('');
+  return posts.map(p=>`<div style="display:flex;gap:.5rem;align-items:center;border:1px solid var(--border);border-radius:10px;padding:.35rem .5rem;max-width:340px">${p.imageUrl?`<img class="mr-thumb" src="${_mrEsc(p.imageUrl)}" alt="Post photo" style="width:54px;height:54px;object-fit:cover">`:''}<div style="font-size:.75rem;line-height:1.3"><div style="font-weight:600">${_mrEsc(_mrFmtDateLong(p.at))} · ${p.platforms.map(q=>q==='facebook'?'Facebook':'LinkedIn').join(' + ')}</div><div class="mr-muted" style="max-width:250px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${_mrEsc((p.message||'').split('\n')[0])}</div>${_mrPostAction(ed.rep,p)==='drop'?'<div class="mr-noweb" style="white-space:normal">Removed from this month’s report — 🔍 Review to put it back</div>':''}${Object.values(p.urls||{}).slice(0,1).map(u=>`<a href="${_mrEsc(u)}" target="_blank" rel="noopener" style="color:var(--brand-teal)">Open post ↗</a>`).join('')}</div></div>`).join('');
 }
 function _mrSocialThumbsHtml(){
   const ed=window._mrState.editor; if(!ed) return '';
@@ -51819,7 +51819,7 @@ async function _mrCompaniesReached(deal, ym, rep, emails){
 async function _mrAssemble(deal, ym){
   const rep=(await _mrLoadReport(deal.id,ym))||{};
   const trafficErr=await _mrAutoTraffic(deal, ym, rep);   // TRAFFICFEED-20261028 — fills monthlyReports/{ym}.traffic from the feed when nothing was pulled or pasted
-  const posts=_mrMonthPosts(deal,ym); const postUrls=new Set(posts.map(p=>p.imageUrl).filter(Boolean));
+  const posts=_mrReportPosts(deal,ym,rep); const postUrls=new Set(posts.map(p=>p.imageUrl).filter(Boolean));
   const [postImgs]=await Promise.all([Promise.all(posts.map(p=>_mrImg(p.imageUrl,{maxPx:1000}))), _mrPostMetrics(posts)]);
   posts.forEach((p,i)=>p.img=postImgs[i]);
   const emails=(typeof _mrMcForReport==='function')?await _mrMcForReport(deal,ym,rep):[];   // MCREPORT-20261007
@@ -52004,7 +52004,8 @@ async function _mrBuildPdf(A){
   }
   /* ---- 5 · Social media ---- */
   // Table rows: what was typed in the editor + rows derived from this month's Terra posts (metrics from the worker).
-  const fb=(A.rep.facebook||[]).filter(r=>r.date||r.reach), li=(A.rep.linkedin||[]).filter(r=>r.date||r.impressions);
+  const _pd=_mrDroppedPostDates(A);   // POSTOK-20261111 — a removed post's results row goes with it
+  const fb=(A.rep.facebook||[]).filter(r=>r.date||r.reach).filter(r=>!_pd.facebook.has(r.date)), li=(A.rep.linkedin||[]).filter(r=>r.date||r.impressions).filter(r=>!_pd.linkedin.has(r.date));
   (A.posts||[]).forEach(p=>{ const date=_mrLocalDate(p.at); const m=p.metrics||{};
     if(p.platforms.includes('facebook') && !fb.some(r=>r.date===date)) fb.push({date, reach:m.facebook?m.facebook.reach:'', interactions:m.facebook?m.facebook.interactions:'', clicks:m.facebook?m.facebook.clicks:''});
     if(p.platforms.includes('linkedin') && !li.some(r=>r.date===date)) li.push({date, impressions:m.linkedin?m.linkedin.impressions:'', engRate:(m.linkedin&&m.linkedin.engagementRate!=null)?m.linkedin.engagementRate+'%':'', clicks:m.linkedin?m.linkedin.clicks:''}); });
@@ -52508,6 +52509,26 @@ function _mrMcConflicts(deal, c){
   return out;
 }
 function _mrMcConfirmed(rep, id){ return !!(rep && rep.mcConfirmed && rep.mcConfirmed[id]); }
+/* POSTOK-20261111 — Ryan: a correct social post was blocking Review & approve with no way through (Clear Springs Corporate Park:
+   the post names the 458± ac park, the listing is 52.6 ac of it). E-blasts already had Remove / "It is this property"; posts had
+   nothing. Each flagged post now gets "OK — leave it in" or "Remove from report". The answer is stored per month on
+   deals/{id}/monthlyReports/{ym}.postReview{<postKey>:{action:'keep'|'drop'|'', at, by, byName}} — the post itself
+   (deal.socialPosts) is never touched, so removing it here only leaves it off THIS month's owner report. */
+function _mrPostKey(p){ const ids=((p&&p.ids)||[]).map(i=>i&&i.id).filter(Boolean).sort().join('+'); return 'p'+_mrHash(ids||(String((p&&p.message)||'')+'|'+Math.round(((p&&p.at)||0)/120000))); }
+function _mrPostReviewOf(rep,p){ const m=rep&&rep.postReview; const e=m&&m[_mrPostKey(p)]; return (e&&(e.action==='keep'||e.action==='drop'))?e:null; }
+function _mrPostAction(rep,p){ const e=_mrPostReviewOf(rep,p); return e?e.action:''; }
+function _mrReportPosts(deal,ym,rep){ return _mrMonthPosts(deal,ym).filter(p=>_mrPostAction(rep,p)!=='drop'); }
+function _mrDroppedPosts(deal,ym,rep){ return (rep&&rep.postReview)?_mrMonthPosts(deal,ym).filter(p=>_mrPostAction(rep,p)==='drop'):[]; }
+/* dates whose Facebook / LinkedIn results row belongs only to a removed post — that row must not print either */
+function _mrDroppedPostDates(A){ const out={facebook:new Set(),linkedin:new Set()}; const gone=_mrDroppedPosts(A.deal,A.ym,A.rep); if(!gone.length) return out;
+  gone.forEach(p=>(p.platforms||[]).forEach(pl=>{ if(out[pl]) out[pl].add(_mrLocalDate(p.at)); }));
+  (A.posts||[]).forEach(p=>(p.platforms||[]).forEach(pl=>{ if(out[pl]) out[pl].delete(_mrLocalDate(p.at)); }));
+  return out; }
+function _mrPostFixBtns(i){
+  if(i.fix==='post') return `<div style="display:flex;gap:.3rem;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end"><button class="mr-btn mr-btn-sm" title="The post is right — keep it in the report. Records your name." onclick="window._mrReviewPost('${_mrEsc(i.id)}','keep',this)">OK — leave it in</button><button class="mr-btn mr-btn-sm" title="Leave this post off this month’s report (the post itself is not deleted)" onclick="window._mrReviewPost('${_mrEsc(i.id)}','drop',this)">Remove from report</button></div>`;
+  if(i.fix==='postUndo') return `<div style="display:flex;gap:.3rem;flex-shrink:0"><button class="mr-btn mr-btn-sm" onclick="window._mrReviewPost('${_mrEsc(i.id)}','',this)">${i.dropped?'Put it back':'Undo'}</button></div>`;
+  return ''; }
+window._mrPostKey=_mrPostKey; window._mrPostAction=_mrPostAction; window._mrReportPosts=_mrReportPosts;
 /* Full verdict for one campaign against one listing. status: match | conflict | promo | none */
 function _mrMcVerdict(deal, c){
   const d=_mrMcScoreDetail(deal,c); const score=d.strong?d.s:Math.min(d.s,2.4);
@@ -52560,7 +52581,11 @@ async function _mrPreflight(A){
   });
   // 3 · social posts
   (A.posts||[]).forEach(p=>{ const v=_mrMcConflicts(deal,{subject:'',bodyText:p.message||''}); const label=_mrFmtDate(p.at)+' '+(p.platforms||[]).join('/')+' post';
-    if(v.length) add('Social posts','block',label+' — '+v.join('; ').replace(/e-blast/g,'post')+'.'); else add('Social posts','ok',label); });
+    const why=v.join('; ').replace(/e-blast/g,'post'); const pr=_mrPostReviewOf(rep,p);   // POSTOK-20261111
+    if(v.length && pr && pr.action==='keep') add('Social posts','warn',label+' — '+why+'. OK’d to stay in the report by '+(pr.byName||'a reviewer')+'.',{fix:'postUndo', id:_mrPostKey(p)});
+    else if(v.length) add('Social posts','block',label+' — '+why+'. If the post is right, press “OK — leave it in”; otherwise remove it from this report.',{fix:'post', id:_mrPostKey(p)});
+    else add('Social posts','ok',label); });
+  _mrDroppedPosts(deal,A.ym,rep).forEach(p=>{ const pr=_mrPostReviewOf(rep,p)||{}; add('Social posts','warn',_mrFmtDate(p.at)+' '+(p.platforms||[]).join('/')+' post — removed from this report by '+(pr.byName||'a reviewer')+'; it will not print.',{fix:'postUndo', id:_mrPostKey(p), dropped:true}); });   // POSTOK-20261111
   // 4 · status letter
   const L=String(A.letter||'');
   if(!L.trim()) add('Status letter','block',A.letterKind==='ai-failed'?('The AI letter couldn’t be drafted'+(A.aiLetterError?' ('+A.aiLetterError+')':'')+' — open ✏️ Edit and press ✨ Draft now, or pick Bill’s letter / your own.'):('No status letter for '+_mrMonthLabel(A.ym)+'.'));
@@ -53081,7 +53106,7 @@ window._mrReview=async function(dealId){
   const icon={ok:'✅',warn:'⚠️',block:'⛔'}; const secs=[...new Set(pf.items.map(i=>i.sec))];
   const rep=A.rep||{}; const approved=_mrApprovalOk(rep,pf.fp);
   const factsForm=pf.items.some(i=>i.fix==='facts')?`<div style="border:1px solid #fecaca;background:rgba(254,226,226,.35);border-radius:10px;padding:.6rem .7rem;margin:.2rem 0 .8rem"><div style="font-weight:700;font-size:.82rem;margin-bottom:.35rem">Fill in the listing facts (saved to the deal card)</div><div class="mr-row" style="gap:.5rem;flex-wrap:wrap"><label class="mr-note">Acres <input id="mr-rv-ac" class="mr-input" style="width:90px" inputmode="decimal" value="${_mrEsc(deal.acreage||deal.acres||'')}"></label><label class="mr-note">County <input id="mr-rv-co" class="mr-input" style="width:140px" value="${_mrEsc(deal.county||'')}"></label><label class="mr-note">Zoning <input id="mr-rv-zo" class="mr-input" style="width:110px" value="${_mrEsc(deal.zoning||'')}"></label><button class="mr-btn mr-btn-sm mr-btn-primary" onclick="window._mrReviewSaveFacts(this)">Save &amp; re-check</button></div></div>`:'';
-  const rows=secs.map(s=>`<div style="margin:.15rem 0 .7rem"><div style="font-weight:700;font-size:.8rem;text-transform:uppercase;letter-spacing:.03em;color:var(--muted,#6b7280);margin-bottom:.25rem">${_mrEsc(s)}</div>${pf.items.filter(i=>i.sec===s).map(i=>`<div style="display:flex;gap:.5rem;align-items:flex-start;padding:.3rem .45rem;border-radius:8px;${i.level==='block'?'background:rgba(254,226,226,.45)':i.level==='warn'?'background:rgba(254,243,199,.45)':''}"><span aria-hidden="true">${icon[i.level]}</span><div style="flex:1;font-size:.82rem;line-height:1.35">${_mrEsc(i.msg)}</div>${i.fix==='mc'?`<div style="display:flex;gap:.3rem;flex-shrink:0"><button class="mr-btn mr-btn-sm" onclick="window._mrReviewDropMc('${_mrEsc(i.id)}',this)">Remove from report</button><button class="mr-btn mr-btn-sm" title="Only if the deal card is wrong — records your name" onclick="window._mrReviewConfirmMc('${_mrEsc(i.id)}',this)">It is this property</button></div>`:''}</div>`).join('')}</div>`).join('');
+  const rows=secs.map(s=>`<div style="margin:.15rem 0 .7rem"><div style="font-weight:700;font-size:.8rem;text-transform:uppercase;letter-spacing:.03em;color:var(--muted,#6b7280);margin-bottom:.25rem">${_mrEsc(s)}</div>${pf.items.filter(i=>i.sec===s).map(i=>`<div style="display:flex;gap:.5rem;align-items:flex-start;padding:.3rem .45rem;border-radius:8px;${i.level==='block'?'background:rgba(254,226,226,.45)':i.level==='warn'?'background:rgba(254,243,199,.45)':''}"><span aria-hidden="true">${icon[i.level]}</span><div style="flex:1;font-size:.82rem;line-height:1.35">${_mrEsc(i.msg)}</div>${_mrPostFixBtns(i)}${i.fix==='mc'?`<div style="display:flex;gap:.3rem;flex-shrink:0"><button class="mr-btn mr-btn-sm" onclick="window._mrReviewDropMc('${_mrEsc(i.id)}',this)">Remove from report</button><button class="mr-btn mr-btn-sm" title="Only if the deal card is wrong — records your name" onclick="window._mrReviewConfirmMc('${_mrEsc(i.id)}',this)">It is this property</button></div>`:''}</div>`).join('')}</div>`).join('');
   const notes=(A.history||[]).slice(0,40).map(h=>`<div style="font-size:.74rem;line-height:1.3;padding:.15rem 0;border-bottom:1px solid var(--border)"><span class="mr-muted">${_mrEsc(h.date)} · ${_mrEsc(h.type)}</span> ${_mrEsc(String(h.text).slice(0,220))}</div>`).join('');
   document.getElementById('mr-rv-body').innerHTML=`${pf.blocks.length?`<div style="background:#fee2e2;color:#991b1b;border-radius:10px;padding:.55rem .7rem;font-weight:600;font-size:.85rem;margin-bottom:.7rem">${pf.blocks.length} problem${pf.blocks.length===1?'':'s'} must be fixed before this report can be approved or sent.</div>`:approved?`<div style="background:#dcfce7;color:#166534;border-radius:10px;padding:.55rem .7rem;font-weight:600;font-size:.85rem;margin-bottom:.7rem">Approved by ${_mrEsc(rep.approval.byName||'')} ${_mrEsc(_mrFmtDate(rep.approval.at))} — nothing has changed since.</div>`:`<div style="background:#e0f2fe;color:#075985;border-radius:10px;padding:.55rem .7rem;font-weight:600;font-size:.85rem;margin-bottom:.7rem">All checks pass. Open the PDF, read it, then approve.</div>`}${factsForm}${rows}${notes?`<details style="margin-top:.3rem"><summary style="cursor:pointer;font-size:.8rem;font-weight:600">Property notes that will print (${(A.history||[]).length})</summary><div style="max-height:30vh;overflow:auto;margin-top:.3rem">${notes}</div></details>`:''}`;
   if(A.letter && String(A.letter).trim()){ const lb=document.getElementById('mr-rv-body'); if(lb){ const box=document.createElement('div'); box.style.cssText='margin:.2rem 0 .8rem;border:1px solid var(--border);border-radius:10px;padding:.6rem .75rem;background:var(--surface-1,var(--surface))'; box.innerHTML=`<div class="mr-row" style="justify-content:space-between;align-items:center;margin-bottom:.35rem"><div style="font-weight:700;font-size:.8rem;text-transform:uppercase;letter-spacing:.03em;color:var(--muted)">Status letter${A.letterKind==='ai'?' — ✨ AI draft':A.letterCustom?' — advisor’s own':' — Bill’s firm letter'}</div><button class="mr-btn mr-btn-sm" onclick="document.getElementById('mr-rv-ov').remove();window._mrOpenEditor('${deal.id}')">✏️ Edit letter</button></div><div style="white-space:pre-wrap;font-size:.84rem;line-height:1.45;max-height:260px;overflow:auto">${_mrEsc(A.letter)}</div><div class="mr-muted" style="font-size:.75rem;margin-top:.35rem">— ${_mrEsc(A.signature||'')}</div>`; lb.insertBefore(box, lb.firstChild.nextSibling); } }   // AILETTER-20261023
@@ -53109,6 +53134,13 @@ window._mrReviewDropMc=async function(id, btn){
     await _mrSaveReport(r.dealId, r.ym, {emailCampaigns:keep, emailCampaignsPicked:true, emailCampaignsPinned:pinned});
     done(); window._mrReview(r.dealId); }
   catch(e){ done(); showToast('Couldn’t remove it: '+e.message,'error',6000); }
+};
+window._mrReviewPost=async function(key, action, btn){   // POSTOK-20261111 — 'keep' | 'drop' | '' (back to Terra's own check)
+  const r=window._mrState.review; if(!r||!key) return; const done=elcBusy(btn, action==='drop'?'Removing…':'Saving…');
+  try{ const rep=(await _mrLoadReport(r.dealId,r.ym))||{}; const m={...(rep.postReview||{})}; m[key]={action:action||'', at:Date.now(), by:currentUser?.uid||'', byName:currentUser?.name||currentUser?.email||''};
+    await _mrSaveReport(r.dealId, r.ym, {postReview:m}); done();
+    showToast(action==='keep'?'Post stays in the report ✓':action==='drop'?'Post removed from this report':'Back to Terra’s check','success'); window._mrReview(r.dealId); }
+  catch(e){ done(); showToast('Couldn’t save: '+e.message,'error',6000); }
 };
 window._mrReviewConfirmMc=async function(id, btn){
   const r=window._mrState.review; if(!r) return;
