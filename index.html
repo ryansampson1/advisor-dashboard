@@ -50664,15 +50664,20 @@ function _pstReviewLine(A){
 window._pstEffective=_pstEffective; window._pstReviewLine=_pstReviewLine; window._pstMonthViewParts=_pstMonthViewParts;
 
 /* ---- PDF: every portal stat as a box on the Leads & Website Activity page ---- */
+/* ZEROBOX-20261111 — Ryan: a box that would show 0 (or nothing) is omitted from the owner report; 1 or more prints */
+function _pstShow(v){ return v!=null && v!=='' && Number(v)!==0; }
+function _pstShownStats(p, e){ return e?PST_PORTALS[p].stats.filter(([k])=>_pstShow(e[k])):[]; }
+function _pstHasBoxes(E){ return Object.keys(PST_PORTALS).some(p=>_pstShownStats(p,E&&E[p]).length>0); }
+window._pstShow=_pstShow; window._pstHasBoxes=_pstHasBoxes; window._pstShownStats=_pstShownStats;
 function _pstDrawPortals(R, doc, E, y){
-  const portals=Object.keys(PST_PORTALS).filter(p=>E[p]); if(!portals.length) return y;
+  const portals=Object.keys(PST_PORTALS).filter(p=>_pstShownStats(p,E[p]).length); if(!portals.length) return y;
   const need=portals.length*(22+50+14)+30; if(y+need>R.H-56){ y=R.newPage()+30; }
   R.text('LISTING PORTAL PERFORMANCE',R.M,y+10,{size:9,bold:true,color:MR_GREY}); R.line(R.M,y+16,R.W-R.M,y+16,MR_TEAL,1.5); y+=28;
   portals.forEach(p=>{ const def=PST_PORTALS[p], e=E[p];
     const meta=p==='loopnet'?[e.exposure?e.exposure+' exposure':'', e.type?e.type+' listing':''].filter(Boolean).join(' · '):(e.name?String(e.name).slice(0,70):'');
     R.text(def.label.toUpperCase()+(meta?'  —  '+meta.toUpperCase():''),R.M,y+8,{size:8,bold:true,color:MR_INK}); y+=14;
-    const n=def.stats.length, bw=(R.W-2*R.M-(n-1)*10)/n;
-    def.stats.forEach(([k,l],i)=>{ const cx=R.M+i*(bw+10); R.rect(cx,y,bw,50,MR_TEAL); R.text(l.toUpperCase(),cx+10,y+14,{size:6.5,bold:true,color:[235,250,250]}); R.text(_pstFmt(e[k]),cx+10,y+34,{size:18,bold:true,color:[255,255,255]}); });
+    const n=def.stats.length, bw=(R.W-2*R.M-(n-1)*10)/n;   /* box width stays the 4-across size; shown boxes close up to the left */
+    _pstShownStats(p,e).forEach(([k,l],i)=>{ const cx=R.M+i*(bw+10); R.rect(cx,y,bw,50,MR_TEAL); R.text(l.toUpperCase(),cx+10,y+14,{size:6.5,bold:true,color:[235,250,250]}); R.text(_pstFmt(e[k]),cx+10,y+34,{size:18,bold:true,color:[255,255,255]}); });
     y+=50+12; });
   return y+4;
 }
@@ -51904,8 +51909,8 @@ async function _mrBuildPdf(A){
   else { y=R.para('No history has been logged on this property yet.',R.M,y,R.W-2*R.M,{size:10.5,color:MR_GREY})+18; }
   if(false&&A.tasks.length){ /* MRNOTASKS-20261008: tasks are internal and never print */ if(y>R.H-160){ y=R.newPage()+30; } R.text('Completed Tasks',R.M,y+6,{size:16,bold:true}); y=R.table({startY:y+16, head:[['Completed','Task','Completed by']], body:A.tasks.map(t=>[t.date,t.title,t.by]), columnStyles:{0:{cellWidth:70},2:{cellWidth:110}}, styles:{font,fontSize:8.5,textColor:MR_INK,cellPadding:4,lineColor:MR_LINE,lineWidth:{bottom:0.8}}, contHeading:'Completed Tasks (cont.)'}); }
   /* ---- 9 · Leads & website activity ---- */
-  const stats=[['TheDirtDog.com visits',T.siteVisits],['Unique visitors',T.uniqueVisitors],['Docs viewed',T.docsViewed],['CAs signed',T.casSigned],['Google sessions',T.gaSessions],['Total Commercial views',T.totalCommercialViews],['LoopNet views',T.loopnetViews],['Crexi views',T.crexiViews]].filter(s=>s[1]!=null&&s[1]!=='');
-  const _pstE=_pstEffective(d, A.ym, A.rep), _pstHas=!!(_pstE.loopnet||_pstE.landcom);   // PORTALSTATS-20261109
+  const stats=[['TheDirtDog.com visits',T.siteVisits],['Unique visitors',T.uniqueVisitors],['Docs viewed',T.docsViewed],['CAs signed',T.casSigned],['Google sessions',T.gaSessions],['Total Commercial views',T.totalCommercialViews],['LoopNet views',T.loopnetViews],['Crexi views',T.crexiViews]].filter(s=>_pstShow(s[1]));   // ZEROBOX-20261111 — zero boxes omitted
+  const _pstE=_pstEffective(d, A.ym, A.rep), _pstHas=_pstHasBoxes(_pstE);   // PORTALSTATS-20261109
   if(act.length||stats.length||_pstHas){
     y=R.section('Leads and Website Activity',y,170);
     y=R.para('The following inquiries are a result of our property’s website traffic and listing-service exposure during '+_mrMonthLabel(A.ym)+'. Each named individual has requested further information.',R.M,y+4,R.W-2*R.M,{size:10.5})+8;
