@@ -21589,6 +21589,7 @@ window._dealLogActivity = async (dealId, type, data = {}) => {
     ...( data.gmailThreadId ? {gmailThreadId: data.gmailThreadId} : {} ),
     ...( data.rfcId        ? {rfcId: data.rfcId, gmailSubject: data.gmailSubject||'', gmailFrom: data.gmailFrom||'', gmailDate: data.gmailDate||''} : {} ),
     ...( data.source       ? {source: data.source} : {} ),
+    ...( data.mcCampaignId ? {mcCampaignId: data.mcCampaignId} : {} ),   // MCMULTI-20261111: one e-blast note per campaign per card
     ...( data.aiSummary    ? {aiSummary: true} : {} ),
     ...( data.contactId    ? {contactId: data.contactId, contactName: data.contactName||''} : {} ),   // LOGCALL-20261014
     ...( data.reportHidden ? {reportHidden: true} : {} ),   // LOGCALL-20261014: 'keep off the owner report'
@@ -51978,14 +51979,15 @@ async function _mrBuildPdf(A){
       const subj=R.split(e.subject||e.title||'E-blast',textW-60,11,true).slice(0,2);
       const imgH=e.img?Math.min(300,e.img.h*(textW/e.img.w)):0;
       const when=_mrFmtDateLong(Date.parse(e.sendTime)||0); const sent=Number(e.emailsSent||0);
-      const stats='Delivered to '+sent.toLocaleString('en-US')+' contacts · Opened by '+Number(e.uniqueOpens||0).toLocaleString('en-US')+' ('+(e.openRate||0)+'%) · Clicked by '+Number(e.uniqueClicks||0).toLocaleString('en-US')+' ('+(e.clickRate||0)+'%)';
-      const h=pad+subj.length*15+16+(imgH?imgH+10:0)+16+pad;
+      const stats=_mrMcStatsLine(e,sent); const _sx=_mrMcSecLines(R,e,textW);   // MCMULTI-20261111
+      const h=pad+subj.length*15+16+(imgH?imgH+10:0)+_sx.h+16+pad;
       if(y+h>R.H-56){ y=R.newPage(); R.text('Email Report (cont.)',R.M,y+10,{size:16,bold:true}); y+=30; }
       const x=R.M; doc.setDrawColor(226,232,240); doc.setLineWidth(1); doc.roundedRect(x,y,cw,h,6,6,'S');
       let cy=y+pad; R.rrect(x+pad,cy,46,18,9,MR_TEAL); R.text('E-BLAST',x+pad+23,cy+12.5,{size:7,bold:true,color:[255,255,255],align:'center'});
       subj.forEach((ln,k)=>R.text(ln,x+pad+56,cy+13+k*15,{size:11,bold:true})); cy+=subj.length*15+2;
       R.text(when+(_mrCleanSeg(e.segment)?' · '+_mrCleanSeg(e.segment):'')+' · via Mailchimp',x+pad,cy+10,{size:8,color:MR_GREY}); cy+=16;
       if(e.img){ const s=Math.min(textW/e.img.w,imgH/e.img.h); const iw=e.img.w*s, ih=e.img.h*s; doc.setDrawColor(226,232,240); doc.rect(x+pad+(textW-iw)/2,cy,iw,ih,'S'); R.img(e.img,x+pad+(textW-iw)/2,cy,iw,ih); cy+=imgH+10; }
+      cy=_mrMcSecDraw(R,_sx,x+pad,cy);
       R.text(stats,x+pad,cy+10,{size:8.5,bold:true,color:MR_INK});
       y+=h+14;
     });
@@ -52115,7 +52117,7 @@ async function _mrSendDeal(deal, ym, opts){
   const A=await _mrAssemble(deal,ym);
   const pf=await _mrPreflight(A);   // MCVERIFY-20261016: nothing goes to an owner unless every check passes and the report is approved as-is
   if(pf.blocks.length) throw new Error('Report check failed — '+pf.blocks[0].msg+(pf.blocks.length>1?' (+'+(pf.blocks.length-1)+' more)':'')+' Open 🔍 Review.');
-  if(!_mrApprovalOk(A.rep,pf.fp)) throw new Error((A.rep&&A.rep.approval?'The report changed after it was approved':'Not approved yet')+' — open 🔍 Review & approve.');
+  if(!_mrApprovalOk(A.rep,pf.fp) && !(!opts.checkOnly && _mrGatePending(A.rep) && A.rep.approval)) throw new Error((A.rep&&A.rep.approval?'The report changed after it was approved':'Not approved yet')+' — open 🔍 Review & approve.');   // MRAUTOQ-20261112 — an advisor-approved, queued report isn't sent back for re-approval because mail filing etc. touched it; ⛔ checks above still apply
   if(opts.checkOnly) return {A,pf};   // SENDGATE-20261029 — a send request runs every check but sends nothing
   const doc=await _mrBuildPdf(A);
   const blob=doc.output('blob'); const b64=_mrB64(await blob.arrayBuffer());
@@ -52315,7 +52317,26 @@ function _mraDayLabel(d){ return d.toLocaleDateString('en-US',{month:'short',day
 function _mraPhase(ym, now){ const t=new Date(now||Date.now()); const today=new Date(t.getFullYear(),t.getMonth(),t.getDate()).getTime(); const D=_mraDue(ym);
   if(today<D.approveBy.getTime()) return 'open'; if(today<=D.chaseEnd.getTime()) return 'late'; if(today<=D.sendBy.getTime()) return 'overdue'; return 'pastdue'; }
 /* where one listing's report stands: 'queued' (approved & locked) · 'sent' · 'off' (Send to client off) · 'need' (advisor still has to approve) */
-function _mraState(d, rep){ if(_mrGatePending(rep)) return 'queued'; if(rep&&rep.status==='sent') return 'sent'; if(!_mrSendOn(d)) return 'off'; return 'need'; }
+/* MRAUTOQ-20261112 — Ryan: "If he or any other advisor has approved, it should automatically be approved and not be asking us to approve as well."
+   An approval that never got its queued sendRequest (approved via 🔍 Review on a cached pre-MRAPPROVE browser) counts as queued and is
+   written to the queue the next time anyone with the runner role opens Monthly Reports. Declined / withdrawn / sent after the approval → not re-queued. */
+function _mraApprovedUnqueued(d, rep){
+  if(!d||!rep||!rep.approval||!rep.approval.at||_mrGatePending(rep)) return false;
+  if(!_mrSendOn(d)||!_mrRecipients(d).length) return false;
+  const at=rep.approval.at;
+  if(rep.status==='sent' && !(rep.sentAt && rep.sentAt<at)) return false;   // sent after (or without a date) → done
+  const q=_mrGateReq(rep); if(q && !(q.resolvedAt && q.resolvedAt<at)) return false;   // declined / withdrawn / sent after this approval → not re-queued
+  return true;
+}
+async function _mraHealQueue(deals, ym){
+  const st=window._mrState; let n=0;
+  for(const d of deals){ const rep=st.reports[d.id+'|'+ym]; if(!_mraApprovedUnqueued(d,rep)) continue; const a=rep.approval;
+    try{ await _mrSaveReport(d.id, ym, {sendRequest:{status:'pending', locked:true, at:a.at, by:a.by||'', byName:a.byName||'', byEmail:'', fp:a.fp||'', to:_mrRecipients(d).map(r=>r.email), approver:_mraMasterEmails().join(', '), resend:rep.status==='sent', reason:'', resolvedAt:null, resolvedBy:'', resolvedByName:'', autoQueued:Date.now()}});
+      _mraCloseChase(d.id, ym, 'Approved by '+(a.byName||'the advisor')); n++; }
+    catch(e){ console.warn('[mra] auto-queue',d.id,e.message); } }
+  return n;
+}
+function _mraState(d, rep){ if(_mrGatePending(rep)||_mraApprovedUnqueued(d,rep)) return 'queued'; /* MRAUTOQ-20261112 */ if(rep&&rep.status==='sent') return 'sent'; if(!_mrSendOn(d)) return 'off'; return 'need'; }
 function _mraInMonth(d, ym){ const s=_mrListingStart(d); return !s || s<_mrMonthRange(ym).end; }   // a listing signed after the report month owes no report for it
 function _mraFlag(d, rep, ym, now){ if(!_mrGateOn()||ym!==_mraChaseYm(now)) return ''; if(_mraState(d,rep)!=='need'||!_mraInMonth(d,ym)) return ''; const ph=_mraPhase(ym,now); return ph==='open'?'':(ph==='late'?'late':'overdue'); }
 function _mraRowClass(d, rep, ym){ const f=_mraFlag(d,rep,ym); return f?('mr-'+f):''; }
@@ -52416,6 +52437,7 @@ window._mrGateRender=function(deals, ym){
   const missing=pool.filter(d=>st.reports[d.id+'|'+ym]===undefined);
   if(missing.length && !st.mraLoading){ st.mraLoading=true; _mrPreloadReports(ym,missing).then(()=>{ st.mraLoading=false; if(currentView==='monthlyReports'&&window._mrState.month===ym) window._mrGateRender(_mrActiveDeals(), ym); }).catch(()=>{ st.mraLoading=false; }); }
   const rows=pool.filter(d=>st.reports[d.id+'|'+ym]!==undefined).map(d=>({d, rep:st.reports[d.id+'|'+ym]||null}));
+  { const heal=rows.filter(r=>_mraApprovedUnqueued(r.d,r.rep)).map(r=>r.d); if(heal.length && !st.mraHealing && currentUser && (master||_mrSeesAll()||heal.every(_mrIsMyDeal))){ st.mraHealing=true; _mraHealQueue(heal,ym).then(n=>{ st.mraHealing=false; if(n&&currentView==='monthlyReports'&&window._mrState.month===ym) window._mrRenderRows(); }).catch(()=>{ st.mraHealing=false; }); } }   // MRAUTOQ-20261112
   const by=s=>rows.filter(r=>_mraState(r.d,r.rep)===s);
   const queued=by('queued'), need=by('need').filter(r=>_mraInMonth(r.d,ym)), sent=by('sent'), off=by('off');
   const D=_mraDue(ym); const isChase=ym===_mraChaseYm(); const ph=_mraPhase(ym); const late=isChase&&ph!=='open';
@@ -52458,6 +52480,7 @@ window._mrSendAllApproved=async function(){
   if(!_mrIsApprover()){ showToast('Only '+_mraMasterNames()+' can send the approved reports','warning',5000); return; }
   const st=window._mrState; const ym=st.month||_mrDefaultMonth(); if(st.sending) return;
   const all=_mraAllDeals(); await _mrPreloadReports(ym, all);
+  await _mraHealQueue(all, ym);   // MRAUTOQ-20261112
   const q=all.filter(d=>_mrGatePending(st.reports[d.id+'|'+ym]));
   const deals=q.filter(d=>_mrSendOn(d)&&_mrRecipients(d).length); const held=q.length-deals.length;
   if(!deals.length){ showToast(q.length?'The queued reports are paused or have no recipients':'Nothing is approved and queued yet','info',5000); return; }
@@ -52544,6 +52567,7 @@ window._mraRun=async function(opts){
   try{
     const {doc,getDoc,setDoc,collection,query,where,getDocs}=_fbFns;
     const reps={}; await Promise.all(deals.map(async d=>{ try{ const s=await getDoc(doc(_fbDb,'deals',d.id,'monthlyReports',ym)); reps[d.id]=s.exists()?s.data():null; }catch(e){ reps[d.id]=undefined; } }));
+    { deals.forEach(d=>{ if(reps[d.id]!==undefined && st.reports[d.id+'|'+ym]===undefined) st.reports[d.id+'|'+ym]=reps[d.id]?{id:ym,...reps[d.id]}:null; }); try{ await _mraHealQueue(deals.filter(d=>_mraApprovedUnqueued(d,reps[d.id])), ym); }catch(e){} }   // MRAUTOQ-20261112
     let tasks=[]; try{ const s=await getDocs(query(collection(_fbDb,'tasks'), where('mrApproveYm','==',ym))); tasks=s.docs.map(x=>({id:x.id,...x.data()})); }catch(e){ tasks=(allTasks||[]).filter(t=>t&&t.mrApproveYm===ym); }
     const mailOn=c.approveChaseEmail!==false && (ph==='late'||ph==='overdue'||!!opts.force);
     const digest={}; let anyOpen=false;
@@ -52839,8 +52863,90 @@ function _mrPostFixBtns(i){
   if(i.fix==='postUndo') return `<div style="display:flex;gap:.3rem;flex-shrink:0"><button class="mr-btn mr-btn-sm" onclick="window._mrReviewPost('${_mrEsc(i.id)}','',this)">${i.dropped?'Put it back':'Undo'}</button></div>`;
   return ''; }
 window._mrPostKey=_mrPostKey; window._mrPostAction=_mrPostAction; window._mrReportPosts=_mrReportPosts;
+/* =======================================================
+   📧 MULTI-PROPERTY E-BLASTS — marker MCMULTI-20261111
+   Ryan 2026-11-11: when one e-blast features several listings ("3 Hillsborough Sites: Valrico, Brandon & Ruskin"),
+   each featured listing's monthly report shows it as an e-blast on THAT site only:
+     • it counts for every listing that has its own section in the e-blast (the worker returns c.sections[] —
+       one per "Featured" block: title, address line, facts, blurb, photo, listing link);
+     • the report card prints the section's own headline instead of the roundup subject, the section's photo and
+       text instead of the whole-email picture, and clicks on that listing's links only (worker /mailchimp/clicks) —
+       nothing on the owner's report says other properties were in the same e-blast;
+     • the deal card gets one note, "📧 E-blast sent on this site: …" (deal.mcBlastNoted{campaignId:ts} keeps it to one).
+   Applies to e-blasts sent on/after MR_MC_MULTI_FROM (the November 2026 reports onward); earlier months are untouched.
+   A multi-property e-blast is never offered or auto-resent as one listing's "Still Available" e-blast.
+   ======================================================= */
+const MR_MC_MULTI_FROM='2026-11-01';
+function _mrMcHasSections(c){ return !!(c && Array.isArray(c.sections) && c.sections.length>=2); }
+function _mrMcMulti(c){ return _mrMcHasSections(c) && String(c.sendTime||'').slice(0,10)>=MR_MC_MULTI_FROM; }
+/* Buildout listing ids ("1251032-sale") found in a link or text */
+function _mrMcListingIds(s){ const out=new Set(); String(s||'').replace(/(\d{6,8})-(?:sale|lease)\b/gi,(m,a)=>{ out.add(a); return m; }); return out; }
+function _mrDealListingIds(deal){ const out=new Set(); if(!deal) return out;
+  const eat=v=>{ if(typeof v==='string' && /buildout|thedirtdog|propertyId/i.test(v)) _mrMcListingIds(v).forEach(x=>out.add(x)); };
+  Object.keys(deal).forEach(k=>eat(deal[k])); (Array.isArray(deal.reportLinks)?deal.reportLinks:[]).forEach(l=>eat(l&&l.url)); return out; }
+function _mrMcSecPseudo(sec){ return {subject:sec.title||'', title:'', preview:sec.line||'', bodyText:[sec.title,sec.line,sec.facts,sec.blurb,sec.alt].filter(Boolean).join('\n')}; }
+/* Which section of a multi-property e-blast (if any) is this listing? status: match | conflict | none */
+function _mrMcSecPick(deal, c){
+  if(!_mrMcMulti(c)) return null;
+  const ids=_mrDealListingIds(deal);
+  const vs=c.sections.map((sec,i)=>{ const p=_mrMcSecPseudo(sec); const d=_mrMcScoreDetail(deal,p,{full:true}); let s=d.s, strong=d.strong;
+    if([..._mrMcListingIds(sec.link)].some(x=>ids.has(x))){ s+=5; strong=true; }   // same listing page as the deal card's links
+    return {i, sec, score:strong?s:Math.min(s,2.4), conflicts:_mrMcConflicts(deal,p), facts:_mrMcFacts(p.bodyText)}; });
+  const ok=vs.filter(v=>v.score>=2.5&&!v.conflicts.length).sort((a,b)=>b.score-a.score); if(ok.length) return {status:'match', ...ok[0]};
+  const bad=vs.filter(v=>v.score>=2.5).sort((a,b)=>b.score-a.score); if(bad.length) return {status:'conflict', ...bad[0]};
+  return {status:'none', i:-1, sec:null, score:vs.reduce((m,v)=>Math.max(m,v.score),0), conflicts:[], facts:{acres:[],counties:[],zoning:''}};
+}
+/* The campaign as THIS listing's report shows it: the section's headline, photo and text. Anything else comes back unchanged. */
+function _mrMcLocal(deal, c){
+  const p=_mrMcSecPick(deal,c); if(!p||p.status!=='match') return c; const s=p.sec;
+  const clicks=(s.clicks==null||s.clicks==='')?null:Number(s.clicks);
+  return {...c, subject:s.title||c.subject||'', title:'', preview:'', image:s.image||c.image||'', uniqueClicks:clicks||0, clickRate:0,
+    sec:{n:s.n||p.i+1, of:c.sections.length, title:s.title||'', line:s.line||'', facts:s.facts||'', blurb:s.blurb||'', link:s.link||'', clicks, from:c.subject||''}};
+}
+/* Clicks on one listing's links inside a multi-property e-blast (the campaign total belongs to all of its listings). */
+function _mrMcSecClickSum(sec, urls){
+  if(!Array.isArray(urls)) return null; const tag=new RegExp('[?&]cta=l'+Number(sec.n||0)+'-','i'); const tagged=urls.some(u=>/[?&]cta=l\d+-/i.test(u.url||''));
+  const ids=_mrMcListingIds(sec.link);
+  return urls.filter(u=>tagged?tag.test(u.url||''):[..._mrMcListingIds(u.url)].some(x=>ids.has(x))).reduce((a,u)=>a+(Number(u.total)||0),0);
+}
+async function _mrMcSecClicks(list){
+  const need=(list||[]).filter(e=>e&&e.id&&e.sec&&e.sec.clicks==null); if(!need.length||typeof _spWorkerPost!=='function') return list;
+  const st=window._mrState; st.mcClicks=st.mcClicks||{}; const ask=[...new Set(need.map(e=>e.id).filter(id=>!(id in st.mcClicks)))];
+  if(ask.length){ try{ const r=await _spWorkerPost('/mailchimp/clicks',{campaignIds:ask.slice(0,8)}); Object.assign(st.mcClicks,(r&&r.clicks)||{}); }catch(e){ console.warn('[mr] section clicks',e.message); } }
+  need.forEach(e=>{ const n=_mrMcSecClickSum(e.sec, st.mcClicks[e.id]); if(n!=null){ e.sec.clicks=n; e.uniqueClicks=n; } });
+  return list;
+}
+function _mrMcStatsLine(e, sent){
+  const base='Delivered to '+Number(sent||0).toLocaleString('en-US')+' contacts · Opened by '+Number(e.uniqueOpens||0).toLocaleString('en-US')+' ('+(e.openRate||0)+'%)';
+  if(e.sec) return base+(e.sec.clicks!=null?' · '+Number(e.sec.clicks).toLocaleString('en-US')+(Number(e.sec.clicks)===1?' click':' clicks')+' on this listing':'');
+  return base+' · Clicked by '+Number(e.uniqueClicks||0).toLocaleString('en-US')+' ('+(e.clickRate||0)+'%)';
+}
+/* The listing's own section of the e-blast, drawn under its photo on the Email Report card. */
+function _mrMcSecLines(R, e, textW){
+  const s=e&&e.sec; if(!s) return {h:0};
+  const line=s.line?R.split(s.line,textW,9.5,true).slice(0,2):[], facts=s.facts?R.split(String(s.facts).toUpperCase(),textW,7.5,true).slice(0,2):[], blurb=s.blurb?R.split(s.blurb,textW,9).slice(0,6):[];
+  return {line, facts, blurb, h:line.length*13+facts.length*11+(blurb.length?blurb.length*12.5+4:0)+((line.length||facts.length||blurb.length)?6:0)};
+}
+function _mrMcSecDraw(R, sx, x, cy){
+  if(!sx||!sx.h) return cy;
+  (sx.line||[]).forEach(ln=>{ R.text(ln,x,cy+9,{size:9.5,bold:true,color:MR_INK}); cy+=13; });
+  (sx.facts||[]).forEach(ln=>{ R.text(ln,x,cy+8,{size:7.5,bold:true,color:MR_GREY}); cy+=11; });
+  if((sx.blurb||[]).length){ cy+=4; sx.blurb.forEach(ln=>{ R.text(ln,x,cy+9,{size:9}); cy+=12.5; }); }
+  return cy+6;
+}
+/* One note on the deal card per multi-property e-blast that featured it — worded as an e-blast on this site. */
+async function _mbNoteMulti(deal, ym, sent){
+  for(const c of (sent||[])){
+    if(!c||!c.id||!c.sec||c.pending) continue; if((deal.mcBlastNoted||{})[c.id]) continue;
+    const map={...(deal.mcBlastNoted||{}), [c.id]:Date.now()}; await Store.updateDeal(deal.id,{mcBlastNoted:map}); deal.mcBlastNoted=map;   // mark first so two runners never double-log
+    try{ const {collection, query, where, getDocs}=_fbFns; const dup=await getDocs(query(collection(_fbDb,'deals',deal.id,'activities'), where('mcCampaignId','==',c.id))); if(!dup.empty) continue; }catch(e){ console.warn('[mb] multi note dedup',e); }
+    await window._dealLogActivity(deal.id,'note',{ body:'📧 E-blast sent on this site: “'+(c.sec.title||c.subject||'')+'”'+(c.emailsSent?' — delivered to '+Number(c.emailsSent).toLocaleString('en-US')+' contacts':'')+'.', source:'mailchimp-blast', autoLogged:true, mcCampaignId:c.id, activityDate:_mrLocalDate(Date.parse(c.sendTime)||Date.now()) });
+  }
+}
+/* ===== MCMULTI_BLOCK_END ===== */
 /* Full verdict for one campaign against one listing. status: match | conflict | promo | none */
 function _mrMcVerdict(deal, c){
+  if(_mrMcMulti(c)){ const p=_mrMcSecPick(deal,c); return {score:p.score, conflicts:p.conflicts||[], status:p.status, facts:p.facts, sec:p.i, multi:true}; }   // MCMULTI-20261111
   const d=_mrMcScoreDetail(deal,c); const score=d.strong?d.s:Math.min(d.s,2.4);
   const conflicts=_mrMcConflicts(deal,c);
   let status='none';
@@ -52849,7 +52955,7 @@ function _mrMcVerdict(deal, c){
   return {score, conflicts, status, facts:_mrMcFacts([(c.subject||''),(c.title||''),_mrMcPrimaryText(c)].join('\n'))};
 }
 function _mrMcScore(deal, c){ const v=_mrMcVerdict(deal,c); return v.status==='match'?v.score:Math.min(v.score,2.4); }
-function _mrMcMatch(deal, campaigns){ return (campaigns||[]).filter(c=>_mrMcVerdict(deal,c).status==='match'); }
+function _mrMcMatch(deal, campaigns){ return (campaigns||[]).filter(c=>_mrMcVerdict(deal,c).status==='match').map(c=>_mrMcLocal(deal,c)); }   // MCMULTI-20261111 — a multi-property e-blast comes back as this listing's section
 /* Campaigns that the old whole-body matcher would have taken — shown in the editor as "not included, and why". */
 function _mrMcNearMisses(deal, campaigns){
   return (campaigns||[]).map(c=>({c, v:_mrMcVerdict(deal,c)})).filter(x=>x.v.status==='conflict'||x.v.status==='promo');
@@ -53414,7 +53520,7 @@ window._mrReview=async function(dealId){
   catch(e){ document.getElementById('mr-rv-body').innerHTML=`<p style="color:#b91c1c">Couldn’t build the report: ${_mrEsc(e.message)}</p>`; return; }
   window._mrState.review={dealId, ym, A, pf};
   const icon={ok:'✅',warn:'⚠️',block:'⛔'}; const secs=[...new Set(pf.items.map(i=>i.sec))];
-  const rep=A.rep||{}; const approved=_mrApprovalOk(rep,pf.fp);
+  const rep=A.rep||{}; const approved=_mrApprovalOk(rep,pf.fp)||(_mrGatePending(rep)&&!!rep.approval);   // MRAUTOQ-20261112
   const factsForm=pf.items.some(i=>i.fix==='facts')?`<div style="border:1px solid #fecaca;background:rgba(254,226,226,.35);border-radius:10px;padding:.6rem .7rem;margin:.2rem 0 .8rem"><div style="font-weight:700;font-size:.82rem;margin-bottom:.35rem">Fill in the listing facts (saved to the deal card)</div><div class="mr-row" style="gap:.5rem;flex-wrap:wrap"><label class="mr-note">Acres <input id="mr-rv-ac" class="mr-input" style="width:90px" inputmode="decimal" value="${_mrEsc(deal.acreage||deal.acres||'')}"></label><label class="mr-note">County <input id="mr-rv-co" class="mr-input" style="width:140px" value="${_mrEsc(deal.county||'')}"></label><label class="mr-note">Zoning <input id="mr-rv-zo" class="mr-input" style="width:110px" value="${_mrEsc(deal.zoning||'')}"></label><button class="mr-btn mr-btn-sm mr-btn-primary" onclick="window._mrReviewSaveFacts(this)">Save &amp; re-check</button></div></div>`:'';
   const rows=secs.map(s=>`<div style="margin:.15rem 0 .7rem"><div style="font-weight:700;font-size:.8rem;text-transform:uppercase;letter-spacing:.03em;color:var(--muted,#6b7280);margin-bottom:.25rem">${_mrEsc(s)}</div>${pf.items.filter(i=>i.sec===s).map(i=>`<div style="display:flex;gap:.5rem;align-items:flex-start;padding:.3rem .45rem;border-radius:8px;${i.level==='block'?'background:rgba(254,226,226,.45)':i.level==='warn'?'background:rgba(254,243,199,.45)':''}"><span aria-hidden="true">${icon[i.level]}</span><div style="flex:1;font-size:.82rem;line-height:1.35">${_mrEsc(i.msg)}</div>${_mrPostFixBtns(i)}${i.fix==='mc'?`<div style="display:flex;gap:.3rem;flex-shrink:0"><button class="mr-btn mr-btn-sm" onclick="window._mrReviewDropMc('${_mrEsc(i.id)}',this)">Remove from report</button><button class="mr-btn mr-btn-sm" title="Only if the deal card is wrong — records your name" onclick="window._mrReviewConfirmMc('${_mrEsc(i.id)}',this)">It is this property</button></div>`:''}</div>`).join('')}</div>`).join('');
   const notes=(A.history||[]).slice(0,40).map(h=>`<div style="font-size:.74rem;line-height:1.3;padding:.15rem 0;border-bottom:1px solid var(--border)"><span class="mr-muted">${_mrEsc(h.date)} · ${_mrEsc(h.type)}</span> ${_mrEsc(String(h.text).slice(0,220))}</div>`).join('');
@@ -53468,8 +53574,8 @@ function _mrMcNearHtml(ed){
 }
 /* ===== MCVERIFY_BLOCK_END ===== */
 
-function _mrMcSlim(c){ return {id:c.id, subject:c.subject||'', title:c.title||'', sendTime:c.sendTime||'', emailsSent:c.emailsSent||0, uniqueOpens:c.uniqueOpens||0, openRate:c.openRate||0, uniqueClicks:c.uniqueClicks||0, clickRate:c.clickRate||0, image:c.image||'', archiveUrl:c.archiveUrl||'', segment:c.segment||'', listName:c.listName||''}; }
-function _mrMcRow(c){ return {title:c.subject||c.title||'E-blast', date:_mrLocalDate(Date.parse(c.sendTime)||Date.now()), recipients:String(c.emailsSent||''), opens:String(c.uniqueOpens||''), clicks:String(c.uniqueClicks||'')}; }
+function _mrMcSlim(c){ return {id:c.id, subject:c.subject||'', title:c.title||'', sendTime:c.sendTime||'', emailsSent:c.emailsSent||0, uniqueOpens:c.uniqueOpens||0, openRate:c.openRate||0, uniqueClicks:c.uniqueClicks||0, clickRate:c.clickRate||0, image:c.image||'', archiveUrl:c.archiveUrl||'', segment:c.segment||'', listName:c.listName||'', ...(c.sec?{sec:{...c.sec}}:{})}; }   // MCMULTI-20261111
+function _mrMcRow(c){ return {title:c.subject||c.title||'E-blast', date:_mrLocalDate(Date.parse(c.sendTime)||Date.now()), recipients:String(c.emailsSent||''), opens:String(c.uniqueOpens||''), clicks:c.sec?(c.sec.clicks==null?'':String(c.sec.clicks)):String(c.uniqueClicks||'')}; }   // MCMULTI-20261111 — only this listing's clicks
 // All sent campaigns in the month — one worker call per month per session (shared by every listing's report).
 async function _mrMcCampaigns(ym){
   const st=window._mrState; st.mc=st.mc||{};
@@ -53484,7 +53590,8 @@ async function _mrMcForReport(deal, ym, rep){
   // E-blasts sent from Terra are pinned on the report doc (MCBLAST-20261007) — always included, with fresh results when Mailchimp has them.
   const pinned=(rep&&Array.isArray(rep.emailCampaignsPinned))?rep.emailCampaignsPinned:[];
   if(pinned.length){ if(!fresh.length){ try{ fresh=await _mrMcCampaigns(ym); }catch(_){ } }
-    pinned.forEach(p=>{ if(!p||!p.id||base.some(b=>b.id===p.id)) return; const f=fresh.find(c=>c.id===p.id); base.push(f?_mrMcSlim(f):_mrMcSlim(p)); }); }
+    pinned.forEach(p=>{ if(!p||!p.id||base.some(b=>b.id===p.id)) return; const f=fresh.find(c=>c.id===p.id); base.push(f?_mrMcSlim(_mrMcLocal(deal,f)):_mrMcSlim(p)); }); }
+  base.forEach(e=>{ if(e.sec) e.sec={...e.sec, clicks:null}; }); try{ await _mrMcSecClicks(base); }catch(_){ }   // MCMULTI-20261111 — fresh clicks on this listing's links
   return base;
 }
 // Mailchimp-hosted images are fetched through the worker so the PDF canvas is not tainted.
@@ -53502,7 +53609,7 @@ function _mrMcSummaryHtml(){
   const list=ed.emailCampaigns||[];
   if(ed.mcError) return `<span class="mr-muted">Mailchimp not reachable — ${_mrEsc(ed.mcError)}. Rows typed above still print.</span>`;
   if(!list.length) return `<span class="mr-muted">${ed.emailCampaignsPicked?'No Mailchimp campaigns chosen for this report.':'No Mailchimp e-blast matched this listing this month — use Choose to pick one by hand.'}</span>`;
-  return list.map(c=>`<div style="display:flex;gap:.5rem;align-items:center;border:1px solid var(--border);border-radius:10px;padding:.35rem .5rem;max-width:380px">${c.image?`<img class="mr-thumb" src="${_mrEsc(c.image)}" alt="" style="width:54px;height:54px;object-fit:cover">`:''}<div style="font-size:.75rem;line-height:1.3;min-width:0"><div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:290px" title="${_mrEsc(c.subject)}">${_mrEsc(c.subject||c.title)}</div><div class="mr-muted">${_mrEsc(_mrFmtDateLong(Date.parse(c.sendTime)||0))} · sent ${Number(c.emailsSent||0).toLocaleString()} · opened ${Number(c.uniqueOpens||0).toLocaleString()} (${c.openRate||0}%) · clicked ${Number(c.uniqueClicks||0).toLocaleString()} (${c.clickRate||0}%)</div>${c.archiveUrl?`<a href="${_mrEsc(c.archiveUrl)}" target="_blank" rel="noopener" style="color:var(--brand-teal)">View e-blast ↗</a>`:''}</div></div>`).join('')+`<div class="mr-muted" style="width:100%">${ed.emailCampaignsPicked?'Chosen by hand':'Matched automatically'} — printed as e-blast cards with the campaign picture and results.`+'</div>';
+  return list.map(c=>`<div style="display:flex;gap:.5rem;align-items:center;border:1px solid var(--border);border-radius:10px;padding:.35rem .5rem;max-width:380px">${c.image?`<img class="mr-thumb" src="${_mrEsc(c.image)}" alt="" style="width:54px;height:54px;object-fit:cover">`:''}<div style="font-size:.75rem;line-height:1.3;min-width:0"><div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:290px" title="${_mrEsc(c.subject)}">${_mrEsc(c.subject||c.title)}</div><div class="mr-muted">${_mrEsc(_mrFmtDateLong(Date.parse(c.sendTime)||0))} · sent ${Number(c.emailsSent||0).toLocaleString()} · opened ${Number(c.uniqueOpens||0).toLocaleString()} (${c.openRate||0}%)${c.sec?(c.sec.clicks!=null?' · '+Number(c.sec.clicks).toLocaleString()+' clicks on this listing':''):' · clicked '+Number(c.uniqueClicks||0).toLocaleString()+' ('+(c.clickRate||0)+'%)'}</div>${c.sec?`<div class="mr-muted" style="white-space:normal" title="${_mrEsc(c.sec.from||'')}">Section ${c.sec.n} of a ${c.sec.of}-property e-blast — the report shows only this listing’s section.</div>`:''}${c.archiveUrl?`<a href="${_mrEsc(c.archiveUrl)}" target="_blank" rel="noopener" style="color:var(--brand-teal)">View e-blast ↗</a>`:''}</div></div>`).join('')+`<div class="mr-muted" style="width:100%">${ed.emailCampaignsPicked?'Chosen by hand':'Matched automatically'} — printed as e-blast cards with the campaign picture and results.`+'</div>';
 }
 function _mrMcMergeRows(list){
   const rows=_mrReadRows('mr-emails'); let added=0;
@@ -53515,7 +53622,7 @@ window._mrMcAutoFill=async function(){
   const ed=window._mrState.editor; if(!ed) return; const box=document.getElementById('mr-mc-summary'); if(!box) return;
   if(ed.emailCampaignsPicked){ box.innerHTML=_mrMcSummaryHtml(); return; }
   box.innerHTML='<span class="mr-muted">Checking Mailchimp for this month’s e-blasts…</span>';
-  try{ const all=await _mrMcCampaigns(ed.ym); if(window._mrState.editor!==ed) return; ed.emailCampaigns=_mrMcMatch(ed.deal,all).map(_mrMcSlim); ed.mcReview=_mrMcNearMisses(ed.deal,all); ed.mcError=''; _mrMcMergeRows(ed.emailCampaigns); }
+  try{ const all=await _mrMcCampaigns(ed.ym); if(window._mrState.editor!==ed) return; ed.emailCampaigns=_mrMcMatch(ed.deal,all).map(_mrMcSlim); try{ await _mrMcSecClicks(ed.emailCampaigns); }catch(_){ } ed.mcReview=_mrMcNearMisses(ed.deal,all); ed.mcError=''; _mrMcMergeRows(ed.emailCampaigns); }
   catch(e){ ed.mcError=e.message; }
   box.innerHTML=_mrMcSummaryHtml()+_mrMcNearHtml(ed);   // MCVERIFY-20261016
 };
@@ -53538,7 +53645,8 @@ window._mrOpenMcPicker=async function(btn){
 };
 window._mrMcApplyPick=function(){
   const ed=window._mrState.editor; if(!ed) return; const ids=new Set([...document.querySelectorAll('.mr-mc-pick:checked')].map(i=>i.value));
-  ed.emailCampaigns=(window._mrMcAll||[]).filter(c=>ids.has(c.id)).map(_mrMcSlim); ed.emailCampaignsPicked=true; ed.mcError='';
+  ed.emailCampaigns=(window._mrMcAll||[]).filter(c=>ids.has(c.id)).map(c=>_mrMcSlim(_mrMcLocal(ed.deal,c))); ed.emailCampaignsPicked=true; ed.mcError='';   // MCMULTI-20261111
+  _mrMcSecClicks(ed.emailCampaigns).then(()=>{ const b=document.getElementById('mr-mc-summary'); if(b&&window._mrState.editor===ed) b.innerHTML=_mrMcSummaryHtml(); }).catch(()=>{});
   const added=_mrMcMergeRows(ed.emailCampaigns); document.getElementById('mr-mc-ov')?.remove();
   const box=document.getElementById('mr-mc-summary'); if(box) box.innerHTML=_mrMcSummaryHtml();
   showToast(ed.emailCampaigns.length+' e-blast'+(ed.emailCampaigns.length===1?'':'s')+' selected'+(added?' · '+added+' row'+(added===1?'':'s')+' added to the table':'')+' — save the draft to keep this','success',5000);
@@ -53744,7 +53852,7 @@ async function _mbPrior(deal, force){
   const months=[]; const now=new Date(); for(let i=0;i<6;i++){ const d=new Date(now.getFullYear(), now.getMonth()-i, 1); months.push(d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')); }
   const lists=await Promise.all(months.map(ym=>_mrMcCampaigns(ym).catch(()=>[])));
   const seen=new Set(); const out=[];
-  lists.flat().forEach(c=>{ if(seen.has(c.id)) return; if(_mrMcScore(deal,c)>=2.5){ seen.add(c.id); out.push(c); } });
+  lists.flat().forEach(c=>{ if(seen.has(c.id)) return; if(!_mrMcHasSections(c) && _mrMcScore(deal,c)>=2.5){ seen.add(c.id); out.push(c); } });   // MCMULTI-20261111 — a multi-property e-blast is never a listing's own prior e-blast
   Object.values(deal.mcBlastLog||{}).forEach(l=>{ if(l&&l.campaignId&&!seen.has(l.campaignId)){ seen.add(l.campaignId); out.push({id:l.campaignId, subject:l.subject||'', sendTime:l.sentAt?new Date(l.sentAt).toISOString():'', segment:l.segment||'', listName:l.listName||'', archiveUrl:l.archiveUrl||'', emailsSent:l.recipientCount||0}); } });
   out.sort((a,b)=>(b.sendTime||'').localeCompare(a.sendTime||''));
   st.mbPrior[deal.id]=out; return out;
@@ -53814,6 +53922,7 @@ window._mbRun=async function(opts){
     for(const d of deals){
       try{
         const s=await _mbStatus(d, ym, true);
+        try{ await _mbNoteMulti(d, ym, s.sent); }catch(e){ console.warn('[mb] multi note',e); }   // MCMULTI-20261111
         const open=_mbOpenTasksFor(d.id, ym);
         if(s.sent.length){ if(open.length){ await _mbCloseTasks(d.id, ym); result.closed++; } continue; }
         // BLASTONCE-20261026: one e-blast task per listing per month. If this month's task was already created and later
