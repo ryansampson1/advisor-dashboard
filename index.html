@@ -2389,6 +2389,7 @@ const APP_CONFIG = {
   // 📬 Monthly Owner Reports (MREPORT-20261006). access: 'owner' | 'admins' | 'all' — overridden from eos/settings.monthlyReports
   monthlyReports: { access: 'all',   /* REPORTSALL-20261016 — opened to all users */ workerUrl: 'https://elc-report-worker.dirtdog.workers.dev' },
   landListingReport: { access: 'owner' },   // LLR-20261116 — 'owner' = Ryan only | 'admins' | 'all'; overridden from eos/settings.landListingReport (⚙ Access on the tab)
+  eshReport: { access: 'owner', writers: [] },   // ESH-20261116 — 'owner' (Ryan) | 'writers' | 'admins' | 'all'; overridden from eos/settings.eshReport
   social: { workerUrl: 'https://elc-social-worker.dirtdog.workers.dev', defaultLink: 'https://www.thedirtdog.com' },   // SOCIAL-20261006-hooks
   mcBlast: { enabled: true, dueDay: 20, autoDay: 25, autoResend: true },
   // MAPWISE-20261107 — Site Research → MapWise parcel sales/ownership via the elc-ai-proxy worker (/mapwise). Billed per record to ELC's MapWise account.
@@ -10095,6 +10096,7 @@ const FB = {
           if(payload.mcBlast && typeof payload.mcBlast==='object') APP_CONFIG.mcBlast={...(APP_CONFIG.mcBlast||{}), ...payload.mcBlast};   // MCBLAST-20261007
           if(payload.monthlyReports && typeof payload.monthlyReports==='object'){ const _mrPrev=(APP_CONFIG.monthlyReports||{}).access; APP_CONFIG.monthlyReports={...(APP_CONFIG.monthlyReports||{}), ...payload.monthlyReports}; if(_mrPrev!==APP_CONFIG.monthlyReports.access && currentUser && typeof renderShell==='function'){ try{ renderShell(); renderCurrentView(); }catch(_){} } } // MREPORT-20261006
           if(payload.landListingReport && typeof payload.landListingReport==='object'){ const _llrPrev=(APP_CONFIG.landListingReport||{}).access; APP_CONFIG.landListingReport={...(APP_CONFIG.landListingReport||{}), ...payload.landListingReport}; if(_llrPrev!==APP_CONFIG.landListingReport.access && currentUser && typeof renderShell==='function'){ try{ renderShell(); renderCurrentView(); }catch(_){} } }   // LLR-20261116
+          if(payload.eshReport && typeof payload.eshReport==='object'){ const _eshPrev=JSON.stringify([(APP_CONFIG.eshReport||{}).access,(APP_CONFIG.eshReport||{}).writers]); APP_CONFIG.eshReport={...(APP_CONFIG.eshReport||{}), ...payload.eshReport}; if(_eshPrev!==JSON.stringify([APP_CONFIG.eshReport.access,APP_CONFIG.eshReport.writers]) && currentUser && typeof renderShell==='function'){ try{ renderShell(); renderCurrentView(); }catch(_){} } }   // ESH-20261116
           eosCache[docId] = payload.data;
         } else {
           eosCache[docId] = payload.data;
@@ -10637,6 +10639,7 @@ function getDealPrice(deal){
 const _ELC_LLR_RE = /\bEsh(?:enbaugh)?\.?\s+(?:Land\s+)?Report\b/gi;
 function _elcLlrRename(s){ return typeof s==='string' ? s.replace(_ELC_LLR_RE,'Land Listings Report') : s; }
 function _elcLlrFix(data){
+  if(data && (data.taskType==='eshArticle' || /^📰/.test(String(data.title||'')))) return data;   // ESH-20261116 — the newsletter keeps its name
   if(data) for(const f of ['title','description','taskBase']) if(typeof data[f]==='string') data[f]=_elcLlrRename(data[f]);
   return data;
 }
@@ -12752,6 +12755,7 @@ function buildNavItems(){
       {id:'videoProposals',label:'🎬 Video Proposals',advisor:true, admin:true, manager:true, staff:true},
       {id:'monthlyReports',label:'📬 Monthly Reports', reports:true},   // MREPORT-20261006 — gated by _mrNavVisible
       {id:'landListingReport',label:'🏞️ Land Listing Report', llr:true},   // LLR-20261116 — gated by _llrNavVisible (Ryan only until opened)
+      {id:'eshReport',     label:'📰 Eshenbaugh Report', esh:true},   // ESH-20261116 — gated by _eshNavVisible (Ryan only until he opens it)
       {id:'marketReports', label:'📊 Market Reports',  always:true},     // MKTREPORT-20261007; REPORTSALL-20261016 — open to every user (editing stays admin-only)
       {id:'activityLog',   label:'🕵️ Activity Log',   admin:true},
       {id:'earthnotes',    label:'🌎 EarthNotes',     always:true},
@@ -12760,7 +12764,8 @@ function buildNavItems(){
     ].filter(n=>{
       if(sv){ // staff view: always tabs + staff-flagged tabs + manager tabs (for office managers) + CRM if enabled
         if(n.staffOnly) return true;   // tabs that exist ONLY inside staff view
-        if(n.llr) return _llrNavVisible(false,true);   // LLR-20261116
+        if(n.llr) return _llrNavVisible(false,true);
+        if(n.esh) return _eshNavVisible(false,true);   // ESH-20261116   // LLR-20261116
         if(n.reports) return (_mrCfg().access||'owner')==='all';   // REPORTSALL-20261016 — staff see every monthly report
         if(n.always) return true;
         if(n.staff) return true;
@@ -12769,6 +12774,7 @@ function buildNavItems(){
         return false;
       }
       if(!effectiveAdmin && ADVISOR_VIEW_HIDDEN_TABS.includes(n.id)) return false;   // ADVHIDE-20261014
+      if(n.esh) return _eshNavVisible(effectiveAdmin,false);   // ESH-20261116
       if(n.llr) return _llrNavVisible(effectiveAdmin,false);   // LLR-20261116
       if(n.reports) return _mrNavVisible(effectiveAdmin);   // MREPORT-20261006
       if(n.always) return true;
@@ -14086,7 +14092,7 @@ function renderCurrentView(){
     bio:viewAdvisorBio,   // ADVBIO-20261006
     splits:viewSplits,automations:viewAutomations,users:viewUsers,leaderboard:viewLeaderboard,
     manageStages:viewManageStages,officeManagers:viewOfficeManagers,approvedUsers:viewApprovedUsers,officeOverview:viewOfficeOverview,
-    eos:()=>viewEOS(window._eosSub||'rocks'),comps:viewComps,drive:viewDrive,documents:viewDocuments,hr:viewHR,crm:viewCRM,leads:viewLeads,inbox:viewSmartInbox,buyers:viewBuyers,videoProposals:viewVideoProposals,earthnotes:viewEarthNotes,valuation:viewValuation,activityLog:viewActivityLog,agreements:viewAgreements,monthlyReports:viewMonthlyReports,marketReports:viewMarketReports,landListingReport:viewLandListingReport};   // LLR-20261116
+    eos:()=>viewEOS(window._eosSub||'rocks'),comps:viewComps,drive:viewDrive,documents:viewDocuments,hr:viewHR,crm:viewCRM,leads:viewLeads,inbox:viewSmartInbox,buyers:viewBuyers,videoProposals:viewVideoProposals,earthnotes:viewEarthNotes,valuation:viewValuation,activityLog:viewActivityLog,agreements:viewAgreements,monthlyReports:viewMonthlyReports,marketReports:viewMarketReports,landListingReport:viewLandListingReport,eshReport:viewEshReport};   // LLR-20261116
   try {
     (map[currentView]||viewBoard)();
   } catch(e) {
@@ -14358,6 +14364,7 @@ function _bioRenderEditor(uid, seeAll){
           <label class="bio-lbl" for="bio-linkedin">LinkedIn</label>
           <input id="bio-linkedin" class="bio-in" type="url" value="${_bioEsc(b.linkedin)}" placeholder="https://www.linkedin.com/in/…" ${ro}>
         </div>
+        ${window._lpBioSection?window._lpBioSection(uid,self):''}<!-- LIPERSONAL-20261116 -->
         <div class="bio-sec">
           <h3>Designations</h3>
           <div id="bio-desig" role="group" aria-label="Designations" style="display:flex;flex-wrap:wrap;gap:.4rem">
@@ -14390,6 +14397,7 @@ function _bioRenderEditor(uid, seeAll){
     </form>
   `);
   st.dirty=false;
+  if(self && window._lpRefreshBio) window._lpRefreshBio();   // LIPERSONAL-20261116
 }
 function _bioPreviewInner(b){
   return `${_bioAvatar(b,72)}
@@ -27735,8 +27743,9 @@ function viewTasks(){
         ${(window._mwIsReviewTask&&window._mwIsReviewTask(t))?window._mwTaskButtons(t):''}<!-- MWTASK-20261016 -->
         ${(window._caIsTask&&window._caIsTask(t))?window._caTaskButtons(t):''}<!-- CARDASK-20261029 -->
         ${(window._crIsTask&&window._crIsTask(t))?`<div data-cr-box="${t.id}">${window._crTaskButtons(t)}</div>`:''}<!-- CRMASK-20261104 -->
-        ${(t.autoCompletedEmailUrl||t.emailUrl||t.invoiceDealId||t.gmailUrl||t.attachmentUrl||t.approvePaymentDealId||(window._spIsSocialTask&&window._spIsSocialTask(t))||(window._mrIsAssetsTask&&window._mrIsAssetsTask(t))||(window._mrIsBlastTask&&window._mrIsBlastTask(t)))?`<div class="flex gap-2 mt-2 flex-wrap">
+        ${(t.autoCompletedEmailUrl||t.emailUrl||t.invoiceDealId||t.gmailUrl||t.attachmentUrl||t.approvePaymentDealId||(window._spIsSocialTask&&window._spIsSocialTask(t))||(window._lpIsPersonalTask&&window._lpIsPersonalTask(t))||(window._mrIsAssetsTask&&window._mrIsAssetsTask(t))||(window._mrIsBlastTask&&window._mrIsBlastTask(t)))?`<div class="flex gap-2 mt-2 flex-wrap">
           ${(window._spIsSocialTask&&window._spIsSocialTask(t))?`<button onclick="window._spOpen('${t.dealId}','${t.id}')" class="text-xs font-semibold px-2.5 py-1 rounded-lg text-white" style="background:#0A66C2">📣 Compose post</button>`:''}
+          ${(window._lpIsPersonalTask&&window._lpIsPersonalTask(t))?`<button onclick="window._lpOpen('${t.dealId}','${t.id}')" class="text-xs font-semibold px-2.5 py-1 rounded-lg text-white" style="background:#0A66C2">in Post to my LinkedIn</button>`:''}
           ${(window._mrIsAssetsTask&&window._mrIsAssetsTask(t))?`<button onclick="window._mrOpenAssets('${t.dealId}','${t.id}')" class="text-xs font-semibold px-2.5 py-1 rounded-lg text-white" style="background:#DA291C">📎 Upload report assets</button>`:''}
           ${(window._mrIsBlastTask&&window._mrIsBlastTask(t))?`<button onclick="window._mbOpen('${t.dealId}','${t.id}')" class="text-xs font-semibold px-2.5 py-1 rounded-lg text-white" style="background:#FFE01B;color:#241C15">📧 Compose e-blast</button>`:''}
           ${t.invoiceDealId?`<button onclick="openCommissionInvoice('${t.invoiceDealId}')" class="text-xs font-semibold px-2.5 py-1 rounded-lg text-white" style="background:#1a1a1a">📄 Download Invoice (Word)</button>`:''}
@@ -34654,7 +34663,7 @@ window._llrSweepTasks = async function(){
   const hit = s => typeof s==='string' && new RegExp(_ELC_LLR_RE.source,'i').test(s);
   const tasks = (typeof allTasks!=='undefined' ? allTasks : []);
   let n = 0;
-  for(const t of tasks.filter(t => hit(t.title) || hit(t.description) || hit(t.taskBase))){
+  for(const t of tasks.filter(t => t.taskType!=='eshArticle' && !/^📰/.test(String(t.title||'')) && (hit(t.title) || hit(t.description) || hit(t.taskBase)))){   // ESH-20261116
     const upd = {}; for(const f of ['title','description','taskBase']) if(hit(t[f])) upd[f] = _elcLlrRename(t[f]);
     try{ await Store.updateTask(t.id, upd); Object.assign(t, upd); n++; }catch(e){ console.warn('[llrSweep task]', t.id, e); }
   }
@@ -34882,7 +34891,7 @@ window._taRenderDealTasks = function(dealId){
       <input type="checkbox" ${done?'checked':''} onchange="window.toggleTask('${t.id}', this.checked?'complete':'pending')" style="margin-top:.15rem;cursor:pointer;flex-shrink:0"/>
       <div style="flex:1;min-width:0">
         <div onclick="window.openTaskModal('${t.id}','${dealId}')" title="Edit task" style="font-size:.82rem;line-height:1.3;cursor:pointer;color:${done?'#9ca3af':'#111827'};${done?'text-decoration:line-through':''}">${esc(t.title)}</div>
-        ${(window._spIsSocialTask&&window._spIsSocialTask(t))?`<button class="prop-note-btn" style="margin-top:.25rem;font-size:.7rem" onclick="window._spOpen('${dealId}','${t.id}')">📣 Compose post</button>`:''}
+        ${(window._spIsSocialTask&&window._spIsSocialTask(t))?`<button class="prop-note-btn" style="margin-top:.25rem;font-size:.7rem" onclick="window._spOpen('${dealId}','${t.id}')">📣 Compose post</button>`:''}${(window._lpIsPersonalTask&&window._lpIsPersonalTask(t))?`<button class="prop-note-btn" style="margin-top:.25rem;font-size:.7rem;color:#0A66C2" onclick="window._lpOpen('${dealId}','${t.id}')">in Post to my LinkedIn</button>`:''}
         ${(window._mrIsAssetsTask&&window._mrIsAssetsTask(t))?`<button class="prop-note-btn" style="margin-top:.25rem;font-size:.7rem" onclick="window._mrOpenAssets('${dealId}','${t.id}')">📎 Upload report assets</button>`:''}
         ${(window._mrIsBlastTask&&window._mrIsBlastTask(t))?`<button class="prop-note-btn" style="margin-top:.25rem;font-size:.7rem" onclick="window._mbOpen('${dealId}','${t.id}')">📧 Compose e-blast</button>`:''}
         <div style="font-size:.7rem;color:#6b7280;margin-top:.15rem;display:flex;gap:.6rem;flex-wrap:wrap">
@@ -51629,7 +51638,7 @@ function _mrSocialPostsHtml(){
   const ed=window._mrState.editor; if(!ed) return '';
   const posts=(typeof _mrMonthPosts==='function')?_mrMonthPosts(ed.deal,ed.ym):[];
   if(!posts.length) return '<span class="mr-muted">None yet — posts made with 📣 Post to social on this listing this month will appear here.</span>';
-  return posts.map(p=>`<div style="display:flex;gap:.5rem;align-items:center;border:1px solid var(--border);border-radius:10px;padding:.35rem .5rem;max-width:340px">${p.imageUrl?`<img class="mr-thumb" src="${_mrEsc(p.imageUrl)}" alt="Post photo" style="width:54px;height:54px;object-fit:cover">`:''}<div style="font-size:.75rem;line-height:1.3"><div style="font-weight:600">${_mrEsc(_mrFmtDateLong(p.at))} · ${p.platforms.map(q=>q==='facebook'?'Facebook':'LinkedIn').join(' + ')}</div><div class="mr-muted" style="max-width:250px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${_mrEsc((p.message||'').split('\n')[0])}</div>${_mrPostAction(ed.rep,p)==='drop'?'<div class="mr-noweb" style="white-space:normal">Removed from this month’s report — 🔍 Review to put it back</div>':''}${Object.values(p.urls||{}).slice(0,1).map(u=>`<a href="${_mrEsc(u)}" target="_blank" rel="noopener" style="color:var(--brand-teal)">Open post ↗</a>`).join('')}</div></div>`).join('');
+  return posts.map(p=>`<div style="display:flex;gap:.5rem;align-items:center;border:1px solid var(--border);border-radius:10px;padding:.35rem .5rem;max-width:340px">${p.imageUrl?`<img class="mr-thumb" src="${_mrEsc(p.imageUrl)}" alt="Post photo" style="width:54px;height:54px;object-fit:cover">`:''}<div style="font-size:.75rem;line-height:1.3"><div style="font-weight:600">${_mrEsc(_mrFmtDateLong(p.at))} · ${p.platforms.map(q=>(window._lpPlatformLabel||String)(q)).join(' + ')}</div><div class="mr-muted" style="max-width:250px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${_mrEsc((p.message||'').split('\n')[0])}</div>${_mrPostAction(ed.rep,p)==='drop'?'<div class="mr-noweb" style="white-space:normal">Removed from this month’s report — 🔍 Review to put it back</div>':''}${Object.values(p.urls||{}).slice(0,1).map(u=>`<a href="${_mrEsc(u)}" target="_blank" rel="noopener" style="color:var(--brand-teal)">Open post ↗</a>`).join('')}</div></div>`).join('');
 }
 function _mrSocialThumbsHtml(){
   const ed=window._mrState.editor; if(!ed) return '';
@@ -51872,13 +51881,13 @@ function _mrEmailLabel(arr){ return (arr||[]).map(r=>r.name).filter(Boolean); }
 function _mrMonthPosts(deal, ym){
   const rng=_mrMonthRange(ym); const groups=new Map();
   (deal.socialPosts||[]).filter(p=>p&&p.at>=rng.start&&p.at<rng.end).sort((a,b)=>(b.at||0)-(a.at||0)).forEach(p=>{
-    const key=(p.message||'')+'|'+(p.imageUrl||'')+'|'+Math.round((p.at||0)/120000);   // same caption+photo within 2 min
-    let g=groups.get(key); if(!g){ g={at:p.at, message:p.message||'', imageUrl:p.imageUrl||'', link:p.link||'', byName:p.byName||'', platforms:[], ids:[], urls:{}, stored:{}, comments:[], reason:p.reason||''}; groups.set(key,g); }
-    if(!g.platforms.includes(p.platform)) g.platforms.push(p.platform); if(p.id) g.ids.push({platform:p.platform,id:p.id}); if(p.url) g.urls[p.platform]=p.url;
+    const key=(p.platform==='linkedin_personal'?'me:'+(p.byUid||p.by||'')+'|':'')+(p.message||'')+'|'+(p.imageUrl||'')+'|'+Math.round((p.at||0)/120000);   // LIPERSONAL-20261116   // same caption+photo within 2 min
+    let g=groups.get(key); if(!g){ g={at:p.at, message:p.message||'', imageUrl:p.imageUrl||'', link:p.link||'', byName:p.byName||'', platforms:[], ids:[], urls:{}, stored:{}, comments:[], reason:p.reason||'', byUid:p.byUid||p.by||'', personal:p.platform==='linkedin_personal'}; groups.set(key,g); }
+    if(!g.platforms.includes(p.platform)) g.platforms.push(p.platform); if(p.id && p.platform!=='linkedin_personal') g.ids.push({platform:p.platform,id:p.id}); if(p.url) g.urls[p.platform]=p.url;
     // SOCIALDAILY-20261007: the 24-hour results and comments the cron saved on the post
     if(p.metrics) g.stored[p.platform]=p.metrics; (p.comments||[]).forEach(c=>{ if(c&&c.message) g.comments.push({platform:p.platform, name:c.name||'', message:c.message, at:c.at||''}); });
   });
-  const order={facebook:0,linkedin:1}; const out=[...groups.values()]; out.forEach(g=>g.platforms.sort((a,b)=>(order[a]??9)-(order[b]??9))); return out;
+  const order={facebook:0,linkedin:1,linkedin_personal:2}; const out=[...groups.values()]; out.forEach(g=>g.platforms.sort((a,b)=>(order[a]??9)-(order[b]??9))); return out;
 }
 // Reach / clicks for those posts from the social worker. Best effort — never blocks the report.
 async function _mrPostMetrics(groups){
@@ -52160,10 +52169,18 @@ async function _mrBuildPdf(A){
         if(i===0 && y>R.M+40) { R.text('Posts',R.M,y+6,{size:16,bold:true}); y+=18; }
         const x=R.M; doc.setDrawColor(226,232,240); doc.setLineWidth(1); doc.roundedRect(x,y,cw,h,6,6,'S');
         // header: avatar + page name + date · platforms
-        let cy=y+pad; doc.setFillColor(...MR_RED); doc.circle(x+pad+14,cy+14,14,'F'); R.text('E',x+pad+14,cy+19,{size:13,bold:true,color:[255,255,255],align:'center'});
+        let cy=y+pad;
+        if(p.personal){   // LIPERSONAL-20261116 — an advisor's post on their own LinkedIn prints under their name + headshot
+          const adv=(A.advisors||[]).find(a=>a.uid&&a.uid===p.byUid)||null; const nm=p.byName||(adv&&adv.name)||'Advisor';
+          if(adv&&adv.head){ let clipped=false; try{ doc.saveGraphicsState(); doc.circle(x+pad+14,cy+14,14,null); doc.clip(); doc.discardPath(); clipped=true; }catch(e){} R.img(adv.head,x+pad,cy,28,28); if(clipped){ try{ doc.restoreGraphicsState(); }catch(e){} } }
+          else { doc.setFillColor(10,102,194); doc.circle(x+pad+14,cy+14,14,'F'); R.text(String(nm).charAt(0).toUpperCase(),x+pad+14,cy+19,{size:13,bold:true,color:[255,255,255],align:'center'}); }
+          R.text(nm,x+pad+36,cy+11,{size:10,bold:true});
+        } else {
+        doc.setFillColor(...MR_RED); doc.circle(x+pad+14,cy+14,14,'F'); R.text('E',x+pad+14,cy+19,{size:13,bold:true,color:[255,255,255],align:'center'});
         R.text('Eshenbaugh Land Company',x+pad+36,cy+11,{size:10,bold:true});
+        }
         const reasonLabel={new:'New listing',price:'Price reduced',back:'Back on the market',renewed:'Listing extended',expiring:'Expiring soon',nooffer:'Available',rotation:'Available'}[p.reason]||'';
-        R.text(_mrFmtDateLong(p.at)+' · '+p.platforms.map(q=>q==='facebook'?'Facebook':q==='linkedin'?'LinkedIn':q).join(' + ')+(p.byName?' · posted by '+p.byName:'')+(reasonLabel?' · '+reasonLabel:''),x+pad+36,cy+24,{size:8,color:MR_GREY});
+        R.text(_mrFmtDateLong(p.at)+' · '+p.platforms.map(q=>q==='facebook'?'Facebook':q==='linkedin'?'LinkedIn':q==='linkedin_personal'?'LinkedIn (personal profile)':q).join(' + ')+(p.byName&&!p.personal?' · posted by '+p.byName:'')+(reasonLabel?' · '+reasonLabel:''),x+pad+36,cy+24,{size:8,color:MR_GREY});
         cy+=34;
         // caption
         doc.setFont(font,'normal'); doc.setFontSize(9); doc.setTextColor(...MR_INK); shown.forEach((ln,k)=>doc.text(ln,x+pad,cy+9+k*lineH)); cy+=shown.length*lineH;
@@ -53114,7 +53131,7 @@ async function _mrPreflight(A){
     else add('E-blasts','ok',label+(v.facts.acres[0]?' — '+v.facts.acres[0]+'± ac':'')+(v.facts.counties[0]?' · '+_mrCap(v.facts.counties[0])+' County':''));
   });
   // 3 · social posts
-  (A.posts||[]).forEach(p=>{ const v=_mrMcConflicts(deal,{subject:'',bodyText:p.message||''}); const label=_mrFmtDate(p.at)+' '+(p.platforms||[]).join('/')+' post';
+  (A.posts||[]).forEach(p=>{ const v=_mrMcConflicts(deal,{subject:'',bodyText:p.message||''}); const label=_mrFmtDate(p.at)+' '+(p.platforms||[]).map(q=>(window._lpPlatformLabel||String)(q)).join('/')+' post';
     const why=v.join('; ').replace(/e-blast/g,'post'); const pr=_mrPostReviewOf(rep,p);   // POSTOK-20261111
     if(v.length && pr && pr.action==='keep') add('Social posts','warn',label+' — '+why+'. OK’d to stay in the report by '+(pr.byName||'a reviewer')+'.',{fix:'postUndo', id:_mrPostKey(p)});
     else if(v.length) add('Social posts','block',label+' — '+why+'. If the post is right, press “OK — leave it in”; otherwise remove it from this report.',{fix:'post', id:_mrPostKey(p)});
@@ -54533,13 +54550,30 @@ window._psIgnore=async function(i,btn){
        listing was moved to). Agricultural / Other / blank Land Type print only in an all-land run.
    Access: APP_CONFIG.landListingReport.access = 'owner' (Ryan only — default) | 'admins' | 'all'; stored in
    eos/settings.landListingReport and flipped from the tab's ⚙ Access button (Ryan only).
+   LLR3-20261116 (Ryan, same day):
+     • Cover redesigned — large logo, "The Land Listings REPORT" title, Commercial / Industrial / Residential / Agricultural
+       buttons that jump to that section's page in the PDF, both office addresses + phones, email and website.
+     • Price shows only an ASKING price: override → owner-report price text → Listed Price. Never the purchase / contract /
+       LOI price (Gibsonton Dr printed its PSA purchase price while the card had no asking price).
+     • "New Listings" and "Other Properties" sections removed. Every listing lands in Commercial / Industrial / Residential /
+       Agricultural (or Featured): Land Type → zoning code → listing name; if none of those tells, it prints under Commercial
+       (most of the old "Other" listings) and the row is flagged "Section guessed — pick one" so it can be moved.
+     • A listing with no photo on the card is left out of the PDF and its advisor gets a one-time task (per quarter) to add one.
+     • The closing page fills the space after the advisor directory with both offices, email, phone and website.
    ======================================================= */
 const LLR_OWNER_EMAILS=['ryan@thedirtdog.com'];
 const LLR_RED=[238,45,36], LLR_TEAL=[84,196,203], LLR_TEAL_DK=[31,127,134], LLR_INK=[33,33,33], LLR_LINK=[52,170,190];
 const LLR_SECTIONS=[
-  ['new','New Listings'],['featured','Featured Properties'],['commercial','Commercial Properties'],['industrial','Industrial Properties'],
-  ['residential','Residential Properties'],['agricultural','Agricultural Properties'],['other','Other Properties'],['uc','Under Contract'],['sold','Quarter Sales']];
-const LLR_PICKABLE=['commercial','industrial','residential','agricultural','other','featured','new'];
+  ['featured','Featured Properties'],['commercial','Commercial Properties'],['industrial','Industrial Properties'],
+  ['residential','Residential Properties'],['agricultural','Agricultural Properties'],['uc','Under Contract'],['sold','Quarter Sales']];
+const LLR_PICKABLE=['commercial','industrial','residential','agricultural','featured'];
+const LLR_LAND_KEYS=['commercial','industrial','residential','agricultural'];
+// LLR3-20261116 — company contact block (cover + closing page)
+const LLR_CONTACT={
+  offices:[
+    {name:'Tampa Office', lines:['304 S. Willow Ave.','Tampa, FL 33606'], phone:'813-287-8787'},
+    {name:'Orlando Office', lines:['941 W. Morse Blvd., Suite 100','Winter Park, FL 32789'], phone:'407-710-7374'}],
+  email:'info@thedirtdog.com', web:'thedirtdog.com', url:'https://www.thedirtdog.com'};
 function _llrCfg(){ return (APP_CONFIG.landListingReport = APP_CONFIG.landListingReport || {access:'owner'}); }
 function _llrIsOwner(){ return !!(currentUser && LLR_OWNER_EMAILS.includes(String(currentUser.email||'').toLowerCase())); }
 function _llrCanAccess(){ if(!currentUser) return false; if(_llrIsOwner()) return true; const a=_llrCfg().access||'owner'; if(a==='all') return true; if(a==='admins') return !!currentUser.isAdmin; return false; }
@@ -54607,8 +54641,39 @@ function _llrCatOf(d){
   if(/agri|timber|ranch|farm/.test(t)) return 'agricultural';
   if(/resid|multi|apartment|senior|single/.test(t)) return 'residential';
   if(/commercial|retail|office|medical|mixed|storage|hotel|hospitality/.test(t)) return 'commercial';
-  return 'other';
+  return '';   // LLR3-20261116 — no "Other": an unrecognised Land Type falls through to zoning / name (_llrAutoCat)
 }
+// LLR3-20261116 — Florida zoning code → land category (first code in the zoning text)
+function _llrZoneCat(z){
+  const s=String(z||'').toUpperCase().replace(/^ZONED\s+/,'').trim(); if(!s) return '';
+  if(/INDUSTR|WAREHOUSE|MANUFACTUR/.test(s)) return 'industrial';
+  if(/AGRIC|RURAL|RANCH/.test(s)) return 'agricultural';
+  if(/COMMERC|RETAIL|BUSINESS|OFFICE/.test(s)) return 'commercial';
+  if(/RESIDEN|MULTI-?FAMILY|SINGLE/.test(s)) return 'residential';
+  const c=(s.match(/[A-Z][A-Z0-9-]*/)||[''])[0];
+  if(/^(PD|PUD|MPUD|RPD|CPD|IPD)-?(C|COM|MU)/.test(c)||/^CPD/.test(c)) return 'commercial';
+  if(/^(PD|PUD|MPUD)-?(I|IND)/.test(c)||/^IPD/.test(c)) return 'industrial';
+  if(/^(PD|PUD|MPUD)-?(R|RES|MF)/.test(c)||/^RPD/.test(c)) return 'residential';
+  if(/^(I|IL|IH|IG|IP|LI|HI|PI|M|ML|MH?|BP|PID)(-?\d+)?$/.test(c)) return c==='MH'?'residential':'industrial';
+  if(/^(A|AG|AR|AC|AS|AU|AGR|ASC|AE)(-?\d+)?$/.test(c)) return 'agricultural';
+  if(/^(C|CG|CN|CI|CH|CS|CC|CP|CR|CT|GC|HC|NC|B|BG|BPO|O|OP|OR|OC|MU|MX|MXD|TC|CBD|DT)(-?\d+)?/.test(c)) return 'commercial';
+  if(/^(R|RS|RSC|RM|RMF|RE|RR|RD|RMH|MF|SF|RU|RSF|RT)(-?\d+)?/.test(c)) return 'residential';
+  return '';
+}
+// Category a listing auto-sorts into, and why: Land Type → zoning → words in the name / notes → guess Commercial
+function _llrAutoCat(d){
+  let c=_llrCatOf(d); if(c) return {cat:c, src:'Land Type'};
+  c=_llrZoneCat(d.zoning); if(c) return {cat:c, src:'zoning'};
+  const n=[d.projectName,d.name,d.dealName,d.llrTitle,d.buyerUse].map(x=>String(x||'')).join(' ').toLowerCase();
+  if(/industrial|warehouse|flex|logistic|distribution|outdoor storage|\bios\b/.test(n)) return {cat:'industrial', src:'name'};
+  if(/\bfarm|ranch|grove|timber|pasture|agri|cattle|hunting/.test(n)) return {cat:'agricultural', src:'name'};
+  if(/subdivision|homesite|residential|multi-?family|apartment|townhome|single.family|\blots?\b|\bsf\b|\bmf\b/.test(n)) return {cat:'residential', src:'name'};
+  if(/retail|outparcel|\bpad\b|commercial|office|medical|hotel|storage|c-store|gas|restaurant|corner/.test(n)) return {cat:'commercial', src:'name'};
+  return {cat:'commercial', src:'guess'};
+}
+// Asking price only (LLR3-20261116) — never the purchase / contract / LOI / proposed price
+function _llrAskingPrice(d){ return Number(d.listedPrice||d.listPrice||d.askingPrice||0)||0; }
+function _llrNoPriceText(t){ return !!t && !/\$\s*\d|^\s*\d[\d,.]*\s*(k|m|mm|million)?\s*$/i.test(t); }
 function _llrAcres(d){ const n=parseFloat(String(d.acreage!=null&&d.acreage!==''?d.acreage:(d.acres||'')).replace(/[^0-9.]/g,'')); if(!isFinite(n)||n<=0) return ''; let s=(Math.round(n*100)/100).toString(); if(n<1) s=s.replace(/^0/,''); return Number(s.replace(/^\./,'0.'))>=1000?Math.round(n).toLocaleString('en-US'):s; }
 function _llrAddrParts(d){ return String(d.propertyAddress||d.address||'').split(',').map(x=>x.trim()).filter(Boolean); }
 function _llrCity(d){
@@ -54628,12 +54693,14 @@ function _llrAdvisors(d){ return _mrAdvisorsOf(d).filter(a=>a.name); }
 function _llrPriceInfo(d){
   const many=_llrAdvisors(d).length>1; const contact='Contact Advisor'+(many?'s':'')+' for Pricing';
   const o=String(d.llrPriceText||'').trim();
-  if(o) return {text:/^\$/.test(o)?'Asking '+o:o, src:'override'};
+  if(o) return _llrNoPriceText(o)&&/call|contact|unpriced|tbd|request|offer|detail/i.test(o)?{text:contact, src:'override says “'+o+'”'}:{text:/^\$/.test(o)?'Asking '+o:o, src:'override'};
   const r=String(d.reportPriceText||'').trim();
   if(r) return /\$\s*\d/.test(r)?{text:/^asking/i.test(r)?r:'Asking '+r.replace(/^asking\s*/i,''), src:'owner report'}:{text:contact, src:'owner report says “'+r+'”'};
   if(d.dealType==='lease') return {text:'Contact Advisor'+(many?'s':'')+' for Lease Terms', src:'lease'};
-  const p=_mrDealPrice(d); if(p) return {text:'Asking '+_mrFmtMoney(p), src:'Terra listed price'};
-  return {text:contact, src:'no price on card'};
+  // LLR3-20261116 — only an ASKING price prints; purchase / contract / LOI price on the card never does
+  const p=_llrAskingPrice(d); if(p) return {text:'Asking '+_mrFmtMoney(p), src:'Terra listed price'};
+  const other=_mrDealPrice(d)||Number(d.contractPrice||d.loiPrice||0);
+  return {text:contact, src:other?'no asking price on card (deal price '+_mrFmtMoney(other)+' not shown)':'no price on card'};
 }
 function _llrAdvisorLabel(d){ const a=_llrAdvisors(d); if(!a.length) return ''; if(a.length===1) return 'Advisor: '+a[0].name; const f=a.map(x=>_mrFirstName(x.name)); return 'Advisors: '+(f.length===2?f.join(' & '):f.slice(0,-1).join(', ')+' & '+f[f.length-1]); }
 function _llrAutoLink(d){
@@ -54665,7 +54732,7 @@ function _llrOfficeOf(uid, email){
 }
 function _llrDealOffices(d){ const s=new Set(); if(d.advisorUid||d.advisorEmail) s.add(_llrOfficeOf(d.advisorUid,d.advisorEmail)); (d.coAdvisors||[]).forEach(c=>{ if(c&&(c.uid||c.email)) s.add(_llrOfficeOf(c.uid,c.email)); }); (d.coAdvisorUids||[]).forEach(u=>s.add(_llrOfficeOf(u,''))); return s; }
 // Land category the listing belongs to: the section it was moved to (when that is a land category) or its Land Type
-function _llrLandCat(d){ const o=String(d.llrSection||''); if(['commercial','industrial','residential','agricultural','other'].includes(o)) return o; return _llrCatOf(d); }
+function _llrLandCat(d){ const o=String(d.llrSection||''); if(LLR_LAND_KEYS.includes(o)) return o; return _llrAutoCat(d).cat; }   // LLR3 — never blank
 function _llrInScope(d){
   const st=_llrState();
   if(st.office && !_llrDealOffices(d).has(st.office)) return false;
@@ -54678,39 +54745,38 @@ function _llrScopeFile(){ const st=_llrState(); return (st.office?'_'+st.office:
 /* ---------- the list ---------- */
 function _llrCollect(){
   const st=_llrState(); const asOf=_llrAsOfTs(st.asOf); const Q=_llrQRange(st.q);
-  const rows=[], out=[];
+  const rows=[];
   (allDeals||[]).forEach(d=>{
     if(!d||!d.id||!_mrIsSellerRep(d)) return;
-    if(!_llrInScope(d)){ if(_llrState().land!=='all' && !_llrLandCat(d) && _mrIsReportStage(_mrStageOf(d)) && !d.doNotMarket) out.push(d); return; }   // LLR2-20261116
+    if(!_llrInScope(d)) return;   // LLR2-20261116 (LLR3: every listing now has a land category, so nothing is skipped as blank)
     const s=_llrStageAt(d, asOf); if(!s) return;
     if(_mrIsReportStage(s)){
       if(_mrListingStart(d)>asOf) return;
       const uc=_mrUnderContract({stage:s});
-      const start=_mrListingStart(d);
-      const isNew=!uc && start>=Q.start && start<=asOf;
+      const auto=_llrAutoCat(d);
       let sec; const ov=String(d.llrSection||'');
-      if(uc) sec='uc'; else if(ov&&LLR_PICKABLE.includes(ov)) sec=ov; else if(isNew) sec='new'; else sec=_llrCatOf(d)||'other';
-      const r={d, stage:s, uc, isNew, sec, excluded:'', issues:[]};
+      if(uc) sec='uc'; else if(ov&&LLR_PICKABLE.includes(ov)) sec=ov; else sec=auto.cat;   // LLR3 — no New Listings / Other
+      const guessed=!uc && !(ov&&LLR_PICKABLE.includes(ov)) && auto.src==='guess';
+      const r={d, stage:s, uc, sec, auto, guessed, excluded:'', issues:[]};
       if(d.doNotMarket) r.excluded='DO NOT MARKET';
       else if(d.llrExclude) r.excluded='Left out by hand';
       else if(uc && !st.includeUc) r.excluded='Under-contract listings switched off';
+      else if(!_llrPhoto(d)){ r.excluded='No photo — left out'; r.noPhoto=true; }   // LLR3-20261116
       rows.push(r);
     } else if(st.includeSold && typeof isWonStage==='function' && isWonStage(_mrStageOf(d))){
       const ct=_llrDateTs(d.closeDate)||_llrDateTs(d.stageEnteredAt);
-      if(ct>=Q.start && ct<=Q.end){ const r={d, stage:_mrStageOf(d), sold:true, closeTs:ct, sec:'sold', excluded:'', issues:[]}; if(d.doNotMarket) r.excluded='DO NOT MARKET'; else if(d.llrExclude) r.excluded='Left out by hand'; rows.push(r); }
+      if(ct>=Q.start && ct<=Q.end){ const r={d, stage:_mrStageOf(d), sold:true, closeTs:ct, sec:'sold', excluded:'', issues:[]}; if(d.doNotMarket) r.excluded='DO NOT MARKET'; else if(d.llrExclude) r.excluded='Left out by hand'; else if(!_llrPhoto(d)){ r.excluded='No photo — left out'; r.noPhoto=true; } rows.push(r); }
     }
   });
   rows.forEach(r=>{ const d=r.d;
-    if(!_llrPhoto(d)) r.issues.push('No aerial');
     if(!r.sold && !_llrLink(d)) r.issues.push('No website link');
     if(!String(d.zoning||'').trim()) r.issues.push('No zoning');
     if(!_llrAcres(d) && !String(d.llrTitle||'').trim()) r.issues.push('No acreage');
     if(!_llrAdvisors(d).length) r.issues.push('No advisor');
-    if(!r.sold && !r.uc && !String(d.llrSection||'') && !r.isNew && !_llrCatOf(d)) r.issues.push('Land Type blank → Other');
+    if(r.guessed) r.issues.push('Section guessed — pick one');   // LLR3-20261116
   });
   const order=LLR_SECTIONS.map(x=>x[0]);
   rows.sort((a,b)=>(order.indexOf(a.sec)-order.indexOf(b.sec)) || (a.sold?(a.closeTs-b.closeTs):0) || _llrTitle(a.d).localeCompare(_llrTitle(b.d),undefined,{numeric:true}));
-  rows.blankLandType=out.length;   // listings skipped by a land-type run because their Land Type is blank
   return rows;
 }
 function _llrSectionTitle(key){ if(key==='sold'){ const r=_llrQRange(_llrState().q); return _llrOrdinal(r.q)+' Quarter Sales'; } return (LLR_SECTIONS.find(x=>x[0]===key)||[key,key])[1]; }
@@ -54732,6 +54798,7 @@ function _llrInjectStyles(){
   .llr-nophoto{width:84px;height:60px;border-radius:6px;border:1px dashed #d97706;display:flex;align-items:center;justify-content:center;font-size:.68rem;font-weight:700;color:#b45309;text-align:center;line-height:1.15}
   html.dark .llr-nophoto{color:#fbbf24;border-color:#fbbf24}
   .llr-sub{font-size:.74rem;color:var(--text-2);margin-top:.2rem;line-height:1.3}
+  .llr-guess{border-color:#d97706!important;box-shadow:0 0 0 2px rgba(217,119,6,.25)} html.dark .llr-guess{border-color:#fbbf24!important}
   .llr-price{color:#c81e1e;font-weight:700} html.dark .llr-price{color:#f87171}
   .llr-ribbon{display:inline-block;font-size:.62rem;font-weight:800;letter-spacing:.06em;padding:.12rem .45rem;border-radius:4px;color:#fff;background:#da291c}
   .llr-ribbon.uc{background:#1f7f86}.llr-ribbon.sold{background:#374151}
@@ -54753,12 +54820,13 @@ function _llrRowHtml(r, canEdit){
   const link=_llrLink(d); const auto=_llrAutoLink(d);
   const rib=r.sold?`<span class="llr-ribbon sold">SOLD ${_mrEsc(_llrSoldDate(r.closeTs))}</span>`:(r.uc?'<span class="llr-ribbon uc">UNDER CONTRACT</span>':'<span class="llr-ribbon">AVAILABLE</span>');
   const secOpts=r.uc||r.sold?`<option>${_mrEsc(_llrSectionTitle(r.sec))}</option>`:
-    `<option value="" ${!d.llrSection?'selected':''}>Auto — ${_mrEsc(_llrSectionTitle(r.isNew?'new':(_llrCatOf(d)||'other')))}</option>`+LLR_PICKABLE.map(k=>`<option value="${k}" ${d.llrSection===k?'selected':''}>${_mrEsc(_llrSectionTitle(k))}</option>`).join('');
-  const issues=r.excluded?`<span class="mr-chip mr-chip-new">${_mrEsc(r.excluded)}</span>`:(r.issues.map(x=>`<span class="mr-chip mr-chip-warn" style="margin:0 .2rem .2rem 0">${_mrEsc(x)}</span>`).join('')||'<span class="mr-chip mr-chip-sent">Ready</span>');
-  const exclLocked=!!d.doNotMarket;
+    `<option value="" ${!LLR_PICKABLE.includes(d.llrSection||'')?'selected':''}>${r.auto&&r.auto.src==='guess'?'Guess':'Auto'} — ${_mrEsc(_llrSectionTitle(r.auto?r.auto.cat:'commercial'))}${r.auto&&r.auto.src!=='guess'?' (from '+_mrEsc(r.auto.src)+')':''}</option>`+LLR_PICKABLE.map(k=>`<option value="${k}" ${d.llrSection===k?'selected':''}>${_mrEsc(_llrSectionTitle(k))}</option>`).join('');
+  const st=_llrState(); const taskSent=r.noPhoto && d.llrPhotoTaskQ===st.q;
+  const issues=r.excluded?`<span class="mr-chip mr-chip-new">${_mrEsc(r.excluded)}</span>${r.noPhoto?`<div class="llr-sub">${taskSent?'📸 Task sent to '+_mrEsc((_llrAdvisors(d)[0]||{}).name||'advisor'):'Add a photo on the card (or pick one here) to print it'}</div>`:''}`:(r.issues.map(x=>`<span class="mr-chip mr-chip-warn" style="margin:0 .2rem .2rem 0">${_mrEsc(x)}</span>`).join('')||'<span class="mr-chip mr-chip-sent">Ready</span>');
+  const exclLocked=!!d.doNotMarket||!!r.noPhoto;
   return `<tr class="${r.excluded?'llr-off':''}" data-id="${id}">
     <td><input type="checkbox" class="mr-check" aria-label="Include ${_mrEsc(_mrDealName(d))} in the report" ${!r.excluded?'checked':''} ${exclLocked||!canEdit||(r.uc&&!_llrState().includeUc)?'disabled':''} onchange="window._llrSet('${id}','llrExclude',!this.checked)"></td>
-    <td><button type="button" class="llr-thumbbtn" ${dis} onclick="window._llrPickPhoto('${id}')" aria-label="Choose the aerial for ${_mrEsc(_mrDealName(d))}" title="${canEdit?'Choose the aerial':''}">${ph?`<img class="mr-thumb" src="${_mrEsc(ph)}" alt="" loading="lazy">`:'<div class="llr-nophoto">No aerial<br>— pick one</div>'}</button></td>
+    <td><button type="button" class="llr-thumbbtn" ${dis} onclick="window._llrPickPhoto('${id}')" aria-label="Choose the aerial for ${_mrEsc(_mrDealName(d))}" title="${canEdit?'Choose the aerial':''}">${ph?`<img class="mr-thumb" src="${_mrEsc(ph)}" alt="" loading="lazy">`:'<div class="llr-nophoto">No photo<br>— pick one</div>'}</button></td>
     <td style="min-width:200px">${rib}
       <input class="mr-input" style="margin-top:.3rem" ${dis} aria-label="Card headline" placeholder="${_mrEsc(_llrAutoTitle(d))}" value="${_mrEsc(d.llrTitle||'')}" onchange="window._llrSet('${id}','llrTitle',this.value)">
       <input class="mr-input" style="margin-top:.3rem" ${dis} aria-label="Address line" placeholder="${_mrEsc(_llrStreet(d)||'Address line')}" value="${_mrEsc(d.llrAddress||'')}" onchange="window._llrSet('${id}','llrAddress',this.value)">
@@ -54766,7 +54834,7 @@ function _llrRowHtml(r, canEdit){
       <button type="button" class="mr-btn mr-btn-sm" style="min-height:32px;margin-top:.3rem" onclick="window._llrOpenDeal('${id}')">Open card ↗</button></td>
     <td style="min-width:100px;max-width:150px">${_mrEsc(_llrZoning(d)||'—')}<div class="llr-sub">${_mrEsc(d.landType||'Land Type blank')}</div></td>
     <td style="min-width:170px"><div class="llr-price">${_mrEsc(price.text)}</div>${r.sold?'':`<input class="mr-input" style="margin-top:.3rem" ${dis} aria-label="Price on the report" placeholder="Override (e.g. \$1,950,000)" value="${_mrEsc(d.llrPriceText||'')}" onchange="window._llrSet('${id}','llrPriceText',this.value)">`}<div class="llr-sub">from ${_mrEsc(price.src)}</div></td>
-    <td style="min-width:150px"><select class="mr-select" ${dis||(r.uc||r.sold?'disabled':'')} aria-label="Report section" onchange="window._llrSet('${id}','llrSection',this.value)">${secOpts}</select></td>
+    <td style="min-width:150px"><select class="mr-select${r.guessed?' llr-guess':''}" ${dis||(r.uc||r.sold?'disabled':'')} aria-label="Report section" onchange="window._llrSet('${id}','llrSection',this.value)">${secOpts}</select></td>
     <td style="min-width:190px"><input class="mr-input" ${dis} aria-label="Property website link" placeholder="${_mrEsc(auto||'Paste the property website URL')}" value="${_mrEsc(d.llrUrl||'')}" onchange="window._llrSet('${id}','llrUrl',this.value)">
       <div class="llr-sub">${link?`<a href="${_mrEsc(link)}" target="_blank" rel="noopener" style="color:var(--brand-teal);font-weight:600">${_mrEsc(_mrLinkHost(link)||'link')} ↗</a>`:'no link yet'}</div></td>
     <td style="min-width:120px">${issues}</td></tr>`;
@@ -54817,8 +54885,8 @@ window._llrRenderRows=function(){
   const st=_llrState(); const canEdit=_llrCanEdit(); const all=_llrCollect();
   const inc=all.filter(r=>!r.excluded);
   const stats=document.getElementById('llr-stats');
-  if(stats){ const av=inc.filter(r=>!r.uc&&!r.sold).length, uc=inc.filter(r=>r.uc).length, so=inc.filter(r=>r.sold).length, att=inc.filter(r=>r.issues.length).length, ex=all.length-inc.length;
-    stats.innerHTML=`<div class="llr-stats"><div class="llr-stat"><b>${av}</b>available</div>${st.includeUc?`<div class="llr-stat"><b>${uc}</b>under contract</div>`:''}${st.includeSold?`<div class="llr-stat"><b>${so}</b>sold in the quarter</div>`:''}<div class="llr-stat"><b>${att}</b>need attention</div><div class="llr-stat"><b>${ex}</b>left out</div>${all.blankLandType?`<div class="llr-stat" title="Set the Land Type on these cards (or move them to a section) so they can print in a residential / commercial run"><b>${all.blankLandType}</b>skipped — no Land Type</div>`:''}<div class="llr-stat"><b>${_llrPagePlan(inc).length+1+(st.includeDir?_llrDirPages():0)}</b>PDF pages</div></div>`; }
+  if(stats){ const np=all.filter(r=>r.noPhoto).length, npTodo=_llrPhotoTodo(all).length, gu=inc.filter(r=>r.guessed).length; const av=inc.filter(r=>!r.uc&&!r.sold).length, uc=inc.filter(r=>r.uc).length, so=inc.filter(r=>r.sold).length, att=inc.filter(r=>r.issues.length).length, ex=all.length-inc.length;
+    stats.innerHTML=`<div class="llr-stats"><div class="llr-stat"><b>${av}</b>available</div>${st.includeUc?`<div class="llr-stat"><b>${uc}</b>under contract</div>`:''}${st.includeSold?`<div class="llr-stat"><b>${so}</b>sold in the quarter</div>`:''}<div class="llr-stat"><b>${att}</b>need attention</div><div class="llr-stat"><b>${ex}</b>left out</div>${np?`<div class="llr-stat" title="No photo on the card — left out of the PDF until one is added"><b>${np}</b>no photo</div>${canEdit&&npTodo?`<button type="button" class="mr-btn mr-btn-sm" style="min-height:40px" onclick="window._llrPhotoTasks(this)">📸 Ask advisors for photos (${npTodo})</button>`:''}`:''}${gu?`<div class="llr-stat" title="No Land Type, zoning or name clue — printing under Commercial until you pick a section"><b>${gu}</b>section guessed</div>`:''}<div class="llr-stat"><b>${_llrPagePlan(inc).length+1+(st.includeDir?_llrDirPages():0)}</b>PDF pages</div></div>`; }
   let rows=all; const q=String(st.search||'').toLowerCase().trim();
   if(q) rows=rows.filter(r=>(_llrTitle(r.d)+' '+_mrDealName(r.d)+' '+_llrAddress(r.d)+' '+(r.d.zoning||'')+' '+_llrAdvisorLabel(r.d)).toLowerCase().includes(q));
   if(st.issuesOnly) rows=rows.filter(r=>!r.excluded&&r.issues.length);
@@ -54856,6 +54924,35 @@ window._llrPickPhoto=function(id){
   document.body.appendChild(ov);
   window._llrPhotoCands=c;
 };
+/* ---------- LLR3-20261116 — no photo → left out + one task per listing per quarter to its advisor ---------- */
+function _llrPhotoTodo(rows){ const q=_llrState().q; return (rows||[]).filter(r=>r.noPhoto && r.d.llrPhotoTaskQ!==q && (r.d.advisorUid||r.d.advisorEmail||_llrAdvisors(r.d).length)); }
+async function _llrSendPhotoTasks(rows){
+  if(!_llrCanEdit() || typeof Store==='undefined' || !Store.createTask) return 0;
+  const st=_llrState(); const qLab=_llrQLabel(st.q); let n=0;
+  const due=(()=>{ const d=new Date(); d.setDate(d.getDate()+5); return _llrIso(d); })();
+  for(const r of _llrPhotoTodo(rows)){
+    const d=r.d; const a0=_llrAdvisors(d)[0]||{};
+    const uid=d.advisorUid||a0.uid||null, email=d.advisorEmail||a0.email||'', name=d.advisorName||a0.name||'';
+    const head=(typeof _taskHeadlineName==='function')?_taskHeadlineName(d):_mrDealName(d);
+    try{
+      await Store.createTask({
+        title:`📸 Add a photo for the Land Listings Report — ${head}`,
+        description:`${head} has no photo on its deal card, so it was left out of the ${qLab} Land Listings Report.\n\nAdd an aerial or property photo to the card (drop an image on the deal card and set it as the card photo). It will print in the report automatically once a photo is on the card.\n\nProperty: ${d.propertyAddress||_mrDealName(d)}`,
+        assignedTo:uid, assignedToName:name||'Advisor', assignedToEmail:email,
+        dealId:d.id, dealAddress:d.propertyAddress||'', dueDate:due, status:'pending',
+        createdBy:currentUser?.uid||'system', createdByName:'Automation', createdAt:Date.now(), source:'llr-photo'});
+      const patch={llrPhotoTaskQ:st.q, llrPhotoTaskAt:Date.now()};
+      try{ await Store.updateDeal(d.id, patch); }catch(e){ console.warn('[llr] photo task stamp',e); }
+      Object.assign(d, patch); n++;
+    }catch(e){ console.warn('[llr] photo task',d.id,e); }
+  }
+  return n;
+}
+window._llrPhotoTasks=async function(btn){
+  const done=btn?elcBusy(btn,'Sending…'):()=>{};
+  try{ const n=await _llrSendPhotoTasks(_llrCollect()); showToast(n?`📸 ${n} photo task${n===1?'':'s'} sent to advisors`:'No new photo tasks to send','success'); }
+  finally{ done(); window._llrRenderRows(); }
+};
 window._llrChoosePhoto=function(id,i){ const p=(window._llrPhotoCands||[])[i]; document.getElementById('llr-photo-ov')?.remove(); if(p) window._llrSet(id,'llrPhotoUrl',p.url); };
 window._llrAccess=async function(){
   if(!_llrIsOwner()) return;
@@ -54888,11 +54985,11 @@ function _llrPagePlan(rows){
 async function _llrFonts(doc){
   window._llrFontCache=window._llrFontCache||{}; const C=window._llrFontCache;
   const base='https://cdn.jsdelivr.net/fontsource/fonts/open-sans@latest/latin-';
-  const want=[['r','400'],['s','600'],['b','700'],['x','800']];
+  const want=[['r','400'],['s','600'],['b','700'],['x','800'],['i','400-italic']];
   try{
-    await Promise.all(want.map(async([k,w])=>{ if(!C[k]){ const r=await fetch(base+w+'-normal.ttf'); if(!r.ok) throw new Error('font '+w+' '+r.status); C[k]=_mrB64(await r.arrayBuffer()); } }));
+    await Promise.all(want.map(async([k,w])=>{ if(!C[k]){ const r=await fetch(base+w+(w.includes('italic')?'':'-normal')+'.ttf'); if(!r.ok) throw new Error('font '+w+' '+r.status); C[k]=_mrB64(await r.arrayBuffer()); } }));
     want.forEach(([k])=>{ doc.addFileToVFS('LlrOS-'+k+'.ttf',C[k]); doc.addFont('LlrOS-'+k+'.ttf','LlrOS'+k,'normal'); });
-    return {r:'LlrOSr', s:'LlrOSs', b:'LlrOSb', x:'LlrOSx'};
+    return {r:'LlrOSr', s:'LlrOSs', b:'LlrOSb', x:'LlrOSx', i:'LlrOSi'};
   }catch(e){ console.warn('[llr] Open Sans unavailable, using Helvetica',e); return null; }
 }
 // Headshot → circular PNG (transparent corners) for the advisor page
@@ -54969,14 +55066,49 @@ function _llrFiller(FX, type, x, y, w, h, sec, rows){
   text('Florida land,',x+14,y+h-26,{size:12,w:'x',color:LLR_TEAL_DK});
   text('since 1992.',x+14,y+h-11,{size:12,w:'x',color:LLR_TEAL_DK});
 }
-async function _llrBuild(progress){
-  const st=_llrState(); const rows=_llrCollect().filter(r=>!r.excluded);
-  if(!rows.length) throw new Error('No listings to print for that date.');
+// LLR3-20261116 — company contact block: closing page / the space after the advisor directory. Lays itself out for the box.
+function _llrContact(FX, x, y, w, h){
+  const {doc,text,fill,logo}=FX; const C=LLR_CONTACT;
+  doc.setFillColor(238,248,249); doc.rect(x,y,w,h,'F'); fill(LLR_RED); doc.rect(x,y,4,h,'F');
+  const wide=w>=400, cx=x+w/2;
+  const logoW=wide?Math.min(250,w-80):Math.min(190,w-40), logoH=logo?logoW*logo.h/logo.w:0;
+  const body=wide?190:(36+C.offices.length*66+44);
+  const useLogo=!!logo && h>=body+logoH+40;
+  let yy=y+Math.max(18,(h-(body+(useLogo?logoH+14:0)))/2);
+  if(useLogo){ doc.addImage(logo.data,logo.fmt,cx-logoW/2,yy,logoW,logoH); yy+=logoH+14; }
+  text('Let’s talk land.',cx,yy+20,{size:wide?24:19,w:'x',color:LLR_RED,align:'center'});
+  text('Florida land specialists since 1992',cx,yy+38,{size:wide?10.5:9,w:'s',color:[90,90,90],align:'center'});
+  yy+=wide?62:56;
+  const office=(o,ox,oy,align)=>{ const opt=a=>Object.assign({align},a);
+    text(o.name.toUpperCase(),ox,oy,opt({size:9.5,w:'x',color:LLR_TEAL_DK}));
+    o.lines.forEach((l,j)=>text(l,ox,oy+15+j*13,opt({size:9.5,color:[50,50,50]})));
+    const t=text(o.phone,ox,oy+46,opt({size:12,w:'b',color:LLR_INK})); const tw=doc.getStringUnitWidth(t)*12;
+    doc.link(align==='center'?ox-tw/2:ox,oy+36,tw,13,{url:'tel:'+o.phone.replace(/\D/g,'')}); };
+  const online=(ox,oy,align)=>{ const opt=a=>Object.assign({align},a);
+    if(wide) text('ONLINE',ox,oy,opt({size:9.5,w:'x',color:LLR_TEAL_DK}));
+    const o1=wide?oy+18:oy, t1=text(C.web,ox,o1,opt({size:13,w:'b',color:LLR_LINK})); let tw=doc.getStringUnitWidth(t1)*13; doc.link(align==='center'?ox-tw/2:ox,o1-11,tw,14,{url:C.url});
+    const o2=o1+16, t2=text(C.email,ox,o2,opt({size:10,w:'s',color:LLR_LINK})); tw=doc.getStringUnitWidth(t2)*10; doc.link(align==='center'?ox-tw/2:ox,o2-9,tw,12,{url:'mailto:'+C.email}); };
+  if(wide){
+    doc.setDrawColor(84,196,203); doc.setLineWidth(0.8); doc.line(x+40,yy,x+w-40,yy); yy+=26;
+    const cw=(w-40)/3;
+    C.offices.forEach((o,i)=>office(o,x+20+cw*i+cw/2,yy,'center'));
+    online(x+20+cw*2+cw/2,yy,'center');
+  } else {
+    C.offices.forEach(o=>{ office(o,cx,yy,'center'); yy+=66; });
+    online(cx,yy+4,'center');
+  }
+}
+// ESH-20261116: opts lets the 📰 Eshenbaugh Report print the same listing / sales / advisor pages inside its own PDF:
+//   {doc, OS, header(pageNo), footer(pageNo), pill(title), pageStart, rows, skipCover, skipDir} — returns {pageNo,…}
+async function _llrBuild(progress, opts){
+  opts=opts||{};
+  const st=_llrState(); const rows=opts.rows||_llrCollect().filter(r=>!r.excluded);
+  if(!rows.length && !opts.doc) throw new Error('No listings to print for that date.');
   await _mrLoadLibs(); const {jsPDF}=window.jspdf;
-  const doc=new jsPDF({orientation:'portrait',unit:'pt',format:'letter',compress:true});
+  const doc=opts.doc||new jsPDF({orientation:'portrait',unit:'pt',format:'letter',compress:true});
   const Q=_llrQRange(st.q); const qLabel=_llrOrdinal(Q.q).toUpperCase()+' QUARTER '+Q.y;
-  doc.setProperties({title:'Land Listings Report · '+_llrQLabel(st.q)+(_llrScopeLabel()?' · '+_llrScopeLabel():''), author:'Eshenbaugh Land Company', subject:'Land Listing Summary', creator:'Terra'});
-  const OS=await _llrFonts(doc);
+  if(!opts.doc) doc.setProperties({title:'Land Listings Report · '+_llrQLabel(st.q)+(_llrScopeLabel()?' · '+_llrScopeLabel():''), author:'Eshenbaugh Land Company', subject:'Land Listing Summary', creator:'Terra'});
+  const OS=opts.OS!==undefined?opts.OS:await _llrFonts(doc);
   const F=(w)=>{ if(OS) doc.setFont(OS[w]||OS.r,'normal'); else doc.setFont('helvetica', (w==='b'||w==='x'||w==='s')?'bold':'normal'); };
   const W=612, H=792;
   const col=c=>{ doc.setTextColor(c[0],c[1],c[2]); };
@@ -54988,9 +55120,9 @@ async function _llrBuild(progress){
   let done=0; const ASPECT=164/126;
   const queue=all.slice(); const worker=async()=>{ while(queue.length){ const it=queue.shift(); try{ imgs[it.id]=await _mrImg(it.url,{cover:ASPECT,maxPx:760,q:0.8}); }catch(e){ imgs[it.id]=null; } done++; progress&&progress(done/Math.max(1,all.length)*0.9); } };
   await Promise.all([1,2,3,4,5,6].map(worker));
-  const logo=await _mrImg('proposals/assets/logo-dark.png',{png:true,maxPx:700});
-  let pageNo=0;
-  const header=()=>{
+  const logo=opts.footer?null:await _mrImg('proposals/assets/logo-dark.png',{png:true,maxPx:700});
+  let pageNo=opts.pageStart||0;
+  const header=opts.header?()=>opts.header(pageNo):()=>{
     fill(LLR_RED); doc.rect(0,0,W,70,'F');
     fill(LLR_TEAL); doc.rect(0,70,375,18,'F');
     doc.setFillColor(255,255,255); doc.rect(375,36,196,54,'F');
@@ -54998,31 +55130,83 @@ async function _llrBuild(progress){
     F('x'); doc.setFontSize(41); col(LLR_RED); doc.text('REPORT',473,78,{align:'center'});
     F('r'); doc.setFontSize(6.5); col([90,90,90]); doc.text(['Land Listing Summary',qLabel,_llrScopeLabel().toUpperCase()].filter(Boolean).join('  ·  '),473,87,{align:'center'});
   };
-  const footer=()=>{
+  const footer=opts.footer?()=>opts.footer(pageNo):()=>{
     F('b'); doc.setFontSize(11); col(LLR_INK); doc.text(String(pageNo),38,746);
     if(logo){ const w=128, h=w*logo.h/logo.w; doc.addImage(logo.data,logo.fmt,W-36-w,750-h,w,h); }
     fill(LLR_TEAL); doc.rect(0,755,W,9,'F');
     for(let i=0;i<28;i++){ const g=110+Math.round((i%5)*7); doc.setFillColor(g,g-6,g-14); doc.rect(0,764+i,W,1.05,'F'); }
   };
-  const newPage=()=>{ if(pageNo>0) doc.addPage(); pageNo++; header(); };
-  const pill=(t)=>{ F('x'); doc.setFontSize(19); const w=Math.max(150,doc.getStringUnitWidth(t)*19+30); fill(LLR_TEAL); doc.rect(45,108,w,34,'F'); col([255,255,255]); doc.text(t,45+15,131); };
-  /* cover */
-  newPage();
-  doc.setDrawColor(232,234,236); doc.setLineWidth(0.8);
-  for(let i=0;i<9;i++){ doc.ellipse(430+i*6,520-i*10,40+i*26,70+i*34,'S'); }
-  const cover=String(st.cover||'').trim();
-  const cl=cover?cover.split(/\s+[—–-]\s+|\n/):['Available '+(st.land==='residential'?'Residential Land':(st.land==='commercial'?'Commercial Land':'Land')),_llrMonthYear(st.asOf)];
-  F('x'); doc.setFontSize(24);
-  cl.slice(0,3).forEach((l,i)=>{ doc.setTextColor(170,170,170); doc.text(l,W/2+1.2,300+i*32+1.2,{align:'center'}); doc.setTextColor(0,0,0); doc.text(l,W/2,300+i*32,{align:'center'}); });
-  const nA=rows.filter(r=>!r.uc&&!r.sold).length, nU=rows.filter(r=>r.uc).length;
-  text(nA+' available listing'+(nA===1?'':'s')+(nU?'  ·  '+nU+' under contract':''),W/2,300+Math.min(3,cl.length)*32+14,{size:11,w:'s',color:[90,90,90],align:'center'});
-  if(st.office) text((st.office==='Orlando'?'Orlando':'Tampa')+' Office  ·  '+(BIO_OFFICE_PHONES[st.office]||'813-287-8787'),W/2,300+Math.min(3,cl.length)*32+30,{size:10,w:'s',color:LLR_TEAL_DK,align:'center'});
-  text('Click any property photo or CLICK FOR DETAILS to open its website.',W/2,300+Math.min(3,cl.length)*32+(st.office?48:32),{size:9,color:[110,110,110],align:'center'});
-  footer();
+  const newPage=()=>{ if(pageNo>0||opts.doc) doc.addPage(); pageNo++; header(); };
+  const pill=opts.pill?(t)=>opts.pill(t):(t)=>{ F('x'); doc.setFontSize(19); const w=Math.max(150,doc.getStringUnitWidth(t)*19+30); fill(LLR_TEAL); doc.rect(45,108,w,34,'F'); col([255,255,255]); doc.text(t,45+15,131); };
+  /* cover — LLR3-20261116: large logo, title, jump-to-section buttons, both offices / phone / email / website */
+  const plan=_llrPagePlan(rows);
+  const firstPage={}; const p0=(opts.pageStart||0)+(opts.skipCover?1:2);   // page number of the first listing page (cover = page 1)
+  plan.forEach((pg,i)=>{ if(firstPage[pg.sec]==null) firstPage[pg.sec]=i+p0; });
+  const dirPage=p0+plan.length;
+  const bars=()=>{ fill(LLR_TEAL); doc.rect(0,755,W,9,'F'); for(let i=0;i<28;i++){ const g=110+Math.round((i%5)*7); doc.setFillColor(g,g-6,g-14); doc.rect(0,764+i,W,1.05,'F'); } };
+  const spaced=(t,y,size,w,color,cs)=>{ F(w); doc.setFontSize(size); const tw=doc.getStringUnitWidth(t)*size+cs*(t.length-1); col(color); doc.text(t,(W-tw)/2,y,{charSpace:cs}); };
+  const acresOf=list=>{ const a=list.reduce((t,r)=>t+(parseFloat(String(r.d.acreage||r.d.acres||'').replace(/[^0-9.]/g,''))||0),0); return a>=100?Math.round(a).toLocaleString('en-US'):(Math.round(a*10)/10).toString(); };
+  if(!opts.skipCover){
+  if(pageNo>0||opts.doc) doc.addPage(); pageNo++;
+  doc.setDrawColor(236,238,240); doc.setLineWidth(0.7);
+  for(let i=0;i<8;i++) doc.ellipse(W+20-i*4,40+i*6,60+i*30,50+i*24,'S');   // faint contour lines behind the logo
+  fill(LLR_RED); doc.rect(0,0,W,14,'F'); fill(LLR_TEAL); doc.rect(0,14,W,6,'F');
+  if(logo){ const lw=340, lh=lw*logo.h/logo.w; doc.addImage(logo.data,logo.fmt,(W-lw)/2,40,lw,lh); }
+  doc.setFont('times','bolditalic'); doc.setFontSize(30); doc.setTextColor(30,30,30); doc.text('The Land Listings',W/2,252,{align:'center'});
+  spaced('REPORT',318,74,'x',LLR_RED,6);
+  const cover=String(st.cover||'').trim().replace(/\s*\n\s*/g,'  ·  ');
+  const band=[qLabel, (cover||('Available '+(st.land==='residential'?'Residential Land':(st.land==='commercial'?'Commercial Land':'Land'))+'  ·  '+_llrMonthYear(st.asOf))).toUpperCase(), (st.office?st.office.toUpperCase()+' OFFICE':'')].filter(Boolean).join('  ·  ');
+  fill(LLR_TEAL_DK); doc.rect(45,334,W-90,28,'F');
+  text(band,W/2,352.5,{size:10.5,w:'b',color:[255,255,255],align:'center',maxW:W-110,min:7});
+  const avail=rows.filter(r=>!r.uc&&!r.sold), nU=rows.filter(r=>r.uc).length;
+  text(avail.length+' available listing'+(avail.length===1?'':'s')+(nU?'  ·  '+nU+' under contract':'')+(avail.length?'  ·  '+acresOf(avail)+' total acres':''),W/2,384,{size:11,w:'s',color:[80,80,80],align:'center'});
+  // jump-to buttons (only the land types this run covers)
+  const cats=st.land==='residential'?['residential']:(st.land==='commercial'?['commercial','industrial']:LLR_LAND_KEYS);
+  const CC={commercial:LLR_RED, industrial:[55,65,81], residential:LLR_TEAL_DK, agricultural:[88,124,52]};
+  const NM={commercial:'COMMERCIAL',industrial:'INDUSTRIAL',residential:'RESIDENTIAL',agricultural:'AGRICULTURAL'};
+  spaced('BROWSE BY LAND TYPE',414,9,'b',[110,110,110],1.6);
+  const perRow=cats.length===1?1:2, gap=14, tw=(W-90-gap*(perRow-1))/perRow, th=cats.length>2?70:84;
+  cats.forEach((k,i)=>{
+    const x=45+(i%perRow)*(tw+gap), y=424+Math.floor(i/perRow)*(th+gap);
+    const list=rows.filter(r=>r.sec===k), pg=firstPage[k];
+    fill(list.length?CC[k]:[226,228,231]); doc.rect(x,y,tw,th,'F');
+    const on=list.length?[255,255,255]:[140,140,140];
+    text(NM[k],x+18,y+th/2-2,{size:19,w:'x',color:on,maxW:tw-90,min:12});
+    text(list.length?(list.length+' listing'+(list.length===1?'':'s')+'  ·  '+acresOf(list)+' acres'):'None this quarter',x+18,y+th/2+15,{size:10,w:'s',color:list.length?[255,255,255]:[140,140,140]});
+    if(list.length && pg){
+      text('Page '+pg,x+tw-40,y+th/2+4,{size:9.5,w:'s',color:[255,255,255],align:'right'});
+      doc.setDrawColor(255,255,255); doc.setLineWidth(2.2); const ax=x+tw-26, ay=y+th/2; doc.line(ax,ay-8,ax+8,ay); doc.line(ax+8,ay,ax,ay+8);
+      doc.link(x,y,tw,th,{pageNumber:pg});
+    }
+  });
+  // secondary links: Featured · Under Contract · Quarter Sales · Advisors
+  const rowsH=Math.ceil(cats.length/perRow)*(th+gap);
+  const extra=[]; if(firstPage.featured) extra.push(['Featured Properties',firstPage.featured]); if(firstPage.uc) extra.push(['Under Contract',firstPage.uc]); if(firstPage.sold) extra.push([_llrSectionTitle('sold'),firstPage.sold]);
+  if(st.includeDir && (typeof _bioAdvisorList==='function') && _bioAdvisorList().length) extra.push(['Our Advisors',dirPage]);
+  if(extra.length){
+    F('s'); doc.setFontSize(10); const sep='     '; const full=extra.map(e=>e[0]+' ›').join(sep); let cx=(W-doc.getStringUnitWidth(full)*10)/2; const ly=424+rowsH+18;
+    extra.forEach((e,i)=>{ const t=e[0]+' ›'; const w=doc.getStringUnitWidth(t)*10; col(LLR_TEAL_DK); doc.text(t,cx,ly); doc.setDrawColor(LLR_TEAL_DK[0],LLR_TEAL_DK[1],LLR_TEAL_DK[2]); doc.setLineWidth(0.5); doc.line(cx,ly+2,cx+w,ly+2); doc.link(cx,ly-9,w,12,{pageNumber:e[1]}); cx+=w+doc.getStringUnitWidth(sep)*10; });
+  }
+  text('Click a land type to jump to it — click any property photo or CLICK FOR DETAILS to open its website.',W/2,Math.min(632,424+rowsH+(extra.length?42:14)),{size:8.5,color:[120,120,120],align:'center'});
+  // contact band
+  fill(LLR_INK); doc.rect(0,646,W,109,'F');
+  const colW=(W-90)/3;
+  LLR_CONTACT.offices.forEach((o,i)=>{ const x=45+i*colW;
+    text(o.name.toUpperCase(),x,670,{size:9.5,w:'x',color:[120,215,222]});
+    o.lines.forEach((l,j)=>text(l,x,686+j*13,{size:9.5,color:[235,235,235]}));
+    text(o.phone,x,729,{size:12,w:'b',color:[255,255,255]}); doc.link(x,719,90,14,{url:'tel:'+o.phone.replace(/\D/g,'')}); });
+  doc.setDrawColor(90,90,90); doc.setLineWidth(0.5); doc.line(45+colW-12,662,45+colW-12,738); doc.line(45+2*colW-12,662,45+2*colW-12,738);
+  { const x=45+2*colW;
+    text('ONLINE',x,670,{size:9.5,w:'x',color:[120,215,222]});
+    const t1=text(LLR_CONTACT.web,x,690,{size:13,w:'b',color:[255,255,255]}); doc.link(x,679,doc.getStringUnitWidth(t1)*13,14,{url:LLR_CONTACT.url});
+    const t2=text(LLR_CONTACT.email,x,707,{size:9.5,color:[235,235,235]}); doc.link(x,698,doc.getStringUnitWidth(t2)*9.5,12,{url:'mailto:'+LLR_CONTACT.email});
+    text('Eshenbaugh Land Company  ·  REALTOR®',x,729,{size:8,color:[170,170,170],maxW:colW-6,min:6}); }
+  bars();
+  }
   /* listing pages */
   const X=[45,225,405], CW=164, IH=126, RY=[158,426];
   const FX={doc,F,text,fill,col,W,H,st,logo}; const FILLERS=['stats','quote','cta','art']; let fillN=0, wideN=0;
-  _llrPagePlan(rows).forEach(pg=>{
+  plan.forEach(pg=>{
     newPage(); pill(_llrSectionTitle(pg.sec));
     pg.rows.forEach((r,i)=>{
       const d=r.d, x=X[i%3], y=RY[Math.floor(i/3)], link=r.sold?'':_llrLink(d);
@@ -55039,6 +55223,7 @@ async function _llrBuild(progress){
       text(_llrTitle(d),x+2,ty,{size:10,w:'s',maxW:CW-4,min:7.5}); if(link) doc.link(x,ty-9,CW,11,{url:link}); ty+=lh;
       const ad=_llrAddress(d); if(ad){ text(ad,x+2,ty,{size:10,maxW:CW-4,min:7.5}); ty+=lh; }
       const z=_llrZoning(d); if(z){ text(z,x+2,ty,{size:10,maxW:CW-4,min:7}); ty+=lh; }
+      if(r.sold && String(d.buyerUse||'').trim()){ text('Planned for '+String(d.buyerUse).trim(),x+2,ty,{size:10,maxW:CW-4,min:7}); ty+=lh; }   // ESH-20261116 — the buyer's intended use, like the printed Quarter Sales pages
       const pr=r.sold?('Sold '+(_mrFmtMoney(_mrDealPrice(d))||'')).trim():_llrPriceInfo(d).text;
       text(pr,x+2,ty,{size:10,w:'b',color:[214,40,40],maxW:CW-4,min:7}); ty+=lh;
       // advisors — names underlined, each a mailto link
@@ -55068,7 +55253,8 @@ async function _llrBuild(progress){
     footer();
   });
   /* advisor directory — 👤 Bio photos (LLR2-20261116) */
-  if(st.includeDir){
+  let closed=false; const TOP2=126;
+  if(st.includeDir && !opts.skipDir){
     let list=(typeof _bioAdvisorList==='function'?_bioAdvisorList():[]).filter(b=>b&&b.name&&!String(b.name).includes('@'));
     if(st.office) list=list.filter(b=>_llrOfficeOf(b.uid,b.email)===st.office);
     if(list.length){
@@ -55091,11 +55277,18 @@ async function _llrBuild(progress){
         if(b.email){ const t2=text(b.email,tx,yy,{size:8.5,w:'s',color:LLR_LINK,maxW:tw,min:6.5}); const w2=doc.getStringUnitWidth(t2)*doc.getFontSize(); doc.link(tx,yy-8,w2,10,{url:'mailto:'+b.email}); }
         y+=ROW;
       });
-      footer();
+      // LLR3-20261116 — fill what's left of the last directory page with the company contact block
+      const left=BOTTOM-y;
+      if(c===0 && left>=300) _llrContact(FX,45,y+8,W-90,left-20);
+      else if(c===0) _llrContact(FX,COLX[1],TOP,249,BOTTOM-TOP-12);
+      else if(left>=230) _llrContact(FX,COLX[1],y+8,249,left-20);
+      else { footer(); newPage(); _llrContact(FX,45,TOP,W-90,BOTTOM-TOP-12); }
+      footer(); closed=true;
     }
   }
+  if(!closed && !opts.doc && !opts.skipDir){ newPage(); _llrContact(FX,45,TOP2,W-90,700-TOP2); footer(); }   // no directory page → a closing contact page
   progress&&progress(1);
-  return {doc, rows, pages:pageNo, file:'Land_Listings_'+Q.y+'_Q'+Q.q+_llrScopeFile()+'.pdf'};
+  return {doc, rows, pageNo, pages:pageNo, file:'Land_Listings_'+Q.y+'_Q'+Q.q+_llrScopeFile()+'.pdf'};
 }
 window._llrGenerate=async function(mode, btn){
   const pre=mode==='preview'?window.open('','_blank'):null;
@@ -55104,13 +55297,665 @@ window._llrGenerate=async function(mode, btn){
     const R=await _llrBuild(p=>{ if(btn) btn.innerHTML='<span class="elc-spin"></span>'+(mode==='preview'?'Building… ':'Building PDF… ')+Math.round(p*100)+'%'; });
     if(mode==='preview'){ const url=R.doc.output('bloburl'); if(pre&&!pre.closed) pre.location.href=url; else window.open(url,'_blank'); }
     else R.doc.save(R.file);
-    const missing=R.rows.filter(r=>!_llrPhoto(r.d)).length;
-    showToast(`${R.rows.length} listing${R.rows.length===1?'':'s'} · ${R.pages} pages${missing?` · ${missing} without an aerial`:''}`, missing?'warning':'success', 5000);
+    // LLR3-20261116 — listings left out for no photo: their advisors get a task (once per listing per quarter)
+    const all=_llrCollect(); const noPh=all.filter(r=>r.noPhoto).length; let sent=0;
+    if(noPh && _llrCanEdit()){ try{ sent=await _llrSendPhotoTasks(all); }catch(e){ console.warn('[llr] photo tasks',e); } window._llrRenderRows(); }
+    showToast(`${R.rows.length} listing${R.rows.length===1?'':'s'} · ${R.pages} pages${noPh?` · ${noPh} left out for no photo${sent?` (${sent} advisor task${sent===1?'':'s'} sent)`:''}`:''}`, noPh?'warning':'success', 6000);
   }catch(e){ if(pre&&!pre.closed) pre.close(); console.error('[llr] build',e); showToast('Couldn’t build the report: '+e.message,'error',8000); }
   finally{ done(); }
 };
+// Run fn with the Land Listing state temporarily replaced (the Eshenbaugh Report borrows the collector / page builder)
+async function _llrWithState(over, fn){ const st=_llrState(); const keep={...st}; Object.assign(st, over); try{ return await fn(); } finally{ Object.keys(st).forEach(k=>delete st[k]); Object.assign(st, keep); } }
+window._llrWithState=_llrWithState; window._llrBuild=_llrBuild; window._llrCollect=_llrCollect; window._llrFonts=_llrFonts; window._llrRoundImg=_llrRoundImg;
 window.viewLandListingReport=viewLandListingReport;
 /* ===== LLR_BLOCK_END ===== */
+/* =======================================================
+   📰 THE ESHENBAUGH REPORT — marker ESH-20261116
+   Ryan (2026-11-16): "add another tab very similar to [the Land Listing Report], but we call it the Eshenbaugh Report. We need to
+   be able to select the advisors we want for each quarter as we rotate so each advisor writes an article twice a year. We also
+   include our sold sales, market intel, etc. Each advisor should be able to upload their articles in their Terra log in and have
+   it auto format/populate using attached design criteria (ELC_EshenbaughReport_StyleGuide4.pdf + SampleLayout9d.pptx).
+   Please don't show to all users until I approve."
+
+   The quarterly newsletter, laid out to the style guide (Open Sans; Eshenbaugh Red 238/42/36; turquoise 86/197/204; masthead,
+   footer bar and Dirt Dog logo from the template file → esh/assets/):
+     1  Cover — masthead + "QUARTER | VOLUME | ISSUE" line, Inside-this-Issue / Team Dirt Dog holding box, lead article with
+        feature photo, headline 24–36 pt red, byline 12 pt, body 10–12 pt / 14 pt leading.
+     2  Inside the Dog Pound, Around the Marketplace (market intel), features, Founder's Firewood — inside pages: heading box
+        24 pt white on turquoise at .57"/1.6", two 3.54" columns, photos with 9 pt italic captions.
+     3  Current listings + Nth Quarter Sales — the 🏞️ Land Listing Report's pages (same collector, same cards, "Planned for").
+     4  Advisor articles — Broker page: Bio headshot + "From the desk of", turquoise-bordered article box, Dirt Dog drawing.
+     5  Cowboy Wisdom quotes, then the Team directory (Bio photos).
+   Writers: pick the advisors for each quarter (✨ Suggest = whoever is short of 2 articles in the last 4 issues and didn't write
+   last issue); "Save & send tasks" gives each a 📰 task with the due date. Writers upload a Word file (or paste) under
+   📝 My Article — Terra pulls the text, headings, bullets and pictures, formats the pages and shows a preview.
+   Data: eshReports/{YYYY-QN} (issue) + eshReports/{YYYY-QN}/articles/{id} (advisor articles use id = their uid).
+   Access: APP_CONFIG.eshReport.access 'owner' (Ryan only — default) | 'writers' (admins + this issue's writers) | 'admins' | 'all'.
+   ======================================================= */
+const ESH_OWNER_EMAILS=['ryan@thedirtdog.com'];
+const ESH_A='esh/assets/';
+const ESH_RED=[238,42,36], ESH_TEAL=[86,197,204], ESH_INK=[30,30,30], ESH_GREY=[90,90,90], ESH_LINK=[40,150,170];
+const ESH_DOGS=['dd-hat.png','dd-boots.png','dd-horseshoes.png','dd-lasso.png','dd-gloves.png'];
+const ESH_KINDS=[['cover','Cover story'],['dogpound','Inside the Dog Pound'],['marketplace','Around the Marketplace'],['feature','Feature article'],['founder','Founder’s Firewood'],['broker','Advisor article']];
+const ESH_KIND_ORDER={feature:1, marketplace:2, founder:3, broker:4};
+function _eshKindLabel(k){ return (ESH_KINDS.find(x=>x[0]===k)||[k,k])[1]; }
+function _eshCfg(){ return (APP_CONFIG.eshReport = APP_CONFIG.eshReport || {access:'owner', writers:[]}); }
+function _eshIsOwner(){ return !!(currentUser && ESH_OWNER_EMAILS.includes(String(currentUser.email||'').toLowerCase())); }
+function _eshIsEditor(){ return !!(currentUser && (_eshIsOwner()||currentUser.isAdmin||currentUser.isStaff)); }   // builds the issue, edits any article
+function _eshIsWriter(){ return !!(currentUser && (_eshCfg().writers||[]).includes(currentUser.uid)); }
+function _eshCanAccess(){ if(!currentUser) return false; if(_eshIsOwner()) return true; const a=_eshCfg().access||'owner';
+  if(a==='all') return true; if(a==='admins') return !!currentUser.isAdmin; if(a==='writers') return !!(currentUser.isAdmin||_eshIsWriter()); return false; }
+function _eshNavVisible(effectiveAdmin, sv){
+  if(!currentUser) return false; const a=_eshCfg().access||'owner';
+  if(a==='all') return true;
+  if(sv) return false;
+  if(a==='admins') return !!effectiveAdmin;
+  if(a==='writers') return !!(effectiveAdmin || _eshIsWriter());
+  return !!(effectiveAdmin && _eshIsOwner());
+}
+window._eshNavVisible=_eshNavVisible;
+async function _eshSaveSettings(patch){ const {doc,setDoc}=_fbFns; const cfg={..._eshCfg(), ...patch}; await setDoc(doc(_fbDb,'eos','settings'), {eshReport:cfg}, {merge:true}); APP_CONFIG.eshReport=cfg; }
+
+/* ---------- quarters / issue numbers ---------- */
+function _eshQIndex(k){ const p=_llrQParse(k)||{y:2026,q:3}; return p.y*4+(p.q-1); }
+function _eshDefaultIssue(k){ const n=127+(_eshQIndex(k)-_eshQIndex('2026-Q3')); return {issue:n, volume:n-76}; }   // 3rd Qtr 2026 = Volume 51, Issue 127
+function _eshIssueLine(I){ const r=_llrQRange(I.id); const d=_eshDefaultIssue(I.id); return (_llrOrdinal(r.q)+' QUARTER '+r.y+' | VOLUME '+(I.volume||d.volume)+', ISSUE '+(I.issue||d.issue)).toUpperCase(); }
+function _eshPrevQ(k){ const i=_eshQIndex(k)-1; return _llrQKey(Math.floor(i/4), i%4+1); }
+
+/* ---------- state + Firestore ---------- */
+function _eshS(){ const s=(window._eshStateObj=window._eshStateObj||{}); if(!s.q) s.q=_llrDefaultQ(); s.issues=s.issues||{}; s.arts=s.arts||{}; return s; }
+function _eshBlankIssue(q){ const d=_eshDefaultIssue(q); return {id:q, volume:d.volume, issue:d.issue, sidebar:'toc', includeListings:true, includeUc:false, includeSales:true, includeDir:true, assignments:[], order:[], coverId:'', quotes:[], dueDate:''}; }
+async function _eshLoad(q, force){
+  const S=_eshS(); if(S.issues[q] && !force) return;
+  const {doc,getDoc,getDocs,collection}=_fbFns;
+  let I=null, A={};
+  try{ const s=await getDoc(doc(_fbDb,'eshReports',q)); if(s.exists()) I={id:q, ...s.data()}; }catch(e){ console.warn('[esh] issue',e); S.err=e; }
+  try{ const s=await getDocs(collection(_fbDb,'eshReports',q,'articles')); s.forEach(d=>{ A[d.id]={id:d.id,...d.data()}; }); }
+  catch(e){ console.warn('[esh] articles',e); if(_eshIsEditor()) S.err=e; else { try{ const s=await getDoc(doc(_fbDb,'eshReports',q,'articles',currentUser.uid)); if(s.exists()) A[s.id]={id:s.id,...s.data()}; }catch(_){ } } }
+  S.issues[q]={..._eshBlankIssue(q), ...(I||{}), id:q}; S.arts[q]=A;
+}
+async function _eshLoadHistory(){
+  const S=_eshS(); if(S.history) return S.history;
+  const {getDocs,collection}=_fbFns; const H={};
+  try{ const s=await getDocs(collection(_fbDb,'eshReports')); s.forEach(d=>{ H[d.id]=d.data(); }); }catch(e){ console.warn('[esh] history',e); }
+  return (S.history=H);
+}
+async function _eshSaveIssue(patch){
+  const S=_eshS(); const q=S.q; const {doc,setDoc}=_fbFns;
+  const data={...patch, updatedAt:Date.now(), updatedBy:currentUser?.name||currentUser?.email||''};
+  await setDoc(doc(_fbDb,'eshReports',q), data, {merge:true});
+  S.issues[q]={...S.issues[q], ...data}; if(S.history) S.history[q]={...(S.history[q]||{}), ...data};
+}
+async function _eshSaveArticle(id, patch){
+  const S=_eshS(); const q=S.q; const {doc,setDoc}=_fbFns;
+  const data={...patch, quarter:q, updatedAt:Date.now(), updatedBy:currentUser?.name||currentUser?.email||''};
+  await setDoc(doc(_fbDb,'eshReports',q,'articles',id), data, {merge:true});
+  S.arts[q][id]={...(S.arts[q][id]||{id}), ...data, id};
+  return S.arts[q][id];
+}
+function _eshRuleHint(e){ return /permission|insufficient/i.test(String(e&&e.message||e))?' — the Firestore rule for eshReports isn’t published yet (see docs/esh-report-firestore-rules.md)':''; }
+
+/* ---------- advisors ---------- */
+function _eshAdvisors(){ return (typeof _bioAdvisorList==='function'?_bioAdvisorList():[]).filter(b=>b&&b.uid&&b.name&&!String(b.name).includes('@')); }
+function _eshPeople(){ const m=new Map(); _eshAdvisors().forEach(b=>m.set(b.uid,b)); Object.entries(allProfiles||{}).forEach(([uid,p])=>{ if(p&&!p.removed&&p.name&&!m.has(uid)&&/@thedirtdog\.com$/i.test(p.email||'')){ const b=_eshBio(uid); if(b.name) m.set(uid,b); } }); return [...m.values()].sort((a,b)=>a.name.localeCompare(b.name)); }   // authors can be staff too (e.g. market intel)
+function _eshBio(uid){ try{ return getAdvisorBio(uid)||{}; }catch(_){ return {}; } }
+function _eshByline(a){ const b=_eshBio(a.authorUid); const n=a.authorName||b.name||''; return n?('By '+(b.designationsStr?n+', '+b.designationsStr:n)):''; }
+
+/* ---------- text → blocks (Word / paste) ---------- */
+// Blank line = new paragraph · a line starting "## " (or a short line in ALL CAPS / ending in ":") = sub-heading · "- " / "• " / "1." = bullet
+function _eshTextToBlocks(t){
+  const out=[]; const paras=String(t||'').replace(/\r/g,'').split(/\n\s*\n/);
+  paras.forEach(p=>{ const lines=p.split('\n').map(x=>x.trim()).filter(Boolean); if(!lines.length) return;
+    let buf=[]; const flush=()=>{ if(buf.length){ out.push({t:'p', text:buf.join(' ')}); buf=[]; } };
+    lines.forEach(l=>{
+      if(/^#{1,3}\s+/.test(l)){ flush(); out.push({t:'h', text:l.replace(/^#{1,3}\s+/,'')}); }
+      else if(/^([-•*]|\d+[.)])\s+/.test(l)){ flush(); out.push({t:'li', text:l.replace(/^([-•*]|\d+[.)])\s+/,'')}); }
+      else buf.push(l);
+    });
+    flush();
+  });
+  return out.map(b=>{ if(b.t==='p' && b.text.length<70 && (/:$/.test(b.text) || (b.text===b.text.toUpperCase() && /[A-Z]/.test(b.text)))) return {t:'h', text:b.text.replace(/:$/,'')}; return b; });
+}
+function _eshBlocksToText(B){ return (B||[]).map(b=>b.t==='h'?'## '+b.text:(b.t==='li'?'- '+b.text:b.text)).join('\n\n').replace(/\n\n- /g,'\n- '); }
+async function _eshLoadMammoth(){ if(!window.mammoth) await _mrLoadScript('https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js'); return window.mammoth; }
+// Word → {title, text, images:[dataURL]}. Headings / bold-only short lines → sub-heads; list items → bullets; pictures kept.
+async function _eshReadDocx(file){
+  const mammoth=await _eshLoadMammoth(); const buf=await file.arrayBuffer(); const images=[];
+  const res=await mammoth.convertToHtml({arrayBuffer:buf},{convertImage:mammoth.images.imgElement(img=>img.read('base64').then(b=>{ const src='data:'+img.contentType+';base64,'+b; images.push(src); return {src}; }))});
+  const div=document.createElement('div'); div.innerHTML=res.value; const blocks=[]; let title='';
+  div.querySelectorAll('h1,h2,h3,h4,p,li').forEach(el=>{ const t=(el.textContent||'').replace(/\s+/g,' ').trim(); if(!t) return;
+    const tag=el.tagName.toLowerCase();
+    if(tag==='li'){ blocks.push({t:'li',text:t}); return; }
+    if(tag==='p' && el.closest('li')) return;
+    const allBold=el.querySelector('strong,b') && (Array.from(el.querySelectorAll('strong,b')).map(x=>x.textContent).join('').trim()===t);
+    if(/^h[1-4]$/.test(tag) || (allBold && t.length<90)){ if(!title && !blocks.length && (tag==='h1'||tag==='h2'||allBold)) { title=t; return; } blocks.push({t:'h',text:t}); return; }
+    blocks.push({t:'p',text:t}); });
+  // a "By Name" line at the top is the byline, not body copy
+  if(blocks[0] && /^by\s+[A-Z]/i.test(blocks[0].text) && blocks[0].text.length<60) blocks.shift();
+  return {title, blocks, images};
+}
+function _eshDataUrlToBlob(u){ const [h,b]=u.split(','); const m=/data:([^;]+)/.exec(h); const bin=atob(b); const a=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) a[i]=bin.charCodeAt(i); return new Blob([a],{type:m?m[1]:'image/png'}); }
+async function _eshUploadPhoto(articleId, fileOrBlob){
+  const S=_eshS(); const small=await _mrShrinkImage(fileOrBlob,1800,0.85);
+  return await _mrUploadBlob('dealPhotos/_esh/'+S.q+'/'+articleId+'/'+Date.now()+'_'+Math.random().toString(36).slice(2,7)+'.jpg', small, 'image/jpeg');
+}
+function _eshWords(B){ return (B||[]).reduce((n,b)=>n+String(b.text||'').split(/\s+/).filter(Boolean).length,0); }
+
+/* ---------- view ---------- */
+function _eshInjectStyles(){
+  if(typeof _llrInjectStyles==='function') _llrInjectStyles();
+  if(document.getElementById('esh-styles')) return;
+  const s=document.createElement('style'); s.id='esh-styles'; s.textContent=`
+  .esh-grid{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:1rem;align-items:start}
+  @media(max-width:1100px){.esh-grid{grid-template-columns:1fr}}
+  .esh-card{padding:1rem 1.1rem}
+  .esh-card h2{font-size:.95rem;font-weight:800;color:var(--text-1);margin:0 0 .6rem;display:flex;align-items:center;gap:.5rem;flex-wrap:wrap}
+  .esh-row{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap}
+  .esh-av{width:34px;height:34px;border-radius:50%;object-fit:cover;flex:none;background:var(--bg)}
+  .esh-ini{width:34px;height:34px;border-radius:50%;flex:none;display:flex;align-items:center;justify-content:center;font-size:.72rem;font-weight:800;background:var(--brand-teal);color:#fff}
+  .esh-kind{display:inline-block;font-size:.66rem;font-weight:800;letter-spacing:.04em;text-transform:uppercase;border-radius:4px;padding:.12rem .4rem;background:var(--surface-2);color:var(--text-2);border:1px solid var(--border)}
+  .esh-photos{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:.6rem}
+  .esh-photo{border:1px solid var(--border);border-radius:10px;padding:.35rem;background:var(--surface)}
+  .esh-photo img{width:100%;height:96px;object-fit:cover;border-radius:6px;display:block;background:var(--bg)}
+  .esh-photo .mr-input{width:100%;box-sizing:border-box;margin-top:.3rem;font-size:.78rem;min-height:34px}
+  .esh-drop{border:2px dashed var(--border);border-radius:12px;padding:1rem;text-align:center;color:var(--text-2);font-size:.85rem;cursor:pointer;background:var(--surface)}
+  .esh-drop:hover,.esh-drop.on{border-color:var(--brand-teal);color:var(--text-1)}
+  .esh-body{min-height:300px;font-size:.9rem;line-height:1.5}
+  .esh-quote{display:grid;grid-template-columns:1fr 180px 40px;gap:.4rem;margin-bottom:.4rem}
+  @media(max-width:767px){.esh-quote{grid-template-columns:1fr}}
+  .esh-step{font-size:.78rem;color:var(--text-2);line-height:1.45}
+  .esh-step b{color:var(--text-1)}
+  `; document.head.appendChild(s);
+}
+function _eshStatusChip(a){
+  if(!a) return '<span class="mr-chip mr-chip-new">Not started</span>';
+  if(a.status==='approved') return '<span class="mr-chip mr-chip-sent">✓ Approved</span>';
+  if(a.status==='submitted') return '<span class="mr-chip mr-chip-queued">Submitted</span>';
+  if(a.status==='returned') return '<span class="mr-chip mr-chip-warn">Returned for changes</span>';
+  return '<span class="mr-chip mr-chip-draft">Draft · '+_eshWords(a.blocks)+' words</span>';
+}
+function _eshAvatar(b){ const n=String(b&&b.name||'?'); return b&&b.headshotUrl?`<img class="esh-av" src="${_mrEsc(b.headshotUrl)}" alt="">`:`<span class="esh-ini" aria-hidden="true">${_mrEsc(n.split(/\s+/).map(w=>w[0]||'').join('').slice(0,2).toUpperCase())}</span>`; }
+async function viewEshReport(){
+  _eshInjectStyles();
+  if(!_eshCanAccess()){ setContent(`<div class="mr-wrap"><div class="mr-card" style="padding:2rem;text-align:center"><div style="font-size:2rem">🔒</div><p style="margin-top:.5rem;font-weight:700;color:var(--text-1)">The Eshenbaugh Report isn’t open to your account yet.</p></div></div>`); return; }
+  const S=_eshS();
+  if(!S.issues[S.q]){ setContent(`<div class="mr-wrap"><p class="mr-muted" style="padding:2rem">Loading the ${_mrEsc(_llrQLabel(S.q))} issue…</p></div>`); await _eshLoad(S.q); if(_eshIsEditor()) await _eshLoadHistory(); if(currentView!=='eshReport') return; }
+  const I=S.issues[S.q], A=S.arts[S.q]||{}; const ed=_eshIsEditor(); const a=_eshCfg().access||'owner';
+  const qOpts=(()=>{ const o=[]; const n=new Date(); let y=n.getFullYear(), q=Math.floor(n.getMonth()/3)+1; q++; if(q>4){q=1;y++;} for(let i=0;i<8;i++){ const k=_llrQKey(y,q); o.push(`<option value="${k}" ${k===S.q?'selected':''}>${_llrQLabel(k)}</option>`); q--; if(q<1){ q=4; y--; } } return o.join(''); })();
+  const accLbl={owner:'Only you',writers:'You, admins & this issue’s writers',admins:'Admins only',all:'Open to all users'}[a]||a;
+  setContent(`<div class="mr-wrap">
+    <div class="mr-head">
+      <h1>📰 The Eshenbaugh Report</h1>
+      <span class="mr-chip ${a==='all'?'mr-chip-sent':(a==='owner'?'mr-chip-new':'mr-chip-draft')}" title="Who can see this tab">${_mrEsc(accLbl)}</span>
+      <div class="mr-toolbar">
+        <label class="sr-only" for="esh-q">Issue</label>
+        <select id="esh-q" class="mr-select" onchange="window._eshSetQ(this.value)">${qOpts}</select>
+        ${_eshIsOwner()?`<button type="button" class="mr-btn" onclick="window._eshAccess()">⚙ Access</button>`:''}
+        ${ed?`<button type="button" class="mr-btn mr-btn-teal" onclick="window._eshGenerate('preview',this)">👁 Preview issue</button><button type="button" class="mr-btn mr-btn-primary" onclick="window._eshGenerate('download',this)">⬇ Download PDF</button>`:''}
+      </div>
+    </div>
+    ${S.err?`<div class="mr-card" style="padding:.8rem 1rem;margin-bottom:.8rem;border-color:#dc2626"><b style="color:var(--text-1)">Couldn’t read the saved issue.</b> <span class="mr-muted">${_mrEsc(String(S.err.message||S.err))}${_mrEsc(_eshRuleHint(S.err))}</span></div>`:''}
+    ${_eshMyArticleCard(I,A)}
+    ${ed?`<div class="esh-grid" style="margin-top:1rem"><div>${_eshArticlesCard(I,A)}${_eshQuotesCard(I)}</div><div>${_eshWritersCard(I,A)}${_eshSettingsCard(I)}</div></div>`:''}
+  </div>`);
+}
+window.viewEshReport=viewEshReport;
+window._eshSetQ=async function(q){ const S=_eshS(); S.q=q; S.err=null; await viewEshReport(); };
+function _eshMyArticleCard(I,A){
+  if(!currentUser) return '';
+  const mine=A[currentUser.uid]; const asg=(I.assignments||[]).find(x=>x.uid===currentUser.uid);
+  if(!mine && !asg) return _eshIsEditor()?'':`<div class="mr-card esh-card"><h2>📝 My article</h2><p class="mr-note">You’re not on the writer list for the ${_mrEsc(_llrQLabel(I.id))} issue. Each advisor writes for two issues a year — you’ll get a task when it’s your turn.</p></div>`;
+  return `<div class="mr-card esh-card" style="border-left:4px solid var(--brand-teal)"><h2>📝 My article — ${_mrEsc(_llrQLabel(I.id))} issue ${_eshStatusChip(mine)}</h2>
+    ${asg&&asg.dueDate?`<p class="mr-note" style="margin:-.3rem 0 .5rem">Due <b>${_mrEsc(_mrFmtDateLong?_mrFmtDateLong(asg.dueDate):asg.dueDate)}</b></p>`:''}
+    ${mine&&mine.status==='returned'&&mine.returnNote?`<p class="mr-note" style="color:#b91c1c">Note from the editor: ${_mrEsc(mine.returnNote)}</p>`:''}
+    <div class="esh-step"><b>1.</b> Write it in Word (about 400–800 words, plus a picture or two if you have them). <b>2.</b> Upload the .docx — Terra pulls the title, text, sub-headings and pictures and lays out your page to the Eshenbaugh Report design. <b>3.</b> 👁 Preview, then <b>Submit</b>.</div>
+    <div class="esh-row" style="margin-top:.6rem"><button type="button" class="mr-btn mr-btn-teal" onclick="window._eshEdit('${_mrEsc(currentUser.uid)}')">${mine?'✏️ Open my article':'⬆ Upload / write my article'}</button>${mine?`<button type="button" class="mr-btn" onclick="window._eshPreviewArticle('${_mrEsc(currentUser.uid)}',this)">👁 Preview my page</button>`:''}</div></div>`;
+}
+function _eshOrdered(I,A){
+  const arts=Object.values(A||{}).filter(a=>a&&a.id);
+  const ord=I.order||[]; const pos=id=>{ const i=ord.indexOf(id); return i<0?999:i; };
+  return arts.filter(a=>a.id!==I.coverId && a.kind!=='dogpound').sort((x,y)=>pos(x.id)-pos(y.id) || (ESH_KIND_ORDER[x.kind]||9)-(ESH_KIND_ORDER[y.kind]||9) || String(x.authorName||'').localeCompare(String(y.authorName||'')));
+}
+function _eshArticleRow(a, I, opts){
+  opts=opts||{}; const b=_eshBio(a.authorUid);
+  return `<tr><td>${_eshAvatar(b.name?b:{name:a.authorName})}</td><td><div style="font-weight:700;color:var(--text-1)">${_mrEsc(a.heading||a.title||'(untitled)')}</div><div class="llr-sub"><span class="esh-kind">${_mrEsc(opts.kindLabel||_eshKindLabel(a.kind))}</span> ${_mrEsc(a.authorName||'')} · ${_eshWords(a.blocks)} words${(a.photos||[]).length?' · '+(a.photos||[]).length+' photo'+((a.photos||[]).length>1?'s':''):''}</div></td>
+    <td>${_eshStatusChip(a)}${a.include===false?' <span class="mr-chip mr-chip-new">Left out</span>':''}</td>
+    <td style="white-space:nowrap">${opts.move?`<button type="button" class="mr-btn mr-btn-sm" aria-label="Move up" onclick="window._eshMove('${_mrEsc(a.id)}',-1)">↑</button><button type="button" class="mr-btn mr-btn-sm" aria-label="Move down" onclick="window._eshMove('${_mrEsc(a.id)}',1)">↓</button>`:''}<button type="button" class="mr-btn mr-btn-sm" onclick="window._eshEdit('${_mrEsc(a.id)}')">✏️ Edit</button></td></tr>`;
+}
+function _eshArticlesCard(I,A){
+  const cover=A[I.coverId]; const dog=Object.values(A).filter(a=>a.kind==='dogpound'); const rest=_eshOrdered(I,A);
+  const coverOpts=Object.values(A).filter(a=>a.kind!=='dogpound').map(a=>`<option value="${_mrEsc(a.id)}" ${a.id===I.coverId?'selected':''}>${_mrEsc((a.heading||a.title||'(untitled)')+' — '+(a.authorName||''))}</option>`).join('');
+  return `<div class="mr-card esh-card"><h2>🗞 What’s in the ${_mrEsc(_llrQLabel(I.id))} issue <span class="mr-muted" style="font-weight:600">${_mrEsc(_eshIssueLine(I))}</span></h2>
+    <div class="esh-row" style="margin-bottom:.6rem"><label class="mr-lbl" for="esh-cover" style="margin:0">Cover story</label><select id="esh-cover" class="mr-select" style="flex:1;min-width:200px" onchange="window._eshSet('coverId',this.value)"><option value="">— pick the lead article —</option>${coverOpts}</select></div>
+    <div class="llr-scroll"><table class="mr-table"><tbody>
+      ${cover?_eshArticleRow(cover,I,{kindLabel:'Cover story'}):''}
+      ${dog.map(a=>_eshArticleRow(a,I)).join('')}
+      ${I.includeListings!==false?`<tr><td></td><td><div style="font-weight:700;color:var(--text-1)">Current listings${I.includeUc?' + under contract':''}</div><div class="llr-sub">Pulled from the deal cards like the 🏞️ Land Listing Report (fix photos, prices and links there)</div></td><td><span class="mr-chip mr-chip-sent">Automatic</span></td><td></td></tr>`:''}
+      ${I.includeSales!==false?`<tr><td></td><td><div style="font-weight:700;color:var(--text-1)">${_mrEsc(_llrOrdinal(_llrQRange(I.id).q))} Quarter Sales</div><div class="llr-sub">Closed (won) deals with a close date in the quarter — sold price, acres, “Planned for” (buyer’s use), advisor</div></td><td><span class="mr-chip mr-chip-sent">Automatic</span></td><td></td></tr>`:''}
+      ${rest.map(a=>_eshArticleRow(a,I,{move:true})).join('')}
+      ${(I.quotes||[]).length?`<tr><td></td><td><div style="font-weight:700;color:var(--text-1)">Cowboy Wisdom</div><div class="llr-sub">${(I.quotes||[]).length} quote${(I.quotes||[]).length>1?'s':''}</div></td><td><span class="mr-chip mr-chip-sent">Ready</span></td><td></td></tr>`:''}
+      ${I.includeDir!==false?`<tr><td></td><td><div style="font-weight:700;color:var(--text-1)">Team Dirt Dog directory</div><div class="llr-sub">From the 👤 Bio tab, with photos</div></td><td><span class="mr-chip mr-chip-sent">Automatic</span></td><td></td></tr>`:''}
+    </tbody></table></div>
+    <div class="esh-row" style="margin-top:.7rem"><label class="mr-lbl" for="esh-newkind" style="margin:0">Add</label><select id="esh-newkind" class="mr-select">${ESH_KINDS.filter(k=>k[0]!=='broker').map(([k,t])=>`<option value="${k}">${_mrEsc(t)}</option>`).join('')}</select><button type="button" class="mr-btn" onclick="window._eshNew(document.getElementById('esh-newkind').value)">＋ New article</button></div>
+    <p class="mr-note" style="margin-top:.5rem">Advisor articles appear here as soon as the writer saves a draft. ↑ ↓ sets the printed order.</p></div>`;
+}
+function _eshHistoryCounts(q){
+  const S=_eshS(); const H=S.history||{}; const idx=_eshQIndex(q); const C={};
+  Object.entries(H).forEach(([k,v])=>{ const d=idx-_eshQIndex(k); if(d<1||d>4) return; (v.assignments||[]).forEach(x=>{ const c=(C[x.uid]=C[x.uid]||{n:0,last:''}); c.n++; if(!c.last||_eshQIndex(k)>_eshQIndex(c.last)) c.last=k; }); });
+  return C;
+}
+function _eshWritersCard(I,A){
+  const S=_eshS(); const adv=_eshAdvisors(); const C=_eshHistoryCounts(I.id); const sel=new Set((S.pickDraft||I.assignments||[]).map(x=>x.uid)); const prev=_eshPrevQ(I.id);
+  const asg=new Set((I.assignments||[]).map(x=>x.uid)); const sent=new Set((I.assignments||[]).filter(x=>x.taskId).map(x=>x.uid));
+  const target=S.target||Math.max(1,Math.ceil(adv.length*2/4));
+  return `<div class="mr-card esh-card"><h2>✍️ Writers for this issue <span class="mr-muted" style="font-weight:600">${sel.size} picked</span></h2>
+    <p class="mr-note" style="margin:-.2rem 0 .6rem">Each advisor writes for two issues a year. “Last 4 issues” counts the quarters they were assigned before this one.</p>
+    <div class="esh-row" style="margin-bottom:.6rem">
+      <label class="mr-muted" style="display:inline-flex;gap:.35rem;align-items:center">Writers <input type="number" min="1" max="20" class="mr-input" style="width:64px" value="${target}" onchange="window._eshS().target=+this.value||1"></label>
+      <button type="button" class="mr-btn" onclick="window._eshSuggest()">✨ Suggest</button>
+      <label class="mr-muted" style="display:inline-flex;gap:.35rem;align-items:center">Due <input type="date" class="mr-input" id="esh-due" value="${_mrEsc(I.dueDate||'')}"></label>
+    </div>
+    <div class="llr-scroll" style="max-height:420px;overflow:auto"><table class="mr-table"><thead><tr><th></th><th>Advisor</th><th>Last 4 issues</th><th>This issue</th></tr></thead><tbody>
+    ${adv.map(b=>{ const c=C[b.uid]||{n:0,last:''}; const lastPrev=c.last===prev; return `<tr><td><input type="checkbox" class="mr-check" aria-label="${_mrEsc(b.name)} writes for this issue" ${sel.has(b.uid)?'checked':''} onchange="window._eshPick('${_mrEsc(b.uid)}',this.checked)"></td>
+      <td><div class="esh-row" style="flex-wrap:nowrap">${_eshAvatar(b)}<span style="color:var(--text-1);font-weight:600">${_mrEsc(b.name)}</span></div></td>
+      <td><span class="${c.n>=2?'llr-price':''}" style="font-weight:700;color:${c.n>=2?'':'var(--text-1)'}">${c.n}</span> <span class="mr-muted">${c.last?'last '+_mrEsc(_llrQLabel(c.last).replace(' Quarter ',' Q ')):'—'}${lastPrev?' · wrote last issue':''}</span></td>
+      <td>${asg.has(b.uid)?(A[b.uid]?_eshStatusChip(A[b.uid]):(sent.has(b.uid)?'<span class="mr-chip mr-chip-queued">Task sent</span>':'<span class="mr-chip mr-chip-new">Assigned</span>'))+` <button type="button" class="mr-btn mr-btn-sm" title="Open or upload this writer’s article (e.g. they e-mailed you the Word file)" onclick="window._eshEdit('${_mrEsc(b.uid)}')">${A[b.uid]?'✏️':'⬆ Upload'}</button>`:''}</td></tr>`; }).join('')}
+    </tbody></table></div>
+    <div class="esh-row" style="margin-top:.7rem"><button type="button" class="mr-btn mr-btn-teal" onclick="window._eshSaveWriters(false,this)">Save writers</button><button type="button" class="mr-btn mr-btn-primary" onclick="window._eshSaveWriters(true,this)">Save &amp; send tasks</button></div>
+    ${(_eshCfg().access||'owner')==='owner'||(_eshCfg().access)==='admins'?`<p class="mr-note" style="margin-top:.4rem">Writers can’t open this tab yet (access: ${_mrEsc(_eshCfg().access==='admins'?'admins only':'only you')}). Set ⚙ Access to <b>Writers</b> before sending tasks.</p>`:''}</div>`;
+}
+function _eshSettingsCard(I){
+  const d=_eshDefaultIssue(I.id); const ck=(k,lbl,def)=>`<label style="display:flex;gap:.45rem;align-items:center;min-height:38px;cursor:pointer;color:var(--text-1);font-size:.85rem"><input type="checkbox" class="mr-check" ${(I[k]==null?def:I[k])?'checked':''} onchange="window._eshSet('${k}',this.checked)"> ${lbl}</label>`;
+  return `<div class="mr-card esh-card" style="margin-top:1rem"><h2>⚙ Issue settings</h2>
+    <div class="esh-row"><label class="mr-muted">Volume <input type="number" class="mr-input" style="width:80px" value="${_mrEsc(I.volume||d.volume)}" onchange="window._eshSet('volume',+this.value||${d.volume})"></label><label class="mr-muted">Issue <input type="number" class="mr-input" style="width:80px" value="${_mrEsc(I.issue||d.issue)}" onchange="window._eshSet('issue',+this.value||${d.issue})"></label></div>
+    <label class="mr-lbl" style="margin-top:.6rem" for="esh-side">Cover side box</label><select id="esh-side" class="mr-select" onchange="window._eshSet('sidebar',this.value)">${[['toc','Inside This Issue + Team Dirt Dog'],['team','Team Dirt Dog only'],['none','None — lead article full width']].map(([v,t])=>`<option value="${v}" ${(I.sidebar||'toc')===v?'selected':''}>${t}</option>`).join('')}</select>
+    <div style="margin-top:.4rem">${ck('includeListings','Current listings (from the deal cards)',true)}${ck('includeUc','…including under-contract listings',false)}${ck('includeSales',_llrOrdinal(_llrQRange(I.id).q)+' Quarter Sales',true)}${ck('includeDir','Team directory with photos (last page)',true)}</div></div>`;
+}
+function _eshQuotesCard(I){
+  const Q=I.quotes||[];
+  return `<div class="mr-card esh-card" style="margin-top:1rem"><h2>🤠 Cowboy Wisdom</h2>
+    ${Q.map((q,i)=>`<div class="esh-quote"><input class="mr-input" aria-label="Quote ${i+1}" value="${_mrEsc(q.q||'')}" placeholder="Quote" onchange="window._eshQuote(${i},'q',this.value)"><input class="mr-input" aria-label="Said by" value="${_mrEsc(q.by||'')}" placeholder="Said by" onchange="window._eshQuote(${i},'by',this.value)"><button type="button" class="mr-x" aria-label="Remove quote ${i+1}" onclick="window._eshQuote(${i},null)">✕</button></div>`).join('')||'<p class="mr-note">No quotes yet — the page is left out until you add some.</p>'}
+    <button type="button" class="mr-btn" style="margin-top:.3rem" onclick="window._eshQuote(${Q.length},'q','')">＋ Add a quote</button></div>`;
+}
+window._eshS=_eshS;
+window._eshSet=async function(k,v){ try{ await _eshSaveIssue({[k]:v}); showToast('Saved','success',1400); if(k!=='volume'&&k!=='issue') viewEshReport(); }catch(e){ showToast('Could not save: '+e.message+_eshRuleHint(e),'error',8000); } };
+window._eshQuote=async function(i,k,v){ const I=_eshS().issues[_eshS().q]; const Q=(I.quotes||[]).slice(); if(k===null) Q.splice(i,1); else { Q[i]={...(Q[i]||{q:'',by:''}), [k]:String(v||'').trim()}; } try{ await _eshSaveIssue({quotes:Q}); if(k===null||i>=(I.quotes||[]).length-1) viewEshReport(); }catch(e){ showToast('Could not save: '+e.message+_eshRuleHint(e),'error',8000); } };
+window._eshPick=function(uid,on){ const S=_eshS(); const I=S.issues[S.q]; const cur=(S.pickDraft||I.assignments||[]).slice(); const i=cur.findIndex(x=>x.uid===uid); if(on&&i<0){ const b=_eshBio(uid); cur.push({uid, name:b.name||'', email:b.email||''}); } if(!on&&i>=0) cur.splice(i,1); S.pickDraft=cur; };
+window._eshSuggest=function(){
+  const S=_eshS(); const I=S.issues[S.q]; const C=_eshHistoryCounts(I.id); const prev=_eshPrevQ(I.id); const n=S.target||Math.max(1,Math.ceil(_eshAdvisors().length*2/4));
+  const cand=_eshAdvisors().map(b=>({b, c:C[b.uid]||{n:0,last:''}})).filter(x=>x.c.n<2 && x.c.last!==prev)
+    .sort((x,y)=>x.c.n-y.c.n || (x.c.last?_eshQIndex(x.c.last):0)-(y.c.last?_eshQIndex(y.c.last):0) || x.b.name.localeCompare(y.b.name));
+  const keep=(I.assignments||[]).filter(x=>x.taskId);   // never un-pick someone who already got the task
+  const picks=[...keep]; cand.forEach(x=>{ if(picks.length<n && !picks.some(p=>p.uid===x.b.uid)) picks.push({uid:x.b.uid, name:x.b.name, email:x.b.email||''}); });
+  S.pickDraft=picks; viewEshReport(); showToast(picks.length+' writer'+(picks.length===1?'':'s')+' suggested — Save to keep them','info',4000);
+};
+window._eshSaveWriters=async function(send, btn){
+  const S=_eshS(); const I=S.issues[S.q]; const due=document.getElementById('esh-due')?.value||I.dueDate||'';
+  const picks=(S.pickDraft||I.assignments||[]).map(x=>({...((I.assignments||[]).find(y=>y.uid===x.uid)||{}), ...x}));
+  const acc=_eshCfg().access||'owner';
+  if(send && (acc==='owner'||acc==='admins')){ const ok=await elcConfirm('Writers can’t open the Eshenbaugh Report tab yet, so the task would point them to a tab they can’t see. Switch ⚙ Access to “Writers” (you, admins and this issue’s writers) and send?',{title:'Open the tab to the writers?',okLabel:'Open to writers & send'}); if(!ok) return; }
+  if(send && !due){ elcAlert('Pick a due date first.'); return; }
+  const done=elcBusy(btn, send?'Sending…':'Saving…');
+  try{
+    let n=0;
+    if(send){
+      if(acc==='owner'||acc==='admins') await _eshSaveSettings({access:'writers'});
+      const lbl=_llrQLabel(S.q);
+      for(const p of picks){ if(p.taskId) continue; const b=_eshBio(p.uid);
+        const id=await Store.createTask({ title:'📰 Write your Eshenbaugh Report article — '+lbl+' issue',
+          description:'You’re one of the writers for the '+lbl+' issue of the Eshenbaugh Report.\n\n□ Write your article in Word (about 400–800 words; add a picture or two if you have them)\n□ In Terra open 📰 Eshenbaugh Report → 📝 My article → upload the .docx\n□ 👁 Preview your page, then Submit\n\nTerra formats it to the newsletter design automatically.',
+          assignedTo:p.uid, assignedToName:p.name||b.name||'', assignedToEmail:p.email||b.email||'', dueDate:due, status:'pending', taskType:'eshArticle',
+          createdBy:currentUser.uid, createdByName:currentUser.name||'', createdAt:Date.now() });
+        p.taskId=id||'sent'; p.sentAt=Date.now(); n++; }
+    }
+    picks.forEach(p=>{ if(!p.assignedAt) p.assignedAt=Date.now(); p.dueDate=due; });
+    await _eshSaveIssue({assignments:picks, dueDate:due});
+    await _eshSaveSettings({writers:[...new Set(picks.map(p=>p.uid))]});
+    S.pickDraft=null; showToast(send?(n?n+' writer task'+(n===1?'':'s')+' sent':'Saved — everyone already had the task'):'Writers saved','success'); try{ renderShell(); }catch(_){}
+    viewEshReport();
+  }catch(e){ console.error('[esh] writers',e); showToast('Could not save: '+e.message+_eshRuleHint(e),'error',8000); }
+  finally{ done(); }
+};
+window._eshMove=async function(id,dir){ const S=_eshS(); const I=S.issues[S.q]; const L=_eshOrdered(I,S.arts[S.q]).map(a=>a.id); const i=L.indexOf(id), j=i+dir; if(i<0||j<0||j>=L.length) return; [L[i],L[j]]=[L[j],L[i]]; try{ await _eshSaveIssue({order:L}); viewEshReport(); }catch(e){ showToast('Could not save: '+e.message+_eshRuleHint(e),'error',8000); } };
+window._eshNew=function(kind){ const id=kind+'_'+Date.now().toString(36); const S=_eshS(); const b=_eshBio(currentUser.uid);
+  const heading={dogpound:'Inside the Dog Pound', marketplace:'Around the Marketplace', founder:'Founder’s Firewood'}[kind]||'';
+  S.arts[S.q][id]={id, kind, heading, title:'', authorUid:currentUser.uid, authorName:b.name||currentUser.name||'', authorEmail:currentUser.email||'', blocks:[], photos:[], status:'draft', _new:true};
+  window._eshEdit(id); };
+window._eshAccess=function(){
+  if(!_eshIsOwner()) return; const a=_eshCfg().access||'owner';
+  document.getElementById('esh-acc-ov')?.remove(); const ov=document.createElement('div'); ov.id='esh-acc-ov'; ov.className='mr-ov fixed inset-0 flex items-center justify-center';
+  const opt=(v,t,s)=>`<label class="mr-sec" style="display:flex;gap:.6rem;align-items:flex-start;cursor:pointer"><input type="radio" name="esh-acc" value="${v}" ${a===v?'checked':''} style="margin-top:.2rem;width:18px;height:18px;accent-color:var(--brand-teal)"><span><b style="color:var(--text-1)">${t}</b><br><span class="mr-muted">${s}</span></span></label>`;
+  ov.innerHTML=`<div class="mr-modal" role="dialog" aria-modal="true" aria-label="Who can see the Eshenbaugh Report" style="width:min(500px,100%)"><div class="mr-modal-h"><h2>Who can see this tab?</h2><button type="button" class="mr-x" style="margin-left:auto" aria-label="Close" onclick="document.getElementById('esh-acc-ov').remove()">✕</button></div>
+    <div class="mr-modal-b">${opt('owner','Only me','Hidden from everyone else (testing).')}${opt('writers','Writers','You, admins and the advisors writing for this issue (they only see their own article).')}${opt('admins','Admins','Admins and staff build the issue; advisors don’t see the tab.')}${opt('all','All users','Everyone sees the tab; advisors only see their own article.')}</div>
+    <div class="mr-modal-f"><button type="button" class="mr-btn" onclick="document.getElementById('esh-acc-ov').remove()">Cancel</button><button type="button" class="mr-btn mr-btn-teal" style="margin-left:auto" onclick="window._eshAccessSave(this)">Save</button></div></div>`;
+  ov.addEventListener('click',e=>{ if(e.target===ov) ov.remove(); }); document.body.appendChild(ov);
+};
+window._eshAccessSave=async function(btn){ const v=(document.querySelector('input[name="esh-acc"]:checked')||{}).value||'owner'; const done=elcBusy(btn,'Saving…');
+  try{ await _eshSaveSettings({access:v, accessChangedAt:Date.now(), accessChangedBy:currentUser?.name||''}); document.getElementById('esh-acc-ov')?.remove(); showToast('Eshenbaugh Report access saved','success'); renderShell(); renderCurrentView(); }
+  catch(e){ showToast('Could not save: '+e.message,'error'); } finally{ done(); } };
+
+/* ---------- article editor ---------- */
+window._eshEdit=function(id){
+  const S=_eshS(); const A=S.arts[S.q]; const ed=_eshIsEditor(); const own=id===currentUser.uid;
+  if(!ed && !own) return;
+  let a=A[id]; if(!a){ const b=_eshBio(id); a=A[id]={id, kind:'broker', heading:'', title:'', authorUid:id, authorName:b.name||(id===currentUser.uid?currentUser.name:'')||'', authorEmail:b.email||(id===currentUser.uid?currentUser.email:'')||'', blocks:[], photos:[], status:'draft', _new:true}; }   // id = the writer's uid (editors can upload for a writer)
+  S.edit={id, photos:(a.photos||[]).map(p=>({...p})), dirty:false};
+  document.getElementById('esh-ed-ov')?.remove(); const ov=document.createElement('div'); ov.id='esh-ed-ov'; ov.className='mr-ov fixed inset-0 flex items-center justify-center';
+  const adv=_eshPeople(); const locked=!ed && (a.status==='submitted'||a.status==='approved');
+  ov.innerHTML=`<div class="mr-modal" role="dialog" aria-modal="true" aria-label="Edit article" style="width:min(980px,100%)">
+    <div class="mr-modal-h"><h2>${_mrEsc(_eshKindLabel(a.kind))} — ${_mrEsc(_llrQLabel(S.q))} issue</h2> ${_eshStatusChip(a._new?null:a)}<button type="button" class="mr-x" style="margin-left:auto" aria-label="Close" onclick="window._eshCloseEd()">✕</button></div>
+    <div class="mr-modal-b">
+      ${locked?`<p class="mr-note" style="margin:0">Submitted — the editor has it now. Ask Ryan or Krissy if you need to change something.</p>`:''}
+      <label class="esh-drop" id="esh-drop" ${locked?'style="display:none"':''}><input type="file" accept=".docx,.txt" style="display:none" onchange="window._eshImport(this.files[0])"><b>⬆ Upload your Word file (.docx)</b><br><span class="mr-muted">Title, text, sub-headings, bullet points and pictures are pulled in and formatted for you — or type / paste below.</span></label>
+      <div class="mr-grid2">
+        <div><span class="mr-lbl">Headline (prints in the turquoise box)</span><input id="esh-ed-head" class="mr-input" style="width:100%;box-sizing:border-box" ${locked?'disabled':''} value="${_mrEsc(a.heading||a.title||'')}" placeholder="e.g. The Math Has to Work Again" oninput="window._eshS().edit.dirty=true"></div>
+        ${ed?`<div class="mr-grid2"><div><span class="mr-lbl">Type</span><select id="esh-ed-kind" class="mr-select" style="width:100%">${ESH_KINDS.map(([k,t])=>`<option value="${k}" ${a.kind===k?'selected':''}>${_mrEsc(t)}</option>`).join('')}</select></div>
+          <div><span class="mr-lbl">Author</span><select id="esh-ed-auth" class="mr-select" style="width:100%" ${a.id===a.authorUid&&a.kind==='broker'?'disabled title="Advisor articles belong to their writer"':''}>${adv.map(b=>`<option value="${_mrEsc(b.uid)}" ${b.uid===a.authorUid?'selected':''}>${_mrEsc(b.name)}</option>`).join('')}</select></div></div>`:'<div></div>'}
+      </div>
+      <div><span class="mr-lbl">Article <span class="mr-muted" style="text-transform:none;letter-spacing:0;font-weight:500">— blank line between paragraphs · “## ” starts a sub-heading · “- ” a bullet</span></span>
+        <textarea id="esh-ed-body" class="mr-textarea esh-body" ${locked?'disabled':''} oninput="window._eshS().edit.dirty=true;document.getElementById('esh-wc').textContent=window._eshWc(this.value)">${_mrEsc(a.body!=null?a.body:_eshBlocksToText(a.blocks))}</textarea>
+        <div class="mr-note" id="esh-wc">${_eshWords(a.blocks)} words</div></div>
+      <div><span class="mr-lbl">Pictures (up to 4 — the first prints beside the article; captions are optional)</span><div class="esh-photos" id="esh-ed-photos"></div>
+        ${locked?'':`<label class="mr-btn" style="margin-top:.5rem;cursor:pointer">＋ Add pictures<input type="file" accept="image/*" multiple style="display:none" onchange="window._eshAddPhotos(this.files)"></label>`}</div>
+      ${ed&&!a._new?`<div><span class="mr-lbl">Editor</span><div class="esh-row"><label style="display:inline-flex;gap:.4rem;align-items:center;color:var(--text-1);font-size:.85rem"><input type="checkbox" class="mr-check" id="esh-ed-inc" ${a.include!==false?'checked':''}> Print in this issue</label><input id="esh-ed-note" class="mr-input" style="flex:1;min-width:200px" placeholder="Note to the writer if you return it" value="${_mrEsc(a.returnNote||'')}"></div></div>`:''}
+    </div>
+    <div class="mr-modal-f">
+      <button type="button" class="mr-btn" onclick="window._eshPreviewArticle('${_mrEsc(id)}',this,true)">👁 Preview page</button>
+      ${locked?'':`<button type="button" class="mr-btn" onclick="window._eshSaveEd('draft',this)">💾 Save draft</button>`}
+      ${ed&&!a._new&&a.authorUid!==currentUser.uid?`<button type="button" class="mr-btn" onclick="window._eshSaveEd('returned',this)">↩ Return to writer</button>`:''}
+      ${ed?`<button type="button" class="mr-btn mr-btn-teal" style="margin-left:auto" onclick="window._eshSaveEd('approved',this)">✓ Approve</button>`:(locked?'':`<button type="button" class="mr-btn mr-btn-teal" style="margin-left:auto" onclick="window._eshSaveEd('submitted',this)">📤 Submit</button>`)}
+    </div></div>`;
+  ov.addEventListener('click',e=>{ if(e.target===ov) window._eshCloseEd(); });
+  document.body.appendChild(ov); _eshRenderPhotos(locked);
+};
+window._eshWc=t=>_eshWords(_eshTextToBlocks(t))+' words';
+window._eshCloseEd=async function(){ const S=_eshS(); if(S.edit&&S.edit.dirty){ const ok=await elcConfirm('Close without saving your changes?',{title:'Unsaved changes',okLabel:'Close',danger:true}); if(!ok) return; } document.getElementById('esh-ed-ov')?.remove(); const a=S.arts[S.q][S.edit&&S.edit.id]; if(a&&a._new) delete S.arts[S.q][a.id]; S.edit=null; };
+function _eshRenderPhotos(locked){
+  const S=_eshS(); const el=document.getElementById('esh-ed-photos'); if(!el||!S.edit) return; const P=S.edit.photos;
+  el.innerHTML=P.length?P.map((p,i)=>`<div class="esh-photo"><img src="${_mrEsc(p.url)}" alt=""><input class="mr-input" aria-label="Caption ${i+1}" placeholder="Caption" value="${_mrEsc(p.caption||'')}" ${locked?'disabled':''} onchange="window._eshS().edit.photos[${i}].caption=this.value;window._eshS().edit.dirty=true">${locked?'':`<div class="esh-row" style="margin-top:.25rem">${i?`<button type="button" class="mr-btn mr-btn-sm" onclick="window._eshPhotoFirst(${i})">Make first</button>`:'<span class="mr-muted">Prints first</span>'}<button type="button" class="mr-x" aria-label="Remove picture" onclick="window._eshPhotoDel(${i})">✕</button></div>`}</div>`).join(''):'<p class="mr-note">No pictures — your Bio headshot still prints with the article.</p>';
+}
+window._eshPhotoFirst=i=>{ const P=_eshS().edit.photos; P.unshift(P.splice(i,1)[0]); _eshS().edit.dirty=true; _eshRenderPhotos(); };
+window._eshPhotoDel=i=>{ _eshS().edit.photos.splice(i,1); _eshS().edit.dirty=true; _eshRenderPhotos(); };
+window._eshAddPhotos=async function(files){
+  const S=_eshS(); const id=S.edit.id; const L=Array.from(files||[]).slice(0,Math.max(0,4-S.edit.photos.length)); if(!L.length){ showToast('Up to 4 pictures per article','info'); return; }
+  showToast('Uploading '+L.length+' picture'+(L.length>1?'s':'')+'…','info',2500);
+  for(const f of L){ try{ const url=await _eshUploadPhoto(id,f); S.edit.photos.push({url, caption:''}); S.edit.dirty=true; _eshRenderPhotos(); }catch(e){ showToast('Upload failed: '+e.message,'error'); } }
+};
+window._eshImport=async function(file){
+  if(!file) return; const S=_eshS(); const drop=document.getElementById('esh-drop'); drop&&drop.classList.add('on');
+  try{
+    let r;
+    if(/\.txt$/i.test(file.name)) r={title:'', blocks:_eshTextToBlocks(await file.text()), images:[]};
+    else if(/\.docx$/i.test(file.name)) r=await _eshReadDocx(file);
+    else { showToast('Upload a Word .docx (or a .txt) file','error'); return; }
+    const head=document.getElementById('esh-ed-head'); if(r.title && head && !head.value.trim()) head.value=r.title;
+    document.getElementById('esh-ed-body').value=_eshBlocksToText(r.blocks); document.getElementById('esh-wc').textContent=_eshWords(r.blocks)+' words';
+    const room=Math.max(0,4-S.edit.photos.length); const imgs=r.images.slice(0,room);
+    for(const u of imgs){ try{ const url=await _eshUploadPhoto(S.edit.id,_eshDataUrlToBlob(u)); S.edit.photos.push({url,caption:''}); }catch(e){ console.warn('[esh] docx image',e); } }
+    S.edit.dirty=true; _eshRenderPhotos();
+    showToast('Pulled in '+_eshWords(r.blocks)+' words'+(imgs.length?' and '+imgs.length+' picture'+(imgs.length>1?'s':''):'')+' — check it, then Preview','success',5000);
+  }catch(e){ console.error('[esh] import',e); showToast('Couldn’t read that file: '+e.message,'error',8000); }
+  finally{ drop&&drop.classList.remove('on'); }
+};
+function _eshCollectEd(){
+  const S=_eshS(); const a=S.arts[S.q][S.edit.id]; const body=document.getElementById('esh-ed-body')?.value||'';
+  const p={heading:(document.getElementById('esh-ed-head')?.value||'').trim(), body, blocks:_eshTextToBlocks(body), photos:S.edit.photos.map(x=>({url:x.url, caption:String(x.caption||'').trim()}))};
+  p.title=p.heading;
+  const k=document.getElementById('esh-ed-kind'); if(k) p.kind=k.value; else p.kind=a.kind||'broker';
+  const au=document.getElementById('esh-ed-auth'); const uid=(au&&!au.disabled)?au.value:a.authorUid; const b=_eshBio(uid); p.authorUid=uid; p.authorName=b.name||a.authorName||''; p.authorEmail=b.email||a.authorEmail||'';
+  const inc=document.getElementById('esh-ed-inc'); if(inc) p.include=inc.checked;
+  const note=document.getElementById('esh-ed-note'); if(note) p.returnNote=note.value.trim();
+  return p;
+}
+window._eshSaveEd=async function(status, btn){
+  const S=_eshS(); const id=S.edit.id; const p=_eshCollectEd();
+  if(status!=='draft' && status!=='returned'){ if(!p.heading){ elcAlert('Add a headline first.'); return; } if(_eshWords(p.blocks)<50){ elcAlert('The article looks empty — upload your Word file or paste the text first.'); return; } }
+  if(status==='returned' && !p.returnNote){ elcAlert('Add a short note telling the writer what to change.'); return; }
+  const done=elcBusy(btn,'Saving…');
+  try{
+    p.status=status; if(status==='submitted') p.submittedAt=Date.now(); if(status==='approved'){ p.approvedAt=Date.now(); p.approvedBy=currentUser.name||''; }
+    const a=S.arts[S.q][id]; delete a._new;
+    await _eshSaveArticle(id, p);
+    const I=S.issues[S.q]; if(!(I.order||[]).includes(id) && p.kind!=='dogpound' && _eshIsEditor()) await _eshSaveIssue({order:[...(I.order||[]), id]}).catch(()=>{});
+    S.edit.dirty=false; document.getElementById('esh-ed-ov')?.remove(); S.edit=null;
+    showToast({draft:'Draft saved',submitted:'Submitted — thanks! Ryan and Krissy will review it',approved:'Approved',returned:'Returned to the writer'}[status],'success',5000);
+    viewEshReport();
+  }catch(e){ console.error('[esh] save',e); showToast('Could not save: '+e.message+_eshRuleHint(e),'error',8000); }
+  finally{ done(); }
+};
+
+/* ---------- PDF: layout engine ---------- */
+async function _eshCtx(){
+  await _mrLoadLibs(); const {jsPDF}=window.jspdf;
+  const doc=new jsPDF({orientation:'portrait',unit:'pt',format:'letter',compress:true});
+  const OS=await _llrFonts(doc);
+  const F=(w)=>{ if(OS) doc.setFont(OS[w]||OS.r,'normal'); else doc.setFont('helvetica', w==='i'?'italic':((w==='b'||w==='x'||w==='s')?'bold':'normal')); };
+  const col=c=>doc.setTextColor(c[0],c[1],c[2]); const fill=c=>doc.setFillColor(c[0],c[1],c[2]);
+  const A={}; await Promise.all([['mc','masthead-cover.png',{png:true,maxPx:2000}],['mi','masthead-inside.jpg',{maxPx:2000,q:0.9}],['ft','footer.jpg',{maxPx:2000,q:0.85}],['logo','logo.png',{png:true,maxPx:600}],['cw','cowboy-wisdom.jpg',{maxPx:1000}],['rider','cowboy-rider.png',{png:true,maxPx:700}],...ESH_DOGS.map(d=>[d,d,{png:true,maxPx:420}])].map(async([k,f,o])=>{ A[k]=await _mrImg(ESH_A+f,o); }));
+  return {doc, OS, F, col, fill, A, W:612, H:792, page:0};
+}
+// Full-width line of spaced caps between two x positions (issue line under REPORT)
+function _eshSpread(C, s, x, w, y, size, w8){ const {doc,F}=C; F(w8||'r'); doc.setFontSize(size); const nat=doc.getStringUnitWidth(s)*size; const cs=Math.max(0,(w-nat)/Math.max(1,s.length-1)); doc.text(s,x,y,{charSpace:cs}); }
+function _eshHeader(C, I){ const {doc,A,col}=C; if(A.mi) doc.addImage(A.mi.data,A.mi.fmt,0,0,612,88.6); col([255,255,255]); _eshSpread(C,_eshIssueLine(I),386.3,176.6,85.2,7.6); }
+function _eshFooter(C){ const {doc,A,F,col}=C; if(A.ft) doc.addImage(A.ft.data,A.ft.fmt,0,762.6,612,29.4); if(A.logo) doc.addImage(A.logo.data,'PNG',430.5,682.5,148.1,71.6); F('b'); doc.setFontSize(12); col(ESH_INK); doc.text(String(C.page),34,738); }
+function _eshNewPage(C, I){ if(C.page>0) C.doc.addPage(); C.page++; if(I) _eshHeader(C,I); }
+function _eshHeadBox(C, t, cont, x, y, maxW){
+  const {doc,F,fill,col}=C; x=x||41.7; y=y||115.3; maxW=maxW||529; let size=24; F('x');
+  const full=t+(cont?'  continued':''); while(size>15 && doc.getStringUnitWidth(full)*size+28>maxW){ size-=0.5; }
+  doc.setFontSize(size); const tw=doc.getStringUnitWidth(t)*size; doc.setFontSize(size*0.5); const cw=cont?doc.getStringUnitWidth('  continued')*size*0.5:0;
+  const w=Math.min(maxW,tw+cw+28); fill(ESH_TEAL); doc.rect(x,y,w,36.2,'F'); col([255,255,255]);
+  F('x'); doc.setFontSize(size); doc.text(t,x+14,y+18+size*0.35,{maxWidth:maxW-28}); if(cont){ F('i'); doc.setFontSize(size*0.5); doc.text('continued',x+14+tw+size*0.25,y+18+size*0.35); }
+  return {x,y,w,h:36.2};
+}
+// Flow blocks into frames. frames(): returns next {x,y,w,bottom} (may start a new page). Returns when all text placed.
+function _eshFlow(C, blocks, nextFrame, o){
+  o=o||{}; const {doc,F,col}=C; const size=o.size||10, lead=o.lead||14, gap=o.gap||9;
+  let fr=nextFrame(); let y=fr.y+size; let fresh=true;
+  const newFrame=()=>{ fr=nextFrame(); y=fr.y+size; fresh=true; };
+  // lines are wrapped to the frame they land in, so a paragraph that crosses into a narrower column re-wraps
+  (blocks||[]).forEach(b=>{
+    const isH=b.t==='h', isLi=b.t==='li'; const w=isH?'b':'r', fs=isH?size+1:size, ind=isLi?12:0;
+    if(isH){ if(!fresh) y+=gap*0.6; if(y+lead*2>fr.bottom) newFrame(); }
+    let words=String(b.text||'').split(/\s+/).filter(Boolean); let firstLine=true;
+    while(words.length){
+      if(y>fr.bottom) newFrame();
+      F(w); doc.setFontSize(fs); const lines=doc.splitTextToSize(words.join(' '), fr.w-ind); const line=lines[0];
+      col(ESH_INK); if(isLi&&firstLine) doc.text('•',fr.x+2,y); doc.text(line, fr.x+ind, y);
+      words=words.slice(Math.max(1,String(line||'').split(/\s+/).filter(Boolean).length)); firstLine=false; fresh=false;
+      y+=lead;
+    }
+    y+=isH?3:(isLi?gap*0.45:gap);
+  });
+  return {y:y-lead+size, frame:fr};
+}
+async function _eshPhotoImgs(a){ const out=[]; for(const p of (a.photos||[]).slice(0,4)){ const im=await _mrImg(p.url,{maxPx:1400,q:0.85}); if(im) out.push({...im, caption:p.caption||''}); } return out; }
+function _eshPlacePhoto(C, im, x, y, w, maxH){
+  const {doc,F,col}=C; let h=w*im.h/im.w; let ww=w; if(h>maxH){ h=maxH; ww=h*im.w/im.h; }
+  const px=x+(w-ww); doc.setDrawColor(210,210,210); doc.setLineWidth(0.5); doc.addImage(im.data,im.fmt,px,y,ww,h); doc.rect(px,y,ww,h,'S');
+  let yy=y+h; if(im.caption){ F('i'); doc.setFontSize(9); col([60,60,60]); doc.splitTextToSize(im.caption,w).slice(0,3).forEach((l,i)=>{ doc.text(l,x+w,yy+11+i*11,{align:'right'}); }); yy+=11*Math.min(3,doc.splitTextToSize(im.caption,w).length)+4; }
+  return yy+8;
+}
+// Inside article (Dog Pound / Marketplace / Feature / cover continuation): heading box + two 3.54" columns; photos take the
+// top of the right column (then the next columns) with captions under them.
+async function _eshDrawInside(C, I, a, o){
+  o=o||{}; const imgs=o.imgs||await _eshPhotoImgs(a); let pi=o.photoStart||0; const start=C.page+1;
+  const cols=[{x:41.7,w:255},{x:316.8,w:255}];
+  let pageCols=[], colIdx=0;
+  const pageNew=(cont)=>{ _eshNewPage(C,I); const hb=_eshHeadBox(C, a.heading||a.title||'', cont, 41.7, 115.3, cont?529:380);
+    if(!cont && a.kind!=='dogpound'){ const by=_eshByline(a); if(by){ C.F('i'); C.doc.setFontSize(9.5); C.col(ESH_GREY); C.doc.text(by, 570, 137, {align:'right', maxWidth:Math.max(80,570-(hb.x+hb.w)-10)}); } }
+    pageCols=cols.map((c,i)=>({x:c.x, w:c.w, y:165.2, bottom:i===1?672:712})); colIdx=0; };
+  const nextFrame=()=>{ if(colIdx>=pageCols.length){ C.page>=start&&_eshFooter(C); pageNew(true); }
+    const fr=pageCols[colIdx++];
+    // a picture heads this column (right column first)
+    if(pi<imgs.length && (colIdx===2 || pi>0)){ fr.y=_eshPlacePhoto(C, imgs[pi++], fr.x, fr.y, fr.w, 210); }
+    return fr; };
+  pageNew(!!o.cont);
+  const r=_eshFlow(C, o.blocks||a.blocks||[], nextFrame);
+  // leftover pictures go under the text if they fit, else into the empty column
+  while(pi<imgs.length){ let fr=r.frame; let y=r.y+6; if(y+120>fr.bottom){ if(colIdx<pageCols.length){ fr=pageCols[colIdx++]; y=fr.y; } else break; } r.y=_eshPlacePhoto(C, imgs[pi++], fr.x, y, fr.w, Math.min(210, fr.bottom-y-30)); r.frame=fr; }
+  _eshFooter(C);
+  return {start};
+}
+// Advisor article — style guide "Broker Page": Bio headshot + From-the-desk-of box on the left, turquoise-bordered article box with
+// the headline on its top edge, a Dirt Dog drawing where the border stops; overflow continues on two-column inside pages.
+async function _eshDrawBroker(C, I, a, dogIdx){
+  const {doc,F,col,fill,A}=C; const b=_eshBio(a.authorUid); const imgs=await _eshPhotoImgs(a); const start=C.page+1;
+  _eshNewPage(C,I);
+  // left column
+  const head=b.headshotUrl?await _mrImg(b.headshotUrl,{cover:140/160,maxPx:600,q:0.9}):null;
+  let ly=150;
+  doc.setFillColor(225,225,225); doc.rect(44.7,ly+3,140,160,'F'); doc.setFillColor(255,255,255); doc.rect(41.7,ly,140,160,'F');
+  if(head) doc.addImage(head.data,head.fmt,45.7,ly+4,132,152); else { fill(ESH_TEAL); doc.rect(45.7,ly+4,132,152,'F'); F('x'); doc.setFontSize(40); col([255,255,255]); doc.text(String(b.name||a.authorName||'').split(/\s+/).map(w=>w[0]||'').join('').slice(0,2).toUpperCase(),111.7,ly+92,{align:'center'}); }
+  ly+=168;
+  doc.setDrawColor(190,190,190); doc.setLineWidth(0.6); doc.setFillColor(255,255,255); doc.rect(41.7,ly,140,58,'FD');
+  F('r'); doc.setFontSize(9); col(ESH_RED); doc.text(a.kind==='founder'?'Founder’s Firewood':'From the desk of',111.7,ly+14,{align:'center'});
+  doc.setFont('times','bold'); let ns=16; const nm=b.name||a.authorName||''; while(ns>10 && doc.getStringUnitWidth(nm)*ns>132) ns-=0.5; doc.setFontSize(ns); col(ESH_INK); doc.text(nm,111.7,ly+33,{align:'center'});
+  doc.setFont('times','normal'); doc.setFontSize(8.5); col(ESH_GREY); doc.text(String(b.title||'Advisor'),111.7,ly+46,{align:'center',maxWidth:134});
+  ly+=66; F('r'); doc.setFontSize(8.5); col(ESH_GREY);
+  if(b.designationsStr){ F('b'); doc.text(b.designationsStr,41.7,ly+9); ly+=12; F('r'); }
+  if(b.cell||b.phone){ doc.text('Cell: '+(b.cell||b.phone),41.7,ly+9); ly+=12; }
+  if(b.email){ F('s'); col(ESH_LINK); doc.text(b.email,41.7,ly+9); doc.link(41.7,ly,doc.getStringUnitWidth(b.email)*8.5,11,{url:'mailto:'+b.email}); ly+=12; }
+  ly+=10; let pi=0;
+  while(pi<imgs.length && ly<560){ ly=_eshPlacePhoto(C, imgs[pi++], 41.7, ly, 140, Math.min(160, 690-ly-36)); }
+  // article box
+  const bx=197, bw=374, by=133, bb=648; const dog=A[ESH_DOGS[dogIdx%ESH_DOGS.length]];
+  doc.setDrawColor(ESH_TEAL[0],ESH_TEAL[1],ESH_TEAL[2]); doc.setLineWidth(0.75);
+  const gapW=dog?96:0; const mid=bx+bw/2;
+  doc.line(bx,by,bx,bb); doc.line(bx+bw,by,bx+bw,bb); doc.line(bx,by,bx+bw,by);
+  if(gapW){ doc.line(bx,bb,mid-gapW/2-6,bb); doc.line(mid+gapW/2+6,bb,bx+bw,bb); const dh=gapW*dog.h/dog.w; doc.addImage(dog.data,'PNG',mid-gapW/2,bb-dh*0.55,gapW,dh); } else doc.line(bx,bb,bx+bw,bb);
+  const t=a.heading||a.title||''; F('x'); let hs=20; while(hs>13 && doc.getStringUnitWidth(t)*hs+28>bw-20) hs-=0.5; doc.setFontSize(hs); const hw=Math.min(bw-20, doc.getStringUnitWidth(t)*hs+28);
+  fill(ESH_TEAL); doc.rect(mid-hw/2,by-15,hw,30,'F'); col([255,255,255]); doc.text(t,mid,by+hs*0.35,{align:'center',maxWidth:bw-34});
+  let used=false; let contPage=null, cc=0;
+  const nextFrame=()=>{ if(!used){ used=true; return {x:bx+14, w:bw-28, y:by+26, bottom:bb-(gapW?30:12)}; }
+    if(!contPage || cc>=2){ _eshFooter(C); _eshNewPage(C,I); _eshHeadBox(C,t,true); contPage=[{x:41.7,w:255,y:165.2,bottom:712},{x:316.8,w:255,y:165.2,bottom:672}]; cc=0; }
+    const fr=contPage[cc++]; if(cc===2 && pi<imgs.length) fr.y=_eshPlacePhoto(C, imgs[pi++], fr.x, fr.y, fr.w, 200); return fr; };
+  _eshFlow(C, a.blocks||[], nextFrame);
+  _eshFooter(C);
+  return {start};
+}
+// Cover — masthead, issue line, side box (Inside This Issue + Team Dirt Dog), lead article with feature photo
+async function _eshDrawCover(C, I, a, sidebar){
+  const {doc,F,col,fill,A}=C; _eshNewPage(C,null);
+  if(A.mc) doc.addImage(A.mc.data,'PNG',0,0,612,124.7);
+  col([255,255,255]); _eshSpread(C,_eshIssueLine(I),284.7,285.8,118.8,9.6);
+  const side=sidebar!=='none';
+  if(side){ doc.setFillColor(215,215,215); doc.rect(39.4,93,182,623.6,'F'); doc.setFillColor(255,255,255); doc.rect(36.4,90,182,623.6,'F'); }
+  const tx=side?240.5:41.7, tw=side?336:529;
+  if(!a){ F('x'); doc.setFontSize(28); col(ESH_RED); doc.text('Lead article goes here',tx,200); _eshFooter(C); return {start:1, tocY:0}; }
+  const b=_eshBio(a.authorUid); const head=b.headshotUrl?await _mrImg(b.headshotUrl,{cover:78/87,maxPx:400,q:0.9}):null;
+  let y=134;
+  if(head){ doc.setFillColor(215,215,215); doc.rect(486,y+2,78,87,'F'); doc.addImage(head.data,head.fmt,484,y,78,87); }
+  const hw=head?(484-12-tx):tw; const t=a.heading||a.title||''; F('x'); let hs=34, lines;
+  for(;;){ doc.setFontSize(hs); lines=doc.splitTextToSize(t,hw); if(lines.length<=3||hs<=24) break; hs-=1; }
+  col(ESH_RED); let hy=y+hs*0.9; lines.slice(0,4).forEach((l,i)=>doc.text(l,tx,hy+i*hs*1.08)); hy+=(Math.min(4,lines.length)-1)*hs*1.08;
+  F('b'); doc.setFontSize(12); col(ESH_INK); const by=_eshByline(a); if(by) doc.text(by,tx,hy+20);
+  let bodyY=Math.max(hy+38, head?y+87+14:0);
+  // body: first page 10.5 pt; overflow continues on an inside page
+  let usedFirst=false, cont=null, cc=0; const imgs=await _eshPhotoImgs(a); let pi=0;
+  const nextFrame=()=>{ if(!usedFirst){ usedFirst=true; return {x:tx, w:tw, y:bodyY, bottom:672}; }
+    if(!cont||cc>=2){ _eshFooter(C); _eshNewPage(C,I); _eshHeadBox(C,t,true); cont=[{x:41.7,w:255,y:165.2,bottom:712},{x:316.8,w:255,y:165.2,bottom:672}]; cc=0; }
+    const fr=cont[cc++]; if(cc===2 && pi<imgs.length) fr.y=_eshPlacePhoto(C, imgs[pi++], fr.x, fr.y, fr.w, 210); return fr; };
+  // remember where the cover ends so the side box can be filled later (needs page numbers)
+  const coverPage=C.page;
+  _eshFlow(C, a.blocks||[], nextFrame, {size:10.5, lead:14.5});
+  if(C.page===coverPage) _eshFooter(C); else _eshFooter(C);
+  C.coverFooterPending=false;
+  return {start:1};
+}
+function _eshDrawSidebar(C, I, toc, mode){
+  const {doc,F,col,fill}=C; doc.setPage(1);
+  const x=36.4, w=182; let y=98.9; const bottom=708;
+  const box=(t,yy)=>{ fill(ESH_TEAL); doc.rect(x+7,yy,166,19.2,'F'); F('x'); doc.setFontSize(13.5); col([255,255,255]); doc.text(t,x+13,yy+14.2); };
+  if(mode==='toc' && toc.length){
+    box('INSIDE THIS ISSUE',y); y+=19.2+14;
+    toc.forEach(e=>{ F('b'); doc.setFontSize(8.6); col(ESH_INK); const pages=e.pages.join(', '); const label=e.title.length>30?e.title.slice(0,29)+'…':e.title;
+      doc.text(label,x+13.7,y); F('r'); const pw=doc.getStringUnitWidth(pages)*8.6; doc.text(pages,x+w-10,y,{align:'right'});
+      F('b'); const lw=doc.getStringUnitWidth(label)*8.6; F('r'); doc.setFontSize(8.6); let dots=''; const dw=doc.getStringUnitWidth(' .')*8.6; const room=(x+w-10-pw-4)-(x+13.7+lw+4); for(let k=0;k<Math.floor(room/dw);k++) dots+=' .'; doc.text(dots,x+13.7+lw+3,y);
+      y+=15.4; });
+    y+=10;
+  }
+  const team=_eshAdvisors().concat(_eshStaffForTeam());
+  box('TEAM DIRT DOG',y); y+=19.2+12;
+  const full=mode==='team'; const per=full?4:2; const avail=bottom-y; let pitch=Math.min(11.5, avail/Math.max(1,team.length*per+team.length*0.45));
+  const fs=Math.max(5.6, Math.min(9.5, pitch*0.82));
+  team.forEach(p=>{ F('b'); doc.setFontSize(fs+0.6); col(ESH_INK); doc.text(p.name,x+13.7,y); if(p.designationsStr){ const nw=doc.getStringUnitWidth(p.name+', ')*(fs+0.6); doc.setFontSize(fs*0.78); doc.text(', '+p.designationsStr,x+13.7+doc.getStringUnitWidth(p.name)*(fs+0.6),y); }
+    y+=pitch; F('r'); doc.setFontSize(fs); col([60,60,60]);
+    if(full){ doc.text(String(p.title||''),x+13.7,y,{maxWidth:w-20}); y+=pitch; if(p.cell||p.phone){ doc.text('Cell: '+(p.cell||p.phone),x+13.7,y); y+=pitch; } if(p.email){ F('b'); col(ESH_LINK); doc.text(p.email,x+13.7,y); doc.link(x+13.7,y-fs,doc.getStringUnitWidth(p.email)*fs,fs+2,{url:'mailto:'+p.email}); y+=pitch; } }
+    else { doc.text([p.title,(p.cell||p.phone)?'Cell: '+(p.cell||p.phone):''].filter(Boolean).join('  ·  '),x+13.7,y,{maxWidth:w-20}); y+=pitch; }
+    y+=pitch*0.45; });
+  doc.setPage(doc.getNumberOfPages());
+}
+function _eshStaffForTeam(){ return []; }   // staff (Pat, Nick…) print in the Team directory; the cover box lists advisors
+async function _eshDrawCowboy(C, I){
+  const Q=(I.quotes||[]).filter(q=>q&&String(q.q||'').trim()); if(!Q.length) return null;
+  const {doc,F,col,A}=C; _eshNewPage(C,I); const start=C.page;
+  if(A.cw){ const w=210, h=w*A.cw.h/A.cw.w; doc.addImage(A.cw.data,A.cw.fmt,(612-w)/2,112,w,h); }
+  const rider=A.rider; const riderH=rider?150:0;
+  let size=17; const top=175, bottom=700-(rider?60:0);
+  const lay=s=>{ let h=0; Q.forEach(q=>{ F('x'); doc.setFontSize(s); h+=doc.splitTextToSize('“'+q.q.trim().replace(/^[“"]|[”"]$/g,'')+'”',420).length*s*1.2+(q.by?s*1.3:0)+s*1.4; }); return h; };
+  while(size>10 && lay(size)>bottom-top) size-=0.5;
+  let y=top+Math.max(0,(bottom-top-lay(size))/2);
+  Q.forEach(q=>{ F('x'); doc.setFontSize(size); col(ESH_INK); const L=doc.splitTextToSize('“'+q.q.trim().replace(/^[“"]|[”"]$/g,'')+'”',420); L.forEach((l,i)=>doc.text(l,306,y+size+i*size*1.2,{align:'center'})); y+=L.length*size*1.2;
+    if(q.by){ F('s'); doc.setFontSize(size*0.62); col(ESH_GREY); doc.text(q.by,306,y+size*0.9,{align:'center'}); y+=size*1.3; } y+=size*1.4; });
+  if(rider){ const w=170, h=w*rider.h/rider.w; doc.addImage(rider.data,'PNG',41.7,752-h,w,h); }
+  _eshFooter(C); return {start};
+}
+async function _eshBuild(only, progress){
+  const S=_eshS(); const I=S.issues[S.q]; const A=S.arts[S.q]||{};
+  const C=await _eshCtx(); const {doc}=C; progress&&progress(0.05);
+  doc.setProperties({title:'The Eshenbaugh Report · '+_llrQLabel(S.q), author:'Eshenbaugh Land Company', subject:_eshIssueLine(I), creator:'Terra'});
+  const toc=[]; const add=(title,r)=>{ if(r&&r.start){ const e=toc.find(x=>x.title===title); const pages=[]; for(let p=r.start;p<=C.page;p++) pages.push(p); const span=pages.length>1?[pages[0]+'-'+pages[pages.length-1]]:[String(pages[0])]; if(e) e.pages.push(...span); else toc.push({title, pages:span}); } };
+  if(only){ const a=A[only]; if(!a) throw new Error('Nothing to preview yet');
+    const live={...a}; if(S.edit&&S.edit.id===only){ Object.assign(live,_eshCollectEd()); }
+    if(live.kind==='broker'||live.kind==='founder') await _eshDrawBroker(C,I,live,0); else await _eshDrawInside(C,I,live);
+    return {doc, file:'Eshenbaugh_Report_'+S.q+'_'+String(live.authorName||'article').replace(/\W+/g,'_')+'.pdf', pages:C.page}; }
+  const inc=a=>a&&a.include!==false&&(a.blocks||[]).length;
+  const cover=inc(A[I.coverId])?A[I.coverId]:null; const side=I.sidebar||'toc';
+  await _eshDrawCover(C,I,cover,side); if(cover) add(cover.heading||cover.title,{start:1});
+  progress&&progress(0.15);
+  for(const a of Object.values(A).filter(a=>a.kind==='dogpound'&&inc(a))){ add(a.heading||'Inside the Dog Pound', await _eshDrawInside(C,I,a)); }
+  // listings + quarter sales via the Land Listing Report page builder
+  if(I.includeListings!==false || I.includeSales!==false){
+    const hdr=()=>_eshHeader(C,I); const ftr=(p)=>{ C.page=p; _eshFooter(C); };
+    const pill=(t)=>_eshHeadBox(C,t,false);
+    await _llrWithState({q:S.q, asOf:_llrIso(new Date(Math.min(Date.now(), _llrQRange(S.q).end))), includeUc:!!I.includeUc, includeSold:I.includeSales!==false, office:'', land:'all', includeDir:false}, async()=>{
+      let rows=_llrCollect().filter(r=>!r.excluded); if(I.includeListings===false) rows=rows.filter(r=>r.sold);
+      if(!rows.length) return;
+      const before=C.page; const secStart={};
+      // build section by section so each lands in the table of contents
+      const order=LLR_SECTIONS.map(x=>x[0]);
+      for(const k of order){ const rr=rows.filter(r=>r.sec===k); if(!rr.length) continue; const s=C.page+1;
+        const R=await _llrBuild(p=>progress&&progress(0.15+0.5*p), {doc, OS:C.OS, header:hdr, footer:ftr, pill, pageStart:C.page, rows:rr, skipCover:true, skipDir:true}); C.page=R.pageNo;
+        add(k==='sold'?_llrOrdinal(_llrQRange(S.q).q)+' Quarter Sales':_llrSectionTitle(k).replace(' Properties',''),{start:s}); }
+    });
+  }
+  progress&&progress(0.7);
+  let di=0;
+  for(const a of _eshOrdered(I,A).filter(inc)){
+    const title=a.kind==='founder'?'Founder’s Firewood':(a.heading||a.title);
+    const r=(a.kind==='broker'||a.kind==='founder')?await _eshDrawBroker(C,I,a,di++):await _eshDrawInside(C,I,a); add(title,r); }
+  add('Cowboy Wisdom', await _eshDrawCowboy(C,I));
+  if(I.includeDir!==false){ const s=C.page+1; await _llrWithState({office:'', includeDir:true}, async()=>{ const R=await _llrBuild(null,{doc, OS:C.OS, header:()=>_eshHeader(C,I), footer:(p)=>{ C.page=p; _eshFooter(C); }, pill:(t)=>_eshHeadBox(C,t,false), pageStart:C.page, rows:[], skipCover:true}); C.page=R.pageNo; }); if(C.page>=s) add('Team Dirt Dog',{start:s}); }
+  if(side!=='none') _eshDrawSidebar(C,I,toc,side);
+  progress&&progress(1);
+  return {doc, file:'Eshenbaugh_Report_'+S.q.replace('-','_')+'.pdf', pages:C.page, toc};
+}
+window._eshGenerate=async function(mode, btn){
+  const pre=mode==='preview'?window.open('','_blank'):null; const done=elcBusy(btn,'Building…');
+  try{ const R=await _eshBuild(null,p=>{ if(btn) btn.innerHTML='<span class="elc-spin"></span>Building… '+Math.round(p*100)+'%'; });
+    if(mode==='preview'){ const u=R.doc.output('bloburl'); if(pre&&!pre.closed) pre.location.href=u; else window.open(u,'_blank'); } else R.doc.save(R.file);
+    showToast(R.pages+' pages','success'); }
+  catch(e){ if(pre&&!pre.closed) pre.close(); console.error('[esh] build',e); showToast('Couldn’t build the issue: '+e.message,'error',8000); }
+  finally{ done(); }
+};
+window._eshPreviewArticle=async function(id, btn){
+  const pre=window.open('','_blank'); const done=elcBusy(btn,'Building…');
+  try{ const R=await _eshBuild(id); const u=R.doc.output('bloburl'); if(pre&&!pre.closed) pre.location.href=u; else window.open(u,'_blank'); }
+  catch(e){ if(pre&&!pre.closed) pre.close(); console.error('[esh] preview',e); showToast('Couldn’t build the preview: '+e.message,'error',8000); }
+  finally{ done(); }
+};
+window._eshBuild=_eshBuild; window._eshTextToBlocks=_eshTextToBlocks;
+/* ===== ESH_BLOCK_END ===== */
 
 /* =======================================================
    🔗 PORTAL LINKS IMPORT — marker PORTALLINKS-20261008
@@ -55239,7 +56084,8 @@ window._spMarketingBlock=function(deal){
   const last=posts[0];
   return `<div style="display:flex;flex-wrap:wrap;gap:.4rem;align-items:center">
     <button class="prop-note-btn" onclick="window._spOpen('${deal.id}')" title="Post this listing to the ELC Facebook Page and LinkedIn Company Page">📣 Post to social</button>
-    ${last?`<span style="font-size:.7rem;color:#6E7480">Last post ${_mrFmtDate(last.at)} · ${posts.map(p=>`<a href="${_mrEsc(p.url||'#')}" target="_blank" rel="noopener" style="color:#0A66C2;font-weight:600">${p.platform==='facebook'?'Facebook':'LinkedIn'}</a>`).filter((v,i,a)=>a.indexOf(v)===i).slice(0,2).join(' · ')}</span>`:''}
+    ${(window._lpCanPost&&window._lpCanPost(deal))?`<button class="prop-note-btn" onclick="window._lpOpen('${deal.id}')" title="Post this listing to YOUR LinkedIn profile — noted on the property history and the monthly report" style="color:#0A66C2;font-weight:700"><span style="display:inline-block;background:#0A66C2;color:#fff;border-radius:3px;padding:0 3px;font-size:.7rem;font-family:Arial,sans-serif;margin-right:3px">in</span>Post to my LinkedIn</button>`:''}
+    ${last?`<span style="font-size:.7rem;color:#6E7480">Last post ${_mrFmtDate(last.at)} · ${posts.map(p=>`<a href="${_mrEsc(p.url||'#')}" target="_blank" rel="noopener" style="color:#0A66C2;font-weight:600">${p.platform==='facebook'?'Facebook':p.platform==='linkedin_personal'?'LinkedIn · '+_mrEsc(String(p.byName||'advisor').split(' ')[0]):'LinkedIn'}</a>`).filter((v,i,a)=>a.indexOf(v)===i).slice(0,2).join(' · ')}</span>`:''}
   </div>`;
 };
 window._spOpen=async function(dealId, taskId){
@@ -55354,7 +56200,7 @@ window._mrPullSocial=async function(btn){
     // Post photos print automatically as post cards (see _mrMonthPosts); this only fills the metric rows.
     ed.socialPhotos=(ed.socialPhotos||[]).filter(u=>!posts.some(p=>p.imageUrl===u)); const box=document.getElementById('mr-social-photos'); if(box) box.innerHTML=_mrSocialThumbsHtml();
     let fbRows=[], liRows=[], metricNote='';
-    try{ const m=await _spWorkerPost('/metrics',{posts:posts.filter(p=>p.id).map(p=>({platform:p.platform,id:p.id}))});
+    try{ const m=await _spWorkerPost('/metrics',{posts:posts.filter(p=>p.id&&p.platform!=='linkedin_personal').map(p=>({platform:p.platform,id:p.id}))});
       (m.metrics||[]).forEach(x=>{ const p=posts.find(q=>q.id===x.id)||{}; const date=x.date||_mrLocalDate(p.at);
         if(x.platform==='facebook') fbRows.push({date, reach:x.reach??'', interactions:x.interactions??'', clicks:x.clicks??''});
         if(x.platform==='linkedin') liRows.push({date, impressions:x.impressions??'', engRate:x.engagementRate!=null?x.engagementRate+'%':'', clicks:x.clicks??''}); });
@@ -55366,6 +56212,259 @@ window._mrPullSocial=async function(btn){
   finally{ done(); }
 };
 function _mrLocalDate(ts){ const d=new Date(ts||Date.now()); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+/* =======================================================
+   in  POST TO MY LINKEDIN — marker LIPERSONAL-20261116
+   Ryan 2026-11-16: an advisor adds their own LinkedIn on 👤 My Bio, then posts their own listings
+   to their PERSONAL profile with one click (deal card Marketing block, or the "Advisor: put on
+   personal social media" task). Manual only — nothing posts to an advisor's profile automatically.
+   Every post:
+     • is kept on deal.socialPosts as {platform:'linkedin_personal', personal:true, byUid, byName, message, imageUrl, link, url, at}
+       → prints on that month's 📬 Monthly Marketing Report as a post card under the advisor's name/headshot
+     • is noted on the property history (caption copy + link)
+     • ticks the open "put on personal social media" task on that deal
+   Tokens never reach the browser: elc-social-worker /li/* holds them (KV). advisorProfiles/{uid}.liPersonal is display status only.
+   ======================================================= */
+const LP_BLUE='#0A66C2';
+function _lpEsc(s){ return (typeof _mrEsc==='function')?_mrEsc(s):String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function _lpProfile(uid){ return ((typeof allProfiles!=='undefined'&&allProfiles)?(allProfiles[uid]||{}):{}).liPersonal||null; }
+function _lpLocalStatus(uid){
+  const lp=_lpProfile(uid); if(!lp||!lp.connected) return {connected:false, name:(lp&&lp.name)||''};
+  const daysLeft=lp.expiresAt?Math.floor((lp.expiresAt-Date.now())/86400000):null;
+  if(daysLeft!=null&&daysLeft<0) return {connected:false, expired:true, name:lp.name||''};
+  return {connected:true, name:lp.name||'', picture:lp.picture||'', expiresAt:lp.expiresAt||0, daysLeft};
+}
+function _lpPlatformLabel(pl){ return pl==='facebook'?'Facebook':pl==='linkedin'?'LinkedIn':pl==='linkedin_personal'?'LinkedIn (advisor profile)':String(pl||''); }
+window._lpPlatformLabel=_lpPlatformLabel;
+function _lpRemember(uid, s){
+  if(!uid||typeof allProfiles==='undefined') return;
+  const next=s&&s.connected?{connected:true,name:s.name||'',picture:s.picture||'',expiresAt:s.expiresAt||0,connectedAt:s.connectedAt||0}:{connected:false,name:(s&&s.name)||'',expiresAt:0};
+  allProfiles[uid]={...(allProfiles[uid]||{}), liPersonal:next};
+  return next;
+}
+async function _lpPersist(uid, next){   // the worker writes this too when it has the service account; this keeps Terra right either way
+  try{ if(_fbDb&&_fbFns){ const {doc,setDoc}=_fbFns; await setDoc(doc(_fbDb,'advisorProfiles',uid),{liPersonal:next},{merge:true}); } }catch(e){ console.warn('[lp] save status',e); }
+}
+async function _lpMe(){
+  if(!currentUser) return {connected:false};
+  try{ const s=await _spWorkerPost('/li/me',{}); const prev=JSON.stringify(_lpProfile(currentUser.uid)||{}); const next=_lpRemember(currentUser.uid,s);
+    if(s.configured!==false && JSON.stringify(next)!==prev) _lpPersist(currentUser.uid,next); return s; }
+  catch(e){ const off=/unknown route|not set up/i.test(e.message||''); return {..._lpLocalStatus(currentUser.uid), ...(off?{configured:false,connected:false}:{}), error:e.message}; }   // worker not updated yet → "not switched on yet"
+}
+window._lpMe=_lpMe;
+function _lpCanPost(deal){
+  if(!deal||!currentUser||currentUser.isStaff) return false;
+  return (typeof isDealAdvisor==='function'&&isDealAdvisor(deal,currentUser.uid)) || !!currentUser.isAdmin;
+}
+window._lpCanPost=_lpCanPost;
+window._lpIsPersonalTask=function(t){ return !!(t && t.dealId && t.status!=='complete' && t.status!=='cancelled' && /personal social/i.test(t.title||'') && !(typeof _dnmOn==='function'&&_dnmOn(t.dealId))); };
+
+/* ---- connect / disconnect (👤 My Bio, or straight from the composer) ---- */
+window._lpConnect=async function(btn, after){
+  if(!currentUser) return;
+  const w=window.open('about:blank','elc-li-connect','width=620,height=760');   // opened on the click itself so the pop-up isn't blocked
+  const done=(typeof elcBusy==='function'&&btn)?elcBusy(btn,'Waiting for LinkedIn…'):()=>{};
+  try{
+    const r=await _spWorkerPost('/li/connect',{});
+    if(w&&!w.closed){ w.location.href=r.url; }
+    else { showToast('Your browser blocked the LinkedIn window.','warning',12000,{label:'Open LinkedIn',onClick:()=>window.open(r.url,'_blank')}); }
+    const base=(()=>{ try{ return new URL(_spCfg().workerUrl).origin; }catch(_){ return ''; } })();
+    const started=Date.now();
+    const res=await new Promise(resolve=>{
+      let fin=false, t=null; const end=v=>{ if(fin) return; fin=true; clearInterval(t); window.removeEventListener('message',onMsg); resolve(v); };
+      const onMsg=e=>{ if(e.origin!==base||!e.data||e.data.type!=='elc-li') return; end(e.data); };
+      window.addEventListener('message',onMsg);
+      // LinkedIn's page can cut the link back to Terra, so don't rely on the message alone — ask the worker every few seconds.
+      t=setInterval(async()=>{ if(fin) return;
+        try{ const s=await _spWorkerPost('/li/me',{}); if(s.connected&&(s.connectedAt||0)>=started-5000) return end({ok:true,...s}); }catch(_){}
+        const el=Date.now()-started;
+        if((!w||w.closed)&&el>90000) end({ok:false,cancelled:true});
+        if(el>6*60000) end({ok:false,error:'LinkedIn didn’t finish within 6 minutes.'});
+      },2500);
+    });
+    if(res.ok){
+      const next=_lpRemember(currentUser.uid,{connected:true,...res}); await _lpPersist(currentUser.uid,next);
+      showToast('LinkedIn connected as '+(res.name||'you')+' ✓','success',6000);
+      if(typeof after==='function') after();
+    } else if(!res.cancelled) showToast('LinkedIn not connected: '+(res.error||'cancelled'),'error',8000);
+  }catch(e){ try{ if(w&&!w.closed) w.close(); }catch(_){} showToast('Could not start LinkedIn: '+e.message,'error',8000); }
+  finally{ done(); }
+};
+window._lpDisconnect=async function(btn, after){
+  const ok=await elcConfirm('Disconnect your LinkedIn from Terra? Posts you already made stay on LinkedIn and on the property history. You can reconnect any time.',{title:'Disconnect LinkedIn',okLabel:'Disconnect',danger:true});
+  if(!ok) return;
+  const done=elcBusy(btn,'Disconnecting…');
+  try{ await _spWorkerPost('/li/disconnect',{}); const next=_lpRemember(currentUser.uid,{connected:false}); await _lpPersist(currentUser.uid,next); showToast('LinkedIn disconnected','success'); if(typeof after==='function') after(); }
+  catch(e){ showToast('Could not disconnect: '+e.message,'error'); }
+  finally{ done(); }
+};
+
+/* ---- 👤 My Bio section ---- */
+function _lpBioInner(uid, self, s){
+  s=s||_lpLocalStatus(uid);
+  const inBadge=`<span aria-hidden="true" style="display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:4px;background:${LP_BLUE};color:#fff;font-weight:800;font-size:.8rem;font-family:Arial,sans-serif">in</span>`;
+  if(!self){
+    return s.connected?`<div class="text-sm" style="display:flex;gap:.5rem;align-items:center">${inBadge}<span>Connected as <b>${_lpEsc(s.name)}</b>${s.daysLeft!=null?` · ${s.daysLeft} day${s.daysLeft===1?'':'s'} left`:''}</span></div>`
+      :`<div class="text-sm text-gray-500" style="display:flex;gap:.5rem;align-items:center">${inBadge}<span>${s.expired?'LinkedIn connection expired.':'Not connected.'} Only the advisor can connect their own LinkedIn.</span></div>`;
+  }
+  if(s.configured===false) return `<p class="text-xs text-gray-500">${inBadge} LinkedIn posting isn’t switched on yet — Ryan is finishing the one-time setup.</p>`;
+  const warn=s.connected&&s.daysLeft!=null&&s.daysLeft<=7;
+  return s.connected
+    ? `<div style="display:flex;gap:.6rem;align-items:center;flex-wrap:wrap">
+        ${s.picture?`<img src="${_lpEsc(s.picture)}" alt="" style="width:40px;height:40px;border-radius:50%;object-fit:cover">`:inBadge}
+        <div style="flex:1;min-width:160px"><div class="text-sm font-semibold text-gray-800">Connected as ${_lpEsc(s.name)}</div>
+        <div class="text-xs ${warn?'font-semibold':'text-gray-500'}" style="${warn?'color:var(--brand-red,#DA291C)':''}">${s.daysLeft!=null?(warn?`⚠ LinkedIn makes you reconnect every 60 days — ${s.daysLeft<=0?'today':s.daysLeft+' day'+(s.daysLeft===1?'':'s')+' left'}.`:`Reconnect in ${s.daysLeft} days (LinkedIn asks every 60 days).`):''}</div></div>
+       </div>
+       <div style="display:flex;gap:.5rem;flex-wrap:wrap;margin-top:.6rem">
+        <button type="button" class="px-3 py-2 rounded-lg text-sm font-semibold text-white" style="background:${LP_BLUE};min-height:44px" onclick="window._lpConnect(this,window._lpRefreshBio)">Reconnect</button>
+        <button type="button" class="px-3 py-2 rounded-lg text-sm font-semibold border text-gray-700" style="min-height:44px" onclick="window._lpDisconnect(this,window._lpRefreshBio)">Disconnect</button>
+       </div>
+       <p class="text-xs text-gray-500 mt-2">Post a listing to your profile from its deal card → Marketing → <b>Post to my LinkedIn</b>. Nothing is ever posted without you pressing Post.</p>`
+    : `<p class="text-xs text-gray-500 mb-2">${s.expired?'<b style="color:var(--brand-red,#DA291C)">Your LinkedIn connection expired.</b> ':''}Connect your LinkedIn to post your listings to your own profile with one click from the deal card. Each post is noted on the property history and goes on the owner’s monthly report. Terra never sees your LinkedIn password, and you can disconnect any time.</p>
+       <button type="button" class="px-3 py-2 rounded-lg text-sm font-semibold text-white inline-flex items-center gap-2" style="background:${LP_BLUE};min-height:44px" onclick="window._lpConnect(this,window._lpRefreshBio)">${inBadge.replace('background:'+LP_BLUE+';color:#fff','background:#fff;color:'+LP_BLUE)} ${s.expired?'Reconnect LinkedIn':'Connect LinkedIn'}</button>`;
+}
+function _lpBioSection(uid, self){
+  return `<div class="bio-sec" id="bio-li-sec"><h3>LinkedIn posting</h3><div id="bio-li-body">${_lpBioInner(uid,self)}</div></div>`;
+}
+window._lpBioSection=_lpBioSection;
+window._lpRefreshBio=async function(){
+  const st=window._bioState; if(!st||!st.uid||!currentUser||st.uid!==currentUser.uid) return;
+  const s=await _lpMe(); const el=document.getElementById('bio-li-body'); if(el&&window._bioState.uid===currentUser.uid) el.innerHTML=_lpBioInner(currentUser.uid,true,s);
+};
+
+/* ---- composer ---- */
+function _lpDefaultCaption(deal){
+  const b=(typeof getAdvisorBio==='function'&&currentUser)?getAdvisorBio(currentUser.uid):{};
+  const bits=[]; if(deal.acreage) bits.push(Number(deal.acreage).toLocaleString('en-US',{maximumFractionDigits:2})+'± acres'); if(deal.county) bits.push(deal.county+' County'); if(deal.zoning) bits.push('zoned '+deal.zoning); if(deal.landType) bits.push(deal.landType);
+  const price=_mrDealPrice(deal);
+  return 'I’m representing '+_mrDealName(deal)+' — now available through Eshenbaugh Land Company.\n'+_mrDealAddr(deal)+(bits.length?'\n'+bits.join(' · '):'')+(price?'\nAsking '+_mrFmtMoney(price):'')
+    +'\n\nIf you or someone you know is looking for land in this area, reach out'+((b&&b.phone)?' — '+b.phone:'')+'.\n'+_spLinkFor(deal)+'\n\n#LandForSale #FloridaLand #CommercialRealEstate #EshenbaughLandCompany';
+}
+async function _lpAiCaption(deal){
+  const b=(typeof getAdvisorBio==='function'&&currentUser)?getAdvisorBio(currentUser.uid):{};
+  const sys='You write LinkedIn posts for a land broker at Eshenbaugh Land Company (Florida) to publish on their OWN personal LinkedIn profile, in the FIRST PERSON ("I", "my client"). Write ONE post of 70-130 words about a land listing they represent: a natural, professional opening line (not salesy clichés), 2-3 concrete facts taken ONLY from the data given, who the site suits, then an invitation to message or call them. End with the link on its own line, then 3-5 relevant hashtags including #EshenbaughLandCompany. Never invent facts, never mention commission, and NEVER say "last call", "expiring", "expires" or anything implying the listing is ending. Return only the post text.';
+  const user='Advisor: '+((b&&b.nameWithDesignations)||currentUser.name||'')+(b&&b.phone?'\nAdvisor phone: '+b.phone:'')+'\nProperty: '+_mrDealName(deal)+'\nAddress: '+_mrDealAddr(deal)+'\nAcreage: '+(deal.acreage||'n/a')+'\nCounty: '+(deal.county||'n/a')+'\nZoning: '+(deal.zoning||'n/a')+'\nLand type: '+(deal.landType||'n/a')+'\nAsking price: '+(_mrFmtMoney(_mrDealPrice(deal))||'call for details')+'\nHighlights / notes: '+String(deal.highlights||deal.description||'').slice(0,900)+'\nLink: '+_spLinkFor(deal);
+  return String(await leadAI(sys,user,600)||'').trim();
+}
+window._lpOpen=async function(dealId, taskId){
+  const deal=(allDeals||[]).find(d=>d.id===dealId); if(!deal){ showToast('Deal not found','error'); return; }
+  if(_dnmGuard(deal,'social posting')) return;
+  if(!_lpCanPost(deal)){ showToast('Only an advisor on this listing can post it to their LinkedIn.','warning'); return; }
+  if(typeof _mrInjectStyles==='function') _mrInjectStyles();
+  const photos=_spPhotoCandidates(deal); const link=_spLinkFor(deal);
+  const me=(typeof getAdvisorBio==='function')?getAdvisorBio(currentUser.uid):{name:currentUser.name};
+  window._lpState={dealId, deal, taskId:taskId||'', photo:photos[0]?photos[0].url:'', photos, me, posting:false, status:_lpLocalStatus(currentUser.uid)};
+  document.getElementById('lp-ov')?.remove();
+  const ov=document.createElement('div'); ov.className='mr-ov fixed inset-0 flex items-center justify-center'; ov.id='lp-ov';
+  ov.innerHTML=`<div class="mr-modal" style="width:min(900px,100%)" role="dialog" aria-label="Post to my LinkedIn">
+    <div class="mr-modal-h"><div style="min-width:0"><h2><span style="color:${LP_BLUE}">in</span> Post to my LinkedIn — ${_lpEsc(_mrDealName(deal))}</h2><div class="mr-muted" id="lp-status">Checking your LinkedIn connection…</div></div><span style="flex:1"></span><button class="mr-x" aria-label="Close" onclick="window._lpClose()">✕</button></div>
+    <div class="mr-modal-b">
+      <div id="lp-connect" style="display:none;margin-bottom:.9rem"></div>
+      <div class="mr-grid2" style="align-items:start">
+        <div style="display:grid;gap:.9rem">
+          <div class="mr-sec"><h3>Photo</h3>
+            <div class="mr-row" id="lp-photos" style="gap:.5rem">${photos.map((p,i)=>`<label title="${_lpEsc(p.label)}" style="cursor:pointer;position:relative"><input type="radio" name="lp-photo" value="${_lpEsc(p.url)}" ${i===0?'checked':''} onchange="window._lpState.photo=this.value;window._lpPreview()" style="position:absolute;top:4px;left:4px" aria-label="${_lpEsc(p.label)}"><img class="mr-thumb" src="${_lpEsc(p.url)}" alt="${_lpEsc(p.label)}"></label>`).join('')}
+              <label title="No photo — LinkedIn shows a link preview card instead" style="cursor:pointer;position:relative"><input type="radio" name="lp-photo" value="" ${photos.length?'':'checked'} onchange="window._lpState.photo='';window._lpPreview()" style="position:absolute;top:4px;left:4px" aria-label="No photo"><div class="mr-thumb" style="display:flex;align-items:center;justify-content:center;font-size:.7rem;color:var(--text-2)">Link only</div></label>
+            </div>
+            <label class="mr-btn mr-btn-sm" style="cursor:pointer;margin-top:.5rem">🖼 Upload another<input type="file" accept="image/*" style="display:none" onchange="window._lpUploadPhoto(this)"></label>
+          </div>
+          <div class="mr-sec"><h3>Your post</h3>
+            <div class="mr-row" style="justify-content:space-between;margin-bottom:.4rem"><span class="mr-note" id="lp-count"></span><button class="mr-btn mr-btn-sm" onclick="window._lpDraft(this)">✨ AI draft</button></div>
+            <label class="sr-only" for="lp-msg">Post text</label>
+            <textarea id="lp-msg" class="mr-textarea" style="min-height:220px" oninput="window._lpPreview()">${_lpEsc(_lpDefaultCaption(deal))}</textarea>
+            <label class="mr-lbl" for="lp-link" style="margin-top:.6rem">Link</label><input id="lp-link" class="mr-input" style="width:100%" value="${_lpEsc(link)}" oninput="window._lpPreview()">
+            <div class="mr-note" style="margin-top:.3rem">Written in your voice — edit freely. It posts to <b>your</b> profile, gets noted on this property’s history, and goes on the owner’s monthly report.</div>
+          </div>
+        </div>
+        <div class="mr-sec" style="position:sticky;top:0"><h3>Preview</h3><div id="lp-preview"></div></div>
+      </div>
+    </div>
+    <div class="mr-modal-f"><span class="mr-note" id="lp-foot"></span><span style="flex:1"></span><button class="mr-btn" onclick="window._lpClose()">Cancel</button><button class="mr-btn mr-btn-primary" id="lp-post" style="background:${LP_BLUE};border-color:${LP_BLUE}" onclick="window._lpPost(this)" disabled>Post to my LinkedIn</button></div>
+  </div>`;
+  document.body.appendChild(ov);
+  window._lpPreview(); window._lpRenderConnect();
+  const s=await _lpMe(); const st=window._lpState; if(!st||st.dealId!==dealId) return; st.status=s; window._lpRenderConnect();
+};
+window._lpRenderConnect=function(){
+  const st=window._lpState; if(!st) return; const s=st.status||{};
+  const box=document.getElementById('lp-connect'), hdr=document.getElementById('lp-status'), btn=document.getElementById('lp-post');
+  if(s.connected){
+    if(box){ box.style.display='none'; box.innerHTML=''; }
+    if(hdr) hdr.textContent='Posting as '+(s.name||st.me.name)+' on LinkedIn'+(s.daysLeft!=null&&s.daysLeft<=7?' · reconnect within '+Math.max(0,s.daysLeft)+' day'+(s.daysLeft===1?'':'s'):'');
+    if(btn) btn.disabled=false;
+  } else {
+    if(hdr) hdr.textContent=s.configured===false?'LinkedIn posting isn’t switched on yet.':(s.expired?'Your LinkedIn connection expired.':'Your LinkedIn isn’t connected yet.');
+    if(box){ box.style.display=''; box.innerHTML=s.configured===false
+      ?`<div class="mr-sec">Ryan is finishing the one-time LinkedIn setup. Once it’s done, connect your LinkedIn here or on 👤 My Bio.</div>`
+      :`<div class="mr-sec" style="display:flex;gap:.8rem;align-items:center;flex-wrap:wrap"><div style="flex:1;min-width:200px">${s.expired?'LinkedIn makes everyone reconnect every 60 days.':'Connect your LinkedIn once — after that, posting is one click.'} Terra never sees your password.</div><button class="mr-btn mr-btn-primary" style="background:${LP_BLUE};border-color:${LP_BLUE}" onclick="window._lpConnect(this,async()=>{ const st=window._lpState; if(!st) return; st.status=await _lpMe(); window._lpRenderConnect(); })">${s.expired?'Reconnect LinkedIn':'Connect LinkedIn'}</button></div>`; }
+    if(btn) btn.disabled=true;
+  }
+  window._lpPreview();
+};
+window._lpClose=function(){ document.getElementById('lp-ov')?.remove(); window._lpState=null; };
+window._lpPreview=function(){
+  const st=window._lpState; if(!st) return;
+  const msg=(document.getElementById('lp-msg')?.value||''); const link=(document.getElementById('lp-link')?.value||'').trim();
+  const cnt=document.getElementById('lp-count'); if(cnt) cnt.textContent=msg.length+' / 3,000 characters'+(msg.length>3000?' — too long for LinkedIn':'');
+  let host=''; try{ host=new URL(link).hostname.replace(/^www\./,''); }catch(_){}
+  const s=st.status||{}; const name=s.name||st.me.name||''; const pic=s.picture||st.me.headshotUrl||'';
+  const box=document.getElementById('lp-preview'); if(!box) return;
+  box.innerHTML=`<div style="border:1px solid var(--border);border-radius:10px;overflow:hidden;background:var(--surface)">
+    <div style="display:flex;gap:.5rem;align-items:center;padding:.6rem .7rem">${pic?`<img src="${_lpEsc(pic)}" alt="" style="width:38px;height:38px;border-radius:50%;object-fit:cover">`:`<div style="width:38px;height:38px;border-radius:50%;background:${LP_BLUE};color:#fff;display:flex;align-items:center;justify-content:center;font-weight:800">${_lpEsc((name[0]||'?').toUpperCase())}</div>`}
+      <div><div style="font-weight:700;font-size:.85rem;color:var(--text-1)">${_lpEsc(name)}</div><div class="mr-muted" style="font-size:.7rem">${_lpEsc(st.me.title||'Advisor')} at Eshenbaugh Land Company · Now · 🌐</div></div></div>
+    <div style="padding:0 .7rem .6rem;font-size:.85rem;white-space:pre-wrap;line-height:1.4;color:var(--text-1)">${_lpEsc(msg)}</div>
+    ${st.photo?`<img src="${_lpEsc(st.photo)}" alt="" style="width:100%;max-height:320px;object-fit:cover;display:block">`:(host?`<div style="border-top:1px solid var(--border);padding:.6rem .7rem;background:var(--bg)"><div style="font-weight:700;font-size:.85rem;color:var(--text-1)">${_lpEsc(_mrDealName(st.deal))}</div><div class="mr-muted">${_lpEsc(host)}</div></div>`:'')}
+    <div class="mr-muted" style="padding:.5rem .7rem;border-top:1px solid var(--border)">👍 Like &nbsp; 💬 Comment &nbsp; 🔁 Repost &nbsp; ➤ Send</div>
+  </div>`;
+  const foot=document.getElementById('lp-foot'); if(foot) foot.textContent=(st.status&&st.status.connected)?'Posts publicly on your LinkedIn profile':'Connect LinkedIn to post';
+};
+window._lpDraft=async function(btn){
+  const st=window._lpState; if(!st) return; const done=elcBusy(btn,'Drafting…');
+  try{ const txt=await _lpAiCaption(st.deal); const ta=document.getElementById('lp-msg'); if(ta&&txt){ ta.value=txt; window._lpPreview(); } }
+  catch(e){ showToast('AI draft failed: '+e.message,'error'); }
+  finally{ done(); }
+};
+window._lpUploadPhoto=async function(input){
+  const st=window._lpState; const f=input.files&&input.files[0]; if(!st||!f) return;
+  try{ showToast('Uploading photo…','info',2000); const blob=await _mrShrinkImage(f,1600,.86); const url=await _mrUploadBlob('dealPhotos/'+st.dealId+'/social_'+Date.now()+'.jpg', blob,'image/jpeg');
+    st.photos.unshift({url,label:'Uploaded'}); st.photo=url;
+    const box=document.getElementById('lp-photos'); if(box){ const l=document.createElement('label'); l.style.cssText='cursor:pointer;position:relative'; l.innerHTML=`<input type="radio" name="lp-photo" value="${_lpEsc(url)}" checked onchange="window._lpState.photo=this.value;window._lpPreview()" style="position:absolute;top:4px;left:4px" aria-label="Uploaded photo"><img class="mr-thumb" src="${_lpEsc(url)}" alt="Uploaded photo">`; box.prepend(l); }
+    window._lpPreview(); }
+  catch(e){ showToast('Upload failed: '+e.message,'error'); }
+  finally{ try{ input.value=''; }catch(_){} }
+};
+window._lpPost=async function(btn){
+  const st=window._lpState; if(!st||st.posting) return; if(_dnmGuard(st.deal||st.dealId,'social posting')) return;
+  const message=(document.getElementById('lp-msg')?.value||'').trim(); const link=(document.getElementById('lp-link')?.value||'').trim();
+  if(!message){ showToast('Write your post first','warning'); return; }
+  if(message.length>3000){ showToast('Post is over 3,000 characters','warning'); return; }
+  const ok=await elcConfirm('Post this to your LinkedIn profile now?\n\nIt goes live publicly on your profile, is noted on this property’s history and goes on the owner’s monthly report.',{title:'Post to my LinkedIn',okLabel:'Post now'});
+  if(!ok) return;
+  st.posting=true; const done=elcBusy(btn,'Posting…');
+  try{
+    const r=await _spWorkerPost('/li/post',{message, imageUrl:st.photo||'', link, title:_mrDealName(st.deal)});
+    if(!r.ok){
+      if(r.reconnect){ st.status=await _lpMe(); window._lpRenderConnect(); }
+      showToast('Not posted — '+(r.error||'LinkedIn error'),'error',9000); return;
+    }
+    const now=r.at||Date.now(); const byName=(st.me&&st.me.name)||currentUser.name||'';
+    const fresh=(allDeals||[]).find(d=>d.id===st.dealId)||st.deal;
+    const posts=(fresh.socialPosts||[]).slice();
+    const rec={platform:'linkedin_personal', personal:true, id:r.id||'', url:r.url||'', at:now, by:currentUser.uid, byUid:currentUser.uid, byName, liName:r.name||'', message, imageUrl:st.photo||'', link, taskId:st.taskId||''};
+    posts.push(rec);
+    let saved=true;
+    try{ await Store.updateDeal(st.dealId,{socialPosts:posts,updatedAt:now}); fresh.socialPosts=posts; st.deal.socialPosts=posts; }catch(e){ saved=false; console.error('[lp] save post',e); }
+    try{ await window._dealLogActivity(st.dealId,'note',{ body:'in '+byName+' posted this listing on their LinkedIn profile'+(r.url?' — '+r.url:'')+'\n\n'+message, source:'linkedin-personal', autoLogged:true, url:r.url||'' }); }catch(e){ console.warn('[lp] history',e); }
+    let taskId=st.taskId;
+    if(!taskId){ const open=(allTasks||[]).filter(t=>t.dealId===st.dealId&&window._lpIsPersonalTask(t)); const mine=open.find(t=>t.assignedTo===currentUser.uid)||open[0]; if(mine) taskId=mine.id; }
+    if(taskId){ try{ await window.toggleTask(taskId,'complete'); }catch(e){ console.warn('[lp] task',e); } }
+    showToast(saved?'Posted to your LinkedIn ✓ — noted on the property history and added to this month’s report':'Posted to LinkedIn ✓ but Terra couldn’t save it on the card — tell Ryan',saved?'success':'warning',9000, r.url?{label:'Open post',onClick:()=>window.open(r.url,'_blank','noopener')}:null);
+    window._lpClose();
+    try{ const blk=document.getElementById('pdw-social-block'); if(blk) blk.innerHTML=window._spMarketingBlock(fresh); }catch(_){}
+    try{ if(typeof renderCurrentView==='function') renderCurrentView(); }catch(_){}
+  }catch(e){ console.error('[lp] post',e); showToast('Post failed: '+e.message,'error',8000); }
+  finally{ if(st) st.posting=false; done(); }
+};
+/* ---- end LIPERSONAL-20261116 ---- */
 /* ===== SOCIAL_BLOCK_END ===== */
 /* =======================================================
    📊 MARKET REPORTS — marker MKTREPORT-20261007
