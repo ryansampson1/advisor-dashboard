@@ -55336,8 +55336,11 @@ const ESH_OWNER_EMAILS=['ryan@thedirtdog.com'];
 const ESH_A='esh/assets/';
 const ESH_RED=[238,42,36], ESH_TEAL=[86,197,204], ESH_INK=[30,30,30], ESH_GREY=[90,90,90], ESH_LINK=[40,150,170];
 const ESH_DOGS=['dd-hat.png','dd-boots.png','dd-horseshoes.png','dd-lasso.png','dd-gloves.png'];
-const ESH_KINDS=[['cover','Cover story'],['dogpound','Inside the Dog Pound'],['marketplace','Around the Marketplace'],['feature','Feature article'],['founder','Founder’s Firewood'],['broker','Advisor article']];
-const ESH_KIND_ORDER={feature:1, marketplace:2, founder:3, broker:4};
+const ESH_KINDS=[['cover','Cover story'],['dogpound','Inside the Dog Pound'],['marketplace','Around the Marketplace'],['transactions','Land Transactions'],['regulation','Regulatory Update'],['feature','Market feature'],['founder','Founder’s Firewood'],['broker','Advisor article']];
+const ESH_KIND_ORDER={marketplace:1, transactions:2, regulation:3, feature:4, founder:5, broker:6};   // ESHMKT-20261116
+// ESHMKT-20261116 (Ryan): the newsletter is about the market — land sales, big regulation changes, sold listings — not available listings.
+const ESH_STD=[['dogpound','Firm news — people, events, community'],['marketplace','Market intel by county — announcements, projects, approvals, absorption'],['transactions','Notable land sales in our markets this quarter — buyer, seller, acres, price, planned use (a table works well)'],['regulation','New laws, rules and court decisions that affect Florida land — Legislature, counties, water management districts, FEMA'],['founder','Bill’s column']];
+const ESH_DEFAULT_HEAD={dogpound:'Inside the Dog Pound', marketplace:'Around the Marketplace', transactions:'Land Transactions', regulation:'Regulatory Update', founder:'Founder’s Firewood'};
 function _eshKindLabel(k){ return (ESH_KINDS.find(x=>x[0]===k)||[k,k])[1]; }
 function _eshCfg(){ return (APP_CONFIG.eshReport = APP_CONFIG.eshReport || {access:'owner', writers:[]}); }
 function _eshIsOwner(){ return !!(currentUser && ESH_OWNER_EMAILS.includes(String(currentUser.email||'').toLowerCase())); }
@@ -55364,7 +55367,7 @@ function _eshPrevQ(k){ const i=_eshQIndex(k)-1; return _llrQKey(Math.floor(i/4),
 
 /* ---------- state + Firestore ---------- */
 function _eshS(){ const s=(window._eshStateObj=window._eshStateObj||{}); if(!s.q) s.q=_llrDefaultQ(); s.issues=s.issues||{}; s.arts=s.arts||{}; return s; }
-function _eshBlankIssue(q){ const d=_eshDefaultIssue(q); return {id:q, volume:d.volume, issue:d.issue, sidebar:'toc', includeListings:true, includeUc:false, includeSales:true, includeDir:true, assignments:[], order:[], coverId:'', quotes:[], dueDate:''}; }
+function _eshBlankIssue(q){ const d=_eshDefaultIssue(q); return {id:q, volume:d.volume, issue:d.issue, sidebar:'toc', listings:'none', includeUc:false, includeSales:true, includeDir:true, assignments:[], order:[], coverId:'', quotes:[], dueDate:''}; }
 async function _eshLoad(q, force){
   const S=_eshS(); if(S.issues[q] && !force) return;
   const {doc,getDoc,getDocs,collection}=_fbFns;
@@ -55406,6 +55409,7 @@ function _eshByline(a){ const b=_eshBio(a.authorUid); const n=a.authorName||b.na
 function _eshTextToBlocks(t){
   const out=[]; const paras=String(t||'').replace(/\r/g,'').split(/\n\s*\n/);
   paras.forEach(p=>{ const lines=p.split('\n').map(x=>x.trim()).filter(Boolean); if(!lines.length) return;
+    if(lines.every(l=>/^\|/.test(l))){ const rows=lines.filter(l=>!/^\|[\s:|-]+\|?$/.test(l)).map(l=>l.replace(/^\||\|$/g,'').split('|').map(c=>c.trim())); if(rows.length) out.push({t:'tbl', rows}); return; }   // | a | b | rows = table
     let buf=[]; const flush=()=>{ if(buf.length){ out.push({t:'p', text:buf.join(' ')}); buf=[]; } };
     lines.forEach(l=>{
       if(/^#{1,3}\s+/.test(l)){ flush(); out.push({t:'h', text:l.replace(/^#{1,3}\s+/,'')}); }
@@ -55414,16 +55418,17 @@ function _eshTextToBlocks(t){
     });
     flush();
   });
-  return out.map(b=>{ if(b.t==='p' && b.text.length<70 && (/:$/.test(b.text) || (b.text===b.text.toUpperCase() && /[A-Z]/.test(b.text)))) return {t:'h', text:b.text.replace(/:$/,'')}; return b; });
+  return out.map(b=>{ if(b.t==='tbl') return b; if(b.t==='p' && b.text.length<70 && (/:$/.test(b.text) || (b.text===b.text.toUpperCase() && /[A-Z]/.test(b.text)))) return {t:'h', text:b.text.replace(/:$/,'')}; return b; });
 }
-function _eshBlocksToText(B){ return (B||[]).map(b=>b.t==='h'?'## '+b.text:(b.t==='li'?'- '+b.text:b.text)).join('\n\n').replace(/\n\n- /g,'\n- '); }
+function _eshBlocksToText(B){ return (B||[]).map(b=>b.t==='tbl'?(b.rows||[]).map(r=>'| '+r.join(' | ')+' |').join('\n'):(b.t==='h'?'## '+b.text:(b.t==='li'?'- '+b.text:b.text))).join('\n\n').replace(/\n\n- /g,'\n- '); }
 async function _eshLoadMammoth(){ if(!window.mammoth) await _mrLoadScript('https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js'); return window.mammoth; }
 // Word → {title, text, images:[dataURL]}. Headings / bold-only short lines → sub-heads; list items → bullets; pictures kept.
 async function _eshReadDocx(file){
   const mammoth=await _eshLoadMammoth(); const buf=await file.arrayBuffer(); const images=[];
   const res=await mammoth.convertToHtml({arrayBuffer:buf},{convertImage:mammoth.images.imgElement(img=>img.read('base64').then(b=>{ const src='data:'+img.contentType+';base64,'+b; images.push(src); return {src}; }))});
-  const div=document.createElement('div'); div.innerHTML=res.value; const blocks=[]; let title='';
-  div.querySelectorAll('h1,h2,h3,h4,p,li').forEach(el=>{ const t=(el.textContent||'').replace(/\s+/g,' ').trim(); if(!t) return;
+  const div=document.createElement('div'); div.innerHTML=res.value; const blocks=[]; let title=''; const tables=[];
+  div.querySelectorAll('table').forEach(tb=>{ const rows=[...tb.querySelectorAll('tr')].map(tr=>[...tr.querySelectorAll('td,th')].map(td=>(td.textContent||'').replace(/\s+/g,' ').trim())).filter(r=>r.some(Boolean)); const ph=document.createElement('p'); ph.setAttribute('data-tbl',tables.length); tables.push(rows); tb.replaceWith(ph); });
+  div.querySelectorAll('h1,h2,h3,h4,p,li').forEach(el=>{ if(el.hasAttribute('data-tbl')){ const rows=tables[+el.getAttribute('data-tbl')]; if(rows&&rows.length) blocks.push({t:'tbl',rows}); return; } const t=(el.textContent||'').replace(/\s+/g,' ').trim(); if(!t) return;
     const tag=el.tagName.toLowerCase();
     if(tag==='li'){ blocks.push({t:'li',text:t}); return; }
     if(tag==='p' && el.closest('li')) return;
@@ -55439,7 +55444,7 @@ async function _eshUploadPhoto(articleId, fileOrBlob){
   const S=_eshS(); const small=await _mrShrinkImage(fileOrBlob,1800,0.85);
   return await _mrUploadBlob('dealPhotos/_esh/'+S.q+'/'+articleId+'/'+Date.now()+'_'+Math.random().toString(36).slice(2,7)+'.jpg', small, 'image/jpeg');
 }
-function _eshWords(B){ return (B||[]).reduce((n,b)=>n+String(b.text||'').split(/\s+/).filter(Boolean).length,0); }
+function _eshWords(B){ return (B||[]).reduce((n,b)=>n+String(b.t==='tbl'?(b.rows||[]).flat().join(' '):(b.text||'')).split(/\s+/).filter(Boolean).length,0); }
 
 /* ---------- view ---------- */
 function _eshInjectStyles(){
@@ -55530,9 +55535,10 @@ function _eshArticlesCard(I,A){
     <div class="llr-scroll"><table class="mr-table"><tbody>
       ${cover?_eshArticleRow(cover,I,{kindLabel:'Cover story'}):''}
       ${dog.map(a=>_eshArticleRow(a,I)).join('')}
-      ${I.includeListings!==false?`<tr><td></td><td><div style="font-weight:700;color:var(--text-1)">Current listings${I.includeUc?' + under contract':''}</div><div class="llr-sub">Pulled from the deal cards like the 🏞️ Land Listing Report (fix photos, prices and links there)</div></td><td><span class="mr-chip mr-chip-sent">Automatic</span></td><td></td></tr>`:''}
+      ${(I.listings||'none')!=='none'?`<tr><td></td><td><div style="font-weight:700;color:var(--text-1)">${I.listings==='new'?'New listings':'Current listings'+(I.includeUc?' + under contract':'')}</div><div class="llr-sub">From the deal cards (the 🏞️ Land Listing Report has the full list)</div></td><td><span class="mr-chip mr-chip-sent">Automatic</span></td><td></td></tr>`:''}
       ${I.includeSales!==false?`<tr><td></td><td><div style="font-weight:700;color:var(--text-1)">${_mrEsc(_llrOrdinal(_llrQRange(I.id).q))} Quarter Sales</div><div class="llr-sub">Closed (won) deals with a close date in the quarter — sold price, acres, “Planned for” (buyer’s use), advisor</div></td><td><span class="mr-chip mr-chip-sent">Automatic</span></td><td></td></tr>`:''}
       ${rest.map(a=>_eshArticleRow(a,I,{move:true})).join('')}
+      ${ESH_STD.filter(([k])=>!Object.values(A).some(a=>a.kind===k)).map(([k,hint])=>`<tr><td></td><td><div style="font-weight:700;color:var(--text-2)">${_mrEsc(ESH_DEFAULT_HEAD[k]||_eshKindLabel(k))}</div><div class="llr-sub">${_mrEsc(hint)}</div></td><td><span class="mr-chip mr-chip-new">Not started</span></td><td><button type="button" class="mr-btn mr-btn-sm" onclick="window._eshNew('${k}')">＋ Start</button></td></tr>`).join('')}
       ${(I.quotes||[]).length?`<tr><td></td><td><div style="font-weight:700;color:var(--text-1)">Cowboy Wisdom</div><div class="llr-sub">${(I.quotes||[]).length} quote${(I.quotes||[]).length>1?'s':''}</div></td><td><span class="mr-chip mr-chip-sent">Ready</span></td><td></td></tr>`:''}
       ${I.includeDir!==false?`<tr><td></td><td><div style="font-weight:700;color:var(--text-1)">Team Dirt Dog directory</div><div class="llr-sub">From the 👤 Bio tab, with photos</div></td><td><span class="mr-chip mr-chip-sent">Automatic</span></td><td></td></tr>`:''}
     </tbody></table></div>
@@ -55569,7 +55575,9 @@ function _eshSettingsCard(I){
   return `<div class="mr-card esh-card" style="margin-top:1rem"><h2>⚙ Issue settings</h2>
     <div class="esh-row"><label class="mr-muted">Volume <input type="number" class="mr-input" style="width:80px" value="${_mrEsc(I.volume||d.volume)}" onchange="window._eshSet('volume',+this.value||${d.volume})"></label><label class="mr-muted">Issue <input type="number" class="mr-input" style="width:80px" value="${_mrEsc(I.issue||d.issue)}" onchange="window._eshSet('issue',+this.value||${d.issue})"></label></div>
     <label class="mr-lbl" style="margin-top:.6rem" for="esh-side">Cover side box</label><select id="esh-side" class="mr-select" onchange="window._eshSet('sidebar',this.value)">${[['toc','Inside This Issue + Team Dirt Dog'],['team','Team Dirt Dog only'],['none','None — lead article full width']].map(([v,t])=>`<option value="${v}" ${(I.sidebar||'toc')===v?'selected':''}>${t}</option>`).join('')}</select>
-    <div style="margin-top:.4rem">${ck('includeListings','Current listings (from the deal cards)',true)}${ck('includeUc','…including under-contract listings',false)}${ck('includeSales',_llrOrdinal(_llrQRange(I.id).q)+' Quarter Sales',true)}${ck('includeDir','Team directory with photos (last page)',true)}</div></div>`;
+    <div style="margin-top:.4rem">${ck('includeSales',_llrOrdinal(_llrQRange(I.id).q)+' Quarter Sales — our sold listings',true)}${ck('includeDir','Team directory with photos (last page)',true)}</div>
+    <label class="mr-lbl" style="margin-top:.4rem" for="esh-lst">Available listings</label><select id="esh-lst" class="mr-select" onchange="window._eshSet('listings',this.value)">${[['none','None — the Land Listing Report covers them'],['new','New listings this quarter only'],['all','All current listings']].map(([v,t])=>`<option value="${v}" ${(I.listings||'none')===v?'selected':''}>${t}</option>`).join('')}</select>
+    ${I.listings==='all'?ck('includeUc','…including under-contract listings',false):''}</div>`;
 }
 function _eshQuotesCard(I){
   const Q=I.quotes||[];
@@ -55618,7 +55626,7 @@ window._eshSaveWriters=async function(send, btn){
 };
 window._eshMove=async function(id,dir){ const S=_eshS(); const I=S.issues[S.q]; const L=_eshOrdered(I,S.arts[S.q]).map(a=>a.id); const i=L.indexOf(id), j=i+dir; if(i<0||j<0||j>=L.length) return; [L[i],L[j]]=[L[j],L[i]]; try{ await _eshSaveIssue({order:L}); viewEshReport(); }catch(e){ showToast('Could not save: '+e.message+_eshRuleHint(e),'error',8000); } };
 window._eshNew=function(kind){ const id=kind+'_'+Date.now().toString(36); const S=_eshS(); const b=_eshBio(currentUser.uid);
-  const heading={dogpound:'Inside the Dog Pound', marketplace:'Around the Marketplace', founder:'Founder’s Firewood'}[kind]||'';
+  const heading=ESH_DEFAULT_HEAD[kind]||'';
   S.arts[S.q][id]={id, kind, heading, title:'', authorUid:currentUser.uid, authorName:b.name||currentUser.name||'', authorEmail:currentUser.email||'', blocks:[], photos:[], status:'draft', _new:true};
   window._eshEdit(id); };
 window._eshAccess=function(){
@@ -55652,9 +55660,10 @@ window._eshEdit=function(id){
         ${ed?`<div class="mr-grid2"><div><span class="mr-lbl">Type</span><select id="esh-ed-kind" class="mr-select" style="width:100%">${ESH_KINDS.map(([k,t])=>`<option value="${k}" ${a.kind===k?'selected':''}>${_mrEsc(t)}</option>`).join('')}</select></div>
           <div><span class="mr-lbl">Author</span><select id="esh-ed-auth" class="mr-select" style="width:100%" ${a.id===a.authorUid&&a.kind==='broker'?'disabled title="Advisor articles belong to their writer"':''}>${adv.map(b=>`<option value="${_mrEsc(b.uid)}" ${b.uid===a.authorUid?'selected':''}>${_mrEsc(b.name)}</option>`).join('')}</select></div></div>`:'<div></div>'}
       </div>
-      <div><span class="mr-lbl">Article <span class="mr-muted" style="text-transform:none;letter-spacing:0;font-weight:500">— blank line between paragraphs · “## ” starts a sub-heading · “- ” a bullet</span></span>
+      <div><span class="mr-lbl">Article <span class="mr-muted" style="text-transform:none;letter-spacing:0;font-weight:500">— blank line between paragraphs · “## ” starts a sub-heading · “- ” a bullet · a table: one row per line, cells between | bars (a Word table works too)</span></span>
         <textarea id="esh-ed-body" class="mr-textarea esh-body" ${locked?'disabled':''} oninput="window._eshS().edit.dirty=true;document.getElementById('esh-wc').textContent=window._eshWc(this.value)">${_mrEsc(a.body!=null?a.body:_eshBlocksToText(a.blocks))}</textarea>
         <div class="mr-note" id="esh-wc">${_eshWords(a.blocks)} words</div></div>
+      <div class="esh-row"><label class="mr-lbl" for="esh-ed-lay" style="margin:0">Layout</label><select id="esh-ed-lay" class="mr-select" ${locked?'disabled':''}>${[['','Automatic (two columns; full width when there’s a table)'],['two','Two columns'],['one','One wide column']].map(([v,t])=>`<option value="${v}" ${(a.layout||'')===v?'selected':''}>${t}</option>`).join('')}</select></div>
       <div><span class="mr-lbl">Pictures (up to 4 — the first prints beside the article; captions are optional)</span><div class="esh-photos" id="esh-ed-photos"></div>
         ${locked?'':`<label class="mr-btn" style="margin-top:.5rem;cursor:pointer">＋ Add pictures<input type="file" accept="image/*" multiple style="display:none" onchange="window._eshAddPhotos(this.files)"></label>`}</div>
       ${ed&&!a._new?`<div><span class="mr-lbl">Editor</span><div class="esh-row"><label style="display:inline-flex;gap:.4rem;align-items:center;color:var(--text-1);font-size:.85rem"><input type="checkbox" class="mr-check" id="esh-ed-inc" ${a.include!==false?'checked':''}> Print in this issue</label><input id="esh-ed-note" class="mr-input" style="flex:1;min-width:200px" placeholder="Note to the writer if you return it" value="${_mrEsc(a.returnNote||'')}"></div></div>`:''}
@@ -55700,7 +55709,7 @@ window._eshImport=async function(file){
 function _eshCollectEd(){
   const S=_eshS(); const a=S.arts[S.q][S.edit.id]; const body=document.getElementById('esh-ed-body')?.value||'';
   const p={heading:(document.getElementById('esh-ed-head')?.value||'').trim(), body, blocks:_eshTextToBlocks(body), photos:S.edit.photos.map(x=>({url:x.url, caption:String(x.caption||'').trim()}))};
-  p.title=p.heading;
+  p.title=p.heading; const lay=document.getElementById('esh-ed-lay'); if(lay) p.layout=lay.value;
   const k=document.getElementById('esh-ed-kind'); if(k) p.kind=k.value; else p.kind=a.kind||'broker';
   const au=document.getElementById('esh-ed-auth'); const uid=(au&&!au.disabled)?au.value:a.authorUid; const b=_eshBio(uid); p.authorUid=uid; p.authorName=b.name||a.authorName||''; p.authorEmail=b.email||a.authorEmail||'';
   const inc=document.getElementById('esh-ed-inc'); if(inc) p.include=inc.checked;
@@ -55754,6 +55763,7 @@ function _eshFlow(C, blocks, nextFrame, o){
   const newFrame=()=>{ fr=nextFrame(); y=fr.y+size; fresh=true; };
   // lines are wrapped to the frame they land in, so a paragraph that crosses into a narrower column re-wraps
   (blocks||[]).forEach(b=>{
+    if(b.t==='tbl'){ const r=_eshTable(C, b.rows||[], fr, y-size+4, newFrame, ()=>fr); y=r.y+size+gap; fresh=false; return; }
     const isH=b.t==='h', isLi=b.t==='li'; const w=isH?'b':'r', fs=isH?size+1:size, ind=isLi?12:0;
     if(isH){ if(!fresh) y+=gap*0.6; if(y+lead*2>fr.bottom) newFrame(); }
     let words=String(b.text||'').split(/\s+/).filter(Boolean); let firstLine=true;
@@ -55768,6 +55778,21 @@ function _eshFlow(C, blocks, nextFrame, o){
   });
   return {y:y-lead+size, frame:fr};
 }
+// Table (first row = header, turquoise). Columns sized to their content; rows never split; header repeats after a column/page break.
+function _eshTable(C, rows, fr0, y, newFrame, curFrame){
+  const {doc,F,col,fill}=C; if(!rows.length) return {y};
+  const n=Math.max(...rows.map(r=>r.length)); const fs=8.2, lh=10;
+  const measure=(fr)=>{ F('r'); doc.setFontSize(fs); const nat=[...Array(n)].map((_,i)=>Math.min(150, Math.max(28, ...rows.map(r=>doc.getStringUnitWidth(String(r[i]||''))*fs+8)))); const tot=nat.reduce((a,b)=>a+b,0); return nat.map(w=>w*fr.w/tot); };
+  let fr=fr0, W=measure(fr);
+  const rowH=(r,hdr)=>{ F(hdr?'b':'r'); doc.setFontSize(fs); return Math.max(...[...Array(n)].map((_,i)=>doc.splitTextToSize(String(r[i]||''),W[i]-6).length))*lh+5; };
+  const draw=(r,hdr,yy)=>{ const h=rowH(r,hdr); let x=fr.x;
+    if(hdr){ fill(ESH_TEAL); doc.rect(fr.x,yy,fr.w,h,'F'); }
+    [...Array(n)].forEach((_,i)=>{ F(hdr?'b':'r'); doc.setFontSize(fs); col(hdr?[255,255,255]:ESH_INK); doc.splitTextToSize(String(r[i]||''),W[i]-6).forEach((l,k)=>doc.text(l,x+3,yy+lh*(k+1)-1)); x+=W[i]; });
+    doc.setDrawColor(210,214,218); doc.setLineWidth(0.4); doc.line(fr.x,yy+h,fr.x+fr.w,yy+h); return yy+h; };
+  let yy=draw(rows[0],true,y);
+  for(let i=1;i<rows.length;i++){ const h=rowH(rows[i],false); if(yy+h>fr.bottom){ newFrame(); fr=curFrame(); W=measure(fr); yy=draw(rows[0],true,fr.y); } yy=draw(rows[i],false,yy); }
+  return {y:yy};
+}
 async function _eshPhotoImgs(a){ const out=[]; for(const p of (a.photos||[]).slice(0,4)){ const im=await _mrImg(p.url,{maxPx:1400,q:0.85}); if(im) out.push({...im, caption:p.caption||''}); } return out; }
 function _eshPlacePhoto(C, im, x, y, w, maxH){
   const {doc,F,col}=C; let h=w*im.h/im.w; let ww=w; if(h>maxH){ h=maxH; ww=h*im.w/im.h; }
@@ -55779,15 +55804,16 @@ function _eshPlacePhoto(C, im, x, y, w, maxH){
 // top of the right column (then the next columns) with captions under them.
 async function _eshDrawInside(C, I, a, o){
   o=o||{}; const imgs=o.imgs||await _eshPhotoImgs(a); let pi=o.photoStart||0; const start=C.page+1;
-  const cols=[{x:41.7,w:255},{x:316.8,w:255}];
+  const one=a.layout==='one' || (!a.layout && (a.blocks||[]).some(b=>b.t==='tbl'));   // tables print best full width
+  const cols=one?[{x:41.7,w:529}]:[{x:41.7,w:255},{x:316.8,w:255}];
   let pageCols=[], colIdx=0;
   const pageNew=(cont)=>{ _eshNewPage(C,I); const hb=_eshHeadBox(C, a.heading||a.title||'', cont, 41.7, 115.3, cont?529:380);
     if(!cont && a.kind!=='dogpound'){ const by=_eshByline(a); if(by){ C.F('i'); C.doc.setFontSize(9.5); C.col(ESH_GREY); C.doc.text(by, 570, 137, {align:'right', maxWidth:Math.max(80,570-(hb.x+hb.w)-10)}); } }
-    pageCols=cols.map((c,i)=>({x:c.x, w:c.w, y:165.2, bottom:i===1?672:712})); colIdx=0; };
+    pageCols=cols.map((c,i)=>({x:c.x, w:c.w, y:165.2, bottom:(one||i===1)?672:712})); colIdx=0; };
   const nextFrame=()=>{ if(colIdx>=pageCols.length){ C.page>=start&&_eshFooter(C); pageNew(true); }
     const fr=pageCols[colIdx++];
     // a picture heads this column (right column first)
-    if(pi<imgs.length && (colIdx===2 || pi>0)){ fr.y=_eshPlacePhoto(C, imgs[pi++], fr.x, fr.y, fr.w, 210); }
+    if(pi<imgs.length && (one || colIdx===2 || pi>0)){ fr.y=_eshPlacePhoto(C, imgs[pi++], one?fr.x+fr.w-300:fr.x, fr.y, one?300:fr.w, 210); }
     return fr; };
   pageNew(!!o.cont);
   const r=_eshFlow(C, o.blocks||a.blocks||[], nextFrame);
@@ -55874,14 +55900,19 @@ function _eshDrawSidebar(C, I, toc, mode){
       y+=15.4; });
     y+=10;
   }
-  const team=_eshAdvisors().concat(_eshStaffForTeam());
-  box('TEAM DIRT DOG',y); y+=19.2+12;
-  const full=mode==='team'; const per=full?4:2; const avail=bottom-y; let pitch=Math.min(11.5, avail/Math.max(1,team.length*per+team.length*0.45));
-  const fs=Math.max(5.6, Math.min(9.5, pitch*0.82));
-  team.forEach(p=>{ F('b'); doc.setFontSize(fs+0.6); col(ESH_INK); doc.text(p.name,x+13.7,y); if(p.designationsStr){ const nw=doc.getStringUnitWidth(p.name+', ')*(fs+0.6); doc.setFontSize(fs*0.78); doc.text(', '+p.designationsStr,x+13.7+doc.getStringUnitWidth(p.name)*(fs+0.6),y); }
-    y+=pitch; F('r'); doc.setFontSize(fs); col([60,60,60]);
-    if(full){ doc.text(String(p.title||''),x+13.7,y,{maxWidth:w-20}); y+=pitch; if(p.cell||p.phone){ doc.text('Cell: '+(p.cell||p.phone),x+13.7,y); y+=pitch; } if(p.email){ F('b'); col(ESH_LINK); doc.text(p.email,x+13.7,y); doc.link(x+13.7,y-fs,doc.getStringUnitWidth(p.email)*fs,fs+2,{url:'mailto:'+p.email}); y+=pitch; } }
-    else { doc.text([p.title,(p.cell||p.phone)?'Cell: '+(p.cell||p.phone):''].filter(Boolean).join('  ·  '),x+13.7,y,{maxWidth:w-20}); y+=pitch; }
+  // ESHSIDE-20261116 — every person on ONE line each (name + designations, then the cell); nothing wraps: the type shrinks to fit
+  const rank=p=>{ const t=String(p.title||'').toLowerCase(); return /founder/.test(t)?0:(/managing partner/.test(t)?1:(/partner/.test(t)?2:(/director/.test(t)?3:4))); };
+  const team=_eshAdvisors().concat(_eshStaffForTeam()).sort((a,b)=>rank(a)-rank(b)||a.name.localeCompare(b.name));
+  box('TEAM DIRT DOG',y); y+=19.2+13;
+  const full=mode==='team'; const per=full?4:2; const avail=bottom-y;
+  const pitch=Math.min(12.5, avail/Math.max(1, team.length*(per+0.45)));
+  const base=Math.max(5.4, Math.min(9.6, pitch*0.84)); const maxW=w-22;
+  const line=(t,yy,o)=>{ o=o||{}; let z=o.size||base; F(o.w||'r'); doc.setFontSize(z); while(z>5 && doc.getStringUnitWidth(t)*z>maxW){ z-=0.2; doc.setFontSize(z); } col(o.color||[60,60,60]); doc.text(t,x+13.7,yy); return z; };
+  team.forEach(p=>{
+    const nm=p.name+(p.designationsStr?', '+p.designationsStr:''); line(nm,y,{w:'b',size:base+0.7,color:ESH_INK}); y+=pitch;
+    const cell=p.cell||p.phone||'';
+    if(full){ line(String(p.title||'Advisor'),y); y+=pitch; if(cell){ line('Cell: '+cell,y); } y+=pitch; if(p.email){ const z=line(p.email,y,{w:'s',color:ESH_LINK}); doc.link(x+13.7,y-z,doc.getStringUnitWidth(p.email)*z,z+2,{url:'mailto:'+p.email}); } y+=pitch; }
+    else { if(cell) line('Cell: '+cell,y); y+=pitch; }
     y+=pitch*0.45; });
   doc.setPage(doc.getNumberOfPages());
 }
@@ -55915,11 +55946,12 @@ async function _eshBuild(only, progress){
   progress&&progress(0.15);
   for(const a of Object.values(A).filter(a=>a.kind==='dogpound'&&inc(a))){ add(a.heading||'Inside the Dog Pound', await _eshDrawInside(C,I,a)); }
   // listings + quarter sales via the Land Listing Report page builder
-  if(I.includeListings!==false || I.includeSales!==false){
+  const lmode=I.listings||'none';
+  if(lmode!=='none' || I.includeSales!==false){
     const hdr=()=>_eshHeader(C,I); const ftr=(p)=>{ C.page=p; _eshFooter(C); };
     const pill=(t)=>_eshHeadBox(C,t,false);
-    await _llrWithState({q:S.q, asOf:_llrIso(new Date(Math.min(Date.now(), _llrQRange(S.q).end))), includeUc:!!I.includeUc, includeSold:I.includeSales!==false, office:'', land:'all', includeDir:false}, async()=>{
-      let rows=_llrCollect().filter(r=>!r.excluded); if(I.includeListings===false) rows=rows.filter(r=>r.sold);
+    await _llrWithState({q:S.q, asOf:_llrIso(new Date(Math.min(Date.now(), _llrQRange(S.q).end))), includeUc:lmode==='all'&&!!I.includeUc, includeSold:I.includeSales!==false, office:'', land:'all', includeDir:false}, async()=>{
+      let rows=_llrCollect().filter(r=>!r.excluded); if(lmode==='none') rows=rows.filter(r=>r.sold); else if(lmode==='new') rows=rows.filter(r=>r.sold||r.sec==='new');
       if(!rows.length) return;
       const before=C.page; const secStart={};
       // build section by section so each lands in the table of contents
