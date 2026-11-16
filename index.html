@@ -2388,6 +2388,7 @@ const APP_CONFIG = {
   agreements: { pdfProxyUrl: 'https://elc-agreements-worker.dirtdog.workers.dev' },   // AGPDF-20261008 — live once agreements-worker is deployed
   // 📬 Monthly Owner Reports (MREPORT-20261006). access: 'owner' | 'admins' | 'all' — overridden from eos/settings.monthlyReports
   monthlyReports: { access: 'all',   /* REPORTSALL-20261016 — opened to all users */ workerUrl: 'https://elc-report-worker.dirtdog.workers.dev' },
+  landListingReport: { access: 'owner' },   // LLR-20261116 — 'owner' = Ryan only | 'admins' | 'all'; overridden from eos/settings.landListingReport (⚙ Access on the tab)
   social: { workerUrl: 'https://elc-social-worker.dirtdog.workers.dev', defaultLink: 'https://www.thedirtdog.com' },   // SOCIAL-20261006-hooks
   mcBlast: { enabled: true, dueDay: 20, autoDay: 25, autoResend: true },
   // MAPWISE-20261107 — Site Research → MapWise parcel sales/ownership via the elc-ai-proxy worker (/mapwise). Billed per record to ELC's MapWise account.
@@ -10093,6 +10094,7 @@ const FB = {
           if(payload.social && typeof payload.social==='object') APP_CONFIG.social={...(APP_CONFIG.social||{}), ...payload.social};   // SOCIAL-20261006
           if(payload.mcBlast && typeof payload.mcBlast==='object') APP_CONFIG.mcBlast={...(APP_CONFIG.mcBlast||{}), ...payload.mcBlast};   // MCBLAST-20261007
           if(payload.monthlyReports && typeof payload.monthlyReports==='object'){ const _mrPrev=(APP_CONFIG.monthlyReports||{}).access; APP_CONFIG.monthlyReports={...(APP_CONFIG.monthlyReports||{}), ...payload.monthlyReports}; if(_mrPrev!==APP_CONFIG.monthlyReports.access && currentUser && typeof renderShell==='function'){ try{ renderShell(); renderCurrentView(); }catch(_){} } } // MREPORT-20261006
+          if(payload.landListingReport && typeof payload.landListingReport==='object'){ const _llrPrev=(APP_CONFIG.landListingReport||{}).access; APP_CONFIG.landListingReport={...(APP_CONFIG.landListingReport||{}), ...payload.landListingReport}; if(_llrPrev!==APP_CONFIG.landListingReport.access && currentUser && typeof renderShell==='function'){ try{ renderShell(); renderCurrentView(); }catch(_){} } }   // LLR-20261116
           eosCache[docId] = payload.data;
         } else {
           eosCache[docId] = payload.data;
@@ -12749,6 +12751,7 @@ function buildNavItems(){
       {id:'buyers',        label:'🏡 Buyers',         advisor:true, admin:true, manager:true},
       {id:'videoProposals',label:'🎬 Video Proposals',advisor:true, admin:true, manager:true, staff:true},
       {id:'monthlyReports',label:'📬 Monthly Reports', reports:true},   // MREPORT-20261006 — gated by _mrNavVisible
+      {id:'landListingReport',label:'🏞️ Land Listing Report', llr:true},   // LLR-20261116 — gated by _llrNavVisible (Ryan only until opened)
       {id:'marketReports', label:'📊 Market Reports',  always:true},     // MKTREPORT-20261007; REPORTSALL-20261016 — open to every user (editing stays admin-only)
       {id:'activityLog',   label:'🕵️ Activity Log',   admin:true},
       {id:'earthnotes',    label:'🌎 EarthNotes',     always:true},
@@ -12757,6 +12760,7 @@ function buildNavItems(){
     ].filter(n=>{
       if(sv){ // staff view: always tabs + staff-flagged tabs + manager tabs (for office managers) + CRM if enabled
         if(n.staffOnly) return true;   // tabs that exist ONLY inside staff view
+        if(n.llr) return _llrNavVisible(false,true);   // LLR-20261116
         if(n.reports) return (_mrCfg().access||'owner')==='all';   // REPORTSALL-20261016 — staff see every monthly report
         if(n.always) return true;
         if(n.staff) return true;
@@ -12765,6 +12769,7 @@ function buildNavItems(){
         return false;
       }
       if(!effectiveAdmin && ADVISOR_VIEW_HIDDEN_TABS.includes(n.id)) return false;   // ADVHIDE-20261014
+      if(n.llr) return _llrNavVisible(effectiveAdmin,false);   // LLR-20261116
       if(n.reports) return _mrNavVisible(effectiveAdmin);   // MREPORT-20261006
       if(n.always) return true;
       if(n.advisor && (!effectiveAdmin || adminViewAsAdvisor)) return true;
@@ -14081,7 +14086,7 @@ function renderCurrentView(){
     bio:viewAdvisorBio,   // ADVBIO-20261006
     splits:viewSplits,automations:viewAutomations,users:viewUsers,leaderboard:viewLeaderboard,
     manageStages:viewManageStages,officeManagers:viewOfficeManagers,approvedUsers:viewApprovedUsers,officeOverview:viewOfficeOverview,
-    eos:()=>viewEOS(window._eosSub||'rocks'),comps:viewComps,drive:viewDrive,documents:viewDocuments,hr:viewHR,crm:viewCRM,leads:viewLeads,inbox:viewSmartInbox,buyers:viewBuyers,videoProposals:viewVideoProposals,earthnotes:viewEarthNotes,valuation:viewValuation,activityLog:viewActivityLog,agreements:viewAgreements,monthlyReports:viewMonthlyReports,marketReports:viewMarketReports};
+    eos:()=>viewEOS(window._eosSub||'rocks'),comps:viewComps,drive:viewDrive,documents:viewDocuments,hr:viewHR,crm:viewCRM,leads:viewLeads,inbox:viewSmartInbox,buyers:viewBuyers,videoProposals:viewVideoProposals,earthnotes:viewEarthNotes,valuation:viewValuation,activityLog:viewActivityLog,agreements:viewAgreements,monthlyReports:viewMonthlyReports,marketReports:viewMarketReports,landListingReport:viewLandListingReport};   // LLR-20261116
   try {
     (map[currentView]||viewBoard)();
   } catch(e) {
@@ -54495,6 +54500,618 @@ window._psIgnore=async function(i,btn){
   finally{ done(); }
 };
 /* ===== PAGESYNC_BLOCK_END ===== */
+/* =======================================================
+   🏞️ LAND LISTING REPORT — marker LLR-20261116
+   Ryan (2026-11-16): "Every quarter we prepare a summary of all our land listings, the status of them, the agent for them and
+   send to prospective buyers … build this in Terra to pull automatically from the cards — all active listings and all under
+   contract as of the date of the quarter — as a PDF that looks like the attached (Land Listings 3rd Qtr 2026 / 1st Qtr 2026).
+   Aerial, a hyperlink to the property website, zoning, price, agent. New tab 'Land Listing Report' on the left that only I can
+   see for the moment; once finalized and working we activate it for all users."
+
+   What it pulls (same definitions as the 📬 Monthly Reports tab, so the two never disagree):
+     • Active listing   = seller-side card in Listing / LOI / Signed LOI-Contract Drafting      → ribbon AVAILABLE
+     • Under contract   = seller-side card in Due Diligence / Rezoning / Permitting / Closing    → ribbon UNDER CONTRACT
+       (_mrIsReportStage / _mrUnderContract). Buyer-rep cards are never in it. DO NOT MARKET cards are always left out
+       (DNM-20261016 already says DNM properties come off the Land Listings Report).
+     • "As of" date: a card counts if it was in one of those stages on that date (stageHistory), else its current stage.
+     • Sections, in the order of the printed report: New Listings (listing started inside the quarter) → Featured → Commercial →
+       Industrial → Residential → Agricultural → Other → Under Contract → [optional] Nth Quarter Sales → [optional] advisor directory.
+       Section comes from the card's Land Type; a per-listing override can move it (or mark it Featured).
+     • Card: aerial (deal primary photo → Terra parcel-line aerial → website screenshot → aerial attachment, or one picked here),
+       "acres – city", street, "Zoned …", price ("Asking $X" / "Contact Advisor for Pricing"), advisor(s), CLICK FOR DETAILS.
+       Photo, title and CLICK FOR DETAILS are all hyperlinked to the property website (thedirtdog.com → Buildout → Terra listing
+       page → first website link on the card).
+   Overrides saved on the deal (only read by this report): llrExclude, llrSection, llrTitle, llrAddress, llrPriceText, llrUrl,
+   llrPhotoUrl. Price never shows Terra's internal rough price when the card's owner-report price (reportPriceText) says
+   it is unpriced.
+   LLR2-20261116 (Ryan, same day): run it company-wide / Tampa advisors' listings / Orlando advisors' listings, and all land /
+   residential land / commercial land; the advisor page shows each advisor's 👤 Bio photo; no white space — a page with fewer than
+   6 listings fills the empty spots with infographic / quote / call-to-action / line-art tiles.
+     • Office run: a listing is in it when ANY advisor on the card (primary or co-advisor) belongs to that office (👤 Bio / profile
+       office; blank office counts as Tampa). The advisor page then lists only that office.
+     • Land run: Residential = Residential section; Commercial = Commercial + Industrial sections (by Land Type, or the section the
+       listing was moved to). Agricultural / Other / blank Land Type print only in an all-land run.
+   Access: APP_CONFIG.landListingReport.access = 'owner' (Ryan only — default) | 'admins' | 'all'; stored in
+   eos/settings.landListingReport and flipped from the tab's ⚙ Access button (Ryan only).
+   ======================================================= */
+const LLR_OWNER_EMAILS=['ryan@thedirtdog.com'];
+const LLR_RED=[238,45,36], LLR_TEAL=[84,196,203], LLR_TEAL_DK=[31,127,134], LLR_INK=[33,33,33], LLR_LINK=[52,170,190];
+const LLR_SECTIONS=[
+  ['new','New Listings'],['featured','Featured Properties'],['commercial','Commercial Properties'],['industrial','Industrial Properties'],
+  ['residential','Residential Properties'],['agricultural','Agricultural Properties'],['other','Other Properties'],['uc','Under Contract'],['sold','Quarter Sales']];
+const LLR_PICKABLE=['commercial','industrial','residential','agricultural','other','featured','new'];
+function _llrCfg(){ return (APP_CONFIG.landListingReport = APP_CONFIG.landListingReport || {access:'owner'}); }
+function _llrIsOwner(){ return !!(currentUser && LLR_OWNER_EMAILS.includes(String(currentUser.email||'').toLowerCase())); }
+function _llrCanAccess(){ if(!currentUser) return false; if(_llrIsOwner()) return true; const a=_llrCfg().access||'owner'; if(a==='all') return true; if(a==='admins') return !!currentUser.isAdmin; return false; }
+function _llrCanEdit(){ return !!(currentUser && (_llrIsOwner()||currentUser.isAdmin||currentUser.isStaff)); }
+// Nav predicate — called from buildNavItems (sv = staff view)
+function _llrNavVisible(effectiveAdmin, sv){
+  if(!currentUser) return false;
+  const a=_llrCfg().access||'owner';
+  if(a==='all') return true;
+  if(sv) return false;
+  if(a==='admins') return !!effectiveAdmin;
+  return !!(effectiveAdmin && _llrIsOwner());
+}
+window._llrNavVisible=_llrNavVisible;
+async function _llrSaveSettings(patch){
+  const {doc,setDoc}=_fbFns; const cfg={..._llrCfg(), ...patch};
+  await setDoc(doc(_fbDb,'eos','settings'), {landListingReport:cfg}, {merge:true});
+  APP_CONFIG.landListingReport=cfg;
+}
+
+/* ---------- dates / quarters ---------- */
+function _llrPad(n){ return String(n).padStart(2,'0'); }
+function _llrIso(d){ return d.getFullYear()+'-'+_llrPad(d.getMonth()+1)+'-'+_llrPad(d.getDate()); }
+function _llrQKey(y,q){ return y+'-Q'+q; }
+function _llrQParse(k){ const m=/^(\d{4})-Q([1-4])$/.exec(k||''); return m?{y:+m[1],q:+m[2]}:null; }
+function _llrQRange(k){ const p=_llrQParse(k)||{y:new Date().getFullYear(),q:1}; return {y:p.y,q:p.q,start:new Date(p.y,(p.q-1)*3,1).getTime(), end:new Date(p.y,p.q*3,0,23,59,59,999).getTime()}; }
+function _llrOrdinal(q){ return ['1st','2nd','3rd','4th'][q-1]||q+'th'; }
+function _llrQLabel(k){ const r=_llrQRange(k); return _llrOrdinal(r.q)+' Quarter '+r.y; }
+// The report is pulled in the first weeks after a quarter closes — until ~45 days in, default to the quarter just ended.
+function _llrDefaultQ(){ const now=new Date(); let y=now.getFullYear(), q=Math.floor(now.getMonth()/3)+1; const qs=new Date(y,(q-1)*3,1); if((now-qs)/864e5<45){ q--; if(q<1){ q=4; y--; } } return _llrQKey(y,q); }
+function _llrAsOfTs(iso){ const t=new Date((iso||_llrIso(new Date()))+'T23:59:59').getTime(); return isNaN(t)?Date.now():t; }
+function _llrMonthYear(iso){ const d=new Date((iso||_llrIso(new Date()))+'T12:00:00'); return d.toLocaleDateString('en-US',{month:'long',year:'numeric'}); }
+function _llrDateTs(v){ if(!v) return 0; if(typeof v==='number') return v; if(v&&typeof v.toMillis==='function') return v.toMillis(); const s=String(v); const t=new Date(/^\d{4}-\d{2}-\d{2}$/.test(s)?s+'T12:00:00':s).getTime(); return isNaN(t)?0:t; }
+
+/* ---------- state ---------- */
+function _llrState(){
+  const st=(window._llrStateObj=window._llrStateObj||{});
+  if(!st.q) st.q=_llrDefaultQ();
+  if(!st.asOf) st.asOf=_llrIso(new Date());
+  if(st.includeUc==null) st.includeUc=true;
+  if(st.includeSold==null) st.includeSold=false;
+  if(st.includeDir==null) st.includeDir=true;
+  if(st.office==null) st.office='';   // '' company-wide | 'Tampa' | 'Orlando' — LLR2-20261116
+  if(!st.land) st.land='all';        // 'all' | 'residential' | 'commercial'
+  if(st.search==null) st.search='';
+  if(st.issuesOnly==null) st.issuesOnly=false;
+  return st;
+}
+
+/* ---------- what a card says ---------- */
+// Stage the card was in on the as-of date. Today (or later) = current stage. Past date = last stageHistory entry on/before it;
+// a card whose history starts after that date wasn't on the board yet. Cards with no history fall back to their current stage.
+function _llrStageAt(d, ts){
+  const cur=_mrStageOf(d);
+  if(ts>=Date.now()-864e5) return cur;
+  const h=(Array.isArray(d.stageHistory)?d.stageHistory:[]).map(e=>({stage:e&&e.stage, t:+(e&&(e.enteredAt||e.at))||0})).filter(e=>e.stage&&e.t).sort((a,b)=>a.t-b.t);
+  if(!h.length) return cur;
+  let st=null; h.forEach(e=>{ if(e.t<=ts) st=e.stage; });
+  return st ? ((typeof STAGE_ALIAS!=='undefined'&&STAGE_ALIAS[st])||st) : null;
+}
+function _llrCatOf(d){
+  const t=String(d.landType||'').toLowerCase();
+  if(!t) return '';
+  if(/industrial/.test(t)) return 'industrial';
+  if(/agri|timber|ranch|farm/.test(t)) return 'agricultural';
+  if(/resid|multi|apartment|senior|single/.test(t)) return 'residential';
+  if(/commercial|retail|office|medical|mixed|storage|hotel|hospitality/.test(t)) return 'commercial';
+  return 'other';
+}
+function _llrAcres(d){ const n=parseFloat(String(d.acreage!=null&&d.acreage!==''?d.acreage:(d.acres||'')).replace(/[^0-9.]/g,'')); if(!isFinite(n)||n<=0) return ''; let s=(Math.round(n*100)/100).toString(); if(n<1) s=s.replace(/^0/,''); return Number(s.replace(/^\./,'0.'))>=1000?Math.round(n).toLocaleString('en-US'):s; }
+function _llrAddrParts(d){ return String(d.propertyAddress||d.address||'').split(',').map(x=>x.trim()).filter(Boolean); }
+function _llrCity(d){
+  if(d.city && !/unincorp/i.test(d.city)) return String(d.city).trim();
+  const p=_llrAddrParts(d);
+  const strip=x=>x.replace(/\b(FL|Florida)\b\.?\s*\d{5}(-\d{4})?$/i,'').replace(/\s+\d{5}(-\d{4})?$/,'').replace(/\b(FL|Florida)\.?$/i,'').trim();
+  if(p.length>=3) return strip(p[p.length-2])||strip(p[p.length-1]);
+  if(p.length===2){ const c=strip(p[1]); if(c) return c; }
+  return d.county?String(d.county).replace(/\s*county$/i,'').trim()+' County':'';
+}
+function _llrStreet(d){ const p=_llrAddrParts(d); if(p.length>=2) return p[0]; return p[0]||''; }
+function _llrAutoTitle(d){ const a=_llrAcres(d), c=_llrCity(d); if(a&&c) return a+' acres – '+c; if(a) return a+' acres'; return c||_mrDealName(d); }
+function _llrTitle(d){ return String(d.llrTitle||'').trim()||_llrAutoTitle(d); }
+function _llrAddress(d){ const o=String(d.llrAddress||'').trim(); if(o) return o; const s=_llrStreet(d); return (s&&s!==_llrTitle(d))?s:''; }
+function _llrZoning(d){ const z=String(d.zoning||'').trim(); return z?('Zoned '+z.replace(/^zoned\s+/i,'')):''; }
+function _llrAdvisors(d){ return _mrAdvisorsOf(d).filter(a=>a.name); }
+function _llrPriceInfo(d){
+  const many=_llrAdvisors(d).length>1; const contact='Contact Advisor'+(many?'s':'')+' for Pricing';
+  const o=String(d.llrPriceText||'').trim();
+  if(o) return {text:/^\$/.test(o)?'Asking '+o:o, src:'override'};
+  const r=String(d.reportPriceText||'').trim();
+  if(r) return /\$\s*\d/.test(r)?{text:/^asking/i.test(r)?r:'Asking '+r.replace(/^asking\s*/i,''), src:'owner report'}:{text:contact, src:'owner report says “'+r+'”'};
+  if(d.dealType==='lease') return {text:'Contact Advisor'+(many?'s':'')+' for Lease Terms', src:'lease'};
+  const p=_mrDealPrice(d); if(p) return {text:'Asking '+_mrFmtMoney(p), src:'Terra listed price'};
+  return {text:contact, src:'no price on card'};
+}
+function _llrAdvisorLabel(d){ const a=_llrAdvisors(d); if(!a.length) return ''; if(a.length===1) return 'Advisor: '+a[0].name; const f=a.map(x=>_mrFirstName(x.name)); return 'Advisors: '+(f.length===2?f.join(' & '):f.slice(0,-1).join(', ')+' & '+f[f.length-1]); }
+function _llrAutoLink(d){
+  const links=_mrDealLinks(d); const host=u=>_mrLinkHost(u);
+  const pick=re=>(links.find(l=>re.test(host(l.url)))||{}).url;
+  let u=pick(/(^|\.)thedirtdog\.com$/)||pick(/(^|\.)buildout\.com$/);
+  if(u) return u;
+  try{ if(d.listingSiteId && d.listingPublished!==false && typeof _lsShareLink==='function') return _lsShareLink(d.listingSiteId); }catch(_){}
+  return (links[0]||{}).url||'';
+}
+function _llrLink(d){ const o=String(d.llrUrl||'').trim(); return /^https?:\/\//i.test(o)?o:_llrAutoLink(d); }
+function _llrPhotoCandidates(d){
+  const out=[]; const seen=new Set(); const add=(url,label)=>{ if(!url||seen.has(url)) return; seen.add(url); out.push({url,label}); };
+  add(d.primaryPhotoUrl,'Card photo'); add(d.eblastAerialUrl,'Aerial with parcel lines (Terra)'); add(d.reportWebsitePhotoUrl,'Website screenshot');
+  try{ (typeof _mbPhotoCandidates==='function'?_mbPhotoCandidates(d,null):[]).forEach(p=>add(p.url,p.label)); }catch(_){}
+  return out;
+}
+function _llrPhoto(d){ return String(d.llrPhotoUrl||'').trim()||((_llrPhotoCandidates(d)[0]||{}).url)||''; }
+
+/* ---------- run scope: office + land type (LLR2-20261116) ---------- */
+const LLR_OFFICES=[['','Company-wide'],['Tampa','Tampa advisors'],['Orlando','Orlando advisors']];
+const LLR_LANDS=[['all','All land'],['residential','Residential land'],['commercial','Commercial land']];
+const LLR_LAND_CATS={residential:['residential'], commercial:['commercial','industrial']};
+function _llrOfficeOf(uid, email){
+  let o='';
+  try{ const b=(typeof getAdvisorBio==='function')?getAdvisorBio(uid||email):null; o=(b&&b.office)||''; }catch(_){}
+  if(!o && uid && allProfiles && allProfiles[uid]) o=allProfiles[uid].office||'';
+  return /orlando/i.test(o)?'Orlando':'Tampa';   // blank office = Tampa (main office)
+}
+function _llrDealOffices(d){ const s=new Set(); if(d.advisorUid||d.advisorEmail) s.add(_llrOfficeOf(d.advisorUid,d.advisorEmail)); (d.coAdvisors||[]).forEach(c=>{ if(c&&(c.uid||c.email)) s.add(_llrOfficeOf(c.uid,c.email)); }); (d.coAdvisorUids||[]).forEach(u=>s.add(_llrOfficeOf(u,''))); return s; }
+// Land category the listing belongs to: the section it was moved to (when that is a land category) or its Land Type
+function _llrLandCat(d){ const o=String(d.llrSection||''); if(['commercial','industrial','residential','agricultural','other'].includes(o)) return o; return _llrCatOf(d); }
+function _llrInScope(d){
+  const st=_llrState();
+  if(st.office && !_llrDealOffices(d).has(st.office)) return false;
+  if(st.land && st.land!=='all' && !(LLR_LAND_CATS[st.land]||[]).includes(_llrLandCat(d))) return false;
+  return true;
+}
+function _llrScopeLabel(){ const st=_llrState(); const p=[]; if(st.office) p.push(st.office+' Office'); if(st.land&&st.land!=='all') p.push(st.land==='residential'?'Residential Land':'Commercial Land'); return p.join(' · '); }
+function _llrScopeFile(){ const st=_llrState(); return (st.office?'_'+st.office:'')+(st.land&&st.land!=='all'?'_'+(st.land==='residential'?'Residential':'Commercial'):''); }
+
+/* ---------- the list ---------- */
+function _llrCollect(){
+  const st=_llrState(); const asOf=_llrAsOfTs(st.asOf); const Q=_llrQRange(st.q);
+  const rows=[], out=[];
+  (allDeals||[]).forEach(d=>{
+    if(!d||!d.id||!_mrIsSellerRep(d)) return;
+    if(!_llrInScope(d)){ if(_llrState().land!=='all' && !_llrLandCat(d) && _mrIsReportStage(_mrStageOf(d)) && !d.doNotMarket) out.push(d); return; }   // LLR2-20261116
+    const s=_llrStageAt(d, asOf); if(!s) return;
+    if(_mrIsReportStage(s)){
+      if(_mrListingStart(d)>asOf) return;
+      const uc=_mrUnderContract({stage:s});
+      const start=_mrListingStart(d);
+      const isNew=!uc && start>=Q.start && start<=asOf;
+      let sec; const ov=String(d.llrSection||'');
+      if(uc) sec='uc'; else if(ov&&LLR_PICKABLE.includes(ov)) sec=ov; else if(isNew) sec='new'; else sec=_llrCatOf(d)||'other';
+      const r={d, stage:s, uc, isNew, sec, excluded:'', issues:[]};
+      if(d.doNotMarket) r.excluded='DO NOT MARKET';
+      else if(d.llrExclude) r.excluded='Left out by hand';
+      else if(uc && !st.includeUc) r.excluded='Under-contract listings switched off';
+      rows.push(r);
+    } else if(st.includeSold && typeof isWonStage==='function' && isWonStage(_mrStageOf(d))){
+      const ct=_llrDateTs(d.closeDate)||_llrDateTs(d.stageEnteredAt);
+      if(ct>=Q.start && ct<=Q.end){ const r={d, stage:_mrStageOf(d), sold:true, closeTs:ct, sec:'sold', excluded:'', issues:[]}; if(d.doNotMarket) r.excluded='DO NOT MARKET'; else if(d.llrExclude) r.excluded='Left out by hand'; rows.push(r); }
+    }
+  });
+  rows.forEach(r=>{ const d=r.d;
+    if(!_llrPhoto(d)) r.issues.push('No aerial');
+    if(!r.sold && !_llrLink(d)) r.issues.push('No website link');
+    if(!String(d.zoning||'').trim()) r.issues.push('No zoning');
+    if(!_llrAcres(d) && !String(d.llrTitle||'').trim()) r.issues.push('No acreage');
+    if(!_llrAdvisors(d).length) r.issues.push('No advisor');
+    if(!r.sold && !r.uc && !String(d.llrSection||'') && !r.isNew && !_llrCatOf(d)) r.issues.push('Land Type blank → Other');
+  });
+  const order=LLR_SECTIONS.map(x=>x[0]);
+  rows.sort((a,b)=>(order.indexOf(a.sec)-order.indexOf(b.sec)) || (a.sold?(a.closeTs-b.closeTs):0) || _llrTitle(a.d).localeCompare(_llrTitle(b.d),undefined,{numeric:true}));
+  rows.blankLandType=out.length;   // listings skipped by a land-type run because their Land Type is blank
+  return rows;
+}
+function _llrSectionTitle(key){ if(key==='sold'){ const r=_llrQRange(_llrState().q); return _llrOrdinal(r.q)+' Quarter Sales'; } return (LLR_SECTIONS.find(x=>x[0]===key)||[key,key])[1]; }
+
+/* ---------- view ---------- */
+function _llrInjectStyles(){
+  if(typeof _mrInjectStyles==='function') _mrInjectStyles();
+  if(document.getElementById('llr-styles')) return;
+  const s=document.createElement('style'); s.id='llr-styles'; s.textContent=`
+  .llr-scroll{overflow-x:auto}
+  .llr-table .mr-thumb{min-width:84px;width:84px;height:60px}
+  .llr-opts label input.mr-input{min-width:0;width:100%}
+  .llr-table td{vertical-align:top}
+  .llr-table .mr-input,.llr-table .mr-select{width:100%;box-sizing:border-box;min-height:38px;font-size:.8rem}
+  .llr-sec td{background:var(--bg);font-weight:800;font-size:.72rem;letter-spacing:.07em;text-transform:uppercase;color:var(--text-2)}
+  .llr-off td{opacity:.55}
+  .llr-thumbbtn{border:0;padding:0;background:none;cursor:pointer;border-radius:6px;display:block}
+  .llr-thumbbtn:disabled{cursor:default}
+  .llr-nophoto{width:84px;height:60px;border-radius:6px;border:1px dashed #d97706;display:flex;align-items:center;justify-content:center;font-size:.68rem;font-weight:700;color:#b45309;text-align:center;line-height:1.15}
+  html.dark .llr-nophoto{color:#fbbf24;border-color:#fbbf24}
+  .llr-sub{font-size:.74rem;color:var(--text-2);margin-top:.2rem;line-height:1.3}
+  .llr-price{color:#c81e1e;font-weight:700} html.dark .llr-price{color:#f87171}
+  .llr-ribbon{display:inline-block;font-size:.62rem;font-weight:800;letter-spacing:.06em;padding:.12rem .45rem;border-radius:4px;color:#fff;background:#da291c}
+  .llr-ribbon.uc{background:#1f7f86}.llr-ribbon.sold{background:#374151}
+  .llr-stats{display:flex;gap:.5rem;flex-wrap:wrap;margin:.25rem 0 .9rem}
+  .llr-stat{border:1px solid var(--border);border-radius:10px;padding:.45rem .75rem;background:var(--surface);font-size:.8rem;color:var(--text-1)}
+  .llr-stat b{font-size:1.05rem;margin-right:.25rem}
+  .llr-opts{display:flex;gap:1rem;flex-wrap:wrap;align-items:center;padding:.8rem 1rem}
+  .llr-opts label{display:inline-flex;gap:.4rem;align-items:center;font-size:.82rem;color:var(--text-1);min-height:40px;cursor:pointer}
+  .llr-photos{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:.6rem}
+  .llr-photo{border:2px solid var(--border);border-radius:10px;padding:.3rem;background:var(--surface);cursor:pointer;text-align:left;color:var(--text-1);font-size:.72rem}
+  .llr-photo img{width:100%;height:96px;object-fit:cover;border-radius:6px;display:block;margin-bottom:.25rem;background:var(--bg)}
+  .llr-photo.on{border-color:var(--brand-teal)}
+  @media(max-width:767px){.llr-table{min-width:980px}}
+  `; document.head.appendChild(s);
+}
+function _llrRowHtml(r, canEdit){
+  const d=r.d, id=_mrEsc(d.id), dis=canEdit?'':'disabled';
+  const ph=_llrPhoto(d); const price=r.sold?{text:'Sold '+(_mrFmtMoney(_mrDealPrice(d))||''),src:'closing'}:_llrPriceInfo(d);
+  const link=_llrLink(d); const auto=_llrAutoLink(d);
+  const rib=r.sold?`<span class="llr-ribbon sold">SOLD ${_mrEsc(_llrSoldDate(r.closeTs))}</span>`:(r.uc?'<span class="llr-ribbon uc">UNDER CONTRACT</span>':'<span class="llr-ribbon">AVAILABLE</span>');
+  const secOpts=r.uc||r.sold?`<option>${_mrEsc(_llrSectionTitle(r.sec))}</option>`:
+    `<option value="" ${!d.llrSection?'selected':''}>Auto — ${_mrEsc(_llrSectionTitle(r.isNew?'new':(_llrCatOf(d)||'other')))}</option>`+LLR_PICKABLE.map(k=>`<option value="${k}" ${d.llrSection===k?'selected':''}>${_mrEsc(_llrSectionTitle(k))}</option>`).join('');
+  const issues=r.excluded?`<span class="mr-chip mr-chip-new">${_mrEsc(r.excluded)}</span>`:(r.issues.map(x=>`<span class="mr-chip mr-chip-warn" style="margin:0 .2rem .2rem 0">${_mrEsc(x)}</span>`).join('')||'<span class="mr-chip mr-chip-sent">Ready</span>');
+  const exclLocked=!!d.doNotMarket;
+  return `<tr class="${r.excluded?'llr-off':''}" data-id="${id}">
+    <td><input type="checkbox" class="mr-check" aria-label="Include ${_mrEsc(_mrDealName(d))} in the report" ${!r.excluded?'checked':''} ${exclLocked||!canEdit||(r.uc&&!_llrState().includeUc)?'disabled':''} onchange="window._llrSet('${id}','llrExclude',!this.checked)"></td>
+    <td><button type="button" class="llr-thumbbtn" ${dis} onclick="window._llrPickPhoto('${id}')" aria-label="Choose the aerial for ${_mrEsc(_mrDealName(d))}" title="${canEdit?'Choose the aerial':''}">${ph?`<img class="mr-thumb" src="${_mrEsc(ph)}" alt="" loading="lazy">`:'<div class="llr-nophoto">No aerial<br>— pick one</div>'}</button></td>
+    <td style="min-width:200px">${rib}
+      <input class="mr-input" style="margin-top:.3rem" ${dis} aria-label="Card headline" placeholder="${_mrEsc(_llrAutoTitle(d))}" value="${_mrEsc(d.llrTitle||'')}" onchange="window._llrSet('${id}','llrTitle',this.value)">
+      <input class="mr-input" style="margin-top:.3rem" ${dis} aria-label="Address line" placeholder="${_mrEsc(_llrStreet(d)||'Address line')}" value="${_mrEsc(d.llrAddress||'')}" onchange="window._llrSet('${id}','llrAddress',this.value)">
+      <div class="llr-sub">${_mrEsc(_llrAdvisorLabel(d)||'No advisor on card')} · ${_mrEsc(r.stage||'')}</div>
+      <button type="button" class="mr-btn mr-btn-sm" style="min-height:32px;margin-top:.3rem" onclick="window._llrOpenDeal('${id}')">Open card ↗</button></td>
+    <td style="min-width:100px;max-width:150px">${_mrEsc(_llrZoning(d)||'—')}<div class="llr-sub">${_mrEsc(d.landType||'Land Type blank')}</div></td>
+    <td style="min-width:170px"><div class="llr-price">${_mrEsc(price.text)}</div>${r.sold?'':`<input class="mr-input" style="margin-top:.3rem" ${dis} aria-label="Price on the report" placeholder="Override (e.g. \$1,950,000)" value="${_mrEsc(d.llrPriceText||'')}" onchange="window._llrSet('${id}','llrPriceText',this.value)">`}<div class="llr-sub">from ${_mrEsc(price.src)}</div></td>
+    <td style="min-width:150px"><select class="mr-select" ${dis||(r.uc||r.sold?'disabled':'')} aria-label="Report section" onchange="window._llrSet('${id}','llrSection',this.value)">${secOpts}</select></td>
+    <td style="min-width:190px"><input class="mr-input" ${dis} aria-label="Property website link" placeholder="${_mrEsc(auto||'Paste the property website URL')}" value="${_mrEsc(d.llrUrl||'')}" onchange="window._llrSet('${id}','llrUrl',this.value)">
+      <div class="llr-sub">${link?`<a href="${_mrEsc(link)}" target="_blank" rel="noopener" style="color:var(--brand-teal);font-weight:600">${_mrEsc(_mrLinkHost(link)||'link')} ↗</a>`:'no link yet'}</div></td>
+    <td style="min-width:120px">${issues}</td></tr>`;
+}
+function _llrDirPages(){ try{ const L=(typeof _bioAdvisorList==='function'?_bioAdvisorList():[]); if(!L.length) return 0; const o=L.filter(b=>/orlando/i.test(b.office||'')).length, t=L.length-o; const cols=Math.ceil(t/11)+Math.ceil(o/11); return Math.max(1,Math.ceil(cols/3)); }catch(_){ return 1; } }
+function _llrSoldDate(ts){ const d=new Date(ts); return (d.getMonth()+1)+'-'+d.getDate()+'-'+String(d.getFullYear()).slice(2); }
+function viewLandListingReport(){
+  _llrInjectStyles();
+  if(!_llrCanAccess()){
+    setContent(`<div class="mr-wrap"><div class="mr-card" style="padding:2rem;text-align:center"><div style="font-size:2rem">🔒</div><p style="margin-top:.5rem;font-weight:700;color:var(--text-1)">The Land Listing Report isn’t open to your account yet.</p></div></div>`);
+    return;
+  }
+  const st=_llrState(); const canEdit=_llrCanEdit(); const a=_llrCfg().access||'owner';
+  const qOpts=(()=>{ const o=[]; const n=new Date(); let y=n.getFullYear(), q=Math.floor(n.getMonth()/3)+1; for(let i=0;i<8;i++){ const k=_llrQKey(y,q); o.push(`<option value="${k}" ${k===st.q?'selected':''}>${_llrQLabel(k)}</option>`); q--; if(q<1){ q=4; y--; } } if(!o.some(x=>x.includes('"'+st.q+'"'))) o.push(`<option value="${st.q}" selected>${_llrQLabel(st.q)}</option>`); return o.join(''); })();
+  setContent(`<div class="mr-wrap">
+    <div class="mr-head">
+      <h1>🏞️ Land Listing Report</h1>
+      <span class="mr-chip ${a==='all'?'mr-chip-sent':(a==='admins'?'mr-chip-draft':'mr-chip-new')}" title="Who can see this tab">${a==='all'?'Open to all users':(a==='admins'?'Admins only':'Only you')}</span>
+      <div class="mr-toolbar">
+        <label class="sr-only" for="llr-q">Quarter</label>
+        <select id="llr-q" class="mr-select" onchange="window._llrState().q=this.value;viewLandListingReport()">${qOpts}</select>
+        <select class="mr-select" aria-label="Which advisors' listings" onchange="window._llrState().office=this.value;viewLandListingReport()">${LLR_OFFICES.map(([v,t])=>`<option value="${v}" ${st.office===v?'selected':''}>${t}</option>`).join('')}</select>
+        <select class="mr-select" aria-label="Land type" onchange="window._llrState().land=this.value;viewLandListingReport()">${LLR_LANDS.map(([v,t])=>`<option value="${v}" ${st.land===v?'selected':''}>${t}</option>`).join('')}</select>
+        <label class="mr-muted" for="llr-asof" style="display:inline-flex;gap:.35rem;align-items:center">As of <input id="llr-asof" type="date" class="mr-input" value="${_mrEsc(st.asOf)}" onchange="window._llrState().asOf=this.value||'';viewLandListingReport()"></label>
+        ${_llrIsOwner()?`<button type="button" class="mr-btn" onclick="window._llrAccess()">⚙ Access</button>`:''}
+        <button type="button" class="mr-btn mr-btn-teal" id="llr-prev" onclick="window._llrGenerate('preview',this)">👁 Preview PDF</button>
+        <button type="button" class="mr-btn mr-btn-primary" id="llr-dl" onclick="window._llrGenerate('download',this)">⬇ Download PDF</button>
+      </div>
+    </div>
+    <p class="mr-note" style="margin:-.4rem 0 .6rem">Pulled live from the deal cards: every seller-side listing in Listing / LOI / Signed LOI (AVAILABLE) and Due Diligence / Rezoning / Permitting / Closing (UNDER CONTRACT) on the as-of date. DO NOT MARKET cards are always left out. Grey text in a box is what Terra pulled from the card — type over it to change it on this report only (saved on the card, used only here).</p>
+    <div id="llr-stats"></div>
+    <div class="mr-card" style="margin-bottom:.9rem"><div class="llr-opts">
+      <label style="flex:1 1 260px">Cover <input class="mr-input" style="flex:1" id="llr-cover" value="${_mrEsc(st.cover||'')}" placeholder="Available ${_mrEsc(st.land==='residential'?'Residential Land':(st.land==='commercial'?'Commercial Land':'Land'))} — ${_mrEsc(_llrMonthYear(st.asOf))}" oninput="window._llrState().cover=this.value"></label>
+      <label><input type="checkbox" class="mr-check" ${st.includeUc?'checked':''} onchange="window._llrState().includeUc=this.checked;window._llrRenderRows()"> Under-contract listings</label>
+      <label><input type="checkbox" class="mr-check" ${st.includeSold?'checked':''} onchange="window._llrState().includeSold=this.checked;window._llrRenderRows()"> ${_mrEsc(_llrSectionTitle('sold'))} (closed in the quarter)</label>
+      <label><input type="checkbox" class="mr-check" ${st.includeDir?'checked':''} onchange="window._llrState().includeDir=this.checked"> Advisor directory page</label>
+    </div></div>
+    <div class="mr-row" style="margin-bottom:.6rem">
+      <input class="mr-input" style="flex:1 1 240px;max-width:360px" placeholder="Search listings…" aria-label="Search listings" value="${_mrEsc(st.search)}" oninput="window._llrState().search=this.value;clearTimeout(window._llrSrchT);window._llrSrchT=setTimeout(window._llrRenderRows,200)">
+      <label class="mr-muted" style="display:inline-flex;gap:.4rem;align-items:center;min-height:40px;cursor:pointer"><input type="checkbox" class="mr-check" ${st.issuesOnly?'checked':''} onchange="window._llrState().issuesOnly=this.checked;window._llrRenderRows()"> Only listings that need attention</label>
+    </div>
+    <div class="mr-card llr-scroll"><table class="mr-table llr-table"><thead><tr><th style="width:36px">In</th><th>Aerial</th><th>Listing</th><th>Zoning</th><th>Price on report</th><th>Section</th><th>Website link</th><th>Check</th></tr></thead><tbody id="llr-rows"></tbody></table></div>
+  </div>`);
+  window._llrRenderRows();
+}
+window._llrRenderRows=function(){
+  const tb=document.getElementById('llr-rows'); if(!tb) return;
+  const st=_llrState(); const canEdit=_llrCanEdit(); const all=_llrCollect();
+  const inc=all.filter(r=>!r.excluded);
+  const stats=document.getElementById('llr-stats');
+  if(stats){ const av=inc.filter(r=>!r.uc&&!r.sold).length, uc=inc.filter(r=>r.uc).length, so=inc.filter(r=>r.sold).length, att=inc.filter(r=>r.issues.length).length, ex=all.length-inc.length;
+    stats.innerHTML=`<div class="llr-stats"><div class="llr-stat"><b>${av}</b>available</div>${st.includeUc?`<div class="llr-stat"><b>${uc}</b>under contract</div>`:''}${st.includeSold?`<div class="llr-stat"><b>${so}</b>sold in the quarter</div>`:''}<div class="llr-stat"><b>${att}</b>need attention</div><div class="llr-stat"><b>${ex}</b>left out</div>${all.blankLandType?`<div class="llr-stat" title="Set the Land Type on these cards (or move them to a section) so they can print in a residential / commercial run"><b>${all.blankLandType}</b>skipped — no Land Type</div>`:''}<div class="llr-stat"><b>${_llrPagePlan(inc).length+1+(st.includeDir?_llrDirPages():0)}</b>PDF pages</div></div>`; }
+  let rows=all; const q=String(st.search||'').toLowerCase().trim();
+  if(q) rows=rows.filter(r=>(_llrTitle(r.d)+' '+_mrDealName(r.d)+' '+_llrAddress(r.d)+' '+(r.d.zoning||'')+' '+_llrAdvisorLabel(r.d)).toLowerCase().includes(q));
+  if(st.issuesOnly) rows=rows.filter(r=>!r.excluded&&r.issues.length);
+  if(!rows.length){ tb.innerHTML=`<tr><td colspan="8" style="text-align:center;padding:1.5rem" class="mr-muted">${all.length?'Nothing matches.':'No active or under-contract listings on that date.'}</td></tr>`; return; }
+  let last=''; const html=[];
+  rows.forEach(r=>{ if(r.sec!==last){ last=r.sec; const n=rows.filter(x=>x.sec===r.sec&&!x.excluded).length; html.push(`<tr class="llr-sec"><td colspan="8">${_mrEsc(_llrSectionTitle(r.sec))} · ${n}</td></tr>`); } html.push(_llrRowHtml(r,canEdit)); });
+  tb.innerHTML=html.join('');
+};
+window._llrState=_llrState;
+window._llrOpenDeal=function(id){ try{ if(typeof window.openPropertyDetail==='function') return window.openPropertyDetail(id); }catch(e){ console.warn('[llr] open',e); } showToast('Open it from the Deals board','info'); };
+window._llrSet=async function(id, key, val){
+  if(!_llrCanEdit()) return;
+  const d=(allDeals||[]).find(x=>x.id===id); if(!d) return;
+  if(typeof val==='string') val=val.trim();
+  if(key==='llrUrl' && val && !/^https?:\/\//i.test(val)) val='https://'+val;
+  const patch={[key]:(val===''||val===false)?null:val};
+  const prev=d[key];
+  try{ await Store.updateDeal(id, patch); Object.assign(d, patch); window._llrRenderRows(); showToast('Saved','success',1600); }
+  catch(e){ d[key]=prev; console.error('[llr] save',e); showToast('Could not save: '+e.message,'error'); window._llrRenderRows(); }
+};
+window._llrPickPhoto=function(id){
+  if(!_llrCanEdit()) return;
+  const d=(allDeals||[]).find(x=>x.id===id); if(!d) return;
+  document.getElementById('llr-photo-ov')?.remove();
+  const cur=_llrPhoto(d); const c=_llrPhotoCandidates(d);
+  const ov=document.createElement('div'); ov.id='llr-photo-ov'; ov.className='mr-ov fixed inset-0 flex items-center justify-center';
+  ov.innerHTML=`<div class="mr-modal" role="dialog" aria-modal="true" aria-label="Choose the aerial" style="width:min(760px,100%)">
+    <div class="mr-modal-h"><h2>Aerial for ${_mrEsc(_mrDealName(d))}</h2><button type="button" class="mr-x" style="margin-left:auto" aria-label="Close" onclick="document.getElementById('llr-photo-ov').remove()">✕</button></div>
+    <div class="mr-modal-b">
+      ${c.length?`<div class="llr-photos">${c.map((p,i)=>`<button type="button" class="llr-photo ${p.url===cur?'on':''}" onclick="window._llrChoosePhoto('${_mrEsc(id)}',${i})"><img src="${_mrEsc(p.url)}" alt="" loading="lazy">${_mrEsc(p.label||'Photo')}</button>`).join('')}</div>`:'<p class="mr-note">No photos on this card yet. Add a primary photo on the deal card, draw the parcel-line aerial from the e-blast builder, or paste an image URL below.</p>'}
+      <div><span class="mr-lbl">…or paste an image URL</span><div class="mr-row"><input id="llr-photo-url" class="mr-input" style="flex:1" placeholder="https://…" value="${_mrEsc(d.llrPhotoUrl||'')}"><button type="button" class="mr-btn mr-btn-teal" onclick="window._llrSet('${_mrEsc(id)}','llrPhotoUrl',document.getElementById('llr-photo-url').value);document.getElementById('llr-photo-ov').remove()">Use this</button></div>
+      ${d.llrPhotoUrl?`<button type="button" class="mr-btn mr-btn-sm" style="margin-top:.5rem" onclick="window._llrSet('${_mrEsc(id)}','llrPhotoUrl','');document.getElementById('llr-photo-ov').remove()">↺ Back to automatic (card photo)</button>`:''}</div>
+    </div></div>`;
+  ov.addEventListener('click',e=>{ if(e.target===ov) ov.remove(); });
+  document.body.appendChild(ov);
+  window._llrPhotoCands=c;
+};
+window._llrChoosePhoto=function(id,i){ const p=(window._llrPhotoCands||[])[i]; document.getElementById('llr-photo-ov')?.remove(); if(p) window._llrSet(id,'llrPhotoUrl',p.url); };
+window._llrAccess=async function(){
+  if(!_llrIsOwner()) return;
+  const a=_llrCfg().access||'owner';
+  document.getElementById('llr-acc-ov')?.remove();
+  const ov=document.createElement('div'); ov.id='llr-acc-ov'; ov.className='mr-ov fixed inset-0 flex items-center justify-center';
+  const opt=(v,t,s)=>`<label class="mr-sec" style="display:flex;gap:.6rem;align-items:flex-start;cursor:pointer"><input type="radio" name="llr-acc" value="${v}" ${a===v?'checked':''} style="margin-top:.2rem;width:18px;height:18px;accent-color:var(--brand-teal)"><span><b style="color:var(--text-1)">${t}</b><br><span class="mr-muted">${s}</span></span></label>`;
+  ov.innerHTML=`<div class="mr-modal" role="dialog" aria-modal="true" aria-label="Who can see the Land Listing Report" style="width:min(480px,100%)">
+    <div class="mr-modal-h"><h2>Who can see this tab?</h2><button type="button" class="mr-x" style="margin-left:auto" aria-label="Close" onclick="document.getElementById('llr-acc-ov').remove()">✕</button></div>
+    <div class="mr-modal-b">${opt('owner','Only me','Hidden from everyone else (testing).')}${opt('admins','Admins','Admins see the tab; advisors and staff don’t.')}${opt('all','All users','Everyone can open it and download the PDF. Only admins, staff and you can change what prints.')}</div>
+    <div class="mr-modal-f"><button type="button" class="mr-btn" onclick="document.getElementById('llr-acc-ov').remove()">Cancel</button><button type="button" class="mr-btn mr-btn-teal" style="margin-left:auto" onclick="window._llrAccessSave(this)">Save</button></div></div>`;
+  ov.addEventListener('click',e=>{ if(e.target===ov) ov.remove(); });
+  document.body.appendChild(ov);
+};
+window._llrAccessSave=async function(btn){
+  const v=(document.querySelector('input[name="llr-acc"]:checked')||{}).value||'owner';
+  const done=elcBusy(btn,'Saving…');
+  try{ await _llrSaveSettings({access:v, accessChangedAt:Date.now(), accessChangedBy:currentUser?.name||currentUser?.email||''}); document.getElementById('llr-acc-ov')?.remove(); showToast(v==='all'?'Land Listing Report is now open to all users':(v==='admins'?'Land Listing Report: admins only':'Land Listing Report: only you'),'success'); renderShell(); renderCurrentView(); }
+  catch(e){ console.error('[llr] access',e); showToast('Could not save: '+e.message,'error'); }
+  finally{ done(); }
+};
+
+/* ---------- PDF ---------- */
+// Pages: one section never shares a page with another (like the printed report); 6 cards a page, section title repeated.
+function _llrPagePlan(rows){
+  const pages=[]; const order=LLR_SECTIONS.map(x=>x[0]);
+  order.forEach(k=>{ const r=rows.filter(x=>x.sec===k); for(let i=0;i<r.length;i+=6) pages.push({sec:k, rows:r.slice(i,i+6)}); });
+  return pages;
+}
+async function _llrFonts(doc){
+  window._llrFontCache=window._llrFontCache||{}; const C=window._llrFontCache;
+  const base='https://cdn.jsdelivr.net/fontsource/fonts/open-sans@latest/latin-';
+  const want=[['r','400'],['s','600'],['b','700'],['x','800']];
+  try{
+    await Promise.all(want.map(async([k,w])=>{ if(!C[k]){ const r=await fetch(base+w+'-normal.ttf'); if(!r.ok) throw new Error('font '+w+' '+r.status); C[k]=_mrB64(await r.arrayBuffer()); } }));
+    want.forEach(([k])=>{ doc.addFileToVFS('LlrOS-'+k+'.ttf',C[k]); doc.addFont('LlrOS-'+k+'.ttf','LlrOS'+k,'normal'); });
+    return {r:'LlrOSr', s:'LlrOSs', b:'LlrOSb', x:'LlrOSx'};
+  }catch(e){ console.warn('[llr] Open Sans unavailable, using Helvetica',e); return null; }
+}
+// Headshot → circular PNG (transparent corners) for the advisor page
+async function _llrRoundImg(url, px){
+  try{
+    const sq=await _mrImg(url,{cover:1,maxPx:px||220,q:0.9}); if(!sq) return null;
+    const im=await new Promise((res,rej)=>{ const i=new Image(); i.onload=()=>res(i); i.onerror=rej; i.src=sq.data; });
+    const n=Math.min(im.naturalWidth,im.naturalHeight); const c=document.createElement('canvas'); c.width=c.height=n; const x=c.getContext('2d');
+    x.beginPath(); x.arc(n/2,n/2,n/2,0,Math.PI*2); x.closePath(); x.clip(); x.drawImage(im,0,0,n,n);
+    x.lineWidth=Math.max(2,n*0.035); x.strokeStyle='#54c4cb'; x.beginPath(); x.arc(n/2,n/2,n/2-x.lineWidth/2,0,Math.PI*2); x.stroke();
+    return {data:c.toDataURL('image/png'), w:n, h:n};
+  }catch(e){ console.warn('[llr] headshot',e); return null; }
+}
+// Filler tiles for empty card spots (LLR2-20261116). Everything printed is drawn from the report itself or ELC's own copy.
+const CWIDE=164;
+function _llrFiller(FX, type, x, y, w, h, sec, rows){
+  const {doc,F,text,fill,st}=FX;
+  const wrap=(t,size,wd,wt)=>{ F(wt||'r'); doc.setFontSize(size); return doc.splitTextToSize(String(t||''),wd); };
+  const secRows=rows.filter(r=>r.sec===sec);
+  const n=secRows.length; const ac=secRows.reduce((t,r)=>t+(parseFloat(r.d.acreage||r.d.acres)||0),0);
+  const acTxt=ac>=100?Math.round(ac).toLocaleString('en-US'):(Math.round(ac*10)/10).toString();
+  const counties=[...new Set(secRows.map(r=>String(r.d.county||'').replace(/\s*county$/i,'').trim()).filter(Boolean))];
+  const one=n===1, L=s=>s+(one?'':'s');
+  const label=sec==='uc'?(one?'property':'properties')+' under contract':(sec==='sold'?(one?'property':'properties')+' sold this quarter':(sec==='new'?'new '+L('listing')+' this quarter':(sec==='featured'?'featured '+L('listing'):_llrSectionTitle(sec).replace(/ Properties$/,'').toLowerCase()+' '+L('listing'))));
+  const cta=(bx,by,bw,bh)=>{ fill(LLR_RED); doc.rect(bx,by,bw,bh,'F');
+    const o=st.office||'Tampa'; const ph=(typeof BIO_OFFICE_PHONES!=='undefined'&&BIO_OFFICE_PHONES[o])||'813-287-8787';
+    text('THINKING OF',bx+bw/2,by+46,{size:12,w:'b',color:[255,255,255],align:'center'});
+    text('SELLING LAND?',bx+bw/2,by+70,{size:17,w:'x',color:[255,255,255],align:'center'});
+    wrap('Talk to the land specialists for a no-cost opinion of value.',9.5,bw-30,'s').slice(0,3).forEach((l,i)=>text(l,bx+bw/2,by+98+i*13,{size:9.5,w:'s',color:[255,235,233],align:'center'}));
+    doc.setFillColor(255,255,255); doc.rect(bx+16,by+152,bw-32,30,'F'); text(ph,bx+bw/2,by+172,{size:13,w:'x',color:LLR_RED,align:'center'}); doc.link(bx+16,by+152,bw-32,30,{url:'tel:'+ph.replace(/[^0-9]/g,'')});
+    text('thedirtdog.com',bx+bw/2,by+208,{size:10,w:'b',color:[255,255,255],align:'center'}); doc.link(bx+16,by+196,bw-32,16,{url:'https://www.thedirtdog.com'}); };
+  const topo=(cx,cy,maxRx,maxRy,rings)=>{ doc.setDrawColor(84,196,203); for(let i=0;i<rings;i++){ const rx=10+i*(maxRx-10)/Math.max(1,rings-1), ry=7+i*(maxRy-7)/Math.max(1,rings-1); doc.setLineWidth(i%3===0?1.1:0.6); doc.ellipse(cx+(i%2?1.5:-1.5)*i*0.4,cy-i*0.8,rx,ry,'S'); } };
+  const QUOTE='Our mission is to be your trusted land consultant, dedicated to shaping the future of our communities through thoughtful land solutions.';
+  if(type==='wideA'){   // infographic strip + call to action
+    const sw=w-CWIDE; fill(LLR_TEAL_DK); doc.rect(x,y,sw-14,h,'F');
+    text('AT A GLANCE  ·  '+_llrSectionTitle(sec).toUpperCase(),x+18,y+28,{size:8.5,w:'b',color:[190,235,238],maxW:sw-50,min:6});
+    const cols=[[String(n),label],[ac?acTxt:'—','total acres'],[String(counties.length||'—'),counties.length===1?'county':'counties']];
+    const cw=(sw-14-36)/3;
+    cols.forEach(([big,sm],i)=>{ const cx=x+18+i*cw; text(big,cx,y+96,{size:34,w:'x',color:[255,255,255],maxW:cw-8,min:16}); wrap(sm,9.5,cw-10,'s').slice(0,2).forEach((l,j)=>text(l,cx,y+114+j*12,{size:9.5,w:'s',color:[255,255,255]})); if(i) { doc.setDrawColor(255,255,255); doc.setLineWidth(0.4); doc.line(cx-10,y+64,cx-10,y+132); } });
+    if(counties.length) wrap(counties.join('  ·  '),8.5,sw-50).slice(0,3).forEach((l,i)=>text(l,x+18,y+170+i*12,{size:8.5,color:[220,240,242]}));
+    cta(x+sw,y,CWIDE,h); return;
+  }
+  if(type==='wideB'){   // line art + mission quote
+    doc.setFillColor(238,248,249); doc.rect(x,y,w,h,'F'); fill(LLR_RED); doc.rect(x,y,4,h,'F');
+    topo(x+w-120,y+h/2-6,105,100,10); topo(x+w-232,y+h-34,30,20,4);
+    text('\u201C',x+22,y+64,{size:60,w:'x',color:LLR_RED});
+    wrap(QUOTE,14,w-300,'s').slice(0,6).forEach((l,i)=>text(l,x+26,y+82+i*19,{size:14,w:'s',color:[40,40,40]}));
+    text('— Eshenbaugh Land Company',x+26,y+h-40,{size:9.5,w:'b',color:[90,90,90]});
+    text('Florida land since 1992  ·  over $3 billion in land sales',x+26,y+h-24,{size:8.5,color:[100,100,100]});
+    return;
+  }
+  if(type==='stats'){
+    fill(LLR_TEAL_DK); doc.rect(x,y,w,h,'F');
+    text('AT A GLANCE',x+14,y+24,{size:8,w:'b',color:[190,235,238]});
+    text(String(n),x+14,y+66,{size:38,w:'x',color:[255,255,255]});
+    wrap(label,10,w-28,'s').slice(0,2).forEach((l,i)=>text(l,x+14,y+84+i*12,{size:10,w:'s',color:[255,255,255]}));
+    doc.setDrawColor(255,255,255); doc.setLineWidth(0.5); doc.line(x+14,y+112,x+w-14,y+112);
+    if(ac){ text(acTxt,x+14,y+142,{size:24,w:'x',color:[255,255,255]}); text('total acres',x+14,y+156,{size:9.5,w:'s',color:[255,255,255]}); }
+    if(counties.length){ const cl=wrap((counties.length===1?'County: ':counties.length+' counties: ')+counties.join(', '),8.5,w-28); cl.slice(0,4).forEach((l,i)=>text(l,x+14,y+182+i*11,{size:8.5,color:[220,240,242]})); }
+    return;
+  }
+  if(type==='quote'){
+    doc.setFillColor(244,245,246); doc.rect(x,y,w,h,'F'); fill(LLR_RED); doc.rect(x,y,4,h,'F');
+    text('\u201C',x+14,y+52,{size:54,w:'x',color:LLR_RED});
+    wrap(QUOTE,10.5,w-30,'s').slice(0,8).forEach((l,i)=>text(l,x+16,y+66+i*14,{size:10.5,w:'s',color:[40,40,40]}));
+    text('— Eshenbaugh Land Company',x+16,y+h-34,{size:8.5,w:'b',color:[90,90,90]});
+    text('Since 1992 · over $3 billion in land sales',x+16,y+h-20,{size:7.8,color:[110,110,110],maxW:w-30,min:6});
+    return;
+  }
+  if(type==='cta'){ cta(x,y,w,h); return; }
+  // 'art' — topographic contour line art
+  doc.setFillColor(238,248,249); doc.rect(x,y,w,h,'F');
+  topo(x+w*0.56,y+h*0.40,62,62,8); topo(x+w*0.28,y+h*0.70,34,24,5);
+  text('Florida land,',x+14,y+h-26,{size:12,w:'x',color:LLR_TEAL_DK});
+  text('since 1992.',x+14,y+h-11,{size:12,w:'x',color:LLR_TEAL_DK});
+}
+async function _llrBuild(progress){
+  const st=_llrState(); const rows=_llrCollect().filter(r=>!r.excluded);
+  if(!rows.length) throw new Error('No listings to print for that date.');
+  await _mrLoadLibs(); const {jsPDF}=window.jspdf;
+  const doc=new jsPDF({orientation:'portrait',unit:'pt',format:'letter',compress:true});
+  const Q=_llrQRange(st.q); const qLabel=_llrOrdinal(Q.q).toUpperCase()+' QUARTER '+Q.y;
+  doc.setProperties({title:'Land Listings Report · '+_llrQLabel(st.q)+(_llrScopeLabel()?' · '+_llrScopeLabel():''), author:'Eshenbaugh Land Company', subject:'Land Listing Summary', creator:'Terra'});
+  const OS=await _llrFonts(doc);
+  const F=(w)=>{ if(OS) doc.setFont(OS[w]||OS.r,'normal'); else doc.setFont('helvetica', (w==='b'||w==='x'||w==='s')?'bold':'normal'); };
+  const W=612, H=792;
+  const col=c=>{ doc.setTextColor(c[0],c[1],c[2]); };
+  const fill=c=>doc.setFillColor(c[0],c[1],c[2]);
+  const fit=(s,w,size,minSize)=>{ s=String(s||''); let z=size; while(z>minSize && doc.getStringUnitWidth(s)*z>w){ z-=0.25; doc.setFontSize(z); } doc.setFontSize(z); if(doc.getStringUnitWidth(s)*z>w){ while(s.length>1 && doc.getStringUnitWidth(s+'…')*z>w) s=s.slice(0,-1); s=s.trimEnd()+'…'; } return s; };
+  const text=(s,x,y,o)=>{ o=o||{}; F(o.w||'r'); doc.setFontSize(o.size||10); col(o.color||LLR_INK); const t=o.maxW?fit(s,o.maxW,o.size||10,o.min||7):String(s||''); doc.text(t,x,y,o.align?{align:o.align}:undefined); return t; };
+  // images (6 at a time)
+  const imgs={}; const all=rows.map(r=>({id:r.d.id,url:_llrPhoto(r.d)})).filter(x=>x.url);
+  let done=0; const ASPECT=164/126;
+  const queue=all.slice(); const worker=async()=>{ while(queue.length){ const it=queue.shift(); try{ imgs[it.id]=await _mrImg(it.url,{cover:ASPECT,maxPx:760,q:0.8}); }catch(e){ imgs[it.id]=null; } done++; progress&&progress(done/Math.max(1,all.length)*0.9); } };
+  await Promise.all([1,2,3,4,5,6].map(worker));
+  const logo=await _mrImg('proposals/assets/logo-dark.png',{png:true,maxPx:700});
+  let pageNo=0;
+  const header=()=>{
+    fill(LLR_RED); doc.rect(0,0,W,70,'F');
+    fill(LLR_TEAL); doc.rect(0,70,375,18,'F');
+    doc.setFillColor(255,255,255); doc.rect(375,36,196,54,'F');
+    doc.setFont('times','bolditalic'); doc.setFontSize(15); doc.setTextColor(30,30,30); doc.text('The Land Listings',388,30);
+    F('x'); doc.setFontSize(41); col(LLR_RED); doc.text('REPORT',473,78,{align:'center'});
+    F('r'); doc.setFontSize(6.5); col([90,90,90]); doc.text(['Land Listing Summary',qLabel,_llrScopeLabel().toUpperCase()].filter(Boolean).join('  ·  '),473,87,{align:'center'});
+  };
+  const footer=()=>{
+    F('b'); doc.setFontSize(11); col(LLR_INK); doc.text(String(pageNo),38,746);
+    if(logo){ const w=128, h=w*logo.h/logo.w; doc.addImage(logo.data,logo.fmt,W-36-w,750-h,w,h); }
+    fill(LLR_TEAL); doc.rect(0,755,W,9,'F');
+    for(let i=0;i<28;i++){ const g=110+Math.round((i%5)*7); doc.setFillColor(g,g-6,g-14); doc.rect(0,764+i,W,1.05,'F'); }
+  };
+  const newPage=()=>{ if(pageNo>0) doc.addPage(); pageNo++; header(); };
+  const pill=(t)=>{ F('x'); doc.setFontSize(19); const w=Math.max(150,doc.getStringUnitWidth(t)*19+30); fill(LLR_TEAL); doc.rect(45,108,w,34,'F'); col([255,255,255]); doc.text(t,45+15,131); };
+  /* cover */
+  newPage();
+  doc.setDrawColor(232,234,236); doc.setLineWidth(0.8);
+  for(let i=0;i<9;i++){ doc.ellipse(430+i*6,520-i*10,40+i*26,70+i*34,'S'); }
+  const cover=String(st.cover||'').trim();
+  const cl=cover?cover.split(/\s+[—–-]\s+|\n/):['Available '+(st.land==='residential'?'Residential Land':(st.land==='commercial'?'Commercial Land':'Land')),_llrMonthYear(st.asOf)];
+  F('x'); doc.setFontSize(24);
+  cl.slice(0,3).forEach((l,i)=>{ doc.setTextColor(170,170,170); doc.text(l,W/2+1.2,300+i*32+1.2,{align:'center'}); doc.setTextColor(0,0,0); doc.text(l,W/2,300+i*32,{align:'center'}); });
+  const nA=rows.filter(r=>!r.uc&&!r.sold).length, nU=rows.filter(r=>r.uc).length;
+  text(nA+' available listing'+(nA===1?'':'s')+(nU?'  ·  '+nU+' under contract':''),W/2,300+Math.min(3,cl.length)*32+14,{size:11,w:'s',color:[90,90,90],align:'center'});
+  if(st.office) text((st.office==='Orlando'?'Orlando':'Tampa')+' Office  ·  '+(BIO_OFFICE_PHONES[st.office]||'813-287-8787'),W/2,300+Math.min(3,cl.length)*32+30,{size:10,w:'s',color:LLR_TEAL_DK,align:'center'});
+  text('Click any property photo or CLICK FOR DETAILS to open its website.',W/2,300+Math.min(3,cl.length)*32+(st.office?48:32),{size:9,color:[110,110,110],align:'center'});
+  footer();
+  /* listing pages */
+  const X=[45,225,405], CW=164, IH=126, RY=[158,426];
+  const FX={doc,F,text,fill,col,W,H,st,logo}; const FILLERS=['stats','quote','cta','art']; let fillN=0, wideN=0;
+  _llrPagePlan(rows).forEach(pg=>{
+    newPage(); pill(_llrSectionTitle(pg.sec));
+    pg.rows.forEach((r,i)=>{
+      const d=r.d, x=X[i%3], y=RY[Math.floor(i/3)], link=r.sold?'':_llrLink(d);
+      // ribbon
+      const rib=r.sold?'SOLD '+_llrSoldDate(r.closeTs):(r.uc?'UNDER CONTRACT':'AVAILABLE');
+      fill(r.uc?LLR_TEAL_DK:LLR_RED); doc.rect(x,y,CW,18,'F'); text(rib,x+CW/2,y+13,{size:10.5,w:'s',color:[255,255,255],align:'center'});
+      // aerial
+      const im=imgs[d.id];
+      if(im){ doc.addImage(im.data,im.fmt,x,y+18,CW,IH); }
+      else { doc.setFillColor(236,238,240); doc.rect(x,y+18,CW,IH,'F'); text('Aerial coming soon',x+CW/2,y+18+IH/2+3,{size:9,color:[140,140,140],align:'center'}); }
+      if(link) doc.link(x,y+18,CW,IH,{url:link});
+      // lines
+      let ty=y+18+IH+13; const lh=12.6;
+      text(_llrTitle(d),x+2,ty,{size:10,w:'s',maxW:CW-4,min:7.5}); if(link) doc.link(x,ty-9,CW,11,{url:link}); ty+=lh;
+      const ad=_llrAddress(d); if(ad){ text(ad,x+2,ty,{size:10,maxW:CW-4,min:7.5}); ty+=lh; }
+      const z=_llrZoning(d); if(z){ text(z,x+2,ty,{size:10,maxW:CW-4,min:7}); ty+=lh; }
+      const pr=r.sold?('Sold '+(_mrFmtMoney(_mrDealPrice(d))||'')).trim():_llrPriceInfo(d).text;
+      text(pr,x+2,ty,{size:10,w:'b',color:[214,40,40],maxW:CW-4,min:7}); ty+=lh;
+      // advisors — names underlined, each a mailto link
+      const adv=_llrAdvisors(d);
+      if(adv.length){
+        const lead=adv.length===1?'Advisor: ':'Advisors: '; F('b'); doc.setFontSize(10); col(LLR_INK);
+        const names=adv.length===1?[adv[0].name]:adv.map(a=>_mrFirstName(a.name));
+        let fs=10; const totalW=()=>doc.getStringUnitWidth(lead+names.join(' & '))*fs;
+        while(totalW()>CW-4 && fs>7){ fs-=0.25; doc.setFontSize(fs); }
+        doc.text(lead,x+2,ty); let cx=x+2+doc.getStringUnitWidth(lead)*fs;
+        names.forEach((n,k)=>{ if(k){ const sep=k===names.length-1?' & ':', '; doc.text(sep,cx,ty); cx+=doc.getStringUnitWidth(sep)*fs; }
+          doc.text(n,cx,ty); const nw=doc.getStringUnitWidth(n)*fs; doc.setDrawColor(33,33,33); doc.setLineWidth(0.6); doc.line(cx,ty+1.6,cx+nw,ty+1.6);
+          if(adv[k]&&adv[k].email) doc.link(cx,ty-8,nw,10,{url:'mailto:'+adv[k].email}); cx+=nw; });
+        ty+=lh;
+      }
+      if(link){ F('s'); doc.setFontSize(8.5); col(LLR_LINK); const t='CLICK FOR DETAILS'; const tw=doc.getStringUnitWidth(t)*8.5; const tx=x+CW/2-tw/2+8; doc.text(t,tx,ty); doc.setDrawColor(LLR_LINK[0],LLR_LINK[1],LLR_LINK[2]); doc.setLineWidth(0.5); doc.line(tx,ty+1.4,tx+tw,ty+1.4); doc.link(tx,ty-8,tw,10,{url:link}); }
+    });
+    // LLR2-20261116 — no white space: every empty card spot on the page gets a filler tile (rotated so pages differ)
+    //   a whole empty bottom row = one wide banner; single empty spots = tiles, never the same tile twice on a page
+    const n=pg.rows.length;
+    if(n<6){
+      let pool;
+      if(n<=3){ const wide=(wideN++%2)?'wideB':'wideA'; _llrFiller(FX, wide, X[0], RY[1], X[2]+CW-X[0], 240, pg.sec, rows); pool=wide==='wideA'?['quote','art']:['stats','cta']; }
+      else { pool=[0,1].map(k=>FILLERS[(fillN+k)%FILLERS.length]); fillN+=6-n; }
+      for(let i=n, k=0; i<(n<=3?3:6); i++, k++) _llrFiller(FX, pool[k%pool.length], X[i%3], RY[Math.floor(i/3)], CW, 240, pg.sec, rows);
+    }
+    footer();
+  });
+  /* advisor directory — 👤 Bio photos (LLR2-20261116) */
+  if(st.includeDir){
+    let list=(typeof _bioAdvisorList==='function'?_bioAdvisorList():[]).filter(b=>b&&b.name&&!String(b.name).includes('@'));
+    if(st.office) list=list.filter(b=>_llrOfficeOf(b.uid,b.email)===st.office);
+    if(list.length){
+      const heads={}; await Promise.all(list.map(async b=>{ heads[b.uid||b.email]=b.headshotUrl?await _llrRoundImg(b.headshotUrl,220):null; }));
+      const items=[]; ['Tampa','Orlando'].forEach(o=>{ const L=list.filter(b=>_llrOfficeOf(b.uid,b.email)===o); if(L.length){ items.push({head:o+' Advisors', phone:BIO_OFFICE_PHONES[o]||'', loc:BIO_OFFICE_LOCATIONS[o]||''}); L.forEach(b=>items.push({b})); } });
+      const COLX=[45,318], TOP=126, BOTTOM=712, ROW=66, HEAD=34; let c=0, y=TOP; newPage();
+      const next=()=>{ c++; y=TOP; if(c>1){ footer(); newPage(); c=0; } };
+      items.forEach((it,i)=>{
+        if(it.head){ if(y+HEAD+ROW>BOTTOM) next(); const x=COLX[c];
+          text(it.head,x,y+14,{size:15,w:'x'}); text([it.loc,it.phone].filter(Boolean).join('  ·  '),x,y+27,{size:8.5,color:[90,90,90]});
+          fill(LLR_TEAL); doc.rect(x,y+31,249,2,'F'); y+=HEAD+8; return; }
+        if(y+ROW>BOTTOM){ next(); }
+        const x=COLX[c], b=it.b, ph=heads[b.uid||b.email];
+        if(ph) doc.addImage(ph.data,'PNG',x,y,54,54);
+        else { fill(LLR_TEAL); doc.circle(x+27,y+27,27,'F'); const ini=String(b.name).split(/\s+/).map(w=>w[0]||'').join('').slice(0,2).toUpperCase(); text(ini,x+27,y+33,{size:16,w:'x',color:[255,255,255],align:'center'}); }
+        const tx=x+64, tw=185;
+        text(b.nameWithDesignations||b.name,tx,y+11,{size:10,w:'b',maxW:tw,min:7.5});
+        text(b.title||'Advisor',tx,y+23,{size:8.5,color:[80,80,80],maxW:tw,min:6.5});
+        let yy=y+34; const pl=b.cell?'Cell: '+b.cell:(b.directLine?'Office: '+b.directLine:''); if(pl){ text(pl,tx,yy,{size:8.5,color:[80,80,80],maxW:tw,min:6.5}); yy+=11; }
+        if(b.email){ const t2=text(b.email,tx,yy,{size:8.5,w:'s',color:LLR_LINK,maxW:tw,min:6.5}); const w2=doc.getStringUnitWidth(t2)*doc.getFontSize(); doc.link(tx,yy-8,w2,10,{url:'mailto:'+b.email}); }
+        y+=ROW;
+      });
+      footer();
+    }
+  }
+  progress&&progress(1);
+  return {doc, rows, pages:pageNo, file:'Land_Listings_'+Q.y+'_Q'+Q.q+_llrScopeFile()+'.pdf'};
+}
+window._llrGenerate=async function(mode, btn){
+  const pre=mode==='preview'?window.open('','_blank'):null;
+  const done=elcBusy(btn, mode==='preview'?'Building…':'Building PDF…');
+  try{
+    const R=await _llrBuild(p=>{ if(btn) btn.innerHTML='<span class="elc-spin"></span>'+(mode==='preview'?'Building… ':'Building PDF… ')+Math.round(p*100)+'%'; });
+    if(mode==='preview'){ const url=R.doc.output('bloburl'); if(pre&&!pre.closed) pre.location.href=url; else window.open(url,'_blank'); }
+    else R.doc.save(R.file);
+    const missing=R.rows.filter(r=>!_llrPhoto(r.d)).length;
+    showToast(`${R.rows.length} listing${R.rows.length===1?'':'s'} · ${R.pages} pages${missing?` · ${missing} without an aerial`:''}`, missing?'warning':'success', 5000);
+  }catch(e){ if(pre&&!pre.closed) pre.close(); console.error('[llr] build',e); showToast('Couldn’t build the report: '+e.message,'error',8000); }
+  finally{ done(); }
+};
+window.viewLandListingReport=viewLandListingReport;
+/* ===== LLR_BLOCK_END ===== */
+
 /* =======================================================
    🔗 PORTAL LINKS IMPORT — marker PORTALLINKS-20261008
    Fills deal.reportLinks[] ("WHERE THE PROPERTY IS LISTED" on the monthly
