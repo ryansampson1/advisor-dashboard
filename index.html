@@ -10636,10 +10636,10 @@ function getDealPrice(deal){
 // The report was renamed. Applied to every task on save (Store.createTask/
 // updateTask), to the saved ⚡ task-set config on load, and swept across tasks
 // already in Firestore once per admin session (_llrSweepTasks).
-const _ELC_LLR_RE = /\bEsh(?:enbaugh)?\.?\s+(?:Land\s+)?Report\b/gi;
+const _ELC_LLR_RE = /\bEsh(?:enbaugh)?\.?\s+(?:Land\s+)?Report\b(?!\s+Newsletter)/gi;   // LLRMONTHLY-20261117 wiring — the "Eshenbaugh Report Newsletter Recipients" CRM group keeps its name
 function _elcLlrRename(s){ return typeof s==='string' ? s.replace(_ELC_LLR_RE,'Land Listings Report') : s; }
 function _elcLlrFix(data){
-  if(data && (data.taskType==='eshArticle' || /^📰/.test(String(data.title||'')))) return data;   // ESH-20261116 — the newsletter keeps its name
+  if(data && (data.taskType==='eshArticle' || data.source==='llr-monthly' || /^📰/.test(String(data.title||'')))) return data;   // LLRMONTHLY-20261117 wiring   // ESH-20261116 — the newsletter keeps its name
   if(data) for(const f of ['title','description','taskBase']) if(typeof data[f]==='string') data[f]=_elcLlrRename(data[f]);
   return data;
 }
@@ -34663,7 +34663,7 @@ window._llrSweepTasks = async function(){
   const hit = s => typeof s==='string' && new RegExp(_ELC_LLR_RE.source,'i').test(s);
   const tasks = (typeof allTasks!=='undefined' ? allTasks : []);
   let n = 0;
-  for(const t of tasks.filter(t => t.taskType!=='eshArticle' && !/^📰/.test(String(t.title||'')) && (hit(t.title) || hit(t.description) || hit(t.taskBase)))){   // ESH-20261116
+  for(const t of tasks.filter(t => t.taskType!=='eshArticle' && t.source!=='llr-monthly' && !/^📰/.test(String(t.title||'')) && (hit(t.title) || hit(t.description) || hit(t.taskBase)))){   // ESH-20261116
     const upd = {}; for(const f of ['title','description','taskBase']) if(hit(t[f])) upd[f] = _elcLlrRename(t[f]);
     try{ await Store.updateTask(t.id, upd); Object.assign(t, upd); n++; }catch(e){ console.warn('[llrSweep task]', t.id, e); }
   }
@@ -43251,6 +43251,7 @@ async function launchApp(){
   setTimeout(() => _applyPendingCommissions(), 1200);
   // Apple Mail quick-link handoff (marker: MAILLINK-20260818)
   setTimeout(() => { try{ window._mailLinkCheck(); }catch(e){ console.warn('[mailLink]', e); } }, 800);
+  setTimeout(() => { try{ window._llrMonthlyBoot && window._llrMonthlyBoot(); }catch(e){ console.warn('[llrMonthly]', e); } }, 2500);   // LLRMONTHLY-20261117 wiring
   // Show commission completion prompt for active contract deals missing commission info
   if(currentUser && !currentUser.isAdmin && !currentUser.isStaff){
     setTimeout(() => _checkCommissionRequirements(), 800);
@@ -50029,7 +50030,7 @@ function _mrAdvisorsOf(d){
     const bName=(b&&b.name&&!String(b.name).includes('@'))?b.name:'';
     const ph=window._fmtPhone?window._fmtPhone(p.reportPhone||p.phone||p.officePhone||''):(p.reportPhone||p.phone||'');
     out.push({uid, name:bName||name||p.name||email||'', email:(email||p.email||'').toLowerCase(),
-      phone:ph||(b&&b.directLine)||'',
+      phone:ph||(b&&b.directLine)||'', cell:(b&&b.cell)||p.cell||p.mobile||p.cellPhone||'',   /* MRDESIGN-20261117 back-page cell */
       designations:(b&&b.designationsStr)||p.reportDesignations||'', title:p.reportTitle||(b&&b.title)||'', headshotUrl:p.reportHeadshotUrl||(b&&b.headshotUrl)||'',
       bio:(b&&b.bio)||(typeof ADVISOR_BIOS!=='undefined' && ADVISOR_BIOS[(email||p.email||'').toLowerCase()])||''}); };
   push(d.advisorUid, d.advisorName, d.advisorEmail);
@@ -50288,7 +50289,7 @@ async function _mrFetchActivities(dealId){
 }
 // Property history since the listing was signed, newest first. Mirrors what the
 // deal feed shows (structured activities + legacy "[when] what" note lines).
-function _mrHistoryRows(deal, activities, tasks, opt){   // opt.includeHidden → editor view (hidden rows come back flagged)
+function _mrHistoryRows_v1(deal, activities, tasks, opt){   // MRCLEAN-20261117: raw rows — _mrHistoryRows (below) dedupes/enriches them · opt.includeHidden → editor view (hidden rows come back flagged)
   const since=_mrListingStart(deal);
   const rows=[];
   (activities||[]).forEach(a=>{
@@ -50309,7 +50310,7 @@ function _mrHistoryRows(deal, activities, tasks, opt){   // opt.includeHidden �
     text=String(text).replace(/\s+/g,' ').trim();
     const autoText=text; const ovText=String(a.reportText||'').replace(/\s+/g,' ').trim(); if(ovText) text=ovText;   // MRNOTES-20261029 — the advisor's saved wording prints, every month, until changed
     if(!text) return;
-    rows.push({id:a.id, ts, date:_mrFmtDate(ts), type:(a.type||'note'), by:a.createdByName||'', text, autoText, edited:!!ovText, subject:a.gmailSubject||'', raw:String(a.body||'').slice(0,1200), mw:!!(mwLab&&a.mwSummary), hidden:!!a.reportHidden, movedTo:a.movedTo||'', auto:a.source==='mailwatch'||a.source==='mailwatch-reviewed', cat:a.mwCategory||'', threadId:a.gmailThreadId||''});
+    rows.push({id:a.id, ts, date:_mrFmtDate(ts), type:(a.type||'note'), by:a.createdByName||'', text, autoText, edited:!!ovText, subject:a.gmailSubject||'', raw:String(a.body||'').slice(0,1200), mw:!!(mwLab&&a.mwSummary), hidden:!!a.reportHidden, movedTo:a.movedTo||'', auto:a.source==='mailwatch'||a.source==='mailwatch-reviewed', cat:a.mwCategory||'', threadId:a.gmailThreadId||'', act:a});   // MRCLEAN-20261117
   });
   if(deal.notes){
     deal.notes.split('\n').filter(l=>/^\s*\[[^\]]+\]/.test(l)).forEach(line=>{
@@ -51251,6 +51252,7 @@ window._mrOpenSettings=function(){
           <div><label class="mr-lbl" for="mr-s-web">Website (cover page)</label><input id="mr-s-web" class="mr-input" style="width:100%" value="${_mrEsc(c.firmWebsite||'WWW.THEDIRTDOG.COM')}"></div>
         </div>
         <div style="margin-top:.6rem"><label class="mr-lbl" for="mr-s-about">About Eshenbaugh Land Company (last page)</label><textarea id="mr-s-about" class="mr-textarea" style="min-height:140px">${_mrEsc(c.about||MR_DEFAULT_ABOUT)}</textarea></div>
+        <div style="margin-top:.6rem"><label class="mr-lbl" for="mr-s-awards">Awards &amp; recognition (one per line — cover, filler panels and the last page)</label><textarea id="mr-s-awards" class="mr-textarea" style="min-height:110px">${_mrEsc(c.awards==null?MR_DEFAULT_AWARDS:c.awards)}</textarea></div>   <!-- MRDESIGN-20261117 -->
         <div style="margin-top:.6rem"><label class="mr-lbl" for="mr-s-sig">Default letter signature</label><input id="mr-s-sig" class="mr-input" style="width:100%" value="${_mrEsc(c.letterSignature||'Ryan Sampson, ALC, CCIM — Managing Partner / Broker of Record')}"></div>
       </div>
       <div class="mr-sec"><h3>Advisor contact cards (last page)</h3>
@@ -51290,7 +51292,7 @@ window._mrSaveSettingsClick=async function(btn){
   const done=elcBusy(btn,'Saving…');
   try{
     const v=id=>(document.getElementById(id)?.value||'').trim();
-    const patch={ workerUrl:v('mr-s-worker').replace(/\/+$/,''), alwaysCc:v('mr-s-cc'), sendApprovers:(v('mr-s-approver')||MR_MASTER_DEFAULT).toLowerCase(), sendApprover:((v('mr-s-approver')||MR_MASTER_DEFAULT).toLowerCase().split(/[,;\s]+/).filter(Boolean)[0]||MR_GATE_DEFAULT_APPROVER),   /* SENDGATE-20261029 */ emailSubject:v('mr-s-subj')||MR_DEFAULT_EMAIL_SUBJECT, emailBody:v('mr-s-body')||MR_DEFAULT_EMAIL_BODY, firmAddress:v('mr-s-addr'), firmWebsite:v('mr-s-web'), about:v('mr-s-about')||MR_DEFAULT_ABOUT, letterSignature:v('mr-s-sig') };
+    const patch={ workerUrl:v('mr-s-worker').replace(/\/+$/,''), alwaysCc:v('mr-s-cc'), sendApprovers:(v('mr-s-approver')||MR_MASTER_DEFAULT).toLowerCase(), sendApprover:((v('mr-s-approver')||MR_MASTER_DEFAULT).toLowerCase().split(/[,;\s]+/).filter(Boolean)[0]||MR_GATE_DEFAULT_APPROVER),   /* SENDGATE-20261029 */ emailSubject:v('mr-s-subj')||MR_DEFAULT_EMAIL_SUBJECT, emailBody:v('mr-s-body')||MR_DEFAULT_EMAIL_BODY, firmAddress:v('mr-s-addr'), firmWebsite:v('mr-s-web'), about:v('mr-s-about')||MR_DEFAULT_ABOUT, awards:(document.getElementById('mr-s-awards')?document.getElementById('mr-s-awards').value.trim():(_mrCfg().awards==null?MR_DEFAULT_AWARDS:_mrCfg().awards)),   /* MRDESIGN-20261117 */ letterSignature:v('mr-s-sig') };
     const acc=document.querySelector('input[name="mr-access"]:checked'); if(acc) patch.access=acc.value;
     await _mrSaveSettings(patch);
     { const {doc,setDoc}=_fbFns; const social={...(APP_CONFIG.social||{}), workerUrl:v('mr-s-social-worker').replace(/\/+$/,''), defaultLink:v('mr-s-social-link')||'https://www.thedirtdog.com'}; await setDoc(doc(_fbDb,'eos','settings'),{social},{merge:true}); APP_CONFIG.social=social; window._spStatusCache=null; }
@@ -51516,7 +51518,7 @@ window._mrHistLoad=async function(dealId){
   box.innerHTML=em.length?`<details open><summary style="cursor:pointer;font-weight:700">Entries (${em.length})${em.some(r=>r.auto)?' · ⚡ = filed automatically from email':''}</summary><div style="max-height:420px;overflow:auto;margin-top:.4rem">`+
     em.slice(0,200).map(r=>{ const I=_mrEsc(r.id); return `<div class="mr-hist-row" data-act="${I}" style="padding:.45rem 0;border-top:1px solid var(--border);${r.hidden?'opacity:.5':''}">
       <div class="mr-row" style="gap:.4rem;align-items:flex-start;flex-wrap:wrap">
-        <div style="flex:1 1 300px;min-width:220px;font-size:.82rem"><b>${_mrEsc(r.date)}</b> · ${_mrEsc(r.type.replace('_',' '))}${r.auto?' ⚡':''}${r.edited?' · <span style="color:#0f766e;font-weight:700">✎ edited</span>':''}${r.hidden?(r.movedTo?' · <i>moved</i>':' · <i>hidden</i>'):''}<div class="mr-note" style="white-space:pre-wrap">${_mrEsc(r.text)}</div></div>
+        <div style="flex:1 1 300px;min-width:220px;font-size:.82rem"><b>${_mrEsc(r.date)}</b> · ${_mrEsc(r.type.replace('_',' '))}${r.auto?' ⚡':''}${r.edited?' · <span style="color:#0f766e;font-weight:700">✎ edited</span>':''}${r.hidden?(r.movedTo?' · <i>moved</i>':' · <i>hidden'+(r.hideWhy?' — '+_mrEsc(r.hideWhy):'')+'</i>'):''}<div class="mr-note" style="white-space:pre-wrap">${_mrEsc(r.text)}</div></div>
         <span class="mr-row" style="gap:.3rem;flex-wrap:wrap">
           ${!r.hidden?`<button type="button" class="mr-btn mr-btn-sm" onclick="window._mrHistEdit(this)" title="Change the wording that prints for the owner">✏️ Edit</button>`:''}
           ${r.hidden&&!r.movedTo?`<button type="button" class="mr-btn mr-btn-sm" onclick="window._mrHistHide('${D}','${I}',false,this)">Show</button>`:''}
@@ -51543,7 +51545,7 @@ window._mrHistReset=async function(dealId,actId,btn){
 };
 window._mrHistHide=async function(dealId,actId,hide,btn){
   const done=elcBusy(btn,'…');
-  try{ await _fbFns.updateDoc(_fbFns.doc(_fbDb,'deals',dealId,'activities',actId),{reportHidden:!!hide, reportHiddenBy:currentUser?.uid||'', reportHiddenAt:Date.now()}); await window._mrHistLoad(dealId); }
+  try{ await _fbFns.updateDoc(_fbFns.doc(_fbDb,'deals',dealId,'activities',actId),{reportHidden:!!hide, reportShow:!hide, reportHiddenBy:currentUser?.uid||'', reportHiddenAt:Date.now()}); await window._mrHistLoad(dealId); }
   catch(e){ console.warn('[mr] hide',e); showToast('Could not update: '+(e.message||e),'error'); done(); }
 };
 window._mrHistMove=async function(fromId,actId,sel){
@@ -51813,7 +51815,7 @@ async function _mrLoadLibs(){
   if(!(window.jspdf.jsPDF.API&&window.jspdf.jsPDF.API.autoTable)) await _mrLoadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.4/jspdf.plugin.autotable.min.js');
 }
 function _mrB64(buf){ const u=new Uint8Array(buf); let s=''; for(let i=0;i<u.length;i+=0x8000) s+=String.fromCharCode.apply(null,u.subarray(i,i+0x8000)); return btoa(s); }
-async function _mrFonts(doc){
+async function _mrFonts_v1(doc){   // MRDESIGN-20261117: wrapped by _mrFonts (Open Sans)
   window._mrFontCache=window._mrFontCache||{};
   const C=window._mrFontCache;
   try{
@@ -51846,7 +51848,7 @@ async function _mrImg(url, opts){
   try{ ctx.drawImage(im,sx,sy,sw,sh,0,0,w,h); return {data:opts.png?c.toDataURL('image/png'):c.toDataURL('image/jpeg',opts.q||0.86), w, h, fmt:opts.png?'PNG':'JPEG'}; }
   catch(e){ console.warn('[mr] canvas tainted',e); return null; }
 }
-const MR_RED=[218,41,28], MR_TEAL=[79,195,201], MR_INK=[60,74,74], MR_GREY=[107,114,128], MR_LINE=[79,195,201];
+const MR_RED=[238,42,36], MR_TEAL=[86,197,204], MR_INK=[30,30,30], MR_GREY=[90,90,90], MR_LINE=[86,197,204];   // MRDESIGN-20261117 — Eshenbaugh Report palette (was 218,41,28 / 79,195,201)
 function _mrPdfRenderer(doc, font){
   const R={doc, W:612, H:792, M:48, font, page:1, footerText:''};
   R.text=(s,x,y,o)=>{ o=o||{}; doc.setFont(font,o.bold?'bold':'normal'); doc.setFontSize(o.size||10); doc.setTextColor(...(o.color||MR_INK)); doc.text(Array.isArray(s)?s.map(v=>String(v==null?'':v)):String(s==null?'':s),x,y,{align:o.align||'left',maxWidth:o.maxWidth,baseline:o.baseline||'alphabetic',lineHeightFactor:o.lh||1.35}); };
@@ -51866,11 +51868,11 @@ function _mrPdfRenderer(doc, font){
   R.title=(t,y)=>{ R.text(t,R.M,y,{size:28,bold:true,color:MR_INK}); const w=doc.getTextWidth(t); R.line(R.M+w+14,y-9,R.W,y-9,MR_INK,0.9); return y+26; };
   R.para=(s,x,y,w,o)=>{ o=o||{}; doc.setFont(font,o.bold?'bold':'normal'); doc.setFontSize(o.size||10.5); doc.setTextColor(...(o.color||MR_INK)); const lines=doc.splitTextToSize(String(s||''),w); const lh=(o.size||10.5)*(o.lh||1.4); lines.forEach((ln,i)=>doc.text(ln,x,y+i*lh)); return y+lines.length*lh; };
   R.table=(opts)=>{ const {contHeading, ...rest}=opts; const base={ theme:'plain', styles:{font, fontSize:9.5, textColor:MR_INK, cellPadding:{top:5,bottom:5,left:6,right:6}, lineColor:MR_LINE, lineWidth:{bottom:0.8}, overflow:'linebreak'},
-      headStyles:{fillColor:MR_RED, textColor:[255,255,255], fontStyle:'bold', fontSize:10.5, lineWidth:0}, margin:{left:R.M,right:R.M,bottom:56,top:R.M+30}, ...rest };
+      headStyles:{fillColor:MR_RED, textColor:[255,255,255], fontStyle:'bold', fontSize:10.5, lineWidth:0}, margin:{left:R.M,right:R.M,bottom:56,top:R.M+52}, ...rest };
     const before=doc.internal.getNumberOfPages();
     doc.autoTable(base);
     const after=doc.internal.getNumberOfPages();
-    for(let p=before+1;p<=after;p++){ doc.setPage(p); R.page=p; R.footer(); if(contHeading){ R.text(contHeading,R.M,R.M+10,{size:16,bold:true}); } }
+    for(let p=before+1;p<=after;p++){ doc.setPage(p); R.page=p; R.footer(); if(contHeading){ R.text(contHeading,R.M,R.M+38,{size:14,bold:true,color:MR_TEAL_DK}); } }
     doc.setPage(after); R.page=after;
     return doc.lastAutoTable.finalY; };
   return R;
@@ -51899,7 +51901,7 @@ async function _mrPostMetrics(groups){
 }
 // Gather everything the PDF needs for one deal/month.
 /* MRNOTASKS-20261008: e-mails print as a one-line AI summary (client-safe), cached on the month's report doc as emailSummaries{activityId:text} */
-async function _mrSummarizeEmails(deal, ym, rep, rows){
+async function _mrSummarizeEmails_v1(deal, ym, rep, rows){   // MRCLEAN-20261117: superseded by _mrSummarizeEmails (what-only AI + relevance)
   const emails=rows.filter(r=>r.type==='email'&&!r.mw); if(!emails.length) return;
   const cache=Object.assign({}, rep.emailSummaries||{}); const todo=emails.filter(r=>r.id&&!cache[r.id]).slice(0,60);
   if(todo.length&&typeof leadAI==='function'){
@@ -51951,7 +51953,7 @@ async function _mrAssemble(deal, ym){
   const emailImgs=await Promise.all(emails.map(e=>_mrMcImage(e.image))); emails.forEach((e,i)=>e.img=emailImgs[i]);
   let companies=null; try{ companies=await _mrCompaniesReached(deal, ym, rep, emails); }catch(e){ console.warn('[mr] companies',e); }   // COMPANIES-20261008
   const [acts,tasks]=await Promise.all([_mrFetchActivities(deal.id),_mrFetchTasks(deal.id)]);
-  const h=_mrHistoryRows(deal,acts,tasks);
+  const h=_mrHistoryRows(deal,acts,tasks,{ym, rep});   // MRCLEAN-20261117
   try{ await _mrSummarizeEmails(deal, ym, rep, h.history); }catch(e){ console.warn('[mr] email summaries',e); }   // MRNOTASKS-20261008
   const cfg=_mrCfg(); const L=_mrLetters()[ym]||{};
   const advisors=_mrAdvisorsOf(deal);
@@ -51975,28 +51977,17 @@ async function _mrAssemble(deal, ym){
   const advSig=((advisors[0]||{}).name||'')+((advisors[0]||{}).designations?', '+(advisors[0]||{}).designations:'')+' — Eshenbaugh Land Company';
   return { deal, ym, rep, history:h.history, tasks:h.tasks, letter:custom?rep.letterBody:aiL?rep.aiLetterBody:(lchoice==='ai'?'':(L.body||'')), signature:(custom||aiL)?(rep.letterSignature||advSig):(L.signature||cfg.letterSignature||'Ryan Sampson, ALC, CCIM — Managing Partner / Broker of Record'), letterCustom:!!custom, letterKind:custom?'custom':aiL?'ai':(lchoice==='ai'?'ai-failed':'firm'), aiLetterError:aiErr, about:cfg.about||MR_DEFAULT_ABOUT,
     firmAddress:cfg.firmAddress||'304 S. Willow Ave, Tampa, FL 33606', firmWebsite:cfg.firmWebsite||'WWW.THEDIRTDOG.COM', advisors, hero, logo, sign, web, qr, links:(typeof _mrDealLinks==='function'?_mrDealLinks(deal):[]), shotE, social:(social||[]).filter(Boolean), posts, emails, companies,
-    preparedFor:rep.preparedFor||_mrOwnerLabel(deal), salutation:String(rep.salutation||'').trim(), traffic:rep.traffic||{}, trafficErr };   // TRAFFICFEED-20261028 · salutation MRMONTH-20261029
+    art:await _mrcArtLoad(), awards:_mrcAwards(),   /* MRDESIGN-20261117 */ preparedFor:rep.preparedFor||_mrOwnerLabel(deal), salutation:String(rep.salutation||'').trim(), traffic:rep.traffic||{}, trafficErr };   // TRAFFICFEED-20261028 · salutation MRMONTH-20261029
 }
 async function _mrBuildPdf(A){
   await _mrLoadLibs();
   const {jsPDF}=window.jspdf; const doc=new jsPDF({unit:'pt',format:'letter',compress:true});
-  const font=await _mrFonts(doc); const R=_mrPdfRenderer(doc,font);
+  const font=await _mrFonts(doc); const R=_mrPdfRenderer(doc,font); R.art=A.art||{}; R.A=A; _mrcRendererExtras(R);   // MRDESIGN-20261117
   const d=A.deal, monthLabel=_mrMonthLabel(A.ym).toUpperCase(), addr=_mrDealAddr(d);
   const shortAddr=addr.split(',')[0]; R.footerText=shortAddr+' - '+_mrMonthLabel(A.ym)+' Monthly Marketing Report';
   doc.setProperties({title:_mrMonthLabel(A.ym)+' Monthly Marketing Report — '+addr, author:'Eshenbaugh Land Company', subject:'Monthly owner marketing report'});
-  /* ---- 1 · Cover ---- */
-  R.rect(0,0,R.W,R.H,MR_RED);
-  R.rrect(116,12,380,66,4,[255,255,255]);
-  R.text(monthLabel,R.W/2,40,{size:22,bold:true,color:MR_RED,align:'center'});
-  R.text('MONTHLY MARKETING REPORT',R.W/2,66,{size:21,bold:true,color:MR_RED,align:'center'});
-  if(A.hero) R.img(A.hero,0,90,R.W,476); else { R.rect(0,90,R.W,476,[160,30,20]); R.text('Add a primary photo to the deal card to show it here',R.W/2,330,{size:12,color:[255,255,255],align:'center'}); }
-  R.line(R.W/2,600,R.W/2,660,[255,255,255],1.2);
-  R.text(R.split(addr.toUpperCase(),240,14),R.W/4,620,{size:14,bold:false,color:[255,255,255],align:'center',lh:1.3});
-  R.text('PREPARED FOR',R.W*3/4,616,{size:14,color:[255,255,255],align:'center'});
-  R.text(R.split(String(A.preparedFor||'PROPERTY OWNER').toUpperCase(),240,14),R.W*3/4,638,{size:14,color:[255,255,255],align:'center',lh:1.3});
-  R.text(R.split(A.firmAddress.toUpperCase(),260,12),28,722,{size:12,color:[255,255,255],lh:1.35});
-  R.text(A.firmWebsite.toUpperCase(),28,770,{size:12,color:[255,255,255]});
-  if(A.logo){ R.rrect(420,700,164,80,6,[255,255,255]); R.fit(A.logo,428,706,148,68); }
+  /* ---- 1 · Cover — MRDESIGN-20261117 newsletter cover ---- */
+  _mrcCover(R,A,doc);
   /* ---- 2 · Status update ---- */
   let y=R.newPage(); y=R.title('Status Update',y+30);
   // MRMONTH-20261029 — the greeting line is typed per listing in ✏️ Edit → “Addressed to”; nothing is pulled from the recipients. Blank = no greeting line.
@@ -52008,7 +51999,7 @@ async function _mrBuildPdf(A){
   if(A.rep.advisorNote){ y+=4; y=R.para('Property-Specific Activity',R.M,y,R.W-2*R.M,{size:12,bold:true})+4; A.rep.advisorNote.split(/\n\s*\n/).forEach(p=>{ y=R.para(p.trim(),R.M,y,R.W-2*R.M,{size:10.5})+8; }); }
   y+=10; y=R.para('Sincerely,',R.M,y,300,{size:10.5})+16; R.para(A.signature,R.M,y,400,{size:10.5,bold:true});
   /* ---- 3 · Listing details + marketing channels ---- */
-  y=R.newPage(); y=R.title('Listing Details',y+30);
+  y=R.newPageFrom(y); y=R.title('Listing Details',y+30);   // MRDESIGN-20261117 — the letter page's blank space gets an infographic
   const lead=A.advisors[0]||{};
   const intro='This reporting letter provides a comprehensive overview of Eshenbaugh Land Company\'s marketing efforts in the promotion of the property located at '+addr+' (hereafter referred to as the “Property”). The assignment is being managed by Eshenbaugh Land Company’s Land Services team under the direction of '+(lead.name||'your advisor')+(lead.designations?', '+lead.designations:'')+', who serves as the exclusive listing broker for the Property.';
   y=R.para(intro,R.M,y+4,R.W-2*R.M-40,{size:10.5,lh:1.5})+16;
@@ -52045,7 +52036,7 @@ async function _mrBuildPdf(A){
   /* ---- 8 · Property notes — MRORDER-20261102: Ryan moved Notes + Leads/Website Activity ahead of Property Website on every report ---- */
   y=R.section('Property Notes',y,170);
   y=R.para('Correspondence, calls, meetings, notes and marketing activity logged on the Property.',R.M,y+4,R.W-2*R.M,{size:10.5})+10;   // MRNOTES-20261029 — no "since the listing was signed (date), newest first"
-  if(A.history.length){ y=R.table({startY:y, head:[['Date','Type','By','Note']], body:A.history.map(r=>[r.date, r.type.replace('_',' '), r.by, r.text.length>420?r.text.slice(0,417)+'…':r.text]), columnStyles:{0:{cellWidth:56},1:{cellWidth:56},2:{cellWidth:86}}, styles:{font,fontSize:8.5,textColor:MR_INK,cellPadding:4,lineColor:MR_LINE,lineWidth:{bottom:0.8},overflow:'linebreak'}, contHeading:'Property Notes (cont.)'})+18; }
+  if(A.history.length){ y=R.table({startY:y, head:[['Date','Type','By','Note']], body:A.history.map(r=>[r.date, r.label||r.type.replace('_',' '), r.by, r.text.length>420?r.text.slice(0,417)+'…':r.text]), columnStyles:{0:{cellWidth:56},1:{cellWidth:56},2:{cellWidth:86}}, styles:{font,fontSize:8.5,textColor:MR_INK,cellPadding:4,lineColor:MR_LINE,lineWidth:{bottom:0.8},overflow:'linebreak'}, contHeading:'Property Notes (cont.)'})+18; }
   else { y=R.para('No history has been logged on this property yet.',R.M,y,R.W-2*R.M,{size:10.5,color:MR_GREY})+18; }
   if(false&&A.tasks.length){ /* MRNOTASKS-20261008: tasks are internal and never print */ if(y>R.H-160){ y=R.newPage()+30; } R.text('Completed Tasks',R.M,y+6,{size:16,bold:true}); y=R.table({startY:y+16, head:[['Completed','Task','Completed by']], body:A.tasks.map(t=>[t.date,t.title,t.by]), columnStyles:{0:{cellWidth:70},2:{cellWidth:110}}, styles:{font,fontSize:8.5,textColor:MR_INK,cellPadding:4,lineColor:MR_LINE,lineWidth:{bottom:0.8}}, contHeading:'Completed Tasks (cont.)'}); }
   /* ---- 9 · Leads & website activity ---- */
@@ -52085,7 +52076,7 @@ async function _mrBuildPdf(A){
   /* ---- 3c · Signage ---- */
   const _sc=(A.deal.signCallsByMonth||{})[A.ym], _scN=_sc&&Number(_sc.calls)>0?Number(_sc.calls):0;   // TELZIO-20261008
   if(A.sign||_scN){ y=R.section('Property Signage',y,A.sign?185:70);
-    if(_scN){ const t=_scN+(_scN===1?' call':' calls')+' from the sign this month'+(_sc.ext?'  (sign extension '+_sc.ext+')':''); R.text(t,R.M,y+6,{size:12,bold:true,color:MR_INK}); y+=26; }
+    if(_scN){ y=_mrcSignCalls(R,A,doc,y+4,_sc); }   // MRDESIGN-20261117 — totals + every caller
     if(A.sign){ const maxW=R.W-2*R.M-60, maxH=Math.min(R.H-60-y-30,420); const s=Math.min(maxW/A.sign.w,maxH/A.sign.h); const w=A.sign.w*s,h=A.sign.h*s; const x=(R.W-w)/2, yy=y+8; doc.setDrawColor(20,20,20); doc.setLineWidth(3); doc.rect(x,yy,w,h,'S'); R.img(A.sign,x,yy,w,h); y=yy+h+18; } }
   /* ---- 4 · Email report: results table + one card per Mailchimp e-blast (picture + delivery results) ---- */
   if(eb.length||A.shotE||(A.emails&&A.emails.length)){
@@ -52207,21 +52198,426 @@ async function _mrBuildPdf(A){
       if(col===1) y+=cellH+gap;
     }
   }
-  /* ---- 10 · Contact information ---- */
-  y=R.newPage(); R.rect(0,0,R.W,R.H-36,[246,247,244]); y=R.title('Contact Information',y+30);
-  let cy=y+30;
-  A.advisors.slice(0,3).forEach(a=>{ const cx=R.M+30; if(a.head){ let clipped=false; try{ doc.saveGraphicsState(); doc.circle(cx+55,cy+55,55,null); doc.clip(); doc.discardPath(); clipped=true; }catch(e){} R.img(a.head,cx,cy,110,110); if(clipped){ try{ doc.restoreGraphicsState(); }catch(e){} } } else { R.rrect(cx,cy,110,110,55,[220,224,228]); R.text(_mrFirstName(a.name).charAt(0).toUpperCase(),cx+55,cy+70,{size:40,bold:true,color:[255,255,255],align:'center'}); }
-    const tx=cx+150, tw2=R.W-R.M-tx; let ty=cy+30;
-    const nameLine=a.name.toUpperCase()+(a.designations?', '+a.designations.toUpperCase().replace(/^,\s*/,''):'');
-    R.text(nameLine,tx+tw2/2,ty,{size:doc.getTextWidth(nameLine)>tw2-10?13:16,bold:true,align:'center'}); ty+=22;
-    if(a.title){ R.text(a.title.toUpperCase(),tx+tw2/2,ty,{size:13,bold:true,align:'center'}); ty+=20; }
-    if(a.phone){ R.text(a.phone.toUpperCase(),tx+tw2/2,ty,{size:13,bold:true,align:'center'}); ty+=20; }
-    if(a.email){ R.text(a.email.toUpperCase(),tx+tw2/2,ty,{size:13,bold:true,align:'center'}); }
-    cy+=150; });
-  cy+=10; R.text('ABOUT ESHENBAUGH LAND COMPANY',R.W/2,cy,{size:15,bold:true,align:'center'}); cy+=22;
-  R.para(A.about,R.M+10,cy,R.W-2*R.M-20,{size:10.5,bold:true,lh:1.5});
+  /* ---- 10 · Contact information — MRDESIGN-20261117 ---- */
+  R.fillGap(y); _mrcContactPage(R,A,doc);
   return doc;
 }
+/* ===== MRCLEAN-20261117 — Ryan (Clear Springs October report): "a lot of them are duplicates … instead of saying sent an OM to
+   John Kennedy, say Sent an OM to John Kennedy with Kennedy Investments (kennedy@gmail.com) … on 10/22 it says Michael sent email to
+   Jay Kennedy, then also on 10/22 Bill sent email to Jay Kennedy … instead of saying Mail Panel in the By section say the advisor …
+   make sure every note has name, company, email and what was discussed or sent." Applies to every monthly report from now on.
+   • ONE line per email conversation. The same email reaches the card up to three ways (📎 Mail Panel, the Terra inbox link and the
+     nightly email check — from every advisor mailbox it sat in). Copies are merged by Message-ID / Gmail id, then by the outside
+     person + day (a send and its replies the same day = one line), then by subject + day when the copy has no recipient on file.
+     Several same-day sends of one subject to people Terra can't name collapse into one line ("… to 5 contacts: Scott, Steve …").
+   • Every email line = what was sent or discussed + who: "Sent the Offering Memorandum to Jay Kennedy with Kennedy Investments, Inc.
+     (jay@kennedyinvestments.com)". Name / company / e-mail come from the email itself, the CRM (by e-mail or exact name), the
+     "Company/Property" subject convention, or the e-mail domain — never invented. The AI writes only the "what", never the names.
+   • By = the ELC advisor who sent the email (or whose mailbox received it) — never "Mail Panel", never the person who clicked ✅ in
+     Email review. Unknown → the listing advisor.
+   • Report month cap: nothing dated after the report month prints (the October report had November emails on it).
+   • Kept off the owner report automatically (✏️ Edit § 8 lists them as hidden, with the reason, and Show brings one back for good):
+     delivery-failure / out-of-office notices, emails about another listing, emails the nightly check filed only on a loose subject
+     word whose subject never names the property (the political mail Bill answered), all-internal emails, and emails the AI judges are
+     not about marketing this property (personal notes etc.).
+   • Type column says what it was: OM sent · Inquiry · Offer · Email · Call · Meeting · Note · Social · Document · Listing.
+   ===== */
+const MRC_INTERNAL=/@(thedirtdog|elcland|dirtdog)\.com$/i;
+const MRC_FREE=/^(gmail|googlemail|yahoo|ymail|rocketmail|hotmail|outlook|aol|icloud|me|mac|msn|live|comcast|att|verizon|protonmail|proton|bellsouth|earthlink|sbcglobal|cox|charter|frontier|tampabay\.rr|rr)\./i;
+const MRC_SKIP_ADDR=/(no-?reply|donotreply|mailer-daemon|postmaster|notifications?@|notify@|alerts?@|calendar-notification|bounces?[@+.])/i;
+const MRC_RELAY=/@(notifications?|mail|email|reply|messages?)\.|^(sales|leads?)_?inbox|inbox_message/i;   // portal lead relays (Crexi, LoopNet …): keep the person, not the relay address
+const MRC_STOP=new Set(('the and of for at on in to with from land park road rd drive dr street st avenue ave blvd boulevard hwy highway parkway pkwy lane ln way court ct '+
+  'parcel parcels property properties acre acres commercial industrial residential corporate research center centre north south east west '+
+  'county florida tract site sites lot lots llc inc company group holdings phase project lease sale unit units state city town ranch farm '+
+  'office retail outparcel vacant multifamily development estates subdivision').split(' '));
+const MRC_NOISE=/delivery status notification|undeliverable|mail delivery (failed|subsystem)|message (blocked|not delivered)|delivery (has )?failed|automatic reply|auto-?reply|out of (the )?office|returned mail|read:\s/i;
+const MRC_LABEL={om_sent:'OM sent', info_request:'Inquiry', question:'Inquiry', offer:'Offer', email:'Email', call:'Call', meeting:'Meeting', note:'Note', social:'Social', attachment:'Document', stage_change:'Listing'};
+function _mrcNorm(s){ return String(s||'').toLowerCase().replace(/&amp;/g,'&').replace(/&/g,' and ').replace(/[^a-z0-9@.' ]+/g,' ').replace(/\s+/g,' ').trim(); }
+function _mrcAddrs(s){ const out=[]; String(s||'').split(/[,;](?=(?:[^"]*"[^"]*")*[^"]*$)/).forEach(part=>{ const m=part.match(/[A-Z0-9._%+'-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i); if(!m) return;
+  const lt=part.indexOf('<'); let nm=lt>0?part.slice(0,lt):''; nm=nm.replace(/["']/g,'').replace(/\s+/g,' ').trim(); if(/@/.test(nm)) nm=''; out.push({name:nm, email:m[0].toLowerCase()}); }); return out; }
+function _mrcAddr(s){ return _mrcAddrs(s)[0]||{name:'',email:''}; }
+function _mrcTs(a){ const g=a&&a.gmailDate; if(typeof g==='number'&&g>0) return g;
+  if(typeof g==='string'&&g){ const m=g.match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{1,2}):(\d{2}))?$/); if(m) return new Date(+m[1],+m[2]-1,+m[3],+(m[4]||12),+(m[5]||0)).getTime(); const t=Date.parse(g); if(!isNaN(t)) return t; }
+  return (a&&a.createdAt)||0; }
+function _mrcDay(ts){ const d=new Date(ts||0); return d.getFullYear()+'-'+(d.getMonth()+1)+'-'+d.getDate(); }
+function _mrcSubj(s){ return _mrcNorm(String(s||'').replace(/^(\s*(re|fw|fwd|aw)\s*:\s*)+/i,'').replace(/\[case:[^\]]*\]/ig,'')); }
+function _mrcRfc(s){ return String(s||'').trim().replace(/^<|>$/g,'').toLowerCase(); }
+function _mrcIsEmailish(s){ return /@/.test(String(s||'')); }
+function _mrcCap(s){ s=String(s||'').trim(); return s?s.charAt(0).toUpperCase()+s.slice(1):s; }
+function _mrcDealTokens(deal){
+  const src=[deal&&deal.projectName, deal&&deal.propertyAddress, deal&&deal.address, deal&&deal.reportAppPropertyName].filter(Boolean).join(' ');
+  const t=new Set(); _mrcNorm(src).split(' ').forEach(w=>{ w=w.replace(/[.']/g,''); if(w.length>=4&&!MRC_STOP.has(w)&&!/^\d+$/.test(w)) t.add(w); }); return [...t]; }
+function _mrcMentions(text,toks){ if(!toks.length) return true; const n=' '+_mrcNorm(text).replace(/[.']/g,'')+' '; return toks.some(w=>n.includes(' '+w+' ')||(w.length>5&&n.includes(' '+w.replace(/s$/,'')+' '))); }
+let _mrcCrmCache=null;
+function _mrcCrm(){
+  const list=(typeof allContacts!=='undefined'&&Array.isArray(allContacts))?allContacts:[];
+  if(_mrcCrmCache&&_mrcCrmCache.list===list&&_mrcCrmCache.n===list.length) return _mrcCrmCache;
+  const byEmail=new Map(), byName=new Map(), byPhone=new Map();
+  list.forEach(c=>{ if(!c||c.deleted) return; const nm=(c.name&&String(c.name).trim())||[c.firstName,c.lastName].filter(Boolean).join(' ').trim();
+    const o={name:_mrcIsEmailish(nm)?'':nm, company:String(c.company||'').trim(), email:String(c.email||c.email2||'').toLowerCase().trim()};
+    [c.email,c.email2,...(Array.isArray(c.emails)?c.emails:[])].filter(Boolean).forEach(e=>{ e=String(e).toLowerCase().trim(); if(e&&!byEmail.has(e)) byEmail.set(e,{...o,email:e}); });
+    if(o.name){ const k=_mrcNorm(o.name); if(!byName.has(k)) byName.set(k,[]); byName.get(k).push(o); }
+    [c.phone,c.phone2,c.officePhone,c.mobile,c.cell,c.mobilePhone,c.cellPhone].filter(Boolean).forEach(p=>{ const d=String(p).replace(/\D/g,'').slice(-10); if(d.length===10&&!byPhone.has(d)) byPhone.set(d,o); }); });
+  return (_mrcCrmCache={list, n:list.length, byEmail, byName, byPhone}); }
+function _mrcDomainCo(email){ const d=String(email||'').split('@')[1]||''; if(!d||MRC_FREE.test(d)||MRC_INTERNAL.test('@'+d)) return ''; return (typeof _mrDomainLabel==='function')?_mrDomainLabel(d):d; }
+// Bill's convention: "Exeter Prop/Clear Springs Ind Park" → the side that is not the property is the company
+function _mrcSubjectCo(subject,toks){ const s=String(subject||'').replace(/^(\s*(re|fw|fwd|aw)\s*:\s*)+/i,'').trim(); const p=s.split('/'); if(p.length!==2) return '';
+  const a=p[0].trim(), b=p[1].trim(); const am=_mrcMentions(a,toks), bm=_mrcMentions(b,toks); const co=(bm&&!am)?a:((am&&!bm)?b:''); return (co.length>=2&&co.length<=48&&!/^\d+$/.test(co))?co.replace(/\s+/g,' '):''; }
+function _mrcGreeting(raw){ const s=String(raw||''); const m=s.match(/\b(?:[Gg]ood (?:[Mm]orning|[Aa]fternoon|[Ee]vening)|[Hh]i|[Hh]ello|[Hh]ey|[Dd]ear)[ ,]+([A-Z][a-z]{1,15})\b/)||s.replace(/^[^\n]*\n/,'').match(/^\s*([A-Z][a-z]{2,15}),\s/);
+  return m&&!/^(I|We|Thanks|Thank|Please|Attached|Here|Hope|All|Team|Sir|Madam|Folks|Everyone)$/.test(m[1])?m[1]:''; }
+function _mrcCoWord(co){ const w=_mrCoKey(co).split(' ').filter(Boolean)[0]||''; return (w.length>=4&&!/^(first|north|south|east|west|florida|american|united|great|central|global|national|capital|real|estate|land|properties|property|development|group|partners)$/.test(w))?w:''; }
+function _mrcPeople(deal){ const m={}; try{ Object.values(allProfiles||{}).forEach(p=>{ if(p&&p.email&&p.name&&!_mrcIsEmailish(p.name)) m[String(p.email).toLowerCase()]=p.name; }); }catch(_){}
+  try{ (_mrAdvisorsOf(deal)||[]).forEach(a=>{ if(a.email&&a.name) m[a.email]=a.name; }); }catch(_){}
+  try{ (allDeals||[]).forEach(d=>{ if(d.advisorEmail&&d.advisorName&&!m[String(d.advisorEmail).toLowerCase()]) m[String(d.advisorEmail).toLowerCase()]=d.advisorName; }); }catch(_){}
+  return m; }
+function _mrcPerson(P,email,fallback){ email=String(email||'').toLowerCase(); if(!email) return fallback||''; if(P[email]) return P[email];
+  const loc=email.split('@')[0]; const alt=Object.keys(P).find(k=>k.split('@')[0]===loc&&MRC_INTERNAL.test(k)); return alt?P[alt]:(fallback||''); }
+function _mrcOtherListings(deal){ try{ return (allDeals||[]).filter(d=>d&&d.id!==deal.id&&!d.archived&&d.projectName).map(d=>({name:d.projectName, toks:_mrcDealTokens({projectName:d.projectName})})).filter(o=>o.toks.length>=2); }catch(_){ return []; } }
+function _mrcWho(cp, opt){ opt=opt||{}; const nm=String(cp.name||'').trim(), co=String(cp.company||'').trim(), em=String(cp.email||'').trim();
+  let s=nm||''; if(co&&_mrCoKey(co)!==_mrCoKey(nm)) s+=(s?' with ':'')+co; if(em) s+=(s?' (':'')+em+(s?')':'');
+  return s||opt.empty||'an interested party'; }
+// "Bill Eshenbaugh sent an Offering Memorandum for Clear Springs … to Jay Kennedy, who declined." → {item:'the Offering Memorandum', extra:'declined'}
+function _mrcOmParts(summary){
+  const s=String(summary||'').replace(/\s+/g,' ').trim().replace(/\.$/,'');
+  let item='the Offering Memorandum', extra='';
+  const m=s.match(/\b(?:sent|shared|provided|resent|re-sent|emailed|forwarded|delivered)\s+(.+?)\s+(?:for|regarding|concerning|on|about|of)\s+(?:the\s+)?(?:[A-Z0-9][^,]*?)\s+(?:to|with)\s+/i)
+        ||s.match(/\b(?:sent|shared|provided|resent|re-sent|emailed|forwarded|delivered)\s+(.+?)\s+(?:to|with)\s+/i);
+  if(m){ let it=m[1].trim().replace(/\bOMs?\b/g,'Offering Memorandum').replace(/\boffering memorandum\b/gi,'Offering Memorandum');
+    it=it.replace(/^(an?|the)\s+(?:[A-Z][\w&.'-]*\s+){0,5}?(Offering Memorandum)/,'the $2'); if(/^an?\s/i.test(it)) it=it.replace(/^an?\s/i,'the ');
+    if(it.length<=90&&!/clear springs|park\b/i.test(it.replace(/Offering Memorandum/,''))) item=it; }
+  const x=s.match(/,\s*(?:who|which)\s+(.+)$/i)||s.match(/;\s*(.+)$/);
+  if(x) extra=x[1].trim().replace(/^(?:he|she|they)\s+/i,'');
+  if(extra.length>70||/offering memorandum|\bOM\b/i.test(extra)) extra='';
+  return {item, extra}; }
+// Strip the ELC person ("Bill Eshenbaugh", "ELC", "The brokerage firm", "Mail Panel") from the front of an AI line → "Requested a meeting …"
+function _mrcWhatFrom(summary, P){
+  let s=String(summary||'').replace(/\s+/g,' ').trim(); if(!s) return '';
+  s=s.replace(/^(email|om \/ info sent|info requested|buyer question|correspondence|transaction update|offer)\s*:\s*/i,'');
+  const elc=['Eshenbaugh Land Company','The brokerage firm','The brokerage','A broker','ELC','Mail Panel',"Bill Eshenbaugh's team",'The team','Our team'].concat(Object.values(P||{})).sort((a,b)=>b.length-a.length);
+  for(const n of elc){ if(n&&s.toLowerCase().startsWith(n.toLowerCase()+' ')){ s=s.slice(n.length+1); if(/^(is|was|has|had)\s/i.test(s)) s=s.replace(/^is\s+(\w+ing)\b/i,(m0,v)=>v).replace(/^(was|has|had)\s+/i,''); return _mrcCap(s); } }
+  return _mrcCap(s); }
+function _mrcCleanMeeting(t){ return String(t||'').replace(/https?:\/\/\S+/g,' ').replace(/_{3,}/g,' ').replace(/Microsoft Teams meeting|Join:|Meeting ID:?\s*[\d ]+|Passcode:?\s*\S+|Need help\?\S*|System reference\S*|<[^>]*>/gi,' ').replace(/\s*\|\s*$/,'').replace(/\s+/g,' ').replace(/[:|—-]\s*$/,'').trim(); }
+function _mrcCompose(r){
+  if(r.override) return r.override;
+  if(r.type!=='email') return r.text;
+  const who=_mrcWho(r.cp); const many=r.many&&r.many.count>1?r.many:null; const nl=many&&many.names.length?many.names.join(', '):'';
+  if(r.cat==='om_sent'){ const p=r.om||{item:'the Offering Memorandum',extra:''};
+    if(many) return 'Sent '+p.item+' to '+many.count+' contacts'+(nl?': '+nl:'')+'.';
+    return 'Sent '+p.item+' to '+who+(p.extra?' — '+p.extra.replace(/\.$/,''):'')+'.'; }
+  let what=String(r.what||'').trim().replace(/\.$/,'');
+  if(many) return (r.dir==='out'?'Emailed ':'Emails from ')+many.count+' contacts'+(nl?' ('+nl+')':'')+(what?': '+what:'')+'.';
+  if(!what) what=r.subjectLine?('“'+r.subjectLine+'”'):'';
+  const nm=String(r.cp.name||'').trim();
+  if(nm&&what.toLowerCase().startsWith(nm.toLowerCase()+' ')){ let rest=what.slice(nm.length); const co=String(r.cp.company||'').trim(); if(co) rest=rest.replace(new RegExp('^\\s*(?:from|of|at|with)\\s+(?:the\\s+)?'+co.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'i'),''); return who+rest+'.'; }
+  if(r.cat==='info_request'||r.cat==='question') return 'Inquiry from '+who+(what?': '+what:'')+'.';
+  if(r.cat==='offer') return 'Offer from '+who+(what?': '+what:'')+'.';
+  return (r.dir==='out'?'To ':'From ')+who+(what?': '+what:'')+'.'; }
+function _mrcPriority(r){ return (r.src==='mailwatch'||r.src==='mailwatch-reviewed')?0:(r.cp.email?1:(r.src==='inbox'?2:3)); }
+
+/* history rows → owner-report rows (deduped, enriched, month-capped) */
+function _mrHistoryRows(deal, activities, tasks, opt){
+  opt=opt||{}; const withHidden=!!opt.includeHidden;
+  const base=_mrHistoryRows_v1(deal, activities, tasks, {includeHidden:true});
+  const ym=opt.ym||(window._mrState&&window._mrState.month)||(typeof _mrDefaultMonth==='function'?_mrDefaultMonth():'');
+  const end=ym?_mrMonthRange(ym).end:0;
+  const rep=opt.rep||((window._mrState&&window._mrState.reports)||{})[deal.id+'|'+ym]||{};
+  const aiCache=(rep&&rep.emailWhat)||{};
+  const P=_mrcPeople(deal), toks=_mrcDealTokens(deal), others=_mrcOtherListings(deal), crm=_mrcCrm();
+  const lead=(_mrAdvisorsOf(deal)[0]||{}).name||deal.advisorName||'';
+  const SYS=/^(mail panel|terra email check|automation|monthly reports|system|)$/i;
+  const out=[]; const em=[];
+  base.history.forEach(r=>{
+    const a=r.act||{}; r.userHidden=!!(a.reportHidden&&a.reportHiddenBy!=='mailwatch'); r.forceShow=a.reportShow===true; r.override=r.edited?r.text:'';
+    if(r.type!=='email'){
+      if(r.type==='meeting'&&!r.edited){ const ext=_mrcAddrs(String(a.body||'').split(/Attendees:/i)[1]||'').filter(x=>!MRC_INTERNAL.test(x.email)).map(x=>{ const c=crm.byEmail.get(x.email); return c&&c.name?c.name+(c.company?' with '+c.company:'')+' ('+x.email+')':x.email; });
+        const title=String(a.meetingTitle||'').replace(/^meeting with eshenbaugh land company\s*\|\s*/i,'').trim()||_mrcCleanMeeting(String(a.body||'').split(/[|:]/)[0]);
+        r.text='Meeting'+(title?' — '+title:'')+(ext.length?' with '+ext.join(', '):'')+(a.meetingDate?' ('+_mrFmtDateLong(a.meetingDate)+')':'')+'.'; }
+      if(r.type==='attachment'&&!r.edited){ const lab=a.attachmentLabel||a.attachmentName||''; if(/^(document:\s*)?(\w+:\s*N\/A\s*)+$/i.test(String(r.text).replace(/Document:\s*/i,'').trim())||/N\/A.*N\/A/.test(r.text)) r.text=lab?'Document added: '+lab:'Listing agreement filed.'; }
+      if(r.type==='stage_change'&&!r.edited){ const to=a.toStage||''; if(/^listing$/i.test(to)) r.text='Listing agreement signed — marketing launched.'; else if(to) r.text='Status: '+to+'.'; }
+      if(/^(terra daily post|social)/i.test(r.by)||a.source==='social-daily'){ r.label='Social'; r.by=lead||r.by; }
+      if(SYS.test(r.by)) r.by=lead;
+      r.text=String(r.text||'').replace(/[\u{1F000}-\u{1FFFF}\u{2600}-\u{27BF}\u{FE0F}\u{200D}]/gu,'').replace(/\s+/g,' ').trim();   // jsPDF can't draw emoji (printed as ��)
+      r.label=r.label||MRC_LABEL[r.type]||_mrcCap(String(r.type).replace('_',' '));
+      out.push(r); return; }
+    const src=a.source||'inbox'; const ts=_mrcTs(a); r.ts=ts; r.date=_mrFmtDate(ts); r.day=_mrcDay(ts); r.src=src;
+    const from=_mrcAddr(a.gmailFrom); const fromInt=!!from.email&&MRC_INTERNAL.test(from.email);
+    const mb=String(a.mailbox||'').toLowerCase();
+    r.dir=from.email?(fromInt?'out':'in'):((a.direction==='out'||a.direction==='outbound')?'out':(a.direction?'in':''));
+    let by=''; if(fromInt) by=_mrcPerson(P,from.email,from.name); if(!by&&mb&&MRC_INTERNAL.test(mb)) by=_mrcPerson(P,mb,'');
+    if(!by&&src!=='mailwatch-reviewed'&&!SYS.test(a.createdByName||'')) by=a.createdByName||''; r.by=by||lead;
+    const cp={name:String(a.counterpartyName||'').trim(), company:String(a.counterpartyCompany||'').trim(), email:String(a.counterpartyEmail||'').toLowerCase().trim()};
+    if(_mrcIsEmailish(cp.name)){ if(!cp.email) cp.email=_mrcAddr(cp.name).email; cp.name=''; }
+    if(!cp.email&&!fromInt&&from.email&&!MRC_SKIP_ADDR.test(from.email)){ cp.email=from.email; if(!cp.name) cp.name=from.name; }
+    const tos=_mrcAddrs(a.gmailTo).filter(x=>!MRC_INTERNAL.test(x.email)&&!MRC_SKIP_ADDR.test(x.email));
+    if(!cp.email&&tos.length&&r.dir==='out'){ cp.email=tos[0].email; if(!cp.name) cp.name=tos[0].name; }
+    const toAll=_mrcAddrs(a.gmailTo); r.internalOnly=!!(fromInt&&toAll.length&&!tos.length);
+    if(cp.email&&MRC_INTERNAL.test(cp.email)){ r.internalCp=true; cp.email=''; cp.name=''; cp.company=''; }
+    if(cp.email&&MRC_RELAY.test(cp.email)){ if(!cp.company) cp.company=_mrcDomainCo(cp.email.replace(/@(notifications?|mail|email|reply|messages?)\./i,'@')); cp.email=''; }
+    if(cp.name&&!/\s/.test(cp.name)&&cp.email&&cp.email.split('@')[0].replace(/[^a-z0-9]/g,'').includes(cp.name.toLowerCase().replace(/[^a-z0-9]/g,''))&&cp.name.toLowerCase()===cp.name) cp.name='';
+    if(cp.email){ const c=crm.byEmail.get(cp.email); if(c){ if(!cp.name||(!/\s/.test(cp.name)&&c.name&&c.name.toLowerCase().startsWith(cp.name.toLowerCase()))) cp.name=c.name||cp.name; if(!cp.company) cp.company=c.company; } }
+    else if(cp.name){ const L=(crm.byName.get(_mrcNorm(cp.name))||[]).filter(c=>c.email); const same=cp.company?L.filter(c=>_mrCoKey(c.company)===_mrCoKey(cp.company)):[];
+      const p=same.length===1?same[0]:(L.length===1?L[0]:null); if(p){ cp.email=p.email; if(!cp.company) cp.company=p.company; } }
+    if(!cp.company) cp.company=_mrcSubjectCo(a.gmailSubject,toks)||_mrcDomainCo(cp.email);
+    if((cp.email&&MRC_INTERNAL.test(cp.email))||/^eshenbaugh land/i.test(cp.company)||Object.values(P).some(n=>n&&_mrcNorm(n)===_mrcNorm(cp.name))){ r.internalCp=true; cp.email=''; cp.name=''; cp.company=''; }
+    if(cp.name&&cp.company&&_mrCoKey(cp.name)===_mrCoKey(cp.company)) cp.name='';
+    { const lf=cp.name.match(/^([A-Z][\w'-]+),\s*([A-Z][\w'.-]+)$/); if(lf) cp.name=lf[2]+' '+lf[1]; }
+    cp.company=cp.company.replace(/\s*\|\s*.*$/,'').trim();
+    r.cp=cp; r.greet=(!cp.name&&!cp.email)?_mrcGreeting(a.body):'';
+    r.cpKey=cp.email||(cp.name&&_mrcNorm(cp.name))||(cp.company&&('co:'+_mrCoKey(cp.company)))||'';
+    r.rfc=_mrcRfc(a.rfcId); r.gid=a.gmailId||''; r.subj=_mrcSubj(a.gmailSubject); r.subjectLine=String(a.gmailSubject||'').replace(/^(\s*(re|fw|fwd)\s*:\s*)+/i,'').trim();
+    r.cat=a.mwCategory||''; if(r.cat==='correspondence'||r.cat==='deal_activity'||r.cat==='proposal'||r.cat==='buyer_rep') r.cat='';
+    const sum=a.mwSummary||(a.aiSummary?a.body:'');
+    if(!r.cat&&/\b(sent|shared|provided|resent|forwarded)\s+(an?|the)\s+(?:[\w&.'-]+\s+){0,4}?(offering memorandum|OM)\b/i.test(a.mwSummary||'')) r.cat='om_sent';
+    if(r.cat==='om_sent') r.om=_mrcOmParts(sum);
+    if(!r.cat&&r.dir==='out'&&(/offering memorandum/i.test(String(a.mwSummary||a.body||''))||/\bOM\b/.test(String(a.mwSummary||a.body||'')))&&!/^(re|fw|fwd)\s*:/i.test(a.gmailSubject||'')&&/attach|share|sent|send|enclosed/i.test(String(a.body||''))) { r.cat='om_sent'; r.om=_mrcOmParts(sum||''); }
+    r.what=a.mwSummary?_mrcWhatFrom(a.mwSummary,P):''; r.needsAI=!a.mwSummary;
+    const c=aiCache[r.id]; if(c&&c.what&&!a.mwSummary){ r.what=c.what; if(c.om&&r.dir==='out'&&!r.cat){ r.cat='om_sent'; r.om={item:'the Offering Memorandum',extra:''}; } }
+    // why it stays off the owner report (unless someone pressed Show)
+    const subjBody=String(a.gmailSubject||'')+' '+String(a.body||'').slice(0,400);
+    let why='';
+    if(MRC_NOISE.test(a.gmailSubject||'')||MRC_NOISE.test(String(a.body||'').slice(0,120))) why='delivery / auto-reply notice';
+    else if(!_mrcMentions(a.gmailSubject||'',toks)&&others.some(o=>_mrcMentions(a.gmailSubject||'',o.toks)&&o.toks.every(t=>_mrcMentions(a.gmailSubject||'',[t])))) why='about another listing';
+    else if((src==='mailwatch'||src==='mailwatch-reviewed')&&Array.isArray(a.mwDatapoints)&&a.mwDatapoints.length&&a.mwDatapoints.every(p=>/^name:subject-word:/.test(p))&&!_mrcMentions(subjBody.replace(String(a.body||''),''),toks)) why='not about this property (filed on a loose subject word)';
+    else if(r.internalOnly||(r.internalCp&&!cp.email&&!cp.name&&!cp.company)) why='internal ELC email';
+    else if(c&&c.relevant===false) why='not about this property (AI)';
+    r.autoWhy=why;
+    em.push(r);
+  });
+  // ---- merge copies of the same conversation ----
+  const N=em.length, Pn=em.map((_,i)=>i); const f=i=>Pn[i]===i?i:(Pn[i]=f(Pn[i])); const U=(x,y)=>{ x=f(x); y=f(y); if(x!==y) Pn[y]=x; };
+  const idx=new Map(); const key=(k,i)=>{ if(!k) return; if(idx.has(k)) U(idx.get(k),i); else idx.set(k,i); };
+  em.forEach((r,i)=>{ key(r.rfc&&('r:'+r.rfc),i); key(r.gid&&('g:'+r.gid),i); });
+  em.forEach((r,i)=>{ if(r.cpKey) key('c:'+r.cpKey+'|'+r.day,i); if(r.cp.email&&r.cp.name&&/\s/.test(r.cp.name)) key('c:'+_mrcNorm(r.cp.name)+'|'+r.day,i); if(r.cp.email) key('d:'+r.cp.email.split('@')[0]+'|'+r.day,i); const cw=r.cp.company&&_mrcCoWord(r.cp.company); if(cw) key('k:'+cw+'|'+r.day,i); });
+  // an un-named copy joins the named line with the same subject + day (only if its greeting doesn't point at someone else)
+  const bySubj=new Map(); em.forEach((r,i)=>{ if(r.cpKey&&r.subj){ const k=r.subj+'|'+r.day; if(!bySubj.has(k)) bySubj.set(k,[]); bySubj.get(k).push(i); } });
+  em.forEach((r,i)=>{ if(r.cpKey||!r.subj) return; const L=bySubj.get(r.subj+'|'+r.day); if(!L) return;
+    const hit=r.greet?L.find(j=>String(em[j].cp.name||'').split(' ')[0].toLowerCase()===r.greet.toLowerCase()):(L.length===1?L[0]:null);
+    if(hit!=null) U(hit,i); else if(!r.greet) U(L[0],i); });
+  const groups=new Map(); em.forEach((r,i)=>{ const g=f(i); if(!groups.has(g)) groups.set(g,[]); groups.get(g).push(r); });
+  // un-named sends of one subject on one day by one advisor → one line listing the greeting names
+  const lone=new Map(); const merged=[];
+  groups.forEach(M=>{ M.sort((x,y)=>_mrcPriority(x)-_mrcPriority(y)||(x.ts-y.ts)); const R=Object.assign({},M[0]);
+    R.ts=Math.min(...M.map(x=>x.ts||Infinity)); R.date=_mrFmtDate(R.ts); R.day=_mrcDay(R.ts);
+    R.cp={...R.cp}; ['name','company','email'].forEach(k=>{ if(!R.cp[k]){ const s=M.find(x=>x.cp[k]); if(s) R.cp[k]=s.cp[k]; } });
+    if(!R.cat){ const s=M.find(x=>x.cat); if(s){ R.cat=s.cat; R.om=s.om; } }
+    if(!R.what||R.needsAI){ const s=M.find(x=>x.what&&!x.needsAI); if(s){ R.what=s.what; R.needsAI=false; } }
+    const outM=M.find(x=>x.dir==='out'&&x.by); if(outM) R.by=outM.by;
+    if(M.some(x=>x.dir==='out')) R.dir='out';
+    R.dupIds=M.map(x=>x.id); R.userHidden=M.some(x=>x.userHidden); R.forceShow=M.some(x=>x.forceShow);
+    const ov=M.find(x=>x.override); R.override=ov?ov.override:''; R.edited=!!ov; if(ov&&ov!==M[0]) R.id=ov.id;
+    R.autoWhy=M.every(x=>x.autoWhy)?M[0].autoWhy:''; R.cpKey=R.cp.email||(R.cp.name&&_mrcNorm(R.cp.name))||(R.cp.company&&('co:'+_mrCoKey(R.cp.company)))||'';
+    if(!R.cpKey&&!R.override&&(R.subj||R.cat==='om_sent')){ const k=R.by+'|'+(R.cat==='om_sent'?'om':R.subj)+'|'+R.day+'|'+R.dir; const g=lone.get(k); if(g){ g.many.push(R.greet||''); g.dupIds.push(...R.dupIds); g.forceShow=g.forceShow||R.forceShow; g.userHidden=g.userHidden&&R.userHidden; if(!R.autoWhy) g.autoWhy=''; return; } R.many=[R.greet||'']; lone.set(k,R); }
+    merged.push(R); });
+  merged.forEach(R=>{ if(R.many){ const nm=[...new Set(R.many.filter(Boolean))]; const n=nm.length+R.many.filter(x=>!x).length; R.many=n>1?{count:n, names:nm}:null; if(!R.many&&nm[0]&&!R.cpKey) R.cp.name=nm[0]; }
+    R.label=MRC_LABEL[R.cat||'email']||'Email';
+    R.hidden=R.userHidden||(!!R.autoWhy&&!R.forceShow); R.hideWhy=R.userHidden?'':(R.hidden?R.autoWhy:'');
+    R.text=_mrcCompose(R); R.autoText=_mrcCompose({...R, override:''}); });
+  let rows=out.concat(merged);
+  if(end) rows=rows.filter(r=>!(r.ts&&r.ts>=end));
+  rows=rows.filter(r=>withHidden||!r.hidden);
+  rows.sort((a,b)=>(b.ts||0)-(a.ts||0));
+  return {history:rows, tasks:base.tasks};
+}
+
+/* The AI writes only WHAT was sent / discussed (never names) and says whether the email is about marketing this property.
+   Cached on the month's report doc as emailWhat{activityId:{what,relevant}}. */
+async function _mrSummarizeEmails(deal, ym, rep, rows){
+  const emails=rows.filter(r=>r.type==='email'&&r.needsAI&&!r.override); if(!emails.length) return;
+  const cache=Object.assign({}, rep.emailWhat||{}); const todo=emails.filter(r=>r.id&&!cache[r.id]).slice(0,90);
+  if(todo.length&&typeof leadAI==='function'){
+    const sys='You help write a property owner\'s monthly marketing report for Eshenbaugh Land Company (ELC), a Florida land brokerage marketing the owner\'s property "'+_mrDealName(deal)+'" ('+_mrDealAddr(deal)+'). For each e-mail return:\n'+
+      '- "what": ONE short clause (max 18 words) that starts with a verb and says what was sent or discussed, e.g. "Sent the Offering Memorandum and offered a site visit", "Asked for the survey and wetlands report", "Replied the site is not a fit for their client", "Confirmed a site meeting for Tuesday". Do NOT name the ELC advisor or the other party — their name, company and e-mail print separately. Never mention commission, fees, pricing strategy or internal matters.\n'+
+      '- "om": true if the e-mail mainly sends the Offering Memorandum / marketing package for the property to someone.\n'+
+      '- "relevant": true only if the e-mail is about marketing or selling THIS property to a buyer, broker, developer, agency or the owner. Personal notes, politics, newsletters, delivery notices, e-mails about other properties and unrelated chit-chat are false.\n'+
+      'Return ONLY JSON: {"<id>":{"what":"…","om":false,"relevant":true}, …}.';
+    for(let i=0;i<todo.length;i+=20){ const chunk=todo.slice(i,i+20);
+      const user=chunk.map(r=>'ID '+r.id+'\nDirection: '+(r.dir==='out'?'ELC sent':'ELC received')+'\nSubject: '+(r.subjectLine||'')+'\nText: '+String((r.act&&r.act.body)||r.raw||r.text).replace(/\s+/g,' ').slice(0,800)).join('\n\n');
+      try{ const txt=await leadAI(sys,user,2200); const m=String(txt||'').match(/\{[\s\S]*\}/); const j=m?JSON.parse(m[0]):{};
+        chunk.forEach(r=>{ const v=j[r.id]; if(v&&typeof v==='object'&&typeof v.what==='string') cache[r.id]={what:v.what.trim().replace(/\.$/,'').slice(0,160), om:v.om===true, relevant:v.relevant!==false}; else if(typeof v==='string') cache[r.id]={what:v.trim().slice(0,160), relevant:true}; }); }
+      catch(e){ console.warn('[mr] email what chunk',e); } }
+    if(Object.keys(cache).length>Object.keys(rep.emailWhat||{}).length){ try{ await _mrSaveReport(deal.id, ym, {emailWhat:cache}); rep.emailWhat=cache; }catch(e){ console.warn('[mr] save emailWhat',e); } }
+  }
+  emails.forEach(r=>{ const v=cache[r.id]; if(!v) return; if(v.what) r.what=v.what; if(v.om&&r.dir==='out'&&!r.cat){ r.cat='om_sent'; r.label='OM sent'; r.om={item:/aerial|survey|due diligence|site plan/i.test(v.what)?_mrcOmParts('sent '+v.what.replace(/^sent\s+/i,'')+' to x').item:'the Offering Memorandum', extra:''}; } if(v.relevant===false&&!r.forceShow){ r.hidden=true; r.hideWhy='not about this property (AI)'; } r.text=_mrcCompose(r); });
+  for(let i=rows.length-1;i>=0;i--){ if(rows[i].hidden) rows.splice(i,1); }
+}
+
+/* ===== MRDESIGN-20261117 — Ryan: "redesign to match design standards similar to Eshenbaugh Report with line art, infographics in
+   blank spaces, awards won, etc. … on the back page please add cell numbers for the advisors … on the property sign it says 1 call — put a
+   list of the numbers that called under it; if we have person name or company add as well." Every monthly report from now on.
+   • Eshenbaugh Report look: ESH red / teal palette, Open Sans, red masthead on every inside page ("Monthly Marketing Report" + month |
+     property in spaced caps), teal heading boxes, the stone footer band, the Dirt Dog line art (hat, boots, horseshoes, lasso, gloves,
+     cowboy rider) from esh/assets.
+   • Blank space at the bottom of a page is filled (never the same tile twice in one report): property-at-a-glance infographic, ELC by the
+     numbers, awards & recognition, mission quote — each with a line-art drawing; small gaps get a line-art strip.
+   • Cover rebuilt in the newsletter style; Contact page: headshot, name + designations, title, OFFICE and CELL, email, About, Awards,
+     rider art and logo.
+   • Awards list = 📬 Monthly Reports ⚙ Settings → "Awards & recognition" (one per line; seeded with RLI APEX awards — verify/edit there).
+   • Property Signage: running total + "drive-by calls only" note, then every caller this month: date, number, CRM name / company
+     (matched by phone) or the caller-ID city. Needs the mailwatch worker update (callers are now saved per call).
+   ===== */
+const MR_DEFAULT_AWARDS=['RLI APEX Top National Producer — Bill Eshenbaugh, ALC, CCIM (2022)',
+  'RLI APEX National Land Broker of the Year, Commercial Land Sales — Ryan Sampson, ALC, CCIM (2019, 2022)',
+  'RLI APEX National Land Broker of the Year, Residential Land Sales — Ryan Sampson (2020) · Bill Eshenbaugh (2022)',
+  'RLI APEX Largest ALC-to-ALC Transaction (2017, 2019, 2020)',
+  'RLI APEX Top 20 National Producers — ELC advisors, multiple years'].join('\n');
+const MR_TEAL_DK=[31,127,134], MR_STONE=[105,99,93], MR_MIST=[238,248,249];
+function _mrcAwards(){ const c=_mrCfg(); const t=(c.awards==null)?MR_DEFAULT_AWARDS:String(c.awards||''); return t.split('\n').map(x=>x.replace(/^[•\-\s]+/,'').trim()).filter(Boolean).slice(0,8); }
+async function _mrcArtLoad(){
+  window._mrcArtCache=window._mrcArtCache||{}; const C=window._mrcArtCache; const A=(typeof ESH_A!=='undefined'?ESH_A:'esh/assets/');
+  const want=[['ft','footer.jpg',{maxPx:2000,q:0.85}],['logo','logo.png',{png:true,maxPx:700}],['rider','cowboy-rider.png',{png:true,maxPx:700}],
+    ['hat','dd-hat.png',{png:true,maxPx:420}],['boots','dd-boots.png',{png:true,maxPx:420}],['shoes','dd-horseshoes.png',{png:true,maxPx:420}],['lasso','dd-lasso.png',{png:true,maxPx:420}],['gloves','dd-gloves.png',{png:true,maxPx:420}]];
+  await Promise.all(want.map(async([k,f,o])=>{ if(C[k]===undefined){ try{ C[k]=await _mrImg(A+f,o); }catch(_){ C[k]=null; } } }));
+  return C; }
+function _mrcPhone(s){ const d=String(s||'').replace(/\D/g,'').replace(/^1(?=\d{10}$)/,''); return d.length===10?'('+d.slice(0,3)+') '+d.slice(3,6)+'-'+d.slice(6):String(s||''); }
+function _mrcSpread(R,s,x,w,y,size,color){ const {doc}=R; doc.setFont(R.font,'bold'); doc.setFontSize(size); const nat=doc.getTextWidth(s); const cs=Math.max(0,Math.min(3,(w-nat)/Math.max(1,s.length-1))); doc.setTextColor(...(color||[255,255,255])); doc.text(s,x,y,{charSpace:cs}); return nat+cs*(s.length-1); }
+
+/* renderer additions: masthead on every inside page, stone footer, teal heading boxes, gap fillers */
+function _mrcRendererExtras(R){
+  const doc=R.doc; R.fillUsed=R.fillUsed||new Set(); R.contentTop=R.M+16;
+  R.header=()=>{ if(R.page<=1) return; R.rect(0,0,R.W,50,MR_RED); R.rect(0,44,R.W*0.56,6,[255,255,255]);
+    R.text('Monthly Marketing Report',R.M,31,{size:17,bold:true,color:[255,255,255]});
+    const tag=(R.A?_mrMonthLabel(R.A.ym).toUpperCase()+'  |  '+String(_mrDealAddr(R.A.deal)).split(',')[0].toUpperCase():''); doc.setFont(R.font,'bold'); doc.setFontSize(7.4);
+    const w=Math.min(250,doc.getTextWidth(tag)+40); _mrcSpread(R,tag,R.W-R.M-w,w,31,7.4); };
+  R.footer=()=>{ const ft=R.art&&R.art.ft; if(ft) R.img(ft,0,R.H-29.4,R.W,29.4); else { R.rect(0,R.H-30,R.W,30,MR_STONE); R.rect(0,R.H-30,R.W,2.4,MR_TEAL); }
+    R.text(String(R.page),R.M-14,R.H-10,{size:11,bold:true,color:[255,255,255]});
+    doc.setFont(R.font,'bold'); doc.setFontSize(8); R.text(String(R.footerText||'').toUpperCase(),R.W-R.M+14,R.H-10.5,{size:8,bold:true,color:[255,255,255],align:'right'}); R.header(); };
+  R.title=(t,y)=>{ doc.setFont(R.font,'bold'); let size=19; doc.setFontSize(size); while(size>13&&doc.getTextWidth(t)+28>R.W-2*R.M){ size-=0.5; doc.setFontSize(size); }
+    const w=doc.getTextWidth(t)+28, top=y-24; R.rect(R.M,top,w,31,MR_TEAL); R.text(t,R.M+14,top+15.5+size*0.35,{size,bold:true,color:[255,255,255]});
+    R.line(R.M+w+10,top+15.5,R.W-R.M,top+15.5,[210,232,234],0.8); return y+24; };
+  R.section=(t,y,need)=>{ if(y!=null&&(R.H-56-y)>=need+30) return R.title(t,y+44); R.fillGap(y); return R.title(t,R.newPage()+30); };
+  R.newPageFrom=(y)=>{ R.fillGap(y); return R.newPage(); };
+  R.fillGap=(y)=>{ try{ if(y==null) return; const top=y+18, bottom=R.H-48, h=bottom-top; if(h<88) return;
+      if(h<150){ _mrcFillStrip(R,top,h); return; }
+      const order=['glance','numbers','awards','quote']; const pick=order.find(k=>!R.fillUsed.has(k)&&_mrcFillOk(R,k))||null; if(!pick){ _mrcFillStrip(R,top,Math.min(h,140)); return; }
+      R.fillUsed.add(pick); _mrcFill(R,pick,top,Math.min(h,pick==='glance'?200:(pick==='awards'?250:230))); }catch(e){ console.warn('[mr] fill',e); } };
+}
+function _mrcArtPick(R){ const keys=['hat','boots','shoes','lasso','gloves'].filter(k=>R.art&&R.art[k]); if(!keys.length) return null; R._artI=(R._artI||0)+1; return R.art[keys[(R._artI-1)%keys.length]]; }
+function _mrcFillOk(R,k){ if(k==='awards') return !!(R.A&&R.A.awards&&R.A.awards.length); return true; }
+function _mrcFillStrip(R,top,h){ const im=_mrcArtPick(R); const doc=R.doc; const y=top+(h-70)/2;
+  R.line(R.M,y+35,R.W/2-60,y+35,[214,226,228],0.8); R.line(R.W/2+60,y+35,R.W-R.M,y+35,[214,226,228],0.8);
+  if(im){ const s=Math.min(96/im.w,70/im.h); R.img(im,R.W/2-im.w*s/2,y+35-im.h*s/2,im.w*s,im.h*s); }
+  R.text('FLORIDA LAND SPECIALISTS SINCE 1992',R.W/2,y+70+10,{size:7,bold:true,color:[150,150,150],align:'center'}); }
+function _mrcGlance(A){ const d=A.deal||{}; const rng=_mrMonthRange(A.ym); const m=(A.history||[]).filter(r=>r.ts>=rng.start&&r.ts<rng.end);
+  const om=m.filter(r=>r.label==='OM sent'), cos=new Set(); om.forEach(r=>{ if(r.many) cos.add('many'+r.id); else cos.add(_mrCoKey((r.cp&&(r.cp.company||r.cp.name))||r.id)); });
+  const omN=om.reduce((n,r)=>n+(r.many?r.many.count:1),0), inq=m.filter(r=>r.label==='Inquiry').length;
+  const blast=(A.emails||[]).reduce((n,e)=>n+(+e.emailsSent||+e.recipients||0),0);
+  const out=[]; const ac=parseFloat(d.acreage||d.acres); if(ac) out.push([ac>=100?Math.round(ac).toLocaleString('en-US'):String(Math.round(ac*10)/10),'acres']);
+  if(omN) out.push([String(omN),'offering memorandums sent this month']); if(blast) out.push([blast.toLocaleString('en-US'),'e-blast recipients']); if(inq) out.push([String(inq),inq===1?'buyer inquiry':'buyer inquiries']);
+  if(m.length&&out.length<4) out.push([String(m.length),'touches logged this month']);
+  const facts=[d.county?String(d.county).replace(/\s*county$/i,'')+' County':'', d.zoning?'Zoned '+d.zoning:'', d.futureLandUse?'FLU '+d.futureLandUse:''].filter(Boolean);
+  return {tiles:out.slice(0,4), facts}; }
+function _mrcFill(R,kind,top,h){
+  const doc=R.doc, x=R.M, w=R.W-2*R.M, A=R.A||{}; const im=_mrcArtPick(R);
+  const wrap=(t,size,wd,bold)=>{ doc.setFont(R.font,bold?'bold':'normal'); doc.setFontSize(size); return doc.splitTextToSize(String(t||''),wd); };
+  if(kind==='glance'){ const g=_mrcGlance(A); if(!g.tiles.length){ R.fillUsed.add('glance'); return _mrcFill(R,'numbers',top,h); }
+    R.rect(x,top,w,h,MR_TEAL_DK); R.text(('THIS MONTH AT A GLANCE  ·  '+_mrDealName(A.deal)).toUpperCase().slice(0,80),x+18,top+24,{size:8,bold:true,color:[190,235,238]});
+    const artW=im?110:0; const cw=(w-36-artW)/g.tiles.length;
+    g.tiles.forEach(([big,sm],i)=>{ const cx=x+18+i*cw; R.text(big,cx,top+Math.min(h-60,86),{size:Math.min(34,cw/3.2),bold:true,color:[255,255,255]}); wrap(sm,9,cw-12,true).slice(0,3).forEach((l,j)=>R.text(l,cx,top+Math.min(h-60,86)+18+j*11.5,{size:9,bold:true,color:[255,255,255]}));
+      if(i){ doc.setDrawColor(255,255,255); doc.setLineWidth(0.4); doc.line(cx-10,top+44,cx-10,top+Math.min(h-24,130)); } });
+    if(g.facts.length) R.text(g.facts.join('   ·   '),x+18,top+h-16,{size:8.5,color:[214,240,242]});
+    if(im){ const s=Math.min((artW-10)/im.w,(h-40)/im.h); doc.setFillColor(255,255,255); doc.circle(x+w-artW/2-8,top+h/2,Math.min(artW/2,h/2-12),'F'); R.img(im,x+w-artW/2-8-im.w*s*0.42,top+h/2-im.h*s*0.42,im.w*s*0.84,im.h*s*0.84); }
+    return; }
+  if(kind==='numbers'){ R.rect(x,top,w,h,MR_MIST); R.rect(x,top,4,h,MR_RED);
+    R.text('ESHENBAUGH LAND COMPANY BY THE NUMBERS',x+20,top+26,{size:8.5,bold:true,color:MR_TEAL_DK});
+    const cols=[['1992','founded in Tampa'],['$3B+','in land sales'],['$1.5B+','sold since 2020'],['2','offices · Tampa & Orlando']]; const artW=im?130:0; const cw=(w-40-artW)/cols.length;
+    cols.forEach(([b,s],i)=>{ const cx=x+20+i*cw; R.text(b,cx,top+Math.min(h-50,84),{size:26,bold:true,color:MR_RED}); wrap(s,9,cw-10,true).slice(0,2).forEach((l,j)=>R.text(l,cx,top+Math.min(h-50,84)+16+j*11,{size:9,bold:true,color:[70,70,70]})); });
+    R.text('Florida land is all we do — sellers, buyers, developers and investors across Tampa Bay and the I-4 Corridor.',x+20,top+h-18,{size:8.5,color:[90,90,90],maxWidth:w-40-artW});
+    if(im){ const s=Math.min((artW-10)/im.w,(h-30)/im.h); R.img(im,x+w-artW+(artW-im.w*s)/2-6,top+(h-im.h*s)/2,im.w*s,im.h*s); }
+    return; }
+  if(kind==='awards'){ const aw=(A.awards||[]); R.rect(x,top,w,h,[250,247,242]); R.rect(x,top,w,3,MR_RED);
+    R.text('AWARD-WINNING LAND ADVISORS',x+20,top+28,{size:12,bold:true,color:MR_RED}); R.text('National recognition from the REALTORS® Land Institute',x+20,top+42,{size:8.5,color:[100,100,100]});
+    const artW=im?130:0; let yy=top+62; const maxL=Math.floor((h-74)/24);
+    aw.slice(0,Math.max(1,maxL)).forEach(a=>{ doc.setFillColor(...MR_TEAL); doc.circle(x+26,yy-3,3,'F'); const L=wrap(a,9.5,w-60-artW,true).slice(0,2); L.forEach((l,j)=>R.text(l,x+36,yy+j*11.5,{size:9.5,bold:true,color:[45,45,45]})); yy+=L.length*11.5+8; });
+    if(im){ const s=Math.min((artW-10)/im.w,(h-30)/im.h); R.img(im,x+w-artW+(artW-im.w*s)/2-6,top+(h-im.h*s)/2,im.w*s,im.h*s); }
+    return; }
+  // quote
+  R.rect(x,top,w,h,[244,245,246]); R.rect(x,top,4,h,MR_RED);
+  R.text('“',x+20,top+58,{size:56,bold:true,color:MR_RED});
+  const Q='Our mission is to be your trusted land consultant, dedicated to shaping the future of our communities through thoughtful land solutions that maximize our clients’ interests.';
+  const artW=im?140:0; wrap(Q,13,w-70-artW,true).slice(0,Math.max(2,Math.floor((h-80)/18))).forEach((l,i)=>R.text(l,x+26,top+74+i*18,{size:13,bold:true,color:[40,40,40]}));
+  R.text('— Eshenbaugh Land Company · Florida land since 1992',x+26,top+h-20,{size:8.5,bold:true,color:[110,110,110]});
+  if(im){ const s=Math.min((artW-10)/im.w,(h-30)/im.h); R.img(im,x+w-artW+(artW-im.w*s)/2-6,top+(h-im.h*s)/2,im.w*s,im.h*s); }
+}
+
+/* cover — newsletter style */
+function _mrcCover(R,A,doc){
+  const d=A.deal, W=R.W; const addr=_mrDealAddr(d), name=_mrDealName(d);
+  R.rect(0,0,W,R.H,[255,255,255]);
+  R.rect(0,0,W,122,MR_RED); R.rect(0,114,W*0.5,8,[255,255,255]);
+  R.text('Eshenbaugh Land Company',R.M,40,{size:12,bold:false,color:[255,255,255]});
+  R.text('Monthly Marketing',R.M,74,{size:28,bold:true,color:[255,255,255]});
+  R.text('REPORT',R.M,108,{size:34,bold:true,color:[255,255,255]});
+  const mon=_mrMonthLabel(A.ym).toUpperCase(); doc.setFont(R.font,'bold'); doc.setFontSize(20);
+  R.text(mon,W-R.M,74,{size:20,bold:true,color:[255,255,255],align:'right'});
+  R.text('OWNER UPDATE',W-R.M,96,{size:9,bold:true,color:[255,215,212],align:'right'});
+  R.rect(0,122,W,20,MR_TEAL); _mrcSpread(R,(String(addr).split(',')[0]+'  |  '+mon).toUpperCase().slice(0,70),R.M,W-2*R.M,135.5,8);
+  // hero with drop shadow
+  const hx=R.M, hy=158, hw=W-2*R.M, hh=330;
+  R.rect(hx+4,hy+4,hw,hh,[214,214,214]);
+  if(A.hero) R.img(A.hero,hx,hy,hw,hh); else { R.rect(hx,hy,hw,hh,[160,30,20]); R.text('Add a primary photo to the deal card to show it here',W/2,hy+hh/2,{size:12,color:[255,255,255],align:'center'}); }
+  // property + prepared for
+  let y=hy+hh+40;
+  const nl=R.split(name,W*0.56,22,true).slice(0,2); nl.forEach((l,i)=>R.text(l,R.M,y+i*25,{size:22,bold:true,color:MR_INK})); y+=nl.length*25;
+  const facts=[addr!==name?addr:'', [parseFloat(d.acreage)?(Math.round(parseFloat(d.acreage)*100)/100)+' ± acres':'', d.county?String(d.county).replace(/\s*county$/i,'')+' County':'', d.zoning?'Zoned '+d.zoning:''].filter(Boolean).join('  ·  ')].filter(Boolean);
+  facts.forEach((t,i)=>R.text(t,R.M,y+4+i*15,{size:10.5,color:[90,90,90],maxWidth:W*0.56}));
+  const bx=W*0.64, bw=W-R.M-bx, by=hy+hh+20; R.rect(bx,by,bw,112,MR_MIST); R.rect(bx,by,bw,4,MR_TEAL);
+  R.text('PREPARED FOR',bx+14,by+26,{size:8.5,bold:true,color:MR_TEAL_DK});
+  R.split(String(A.preparedFor||'Property owner'),bw-28,12,true).slice(0,4).forEach((l,i)=>R.text(l,bx+14,by+46+i*15,{size:12,bold:true,color:MR_INK}));
+  // awards ribbon
+  const aw=(A.awards||[]).slice(0,2); let ay=642;
+  if(aw.length){ R.line(R.M,ay,W-R.M,ay,[226,226,226],0.8); R.text('AWARD-WINNING LAND ADVISORS',R.M,ay+16,{size:8,bold:true,color:MR_RED});
+    aw.forEach((a,i)=>R.text('★  '+a,R.M,ay+31+i*13,{size:8.2,color:[80,80,80],maxWidth:W-2*R.M-170})); }
+  // firm + logo
+  R.text(R.split(String(A.firmAddress||'').toUpperCase(),260,9).concat([String(A.firmWebsite||'').toUpperCase(),'813-287-8787']),R.M,712,{size:9,bold:true,color:[90,90,90],lh:1.45});
+  if(A.logo){ R.fit(A.logo,W-R.M-150,684,150,64); }
+  const ft=R.art&&R.art.ft; if(ft) R.img(ft,0,R.H-29.4,W,29.4); else R.rect(0,R.H-30,W,30,MR_STONE);
+}
+
+/* contact page — headshot, name, title, OFFICE + CELL, email; about; awards; art */
+function _mrcContactPage(R,A,doc){
+  let y=R.newPage(); y=R.title('Contact Information',y+30)+8;
+  const adv=(A.advisors||[]).slice(0,3); const rowH=adv.length>2?112:128; const hs=adv.length>2?84:96;
+  adv.forEach(a=>{ const cx=R.M+8;
+    if(a.head){ let clipped=false; try{ doc.saveGraphicsState(); doc.circle(cx+hs/2,y+hs/2,hs/2,null); doc.clip(); doc.discardPath(); clipped=true; }catch(e){} R.img(a.head,cx,y,hs,hs); if(clipped){ try{ doc.restoreGraphicsState(); }catch(e){} } }
+    else { doc.setFillColor(220,224,228); doc.circle(cx+hs/2,y+hs/2,hs/2,'F'); R.text(_mrFirstName(a.name).charAt(0).toUpperCase(),cx+hs/2,y+hs/2+13,{size:34,bold:true,color:[255,255,255],align:'center'}); }
+    doc.setDrawColor(...MR_TEAL); doc.setLineWidth(2); doc.circle(cx+hs/2,y+hs/2,hs/2+2,'S');
+    const tx=cx+hs+26; let ty=y+20; const tw=R.W-R.M-tx;
+    const nameLine=a.name+(a.designations?', '+String(a.designations).replace(/^,\s*/,''):''); doc.setFont(R.font,'bold'); let sz=15; doc.setFontSize(sz); while(sz>11&&doc.getTextWidth(nameLine)>tw){ sz-=0.5; doc.setFontSize(sz); }
+    R.text(nameLine,tx,ty,{size:sz,bold:true,color:MR_INK}); ty+=16;
+    if(a.title){ R.text(String(a.title).toUpperCase(),tx,ty,{size:8.5,bold:true,color:MR_RED}); ty+=17; }
+    const lines=[]; if(a.phone) lines.push(['OFFICE',a.phone]); if(a.cell&&String(a.cell).replace(/\D/g,'')!==String(a.phone||'').replace(/\D/g,'')) lines.push(['CELL',a.cell]); if(a.email) lines.push(['EMAIL',a.email]);
+    lines.forEach(([k,v])=>{ R.text(k,tx,ty,{size:7.5,bold:true,color:MR_TEAL_DK}); R.text(v,tx+46,ty,{size:10.5,bold:k!=='EMAIL',color:k==='EMAIL'?[40,150,170]:MR_INK});
+      if(k==='EMAIL') doc.link(tx+46,ty-9,doc.getTextWidth(v),12,{url:'mailto:'+v}); else if(k==='CELL'||k==='OFFICE') doc.link(tx+46,ty-9,doc.getTextWidth(v),12,{url:'tel:'+String(v).replace(/[^0-9x]/gi,'').replace(/x.*/i,'')}); ty+=14; });
+    y+=rowH; });
+  // about
+  y+=4; R.rect(R.M,y,R.W-2*R.M,24,MR_TEAL); R.text('ABOUT ESHENBAUGH LAND COMPANY',R.M+12,y+16,{size:10,bold:true,color:[255,255,255]}); y+=40;
+  y=R.para(A.about,R.M,y,R.W-2*R.M,{size:9.6,lh:1.45})+10;
+  // awards
+  const aw=(A.awards||[]); const room=R.H-48-y;
+  if(aw.length&&room>70){ R.text('AWARDS & RECOGNITION',R.M,y+10,{size:10,bold:true,color:MR_RED}); y+=24; const artW=(R.art&&R.art.rider)?170:0;
+    aw.forEach(a=>{ if(y>R.H-60) return; doc.setFillColor(...MR_TEAL); doc.circle(R.M+4,y-3,2.6,'F'); const L=R.split(a,R.W-2*R.M-14-artW,8.8,true).slice(0,2); L.forEach((l,j)=>R.text(l,R.M+14,y+j*11,{size:8.8,bold:true,color:[60,60,60]})); y+=L.length*11+6; }); }
+  const rider=R.art&&R.art.rider; if(rider){ const w=150, h=w*rider.h/rider.w; if(R.H-36-h>y-40||!aw.length) R.img(rider,R.W-R.M-w,R.H-34-h,w,h); }
+  else if(A.logo){ R.fit(A.logo,R.W-R.M-150,R.H-110,150,64); }
+}
+
+/* Property Signage — running total + every caller this month */
+function _mrcSignCalls(R,A,doc,y,sc){
+  const n=Number(sc.calls)||0; const all=(A.deal&&A.deal.signCallsByMonth)||{}; const tot=Object.entries(all).filter(([k,v])=>k<=A.ym&&v&&Number(v.calls)>0).reduce((t,[,v])=>t+Number(v.calls),0);
+  R.rect(R.M,y,150,58,MR_RED); R.text(String(n),R.M+14,y+36,{size:28,bold:true,color:[255,255,255]}); R.text((n===1?'CALL':'CALLS')+' THIS MONTH',R.M+14,y+50,{size:7,bold:true,color:[255,225,222]});
+  if(tot>n){ R.rect(R.M+160,y,150,58,MR_TEAL); R.text(String(tot),R.M+174,y+36,{size:28,bold:true,color:[255,255,255]}); R.text('SINCE THE SIGN WENT UP',R.M+174,y+50,{size:7,bold:true,color:[230,248,249]}); }
+  const nx=R.M+(tot>n?324:164); R.para('Calls to the number on the property sign'+(sc.ext?' (extension '+sc.ext+')':'')+' — drive-by interest only. Website and e-blast callers use the main office line.',nx,y+18,R.W-R.M-nx,{size:8.6,color:[90,90,90],lh:1.35});
+  y+=74;
+  const callers=Array.isArray(sc.callers)?sc.callers:[];
+  if(callers.length){ const crm=_mrcCrm();
+    const body=callers.slice().sort((a,b)=>String(a.at).localeCompare(String(b.at))).map(c=>{ const d=String(c.from||'').replace(/\D/g,'').slice(-10); const m=crm.byPhone.get(d);
+      const cnam=String(c.cnam||'').replace(/\s+/g,' ').trim(); const loc=/^[A-Z .'-]+\s[A-Z]{2}$/.test(cnam)?cnam.replace(/\s([A-Z]{2})$/,', $1').toLowerCase().replace(/\b\w/g,s=>s.toUpperCase()).replace(/, (\w\w)$/,(x,s)=>', '+s.toUpperCase()):'';
+      const who=m?[m.name,m.company].filter(Boolean).join(' — '):((!loc&&cnam&&!/unknown|wireless|unavailable/i.test(cnam))?cnam:'');
+      const t=c.at?new Date(c.at):null; return [t?_mrFmtDate(t.getTime())+' '+t.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'}):'', _mrcPhone(c.from), who||'Not in our contacts yet', loc||'']; });
+    y=R.table({startY:y, head:[['Date / time','Caller','Name / company','Caller ID location']], body, styles:{font:R.font,fontSize:8.6,textColor:MR_INK,cellPadding:4,lineColor:MR_LINE,lineWidth:{bottom:0.6}}, columnStyles:{0:{cellWidth:96},1:{cellWidth:96},3:{cellWidth:120}}, contHeading:'Property Signage (cont.)'})+14; }
+  return y; }
+
+/* MRDESIGN-20261117 — Open Sans (the Eshenbaugh Report face) for the monthly report; Poppins stays as the fallback */
+async function _mrFonts(doc){ try{ const OS=(typeof _llrFonts==='function')?await _llrFonts(doc):null; if(OS){ doc.addFont('LlrOS-r.ttf','MrOS','normal'); doc.addFont('LlrOS-b.ttf','MrOS','bold'); return 'MrOS'; } }catch(e){ console.warn('[mr] Open Sans',e); } return _mrFonts_v1(doc); }
 window._mrPreview=async function(dealId){
   const deal=(allDeals||[]).find(d=>d.id===dealId); if(!deal) return;
   const ym=window._mrState.month||_mrDefaultMonth();
@@ -53242,7 +53638,7 @@ async function _mwFileReview(r, dealId, note){
   const prints=side==='seller'&&_mrIsReportStage(_mrStageOf(deal));   // MRSTATUS-20261105
   const act={ type:'email', source:'mailwatch-reviewed', mwCategory:cat, mwSummary:r.summary||'', body:r.summary||r.subject||'', direction:r.direction||'',
     mwSide:side, mwDatapoints:r.datapoints||[], rfcId:r.rfcId||'', mwRootId:r.rootId||'', gmailId:r.gmailId||r.id, gmailThreadId:r.gmailThreadId||'', gmailSubject:r.subject||'',
-    gmailDate:r.emailDate||'', gmailFrom:r.direction==='out'?r.mailbox:(r.counterpartyEmail||''), counterpartyName:r.counterpartyName||'', counterpartyCompany:r.counterpartyCompany||'', mailbox:r.mailbox||'',
+    gmailDate:r.emailDate||'', gmailFrom:r.direction==='out'?r.mailbox:(r.counterpartyEmail||''), counterpartyName:r.counterpartyName||'', counterpartyCompany:r.counterpartyCompany||'', counterpartyEmail:r.counterpartyEmail||'', mailbox:r.mailbox||'',   /* MRCLEAN-20261117 */
     createdBy:currentUser?.uid||'', createdByName:currentUser?.name||currentUser?.displayName||'', reviewedFrom:r.id, createdAt:r.emailDate||Date.now(),
     ...(note?{advisorNote:String(note).slice(0,1000)}:{}),
     ...((!prints||!_mwMarketing.includes(cat))?{reportHidden:true,reportHiddenBy:'mailwatch'}:{}) };   // proposal / buyer-rep / transaction mail stays off the owner report unless an advisor shows it
@@ -54560,6 +54956,10 @@ window._psIgnore=async function(i,btn){
        (most of the old "Other" listings) and the row is flagged "Section guessed — pick one" so it can be moved.
      • A listing with no photo on the card is left out of the PDF and its advisor gets a one-time task (per quarter) to add one.
      • The closing page fills the space after the advisor directory with both offices, email, phone and website.
+   LLRMONTHLY-20261117 (Ryan): the approved report is emailed on the 5th of every month to the "Eshenbaugh Report Newsletter
+   Recipients" CRM group (Mailchimp tag), until he says stop; Ryan + Krissy get it first and either approves on the 4th (task).
+     • 📨 Monthly email panel at the top of this tab; Krissy (approver) sees the tab too. Details in the 📨 MONTHLY EMAIL block below
+       and in elc-social-worker (schedule + Mailchimp send).
    LLRADV-20261117 (Ryan): "can we also run by advisor, so if I want to only see my listings, then I select myself at top and
    run report of just my listings?"
      • Advisor picker in the toolbar (All advisors / ⭐ My listings / each advisor). A listing is in an advisor run when that
@@ -54583,11 +54983,12 @@ const LLR_CONTACT={
   email:'info@thedirtdog.com', web:'thedirtdog.com', url:'https://www.thedirtdog.com'};
 function _llrCfg(){ return (APP_CONFIG.landListingReport = APP_CONFIG.landListingReport || {access:'owner'}); }
 function _llrIsOwner(){ return !!(currentUser && LLR_OWNER_EMAILS.includes(String(currentUser.email||'').toLowerCase())); }
-function _llrCanAccess(){ if(!currentUser) return false; if(_llrIsOwner()) return true; const a=_llrCfg().access||'owner'; if(a==='all') return true; if(a==='admins') return !!currentUser.isAdmin; return false; }
+function _llrCanAccess(){ if(!currentUser) return false; if(_llrIsOwner() || _llrmCanSeeTab()) return true;   /* LLRMONTHLY-20261117 — approvers */ const a=_llrCfg().access||'owner'; if(a==='all') return true; if(a==='admins') return !!currentUser.isAdmin; return false; }
 function _llrCanEdit(){ return !!(currentUser && (_llrIsOwner()||currentUser.isAdmin||currentUser.isStaff)); }
 // Nav predicate — called from buildNavItems (sv = staff view)
 function _llrNavVisible(effectiveAdmin, sv){
   if(!currentUser) return false;
+  if(_llrmIsApprover()) return true;   // LLRMONTHLY-20261117 — Ryan + Krissy approve the monthly email here (Krissy works in staff view)
   const a=_llrCfg().access||'owner';
   if(a==='all') return true;
   if(sv) return false;
@@ -54890,6 +55291,7 @@ function viewLandListingReport(){
       </div>
     </div>
     <p class="mr-note" style="margin:-.4rem 0 .6rem">Pulled live from the deal cards: every seller-side listing in Listing / LOI / Signed LOI (AVAILABLE) and Due Diligence / Rezoning / Permitting / Closing (UNDER CONTRACT) on the as-of date. DO NOT MARKET cards are always left out. Grey text in a box is what Terra pulled from the card — type over it to change it on this report only (saved on the card, used only here).</p>
+    ${_llrmPanelSlot()}
     <div id="llr-stats"></div>
     <div class="mr-card" style="margin-bottom:.9rem"><div class="llr-opts">
       <label style="flex:1 1 260px">Cover <input class="mr-input" style="flex:1" id="llr-cover" value="${_mrEsc(st.cover||'')}" placeholder="Available ${_mrEsc(st.land==='residential'?'Residential Land':(st.land==='commercial'?'Commercial Land':'Land'))} — ${_mrEsc(_llrMonthYear(st.asOf))}" oninput="window._llrState().cover=this.value"></label>
@@ -54904,6 +55306,7 @@ function viewLandListingReport(){
     <div class="mr-card llr-scroll"><table class="mr-table llr-table"><thead><tr><th style="width:36px">In</th><th>Aerial</th><th>Listing</th><th>Zoning</th><th>Price on report</th><th>Section</th><th>Website link</th><th>Check</th></tr></thead><tbody id="llr-rows"></tbody></table></div>
   </div>`);
   window._llrRenderRows();
+  try{ _llrmWatch(); _llrmRenderPanel(); }catch(e){ console.warn('[llrm] panel',e); }   // LLRMONTHLY-20261117
 }
 window._llrRenderRows=function(){
   const tb=document.getElementById('llr-rows'); if(!tb) return;
@@ -55334,6 +55737,169 @@ window._llrGenerate=async function(mode, btn){
 async function _llrWithState(over, fn){ const st=_llrState(); const keep={...st}; Object.assign(st, {advisor:''}, over);   /* LLRADV-20261117 — borrowers never inherit an advisor run */ try{ return await fn(); } finally{ Object.keys(st).forEach(k=>delete st[k]); Object.assign(st, keep); } }
 window._llrWithState=_llrWithState; window._llrBuild=_llrBuild; window._llrCollect=_llrCollect; window._llrFonts=_llrFonts; window._llrRoundImg=_llrRoundImg;
 window.viewLandListingReport=viewLandListingReport;
+/* =======================================================
+   📨 MONTHLY EMAIL — marker LLRMONTHLY-20261117 (Terra side; the schedule lives in elc-social-worker)
+   Ryan (2026-11-17): send the approved final Land Listings Report on the 5th of every month to the "Eshenbaugh Report
+   Newsletter Recipients" CRM group, until told to stop; the final report goes to Krissy and Ryan first and either one
+   approves it on the 4th as a task.
+     • 4th 7 AM ET — worker: one 📨 approval task each (due the 4th) → links here (#llr-monthly).
+     • The first time Ryan or Krissy opens Terra on/after the 4th, this builds the month's final PDF (company-wide, all land,
+       available + under contract, advisor page; the per-listing overrides on this tab apply), uploads it + a cover image,
+       and the worker makes the Mailchimp campaign to the group's tag and emails both of them the exact email as a test.
+     • ✅ Approve here (or tick off either task) → 5th 10 AM ET it goes out (later approval → within the hour). Never twice.
+     • Ryan's switch turns the whole thing off ("until we ask you to stop").
+   State: eos/llrMonthly-YYYY-MM (status awaiting-draft | draft | approved | sending | sent | failed);
+   settings: eos/settings.landListingReport.monthly {enabled, groupName, approvers}.
+   ======================================================= */
+const LLRM_APPROVERS=['ryan@thedirtdog.com','krissy@thedirtdog.com'];
+const LLRM_GROUP='Eshenbaugh Report Newsletter Recipients';
+function _llrmCfg(){ return _llrCfg().monthly||{}; }
+function _llrmOn(){ return _llrmCfg().enabled!==false; }
+function _llrmApprovers(){ const a=_llrmCfg().approvers; return (Array.isArray(a)&&a.length?a:LLRM_APPROVERS).map(e=>String(e).toLowerCase()); }
+function _llrmGroup(){ return String(_llrmCfg().groupName||LLRM_GROUP); }
+function _llrmIsApprover(){ return !!(currentUser && _llrmApprovers().includes(String(currentUser.email||'').toLowerCase())); }
+function _llrmYm(d){ d=d||new Date(); return d.getFullYear()+'-'+_llrPad(d.getMonth()+1); }
+function _llrmMonthLabel(ym){ const [y,m]=String(ym).split('-').map(Number); return new Date(y,m-1,15).toLocaleDateString('en-US',{month:'long',year:'numeric'}); }
+function _llrmFirstName(e){ const em=String(e||'').toLowerCase(); const p=Object.values(allProfiles||{}).find(x=>String(x.email||'').toLowerCase()===em); return _mrFirstName((p&&p.name)||em.split('@')[0]).replace(/^./,c=>c.toUpperCase()); }
+function _llrmWhen(ts){ return ts?new Date(ts).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}):''; }
+window._llrmDoc=window._llrmDoc||{ym:'',d:null,unsub:null};
+function _llrmWatch(){
+  const ym=_llrmYm(); const W=window._llrmDoc;
+  if(W.ym===ym && W.unsub) return;
+  try{ W.unsub&&W.unsub(); }catch(_){}
+  W.ym=ym; W.d=null; W.loaded=false;
+  try{ const {doc,onSnapshot}=_fbFns;
+    W.unsub=onSnapshot(doc(_fbDb,'eos','llrMonthly-'+ym), s=>{ W.d=s.exists()?s.data():null; W.loaded=true; _llrmRenderPanel(); }, e=>{ console.warn('[llrm] watch',e); W.loaded=true; _llrmRenderPanel(); });
+  }catch(e){ console.warn('[llrm] watch',e); }
+}
+async function _llrmPatch(patch){ const {doc,setDoc}=_fbFns; await setDoc(doc(_fbDb,'eos','llrMonthly-'+_llrmYm()), {month:_llrmYm(), ...patch}, {merge:true}); }
+
+/* ---------- the panel at the top of the tab ---------- */
+function _llrmPanelSlot(){ return (_llrmIsApprover()||_llrIsOwner())?`<div id="llrm-panel" class="mr-card" style="margin-bottom:.9rem" aria-live="polite"></div>`:''; }
+function _llrmRenderPanel(){
+  const el=document.getElementById('llrm-panel'); if(!el) return;
+  const W=window._llrmDoc; const m=W.d||{}; const ym=_llrmYm(); const label=_llrmMonthLabel(ym);
+  const on=_llrmOn(); const day=new Date().getDate(); const st=m.status||'awaiting-draft'; const canAct=_llrmIsApprover();
+  const chip={ 'awaiting-draft':['mr-chip-new','Not built yet'], draft:['mr-chip-draft','Waiting for approval'], approved:['mr-chip-sent','Approved'], sending:['mr-chip-draft','Sending…'], sent:['mr-chip-sent','Sent'], failed:['mr-chip-new','Didn’t send'] }[st]||['mr-chip-new',st];
+  const who=_llrmApprovers().map(_llrmFirstName).join(' and ');
+  const sw=_llrIsOwner()?`<label class="mr-muted" style="display:inline-flex;gap:.45rem;align-items:center;min-height:44px;cursor:pointer;margin-left:auto"><input type="checkbox" class="mr-check" ${on?'checked':''} onchange="window._llrmToggle(this)" aria-label="Send the Land Listings Report automatically every month"> Send every month</label>`:`<span class="mr-muted" style="margin-left:auto">${on?'Sends every month':'Monthly email is off'}</span>`;
+  let body='';
+  if(!on){ body=`<p class="mr-note" style="margin:.4rem 0 0">The monthly email is <b>off</b> — no tasks, no build, nothing sent.${_llrIsOwner()?' Tick <b>Send every month</b> to turn it back on.':''}</p>`; }
+  else {
+    const sched=`<p class="mr-note" style="margin:.35rem 0 .6rem">On the <b>4th</b>, ${_mrEsc(who)} each get a task, Terra builds the final report and emails it to both of you as a Mailchimp test. Either of you approves → it goes out on the <b>5th at 10 AM</b> to the <b>${_mrEsc(m.tag||_llrmGroup())}</b> group${m.recipientCount?` (${Number(m.recipientCount).toLocaleString()} people in Mailchimp)`:''}. Nothing is sent without an approval.</p>`;
+    const pdf=m.pdfUrl?`<a class="mr-btn mr-btn-sm" href="${_mrEsc(m.pdfUrl)}" target="_blank" rel="noopener">👁 Open the PDF</a>`:'';
+    const mc=m.editUrl?`<a class="mr-btn mr-btn-sm" href="${_mrEsc(m.editUrl)}" target="_blank" rel="noopener">✉️ The email in Mailchimp</a>`:'';
+    const built=m.builtAt?`<div class="mr-muted" style="font-size:.85rem">Built ${_mrEsc(_llrmWhen(m.builtAt))}${m.builtBy?' by '+_mrEsc(_llrmFirstName(m.builtBy)):''}${m.stats&&m.stats.available!=null?` · ${m.stats.available} available, ${m.stats.uc||0} under contract`:''}${(m.testSentTo||[]).length?` · test emailed to ${_mrEsc((m.testSentTo||[]).map(_llrmFirstName).join(' & '))}`:''}${m.testError?` · <span style="color:var(--brand-red,#DA291C)">test email failed: ${_mrEsc(m.testError)}</span>`:''}</div>`:'';
+    const rebuild=canAct&&st!=='sent'&&st!=='sending'?`<button type="button" class="mr-btn mr-btn-sm" onclick="window._llrmBuild(this)">🔄 ${m.pdfUrl?'Rebuild from today’s cards':'Build this month’s report now'}</button>`:'';
+    if(st==='awaiting-draft') body=sched+`<div class="mr-row" style="gap:.5rem;flex-wrap:wrap">${rebuild}</div>${day<4?`<p class="mr-muted" style="font-size:.85rem;margin:.4rem 0 0">Builds itself on the 4th. Build early only to check it — rebuild on the 4th so it shows the latest cards.</p>`:''}`;
+    else if(st==='draft') body=sched+built+`<div class="mr-row" style="gap:.5rem;flex-wrap:wrap;margin-top:.55rem">${canAct?`<button type="button" class="mr-btn mr-btn-primary" onclick="window._llrmApprove(this)">✅ Approve — ${day>=5?'send within the hour':'send on the 5th'}</button>`:''}${pdf}${mc}${rebuild}</div>`;
+    else if(st==='approved') body=sched+built+`<p style="margin:.55rem 0 0"><b>Approved</b> by ${_mrEsc(_llrmFirstName(m.approvedBy))} ${_mrEsc(_llrmWhen(m.approvedAt))}${m.approvedVia==='task'?' (task ticked off)':''} — goes out ${day>=5?'within the hour':'on the 5th at 10 AM'}.</p><div class="mr-row" style="gap:.5rem;flex-wrap:wrap;margin-top:.5rem">${pdf}${mc}${canAct?`<button type="button" class="mr-btn mr-btn-sm" onclick="window._llrmUnapprove(this)">↩ Undo approval</button>`:''}${rebuild}</div>`;
+    else if(st==='sending') body=`<p style="margin:.5rem 0 0">Sending now…</p>`;
+    else if(st==='sent') body=`<p style="margin:.5rem 0 0">✅ <b>Sent</b> ${_mrEsc(_llrmWhen(m.sentAt))} to the <b>${_mrEsc(m.tag||_llrmGroup())}</b> group${m.recipientCount?` — ${Number(m.recipientCount).toLocaleString()} recipients`:''}. Approved by ${_mrEsc(_llrmFirstName(m.approvedBy))}.</p><div class="mr-row" style="gap:.5rem;flex-wrap:wrap;margin-top:.5rem">${pdf}${mc}</div><p class="mr-muted" style="font-size:.85rem;margin:.4rem 0 0">Next one: tasks and the new report on the 4th of next month.</p>`;
+    else if(st==='failed') body=`<p style="margin:.5rem 0 0;color:var(--brand-red,#DA291C)"><b>Didn’t go out:</b> ${_mrEsc(m.error||'unknown error')}</p><div class="mr-row" style="gap:.5rem;flex-wrap:wrap;margin-top:.5rem">${canAct?`<button type="button" class="mr-btn mr-btn-primary" onclick="window._llrmRetry(this)">↻ Retry send</button>`:''}${pdf}${mc}${rebuild}</div>`;
+    if(m.lateNoticeAt && (st==='awaiting-draft'||st==='draft')) body=`<p style="margin:.4rem 0 0;color:var(--brand-red,#DA291C)"><b>Not sent on the 5th — it hasn’t been approved.</b> It goes out within the hour after one of you approves.</p>`+body;
+  }
+  el.innerHTML=`<div class="mr-row" style="gap:.6rem;align-items:center;flex-wrap:wrap"><h3 style="margin:0;font-size:1.05rem;color:var(--text-1)">📨 Monthly email — ${_mrEsc(label)}</h3>${on?`<span class="mr-chip ${chip[0]}">${_mrEsc(chip[1])}</span>`:''}${sw}</div>${body}`;
+}
+
+/* ---------- build: PDF + cover image → Storage → worker makes the campaign + test email ---------- */
+function _llrmRun(){ const now=new Date(); return {q:_llrQKey(now.getFullYear(),Math.floor(now.getMonth()/3)+1), asOf:_llrIso(now), office:'', land:'all', advisor:'', includeUc:true, includeSold:false, includeDir:true, cover:'', search:'', issuesOnly:false}; }
+async function _llrmCoverJpg(blob){
+  try{ if(typeof pdfjsLib==='undefined') return null;
+    pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    const pdf=await pdfjsLib.getDocument({data:await blob.arrayBuffer()}).promise; const pg=await pdf.getPage(1);
+    const vp=pg.getViewport({scale:1280/pg.getViewport({scale:1}).width}); const c=document.createElement('canvas'); c.width=vp.width; c.height=vp.height;
+    const ctx=c.getContext('2d'); ctx.fillStyle='#fff'; ctx.fillRect(0,0,c.width,c.height); await pg.render({canvasContext:ctx,viewport:vp}).promise;
+    // the email shows the top of the cover (logo, title, band) — crop to a 16:10 banner
+    const h=Math.round(c.width*0.62); const b=document.createElement('canvas'); b.width=c.width; b.height=h; b.getContext('2d').drawImage(c,0,0,c.width,h,0,0,c.width,h);
+    return await new Promise(r=>b.toBlob(r,'image/jpeg',0.86));
+  }catch(e){ console.warn('[llrm] cover',e); return null; }
+}
+async function _llrmUpload(blob, name, type){
+  let waited=0; while(!_fbStorage&&waited<6000){ await new Promise(r=>setTimeout(r,200)); waited+=200; }
+  if(!_fbStorage) throw new Error('Storage not ready');
+  const {ref,uploadBytes,getDownloadURL}=_fbFns; const path='proposal-agreements/'+name;   // existing signed-in-write Storage folder; the tokened URL is public for email readers
+  const snap=await uploadBytes(ref(_fbStorage,path), blob, {contentType:type}); return {url:await getDownloadURL(snap.ref), path};
+}
+window._llrmBuild=async function(btn, auto){
+  if(!_llrmIsApprover()){ if(!auto) showToast('Only '+_llrmApprovers().map(_llrmFirstName).join(' or ')+' can build the monthly email','warning'); return; }
+  const base=((APP_CONFIG.social||{}).workerUrl||'').replace(/\/+$/,''); if(!base){ if(!auto) showToast('Social worker URL is not set','error'); return; }
+  const ym=_llrmYm(); const W=window._llrmDoc; const cur=(W.ym===ym&&W.d)||{};
+  if(cur.status==='sent'||cur.status==='sending'){ if(!auto) showToast('This month’s email has already gone out','info'); return; }
+  if(!auto && cur.status==='approved' && !(await elcConfirm('It’s already approved. Rebuilding replaces the report with today’s cards, emails you both a new test, and needs a fresh approval.',{title:'Rebuild and re-approve?',okLabel:'Rebuild'}))) return;
+  const done=btn?elcBusy(btn,'Building…'):()=>{};
+  try{
+    await _llrmPatch({buildingAt:Date.now(), buildingBy:currentUser.email});
+    const run=_llrmRun(); let R, all;
+    await _llrWithState(run, async()=>{ R=await _llrBuild(p=>{ if(btn) btn.innerHTML='<span class="elc-spin"></span>Building… '+Math.round(p*100)+'%'; }); all=_llrCollect(); try{ await _llrSendPhotoTasks(all); }catch(e){ console.warn('[llrm] photo tasks',e); } });
+    if(btn) btn.innerHTML='<span class="elc-spin"></span>Uploading…';
+    const pdfBlob=R.doc.output('blob'); const stamp=ym+'-'+Date.now();
+    const pdf=await _llrmUpload(pdfBlob,'land-listings-report-'+stamp+'.pdf','application/pdf');
+    const cov=await _llrmCoverJpg(pdfBlob); const hero=cov?await _llrmUpload(cov,'land-listings-report-'+stamp+'-cover.jpg','image/jpeg').catch(()=>null):null;
+    const rows=R.rows||[]; const acres=rows.filter(r=>!r.sold).reduce((s,r)=>s+(parseFloat(r.d.acreage||r.d.acres||0)||0),0);
+    const asOfLabel=new Date().toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'});
+    if(btn) btn.innerHTML='<span class="elc-spin"></span>Making the email…';
+    const tok=await _mrIdToken(); if(!tok) throw new Error('Not signed in');
+    const r=await fetch(base+'/llr/draft',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+tok},body:JSON.stringify({ym, pdfUrl:pdf.url, pdfPath:pdf.path, heroUrl:hero?hero.url:'', file:R.file, quarter:run.q, quarterLabel:_llrQLabel(run.q), asOf:run.asOf, asOfLabel, builtByName:currentUser.name||'',
+      stats:{listings:rows.length, available:rows.filter(x=>!x.uc&&!x.sold).length, uc:rows.filter(x=>x.uc).length, acres:Math.round(acres), pages:R.pages}})});
+    const j=await r.json().catch(()=>({})); if(!r.ok) throw new Error((j.error&&j.error.message)||('worker '+r.status));
+    showToast(`📨 ${_llrmMonthLabel(ym)} Land Listings Report built — ${(j.testSentTo||[]).length?'test email sent to '+(j.testSentTo||[]).map(_llrmFirstName).join(' & '):'open it here to review'}`,'success',7000);
+  }catch(e){ console.error('[llrm] build',e); try{ await _llrmPatch({buildingAt:0, buildError:String(e.message||e).slice(0,300), buildErrorAt:Date.now()}); }catch(_){}
+    showToast('Couldn’t build the monthly Land Listings Report email: '+e.message,'error',9000); }
+  finally{ done(); }
+};
+window._llrmApprove=async function(btn){
+  if(!_llrmIsApprover()) return; const m=window._llrmDoc.d||{}; if(m.status!=='draft') return;
+  const day=new Date().getDate();
+  if(!(await elcConfirm(`It goes to the ${m.tag||_llrmGroup()} group${m.recipientCount?' ('+Number(m.recipientCount).toLocaleString()+' people)':''} ${day>=5?'within the hour':'on the 5th at 10 AM'}.`,{title:`Approve the ${_llrmMonthLabel(_llrmYm())} Land Listings Report?`,okLabel:'Approve'}))) return;
+  const done=elcBusy(btn,'Approving…');
+  try{
+    await _llrmPatch({status:'approved', approvedAt:Date.now(), approvedBy:String(currentUser.email||'').toLowerCase(), approvedVia:'terra'});
+    try{ const {collection,query,where,getDocs}=_fbFns; const s=await getDocs(query(collection(_fbDb,'tasks'),where('llrMonth','==',_llrmYm())));
+      for(const t of s.docs){ const x=t.data(); if(x.source==='llr-monthly' && x.llrKind==='approve' && !/^complete/.test(String(x.status||''))) await Store.updateTask(t.id,{status:'complete', completedAt:Date.now(), completedBy:currentUser.uid||'', completedNote:'Approved in Terra by '+(currentUser.name||currentUser.email)}); } }
+    catch(e){ console.warn('[llrm] close tasks',e); }
+    showToast('✅ Approved — '+(day>=5?'it goes out within the hour':'it goes out on the 5th at 10 AM'),'success',6000);
+    if(day>=5) _llrmKick();
+  }catch(e){ console.error('[llrm] approve',e); showToast('Could not approve: '+e.message,'error'); }
+  finally{ done(); }
+};
+window._llrmUnapprove=async function(btn){
+  const done=elcBusy(btn,'Saving…');
+  try{ await _llrmPatch({status:'draft', approvedAt:0, approvedBy:'', approvedVia:''}); showToast('Approval undone — nothing will send until one of you approves again','info',6000); }
+  catch(e){ showToast('Could not save: '+e.message,'error'); } finally{ done(); }
+};
+window._llrmRetry=async function(btn){
+  const done=elcBusy(btn,'Re-queuing…');
+  try{ await _llrmPatch({status:'approved', error:'', retriedAt:Date.now(), retriedBy:currentUser.email}); await _llrmKick(); showToast('↻ Re-queued — it goes out within the hour','success'); }
+  catch(e){ showToast('Could not retry: '+e.message,'error'); } finally{ done(); }
+};
+async function _llrmKick(){ try{ const base=((APP_CONFIG.social||{}).workerUrl||'').replace(/\/+$/,''); const tok=await _mrIdToken(); if(base&&tok) await fetch(base+'/llr/run',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+tok},body:'{}'}); }catch(e){ console.warn('[llrm] run',e); } }
+window._llrmToggle=async function(cb){
+  if(!_llrIsOwner()){ cb.checked=_llrmOn(); return; }
+  const on=cb.checked;
+  if(!on && !(await elcConfirm('No approval tasks, no build and no email on the 5th until you turn it back on.',{title:'Stop the monthly Land Listings Report email?',okLabel:'Stop sending',danger:true}))){ cb.checked=true; return; }
+  try{ await _llrSaveSettings({monthly:{..._llrmCfg(), enabled:on, groupName:_llrmGroup(), approvers:_llrmApprovers(), changedAt:Date.now(), changedBy:currentUser.email}}); showToast(on?'📨 Monthly email is on — next one on the 5th':'Monthly email is off','success'); _llrmRenderPanel(); }
+  catch(e){ cb.checked=!on; showToast('Could not save: '+e.message,'error'); }
+};
+
+/* ---------- after login: #llr-monthly deep link (from the tasks) + the automatic build on/after the 4th ---------- */
+window._llrMonthlyBoot=function(attempt){
+  attempt=attempt||0;
+  if(!currentUser) return;
+  const deep=/llr-monthly/.test(location.hash||'');
+  if(deep && _llrNavVisible(true,false)){ try{ history.replaceState(null,'',location.pathname+location.search); }catch(_){} currentView='landListingReport'; renderShell(); renderCurrentView(); }
+  if(!_llrmIsApprover() || !_llrmOn()) return;
+  _llrmWatch();
+  const W=window._llrmDoc;
+  if(!W.loaded || !(allDeals||[]).length){ if(attempt<40) setTimeout(()=>window._llrMonthlyBoot(attempt+1),1500); return; }
+  if(new Date().getDate()<4) return;
+  const m=W.d||{}; const st=m.status||'awaiting-draft';
+  if(st!=='awaiting-draft' || m.pdfUrl) return;                                   // already built (by either approver)
+  if(m.buildingAt && Date.now()-m.buildingAt<15*60000) return;                     // the other approver is building it right now
+  if(m.buildErrorAt && Date.now()-m.buildErrorAt<60*60000) return;                 // failed in the last hour — don't loop; the panel shows the button
+  setTimeout(()=>window._llrmBuild(null,true), 4000);
+};
+function _llrmCanSeeTab(){ return _llrmIsApprover(); }
 /* ===== LLR_BLOCK_END ===== */
 /* =======================================================
    📰 THE ESHENBAUGH REPORT — marker ESH-20261116
