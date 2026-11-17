@@ -43258,6 +43258,7 @@ async function launchApp(){
   // Apple Mail quick-link handoff (marker: MAILLINK-20260818)
   setTimeout(() => { try{ window._mailLinkCheck(); }catch(e){ console.warn('[mailLink]', e); } }, 800);
   setTimeout(() => { try{ window._llrMonthlyBoot && window._llrMonthlyBoot(); }catch(e){ console.warn('[llrMonthly]', e); } }, 2500);   // LLRMONTHLY-20261117 wiring
+  setTimeout(() => { try{ window._bmBoot && window._bmBoot(); }catch(e){ console.warn('[buyerMatch]', e); } }, 2600);   // BMAPPROVE-20261117 #buyer-match deep link
   // Show commission completion prompt for active contract deals missing commission info
   if(currentUser && !currentUser.isAdmin && !currentUser.isStaff){
     setTimeout(() => _checkCommissionRequirements(), 800);
@@ -54937,6 +54938,11 @@ window._psIgnore=async function(i,btn){
      • ⏸ Pause stops all sending immediately (the worker holds matches and e-mails Ryan once a day while paused).
    BMMAPWISE-20261117 (Ryan, same day): one MapWise parcel search per listing — outlined aerial, property-appraiser zoning, parcel ID —
    only on a sure match. Each Properties row shows the parcel (📐) or why none was claimed; 🗺 MapWise on/off = eos/buyerMatch.mapwise.
+   BMAPPROVE-20261117 (Ryan, same afternoon): "I want to approve all that get sent. Match and require my approval/denial for each
+   email." Auto-send is gone. The worker queues every matched e-mail in eos/buyerMatchQueue; ✅ Approvals (the tab's first screen)
+   lists them by property — Approve / Deny each e-mail, or all for a property, or everything. Decisions are written to
+   eos/buyerMatchApprovals.decisions{<costarId>_<contactId>} (merge) and the worker sends approved ones on its next 15-minute run.
+   Undo works until the worker picks it up. Ryan gets one "waiting for your approval" e-mail a day linking to #buyer-match.
    A contact who replies "remove" gets contacts/{id}.buyerMatchOptOut = true and is skipped forever (✕ chip shows it here).
    Access: APP_CONFIG.buyerMatch.access 'owner' (Ryan only — default) | 'admins' | 'all', in eos/settings.buyerMatch (⚙ Access).
    ======================================================= */
@@ -54948,7 +54954,7 @@ const BM_USES=[   // keep in step with elc-buyermatch-worker/uses.js
   ['hotel','Hotel / Hospitality'],['medical','Medical / Office'],['mixed_use','Mixed-Use'],['data_center','Data Center / Energy'],['rv_mh','RV / MH Park']];
 const BM_STARTERS=[['Apartment buyers',['apartment']],['ALF / senior living',['alf']],['Industrial buyers',['industrial']],['Homebuilders',['homebuilder']],
   ['Retail corners',['retail','gas_cstore']],['Self storage',['self_storage']],['Car wash',['carwash']],['Ag / farmland',['ag']],['Investment',['investment']]];
-const BM_STATUS={sent:['Sent','mr-chip-sent'],no_match:['No matching list','mr-chip-new'],held_paused:['Held — paused','mr-chip-draft'],expired:['Too old to send','mr-chip-new'],classified:['Sending…','mr-chip-queued'],new:['Researching…','mr-chip-queued']};
+const BM_STATUS={awaiting_approval:['Awaiting your approval','mr-chip-draft'],sent:['Sent','mr-chip-sent'],no_match:['No matching list','mr-chip-new'],held_paused:['Held — paused','mr-chip-draft'],expired:['Too old to send','mr-chip-new'],classified:['Sending…','mr-chip-queued'],new:['Researching…','mr-chip-queued']};
 const _bmUseLabel=k=>(BM_USES.find(u=>u[0]===k)||[k,k])[1];
 const _bmEsc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function _bmCfg(){ return (APP_CONFIG.buyerMatch = APP_CONFIG.buyerMatch || {access:'owner'}); }
@@ -54960,14 +54966,15 @@ function _bmNavVisible(effectiveAdmin, sv){
   if(a==='all') return true; if(sv) return false; if(a==='admins') return !!effectiveAdmin; return !!(effectiveAdmin && _bmIsOwner());
 }
 window._bmNavVisible=_bmNavVisible;
-function _bmState(){ return (window._bmSt=window._bmSt||{sub:'lists',cfg:null,log:null,prev:null,loading:false,open:{},q:{}}); }
+function _bmState(){ return (window._bmSt=window._bmSt||{sub:'approve',cfg:null,log:null,prev:null,loading:false,open:{},q:{}}); }
 
 async function _bmLoad(force){
   const st=_bmState(); if(st.loading) return; if(st.cfg && !force) return;
   st.loading=true;
   try{
     const {doc,getDoc}=_fbFns;
-    const [c,l]=await Promise.all([getDoc(doc(_fbDb,'eos','buyerMatch')),getDoc(doc(_fbDb,'eos','buyerMatchLog'))]);
+    const [c,l,q,a]=await Promise.all([getDoc(doc(_fbDb,'eos','buyerMatch')),getDoc(doc(_fbDb,'eos','buyerMatchLog')),getDoc(doc(_fbDb,'eos','buyerMatchQueue')),getDoc(doc(_fbDb,'eos','buyerMatchApprovals'))]);
+    st.queue=q.exists()&&Array.isArray(q.data().items)?q.data().items:[]; st.dec=a.exists()?(a.data().decisions||{}):{};
     st.cfg=c.exists()?c.data():{lists:[],paused:false}; st.cfg.lists=Array.isArray(st.cfg.lists)?st.cfg.lists:[];
     st.log=l.exists()?l.data():{props:[],runs:[]};
   }catch(e){ console.warn('[bm] load',e); showToast('Could not load Buyer Match: '+e.message,'error',8000); st.cfg=st.cfg||{lists:[]}; st.log=st.log||{props:[],runs:[]}; }
@@ -54994,7 +55001,7 @@ function viewBuyerMatch(){
     <div class="mr-head">
       <h1>🎯 Buyer Match</h1>
       <span class="mr-chip ${a==='all'?'mr-chip-sent':(a==='admins'?'mr-chip-draft':'mr-chip-new')}" title="Who can see this tab">${a==='all'?'Open to all users':(a==='admins'?'Admins only':'Only you')}</span>
-      ${cfg.paused?'<span class="mr-chip mr-chip-warn" role="status">⏸ Sending paused</span>':'<span class="mr-chip mr-chip-sent">● Auto-send on</span>'}
+      ${cfg.paused?'<span class="mr-chip mr-chip-warn" role="status">⏸ Sending paused</span>':'<span class="mr-chip mr-chip-sent">✅ Your approval required</span>'}
       <div class="mr-toolbar">
         <button type="button" class="mr-btn" onclick="window._bmRefresh(this)" aria-label="Refresh">↻ Refresh</button>
         ${ed?`<label class="mr-btn" title="One MapWise parcel search per new listing (about $0.06–$0.18): outlined aerial, property-appraiser zoning and parcel ID when the parcel is a sure match" style="cursor:pointer"><input type="checkbox" class="mr-check" ${cfg.mapwise!==false?'checked':''} onchange="window._bmToggleMapwise(this)"> 🗺 MapWise</label>`:''}
@@ -55002,24 +55009,64 @@ function viewBuyerMatch(){
         ${_bmIsOwner()?`<button type="button" class="mr-btn" onclick="window._bmAccess()">⚙ Access</button>`:''}
       </div>
     </div>
-    <p class="mr-note" style="margin:-.4rem 0 .8rem">Every morning after the CoStar Daily Alert lands, Terra reads the new for-sale land listings, looks up zoning, flood zone, demographics, traffic counts and school grades, has AI decide which buyer types fit, and e-mails each matching buyer from <b>${_bmEsc((cfg.sender&&cfg.sender.email)||'ryan@thedirtdog.com')}</b> — one e-mail per buyer per property, never twice. Each e-mail says ELC is not the listing broker and offers to represent them.</p>
+    <p class="mr-note" style="margin:-.4rem 0 .8rem">Every morning after the CoStar Daily Alert lands, Terra reads the new for-sale land listings, looks up zoning, flood zone, demographics, traffic counts and school grades, has AI decide which buyer types fit, and lines up one e-mail per matching buyer for <b>your approval</b>. Nothing goes out until you approve it; approved e-mails are sent from <b>${_bmEsc((cfg.sender&&cfg.sender.email)||'ryan@thedirtdog.com')}</b> within about 15 minutes, never twice. Each e-mail says ELC is not the listing broker and offers to represent them.</p>
     <div class="bm-stats">
       <div class="mr-card bm-stat"><div class="mr-lbl">Last run</div><div class="bm-big">${_bmEsc(last)}</div>${log.lastError?`<div class="bm-err" role="alert">⚠ ${_bmEsc(log.lastError)}</div>`:''}</div>
-      <div class="mr-card bm-stat"><div class="mr-lbl">Sent today</div><div class="bm-big">${sentToday}</div></div>
+      <div class="mr-card bm-stat ${_bmPending().length?'bm-stat-hot':''}"><div class="mr-lbl">Waiting for you</div><div class="bm-big">${_bmPending().length}</div><div class="mr-muted">${sentToday} sent today</div></div>
       <div class="mr-card bm-stat"><div class="mr-lbl">Buyer lists</div><div class="bm-big">${cfg.lists.length}</div><div class="mr-muted">${people} buyer${people===1?'':'s'}</div></div>
       <div class="mr-card bm-stat"><div class="mr-lbl">Listings tracked</div><div class="bm-big">${(log.props||[]).length}</div><div class="mr-muted">last 60</div></div>
     </div>
     <div class="bm-tabs" role="tablist">
+      <button type="button" role="tab" aria-selected="${st.sub==='approve'}" class="bm-tab ${st.sub==='approve'?'on':''}" onclick="window._bmSub('approve')">✅ Approvals${_bmPending().length?` <span class="bm-count">${_bmPending().length}</span>`:''}</button>
       <button type="button" role="tab" aria-selected="${st.sub==='lists'}" class="bm-tab ${st.sub==='lists'?'on':''}" onclick="window._bmSub('lists')">📋 Buyer lists</button>
       <button type="button" role="tab" aria-selected="${st.sub==='props'}" class="bm-tab ${st.sub==='props'?'on':''}" onclick="window._bmSub('props')">🏷 Properties sent</button>
     </div>
     <div id="bm-body"></div>
   </div>`);
-  if(st.sub==='props') _bmRenderProps(); else _bmRenderLists();
+  if(st.sub==='props') _bmRenderProps(); else if(st.sub==='lists') _bmRenderLists(); else _bmRenderApprovals();
 }
 window.viewBuyerMatch=viewBuyerMatch;
 window._bmSub=function(s){ _bmState().sub=s; viewBuyerMatch(); };
 window._bmRefresh=async function(btn){ const done=elcBusy(btn,'Refreshing…'); try{ await _bmLoad(true); viewBuyerMatch(); } finally{ done(); } };
+
+/* ---------- approvals (BMAPPROVE-20261117) ---------- */
+function _bmPending(){ const st=_bmState(); return (st.queue||[]).filter(q=>!(st.dec||{})[q.id]); }
+function _bmRenderApprovals(){
+  const box=document.getElementById('bm-body'); if(!box) return; const st=_bmState(); const ed=_bmCanEdit(); const q=st.queue||[]; const dec=st.dec||{};
+  if(!q.length){ box.innerHTML=`<div class="mr-card" style="padding:1.4rem"><p style="margin:0;font-weight:700;color:var(--text-1)">Nothing waiting for approval.</p><p class="mr-note" style="margin:.35rem 0 0">New matches show up here after the morning CoStar alert. You’ll also get one e-mail a day when something is waiting.</p></div>`; return; }
+  const props=new Map(((st.log||{}).props||[]).map(p=>[p.id,p]));
+  const groups=new Map(); q.forEach(it=>{ (groups.get(it.costarId)||groups.set(it.costarId,[]).get(it.costarId)).push(it); });
+  const pend=_bmPending().length;
+  box.innerHTML=`${ed&&pend?`<div class="mr-row" style="margin-bottom:.8rem"><span class="mr-note">${pend} e-mail${pend===1?'':'s'} waiting · approved e-mails go out within about 15 minutes · unanswered ones drop off after 7 days</span><button type="button" class="mr-btn mr-btn-teal" style="margin-left:auto" onclick="window._bmDecideAll('approve',this)">✓ Approve all ${pend}</button></div>`:''}
+  ${[...groups.entries()].map(([cid,items])=>{ const p=props.get(cid)||{}; const it0=items[0]; const open=items.filter(i=>!dec[i.id]).length;
+    return `<div class="mr-card bm-ap">
+      <div class="bm-ap-h">${p.photo?`<img class="mr-thumb bm-ap-img" src="${_bmEsc(p.photo)}" alt="">`:''}
+        <div style="flex:1;min-width:0"><div class="bm-list-name">${_bmEsc(it0.title)}</div>
+          <div class="mr-muted">${_bmEsc([it0.city,it0.county?it0.county+' Co.':'',it0.acres?it0.acres+' ac':'',it0.priceText,p.zoning?'Zoning '+p.zoning:''].filter(Boolean).join(' · '))}</div>
+          <div class="bm-uses">${(p.uses||[]).map(u=>`<span class="bm-use" title="${_bmEsc(u.why||'')}">${_bmEsc(_bmUseLabel(u.key))}</span>`).join('')||it0.uses.map(k=>`<span class="bm-use">${_bmEsc(_bmUseLabel(k))}</span>`).join('')}</div></div>
+        <div class="bm-ap-act"><button type="button" class="mr-btn mr-btn-sm" onclick="window._bmPreview('${_bmEsc(cid)}',this)">👁 Preview e-mail</button>${p.link?`<a class="mr-btn mr-btn-sm" href="${_bmEsc(p.link)}" target="_blank" rel="noopener">CoStar ↗</a>`:''}
+          ${ed&&open?`<button type="button" class="mr-btn mr-btn-sm mr-btn-teal" onclick="window._bmDecideProp('${_bmEsc(cid)}','approve',this)">✓ Approve all ${open}</button><button type="button" class="mr-btn mr-btn-sm" onclick="window._bmDecideProp('${_bmEsc(cid)}','deny',this)">✕ Deny all</button>`:''}</div></div>
+      <div class="bm-ap-rows">${items.map(it=>{ const d=dec[it.id];
+        return `<div class="bm-ap-row ${d?'bm-ap-'+d.d:''}"><div style="flex:1;min-width:0"><b>${_bmEsc(it.name)}</b>${it.company?` <span class="bm-co">· ${_bmEsc(it.company)}</span>`:''}<div class="mr-muted">${_bmEsc(it.email)} · ${_bmEsc(it.uses.map(_bmUseLabel).join(', '))}</div></div>
+          ${d?`<span class="bm-ap-state" role="status">${d.d==='approve'?'✓ Approved — goes out within ~15 min':'✕ Denied'}</span>${ed?`<button type="button" class="mr-btn mr-btn-sm" onclick="window._bmUndecide(['${_bmEsc(it.id)}'],this)">Undo</button>`:''}`
+            :(ed?`<button type="button" class="mr-btn mr-btn-sm mr-btn-teal" aria-label="Approve e-mail to ${_bmEsc(it.name)}" onclick="window._bmDecide(['${_bmEsc(it.id)}'],'approve',this)">✓ Approve</button><button type="button" class="mr-btn mr-btn-sm" aria-label="Deny e-mail to ${_bmEsc(it.name)}" onclick="window._bmDecide(['${_bmEsc(it.id)}'],'deny',this)">✕ Deny</button>`:'<span class="mr-muted">Waiting</span>')}</div>`; }).join('')}</div></div>`; }).join('')}`;
+}
+async function _bmWriteDecisions(ids, d){
+  const st=_bmState(); const {doc,setDoc,deleteField}=_fbFns; const m={};
+  ids.forEach(id=>{ m[id]= d ? {d, at:Date.now(), by:currentUser.email} : deleteField(); });
+  await setDoc(doc(_fbDb,'eos','buyerMatchApprovals'), {decisions:m}, {merge:true});
+  st.dec=st.dec||{}; ids.forEach(id=>{ if(d) st.dec[id]={d,at:Date.now(),by:currentUser.email}; else delete st.dec[id]; });
+}
+window._bmDecide=async function(ids,d,btn){ const done=elcBusy(btn,'…'); try{ await _bmWriteDecisions(ids,d); viewBuyerMatch(); showToast(d==='approve'?(ids.length===1?'Approved — it goes out within about 15 minutes':ids.length+' e-mails approved'):(ids.length===1?'Denied — it won’t be sent':ids.length+' e-mails denied'),'success'); }catch(e){ showToast('Could not save: '+e.message,'error'); } finally{ done(); } };
+window._bmUndecide=async function(ids,btn){ const done=elcBusy(btn,'…'); try{ await _bmWriteDecisions(ids,null); viewBuyerMatch(); showToast('Back to waiting','info'); }catch(e){ showToast('Could not undo: '+e.message,'error'); } finally{ done(); } };
+window._bmDecideProp=async function(cid,d,btn){ const ids=_bmPending().filter(q=>q.costarId===cid).map(q=>q.id); if(!ids.length) return;
+  if(d==='deny' && !(await elcConfirm('Deny all '+ids.length+' e-mail(s) for this property?\n\nNone of these buyers will get it.',{title:'Deny all',okLabel:'Deny all',danger:true}))) return;
+  await window._bmDecide(ids,d,btn); showUndoToast((d==='approve'?'Approved ':'Denied ')+ids.length+' e-mail(s)', ()=>window._bmUndecide(ids,null)); };
+window._bmDecideAll=async function(d,btn){ const ids=_bmPending().map(q=>q.id); if(!ids.length) return;
+  if(!(await elcConfirm('Approve all '+ids.length+' waiting e-mails?\n\nEach buyer gets the property e-mail from your address within about 15 minutes.',{title:'Approve all',okLabel:'Approve all'}))) return;
+  await window._bmDecide(ids,d,btn); showUndoToast('Approved '+ids.length+' e-mails', ()=>window._bmUndecide(ids,null)); };
+/* #buyer-match deep link (from the daily "waiting for your approval" e-mail) */
+window._bmBoot=function(){ if(!currentUser || !/buyer-match/.test(location.hash||'') || !_bmNavVisible(true,false)) return; try{ history.replaceState(null,'',location.pathname+location.search); }catch(_){} _bmState().sub='approve'; currentView='buyerMatch'; renderShell(); renderCurrentView(); };
 
 /* ---------- lists ---------- */
 function _bmContact(id){ return (typeof allContacts!=='undefined'?allContacts:[]).find(c=>c.id===id); }
@@ -55118,9 +55165,9 @@ window._bmPreview=async function(id,btn){
 window._bmToggleMapwise=async function(cb){ const on=cb.checked; try{ await _bmSave({mapwise:on}, on?'MapWise parcel lookup on — one search per new listing':'MapWise off — plain aerial + county-map zoning'); }catch(e){ cb.checked=!on; showToast('Could not change: '+e.message,'error'); } };
 window._bmTogglePause=async function(btn){
   const st=_bmState(); const next=!st.cfg.paused;
-  if(next===false && !(await elcConfirm('Resume automatic sending?\n\nListings held while paused that are still under 4 days old will go out on the next run.',{title:'Resume sending',okLabel:'Resume'}))) return;
+  if(next===false && !(await elcConfirm('Resume sending?\n\nE-mails you approved while paused go out on the next run (within about 15 minutes).',{title:'Resume sending',okLabel:'Resume'}))) return;
   const done=elcBusy(btn,next?'Pausing…':'Resuming…');
-  try{ await _bmSave({paused:next}, next?'Sending paused — nothing goes out until you resume':'Sending resumed'); viewBuyerMatch(); }
+  try{ await _bmSave({paused:next}, next?'Sending paused — approved e-mails wait until you resume':'Sending resumed'); viewBuyerMatch(); }
   catch(e){ showToast('Could not change: '+e.message,'error'); } finally{ done(); }
 };
 window._bmAccess=function(){
@@ -55175,6 +55222,15 @@ function _bmInjectStyles(){
   .bm-usebox{display:flex;gap:.45rem;align-items:center;font-size:.82rem;color:var(--text-1);min-height:36px;cursor:pointer}
   .bm-filters{display:flex;flex-wrap:wrap;gap:.6rem}.bm-filters label{display:flex;flex-direction:column;gap:.2rem;font-size:.75rem;color:var(--text-2);flex:1 1 120px}
   .bm-parcel{font-size:.76rem;font-weight:700;color:#155e63;margin-top:.15rem}html.dark .bm-parcel{color:#5eead4}
+  .bm-stat-hot{border-color:var(--brand-red)}.bm-count{display:inline-block;min-width:20px;padding:0 .4rem;border-radius:999px;background:var(--brand-red);color:#fff;font-size:.7rem;margin-left:.25rem}
+  .bm-ap{padding:.85rem 1rem;margin-bottom:.8rem}.bm-ap-h{display:flex;gap:.8rem;align-items:flex-start;flex-wrap:wrap}.bm-ap-img{width:120px;height:72px}
+  .bm-ap-act{display:flex;gap:.35rem;flex-wrap:wrap;justify-content:flex-end}
+  .bm-ap-rows{margin-top:.7rem;border-top:1px solid var(--border)}
+  .bm-ap-row{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;padding:.5rem .2rem;border-bottom:1px solid var(--border);color:var(--text-1);font-size:.85rem}
+  .bm-ap-approve{background:rgba(22,163,74,.07)}.bm-ap-deny{background:rgba(220,38,38,.06)}
+  .bm-ap-state{font-size:.78rem;font-weight:700}.bm-ap-approve .bm-ap-state{color:#166534}.bm-ap-deny .bm-ap-state{color:#991b1b}
+  html.dark .bm-ap-approve .bm-ap-state{color:#86efac}html.dark .bm-ap-deny .bm-ap-state{color:#fca5a5}
+  @media(max-width:767px){.bm-ap-row>div:first-child{flex:1 1 100% !important}.bm-ap-act{justify-content:flex-start}.bm-ap-state{flex:1}}
   .bm-table td{vertical-align:top}.bm-det{margin-top:.25rem;font-size:.76rem;color:var(--text-2)}.bm-det summary{cursor:pointer;font-weight:700;color:var(--text-1);min-height:28px}
   @media(max-width:767px){.bm-stats{grid-template-columns:1fr 1fr}.bm-lists{grid-template-columns:1fr}.bm-table thead{display:none}.bm-table tr{display:grid;grid-template-columns:96px 1fr;gap:.2rem .6rem;padding:.6rem;border-bottom:1px solid var(--border)}.bm-table td{border:0;padding:.1rem}.bm-table td:nth-child(n+3){grid-column:1/-1}.bm-filters input{font-size:16px}}
   `; document.head.appendChild(s);
@@ -55223,6 +55279,17 @@ function _bmInjectStyles(){
        (most of the old "Other" listings) and the row is flagged "Section guessed — pick one" so it can be moved.
      • A listing with no photo on the card is left out of the PDF and its advisor gets a one-time task (per quarter) to add one.
      • The closing page fills the space after the advisor directory with both offices, email, phone and website.
+   LLRMAP-20261117 (Ryan): "add a map to the land listings with pins that if you click on they take you to info on that parcel —
+   pull from the address or lat/long of each parcel."
+     • LLRMAPZOOM-20261117: the map is zoomed to the corridor the listings are on (exact fit, box shaped to the pins).
+     • 🗺️ Listings Map page right after the cover (switch: "Listings map page", on by default; not in the Eshenbaugh Report,
+       which skips the cover). Esri street basemap fitted to every pin; numbered pins — red AVAILABLE, teal UNDER CONTRACT;
+       clicking a pin jumps to that listing's card page. The same number sits on the card photo. Index of every pin under the
+       map (also clickable, with its page). Cover gets a "Listings Map ›" link.
+     • Where a pin comes from: a lat/long pasted on this tab (llrLatLng — "27.95, -82.45", "27.95° N, 82.45° W" or a Google Maps
+       link) → else the card's address, geocoded once and saved on the card (geoLat/geoLng — the same cache the 🗺️ Deal Map
+       uses: Census → OpenStreetMap → city → county). City-level hits print but are flagged; county-level hits don't print.
+     • Sold listings (Quarter Sales) are not pinned.
    LLRPHOTOTASK-20261117 (Ryan): the 📸 photo tasks can be reassigned to anyone, or ticked "Keep this property off the Land
    Listings Report" (sets llrExclude, closes the task) — see the 📸 PHOTO TASKS block below.
    LLRMONTHLY-20261117 (Ryan): the approved report is emailed on the 5th of every month to the "Eshenbaugh Report Newsletter
@@ -55293,6 +55360,7 @@ function _llrState(){
   if(st.includeUc==null) st.includeUc=true;
   if(st.includeSold==null) st.includeSold=false;
   if(st.includeDir==null) st.includeDir=true;
+  if(st.includeMap==null) st.includeMap=true;   // LLRMAP-20261117
   if(st.advisor==null) st.advisor='';   // '' all advisors | advisor uid — LLRADV-20261117
   if(st.office==null) st.office='';   // '' company-wide | 'Tampa' | 'Orlando' — LLR2-20261116
   if(!st.land) st.land='all';        // 'all' | 'residential' | 'commercial'
@@ -55468,6 +55536,7 @@ function _llrCollect(){
     if(!_llrAcres(d) && !String(d.llrTitle||'').trim()) r.issues.push('No acreage');
     if(!_llrAdvisors(d).length) r.issues.push('No advisor');
     if(r.guessed) r.issues.push('Section guessed — pick one');   // LLR3-20261116
+    if(st.includeMap!==false && !r.sold){ const pn=_llrPinOf(d); if(!pn) r.issues.push('No map pin yet'); else if(pn.precision==='county') r.issues.push('Map pin: county only — paste lat/long'); else if(pn.precision==='city') r.issues.push('Map pin approximate (city)'); }   // LLRMAP-20261117
   });
   const order=LLR_SECTIONS.map(x=>x[0]);
   rows.sort((a,b)=>(order.indexOf(a.sec)-order.indexOf(b.sec)) || (a.sold?(a.closeTs-b.closeTs):0) || _llrTitle(a.d).localeCompare(_llrTitle(b.d),undefined,{numeric:true}));
@@ -55526,7 +55595,7 @@ function _llrRowHtml(r, canEdit){
       <input class="mr-input" style="margin-top:.3rem" ${dis} aria-label="Address line" placeholder="${_mrEsc(_llrStreet(d)||'Address line')}" value="${_mrEsc(d.llrAddress||'')}" onchange="window._llrSet('${id}','llrAddress',this.value)">
       <div class="llr-sub">${_mrEsc(_llrAdvisorLabel(d)||'No advisor on card')} · ${_mrEsc(r.stage||'')}</div>
       <button type="button" class="mr-btn mr-btn-sm" style="min-height:32px;margin-top:.3rem" onclick="window._llrOpenDeal('${id}')">Open card ↗</button></td>
-    <td style="min-width:100px;max-width:150px">${_mrEsc(_llrZoning(d)||'—')}<div class="llr-sub">${_mrEsc(d.landType||'Land Type blank')}</div></td>
+    <td style="min-width:120px;max-width:170px">${_mrEsc(_llrZoning(d)||'—')}<div class="llr-sub">${_mrEsc(d.landType||'Land Type blank')}</div>${r.sold?'':_llrPinCell(d,dis)}</td>
     <td style="min-width:170px"><div class="llr-price">${_mrEsc(price.text)}</div>${r.sold?'':`<input class="mr-input" style="margin-top:.3rem" ${dis} aria-label="Price on the report" placeholder="Override (e.g. \$1,950,000)" value="${_mrEsc(d.llrPriceText||'')}" onchange="window._llrSet('${id}','llrPriceText',this.value)">`}<div class="llr-sub">from ${_mrEsc(price.src)}</div></td>
     <td style="min-width:150px"><select class="mr-select${r.guessed?' llr-guess':''}" ${dis||(r.uc||r.sold?'disabled':'')} aria-label="Report section" onchange="window._llrSet('${id}','llrSection',this.value)">${secOpts}</select></td>
     <td style="min-width:190px"><input class="mr-input" ${dis} aria-label="Property website link" placeholder="${_mrEsc(auto||'Paste the property website URL')}" value="${_mrEsc(d.llrUrl||'')}" onchange="window._llrSet('${id}','llrUrl',this.value)">
@@ -55567,6 +55636,7 @@ function viewLandListingReport(){
       <label><input type="checkbox" class="mr-check" ${st.includeUc?'checked':''} onchange="window._llrState().includeUc=this.checked;window._llrRenderRows()"> Under-contract listings</label>
       <label><input type="checkbox" class="mr-check" ${st.includeSold?'checked':''} onchange="window._llrState().includeSold=this.checked;window._llrRenderRows()"> ${_mrEsc(_llrSectionTitle('sold'))} (closed in the quarter)</label>
       <label><input type="checkbox" class="mr-check" ${st.includeDir?'checked':''} onchange="window._llrState().includeDir=this.checked"> Advisor directory page</label>
+      <label><input type="checkbox" class="mr-check" ${st.includeMap!==false?'checked':''} onchange="window._llrState().includeMap=this.checked;window._llrRenderRows()"> Listings map page</label>
     </div></div>
     <div class="mr-row" style="margin-bottom:.6rem">
       <input class="mr-input" style="flex:1 1 240px;max-width:360px" placeholder="Search listings…" aria-label="Search listings" value="${_mrEsc(st.search)}" oninput="window._llrState().search=this.value;clearTimeout(window._llrSrchT);window._llrSrchT=setTimeout(window._llrRenderRows,200)">
@@ -55576,6 +55646,7 @@ function viewLandListingReport(){
   </div>`);
   window._llrRenderRows();
   try{ _llrmWatch(); _llrmRenderPanel(); }catch(e){ console.warn('[llrm] panel',e); }   // LLRMONTHLY-20261117
+  try{ _llrGeoKick(); }catch(e){ console.warn('[llrmap] geo',e); }   // LLRMAP-20261117
 }
 window._llrRenderRows=function(){
   const tb=document.getElementById('llr-rows'); if(!tb) return;
@@ -55813,6 +55884,8 @@ async function _llrBuild(progress, opts){
   const fit=(s,w,size,minSize)=>{ s=String(s||''); let z=size; while(z>minSize && doc.getStringUnitWidth(s)*z>w){ z-=0.25; doc.setFontSize(z); } doc.setFontSize(z); if(doc.getStringUnitWidth(s)*z>w){ while(s.length>1 && doc.getStringUnitWidth(s+'…')*z>w) s=s.slice(0,-1); s=s.trimEnd()+'…'; } return s; };
   const text=(s,x,y,o)=>{ o=o||{}; F(o.w||'r'); doc.setFontSize(o.size||10); col(o.color||LLR_INK); const t=o.maxW?fit(s,o.maxW,o.size||10,o.min||7):String(s||''); doc.text(t,x,y,o.align?{align:o.align}:undefined); return t; };
   // images (6 at a time)
+  const mapOn=st.includeMap!==false && !opts.skipCover && !opts.doc;   // LLRMAP-20261117 — only the stand-alone report gets the map
+  if(mapOn){ try{ await _llrResolvePins(rows); }catch(e){ console.warn('[llrmap] pins',e); } }
   const imgs={}; const all=rows.map(r=>({id:r.d.id,url:_llrPhoto(r.d)})).filter(x=>x.url);
   let done=0; const ASPECT=164/126;
   const queue=all.slice(); const worker=async()=>{ while(queue.length){ const it=queue.shift(); try{ imgs[it.id]=await _mrImg(it.url,{cover:ASPECT,maxPx:760,q:0.8}); }catch(e){ imgs[it.id]=null; } done++; progress&&progress(done/Math.max(1,all.length)*0.9); } };
@@ -55837,7 +55910,12 @@ async function _llrBuild(progress, opts){
   const pill=opts.pill?(t)=>opts.pill(t):(t)=>{ F('x'); doc.setFontSize(19); const w=Math.max(150,doc.getStringUnitWidth(t)*19+30); fill(LLR_TEAL); doc.rect(45,108,w,34,'F'); col([255,255,255]); doc.text(t,45+15,131); };
   /* cover — LLR3-20261116: large logo, title, jump-to-section buttons, both offices / phone / email / website */
   const plan=_llrPagePlan(rows);
-  const firstPage={}; const p0=(opts.pageStart||0)+(opts.skipCover?1:2);   // page number of the first listing page (cover = page 1)
+  // LLRMAP-20261117 — pins numbered in printed order; the map page(s) sit between the cover and the listings
+  const pinList=[]; if(mapOn){ plan.forEach(pg=>pg.rows.forEach(r=>{ if(r.sold) return; const pn=_llrPinOf(r.d); if(pn && pn.precision!=='county') pinList.push({r, lat:pn.lat, lng:pn.lng, approx:pn.precision==='city', no:pinList.length+1}); })); }
+  const MAPL=pinList.length?_llrMapLayout(pinList.length):null; const mapPages=MAPL?MAPL.pages:0; const mapPage=(opts.pageStart||0)+2;
+  const pinNo={}; pinList.forEach(p=>{ pinNo[p.r.d.id]=p.no; });
+  const firstPage={}; const p0=(opts.pageStart||0)+(opts.skipCover?1:2)+mapPages;   // page number of the first listing page (cover = page 1, then the map)
+  const rowPage={}; plan.forEach((pg,i)=>pg.rows.forEach(r=>{ if(rowPage[r.d.id]==null) rowPage[r.d.id]=i+p0; }));
   plan.forEach((pg,i)=>{ if(firstPage[pg.sec]==null) firstPage[pg.sec]=i+p0; });
   const dirPage=p0+plan.length;
   const bars=()=>{ fill(LLR_TEAL); doc.rect(0,755,W,9,'F'); for(let i=0;i<28;i++){ const g=110+Math.round((i%5)*7); doc.setFillColor(g,g-6,g-14); doc.rect(0,764+i,W,1.05,'F'); } };
@@ -55880,6 +55958,7 @@ async function _llrBuild(progress, opts){
   const rowsH=Math.ceil(cats.length/perRow)*(th+gap);
   const extra=[]; if(firstPage.featured) extra.push(['Featured Properties',firstPage.featured]); if(firstPage.uc) extra.push(['Under Contract',firstPage.uc]); if(firstPage.sold) extra.push([_llrSectionTitle('sold'),firstPage.sold]);
   if(st.includeDir && (typeof _bioAdvisorList==='function') && _bioAdvisorList().length) extra.push(['Our Advisors',dirPage]);
+  if(mapPages) extra.unshift(['Listings Map',mapPage]);   // LLRMAP-20261117
   if(extra.length){
     F('s'); doc.setFontSize(10); const sep='     '; const full=extra.map(e=>e[0]+' ›').join(sep); let cx=(W-doc.getStringUnitWidth(full)*10)/2; const ly=424+rowsH+18;
     extra.forEach((e,i)=>{ const t=e[0]+' ›'; const w=doc.getStringUnitWidth(t)*10; col(LLR_TEAL_DK); doc.text(t,cx,ly); doc.setDrawColor(LLR_TEAL_DK[0],LLR_TEAL_DK[1],LLR_TEAL_DK[2]); doc.setLineWidth(0.5); doc.line(cx,ly+2,cx+w,ly+2); doc.link(cx,ly-9,w,12,{pageNumber:e[1]}); cx+=w+doc.getStringUnitWidth(sep)*10; });
@@ -55900,6 +55979,7 @@ async function _llrBuild(progress, opts){
     text('Eshenbaugh Land Company  ·  REALTOR®',x,729,{size:8,color:[170,170,170],maxW:colW-6,min:6}); }
   bars();
   }
+  if(mapPages){ await _llrDrawMap({doc,F,text,fill,col,W,newPage,pill,footer,pins:pinList,rowPage,L:MAPL,progress}); }   // LLRMAP-20261117
   /* listing pages */
   const X=[45,225,405], CW=164, IH=126, RY=[158,426];
   const FX={doc,F,text,fill,col,W,H,st,logo}; const FILLERS=['stats','quote','cta','art']; let fillN=0, wideN=0;
@@ -55915,6 +55995,7 @@ async function _llrBuild(progress, opts){
       if(im){ doc.addImage(im.data,im.fmt,x,y+18,CW,IH); }
       else { doc.setFillColor(236,238,240); doc.rect(x,y+18,CW,IH,'F'); text('Aerial coming soon',x+CW/2,y+18+IH/2+3,{size:9,color:[140,140,140],align:'center'}); }
       if(link) doc.link(x,y+18,CW,IH,{url:link});
+      if(pinNo[d.id]){ const no=pinNo[d.id]; fill(r.uc?LLR_TEAL_DK:LLR_RED); doc.setDrawColor(255,255,255); doc.setLineWidth(1.4); doc.circle(x+13,y+31,9,'FD'); text(String(no),x+13,y+34.2,{size:no>99?6.5:8.5,w:'x',color:[255,255,255],align:'center'}); if(mapPage) doc.link(x+4,y+22,18,18,{pageNumber:mapPage}); }   // LLRMAP-20261117 — matches the map pin; tap → back to the map
       // lines
       let ty=y+18+IH+13; const lh=12.6;
       text(_llrTitle(d),x+2,ty,{size:10,w:'s',maxW:CW-4,min:7.5}); if(link) doc.link(x,ty-9,CW,11,{url:link}); ty+=lh;
@@ -56169,6 +56250,146 @@ window._llrMonthlyBoot=function(attempt){
   setTimeout(()=>window._llrmBuild(null,true), 4000);
 };
 function _llrmCanSeeTab(){ return _llrmIsApprover(); }
+/* =======================================================
+   🗺️ LISTINGS MAP — marker LLRMAP-20261117 (see the LLRMAP note at the top of this block)
+   ======================================================= */
+const LLR_MAP_TILES='https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}';   // keyless, CORS-enabled
+// "27.95, -82.45" · "27.95° N, 82.45° W" · a Google Maps link (…/@27.95,-82.45,15z or ?q=27.95,-82.45)
+function _llrParseLatLng(v){
+  const s=String(v||'').trim(); if(!s) return null;
+  const m=s.match(/(-?\d{1,2}(?:\.\d+)?)\s*°?\s*([NS])?\s*[,\s]\s*(-?\d{1,3}(?:\.\d+)?)\s*°?\s*([EW])?/i); if(!m) return null;
+  let lat=+m[1], lng=+m[3]; if(/s/i.test(m[2]||'')) lat=-Math.abs(lat); if(/w/i.test(m[4]||'')) lng=-Math.abs(lng);
+  if(lng>0 && lat>20 && lat<40 && lng>70 && lng<95) lng=-lng;   // "27.95, 82.45" — Florida longitude typed without the minus
+  if(!(lat>=24 && lat<=36 && lng>=-90 && lng<=-75)) return null;   // Florida + neighbours only
+  return {lat, lng};
+}
+function _llrPinOf(d){
+  const o=_llrParseLatLng(d.llrLatLng); if(o) return {...o, src:'pasted', precision:'exact'};
+  const addr=String(d.propertyAddress||'').trim();
+  if(typeof d.geoLat==='number' && typeof d.geoLng==='number' && (d.geoAddr||'')===addr){ const p=d.geoPrecision||'exact'; return {lat:d.geoLat, lng:d.geoLng, src:p==='exact'?'address':p, precision:p}; }
+  return null;
+}
+async function _llrResolvePins(rows){
+  if(typeof _mapGeocode!=='function') return;
+  const todo=(rows||[]).filter(r=>!r.sold && !_llrPinOf(r.d) && (String(r.d.propertyAddress||'').trim()||String(r.d.county||'').trim()) && !r.d._llrGeoTried);
+  let i=0; const worker=async()=>{ while(i<todo.length){ const d=todo[i++].d; d._llrGeoTried=true; try{ await _mapGeocode(d); }catch(_){} } };
+  await Promise.all([worker(),worker(),worker()]);
+}
+// Tab open → quietly locate listings that have no pin yet, then refresh the rows
+window._llrGeoBusy=false;
+function _llrGeoKick(){
+  if(window._llrGeoBusy || _llrState().includeMap===false) return;
+  const rows=_llrCollect().filter(r=>!r.excluded && !r.sold && !_llrPinOf(r.d) && !r.d._llrGeoTried); if(!rows.length) return;
+  window._llrGeoBusy=true;
+  _llrResolvePins(rows).catch(()=>{}).finally(()=>{ window._llrGeoBusy=false; try{ window._llrRenderRows(); }catch(_){} });
+}
+function _llrPinCell(d, dis){
+  const pn=_llrPinOf(d); const id=_mrEsc(d.id);
+  const lab=!pn?'Not located yet':(pn.src==='pasted'?'📍 Pasted lat/long':(pn.precision==='exact'?'📍 From the address':(pn.precision==='city'?'📍 City only — approximate':'📍 County only — not on the map')));
+  const ll=pn?pn.lat.toFixed(5)+', '+pn.lng.toFixed(5):'';
+  return `<input class="mr-input" style="margin-top:.35rem" ${dis} aria-label="Map pin latitude, longitude" placeholder="${_mrEsc(ll||'lat, long or Google Maps link')}" value="${_mrEsc(d.llrLatLng||'')}" onchange="window._llrSetPin('${id}',this)">
+    <div class="llr-sub">${lab}${pn?` · <a href="https://www.google.com/maps?q=${pn.lat},${pn.lng}" target="_blank" rel="noopener" style="color:var(--brand-teal);font-weight:600">check ↗</a>`:''}</div>`;
+}
+window._llrSetPin=function(id, inp){
+  const v=String(inp.value||'').trim();
+  if(v && !_llrParseLatLng(v)){ showToast('Couldn’t read that — paste “27.95, -82.45” or a Google Maps link','warning',6000); inp.focus(); return; }
+  window._llrSet(id,'llrLatLng',v);
+};
+// Map + index geometry (letter page, points). Shared by the page plan (how many pages) and the drawing.
+const LLR_MAP_TOP=152, LLR_MAP_BOTTOM=738, LLR_IDX_RH=10.8, LLR_MAP_MINH=300, LLR_MAP_MAXH=430;
+function _llrMapLayout(n){
+  const rowsNeed=Math.ceil(n/3); const legend=18, gap=10;
+  const room=LLR_MAP_BOTTOM-LLR_MAP_TOP-legend-gap;
+  let mapH=Math.min(LLR_MAP_MAXH, room-rowsNeed*LLR_IDX_RH);
+  let rowsFirst=rowsNeed;
+  if(mapH<LLR_MAP_MINH){ mapH=LLR_MAP_MINH; rowsFirst=Math.max(0,Math.floor((room-mapH)/LLR_IDX_RH)); }
+  const rest=Math.max(0,n-rowsFirst*3); const rowsFull=Math.floor((LLR_MAP_BOTTOM-LLR_MAP_TOP)/LLR_IDX_RH);
+  return {mapH, rowsFirst, rowsFull, pages:1+(rest?Math.ceil(rest/(rowsFull*3)):0)};
+}
+// Stitch Esri tiles onto a canvas fitted to the pins → JPEG + a projector into page points.
+// LLRMAPZOOM-20261117 (Ryan: "zoom in to only the corridor that we actually have listings on"): tiles only come in whole zoom
+// steps, so the pins' bounding box is filled exactly by choosing the nearest step and setting the canvas's pixels-per-point
+// to match (1.06–2.1 px/pt → street labels stay 5–10 pt, never a statewide view with empty margins). pad = room for the pins.
+const LLR_MAP_PAD=16;
+function _llrMercSpan(pts){ const T=256; const wx=lng=>(lng+180)/360*T; const wy=lat=>{ const s=Math.sin(lat*Math.PI/180); return (0.5-Math.log((1+s)/(1-s))/(4*Math.PI))*T; };
+  const xs=pts.map(p=>wx(p.lng)), ys=pts.map(p=>wy(p.lat)); return {w:Math.max(...xs)-Math.min(...xs), h:Math.max(...ys)-Math.min(...ys), wx, wy}; }
+// Map box height that matches the corridor's shape (an east–west corridor gets a shorter box, not empty sea above and below)
+function _llrMapBoxH(pts, MW, maxH){ const sp=_llrMercSpan(pts); if(pts.length<2 || sp.w<=0) return maxH; const iw=MW-2*LLR_MAP_PAD; return Math.max(230, Math.min(maxH, Math.round(iw*sp.h/sp.w+2*LLR_MAP_PAD))); }
+async function _llrMapImage(pts, wPt, hPt){
+  const T=256, S0=1.6, pad=LLR_MAP_PAD; const iw=wPt-2*pad, ih=hPt-2*pad;
+  const sp=_llrMercSpan(pts);
+  let zi, S;
+  if(pts.length<2 || (sp.w<=1e-9 && sp.h<=1e-9)){ zi=13; S=S0; }
+  else {
+    const zf=Math.log2(Math.min(sp.w>0?iw*S0/sp.w:Infinity, sp.h>0?ih*S0/sp.h:Infinity));   // continuous zoom that fills the box at 1.6 px/pt
+    const d=zf-Math.floor(zf); zi=Math.max(5, Math.min(15, d>0.6?Math.ceil(zf):Math.floor(zf)));
+    const k=Math.pow(2,zi); S=Math.max(sp.w*k/iw, sp.h*k/ih);                              // px per pt so the pins exactly fill the box
+    S=Math.max(0.8, Math.min(3.2, S));
+  }
+  const k=Math.pow(2,zi); const Wp=Math.round(wPt*S), Hp=Math.round(hPt*S);
+  const wx=lng=>sp.wx(lng)*k, wy=lat=>sp.wy(lat)*k;
+  const la=pts.map(p=>p.lat), ln=pts.map(p=>p.lng);
+  const cx=(wx(Math.min(...ln))+wx(Math.max(...ln)))/2, cy=(wy(Math.min(...la))+wy(Math.max(...la)))/2, x0=cx-Wp/2, y0=cy-Hp/2;
+  const c=document.createElement('canvas'); c.width=Wp; c.height=Hp; const g=c.getContext('2d'); g.fillStyle='#e9eaec'; g.fillRect(0,0,Wp,Hp);
+  const jobs=[];
+  for(let tx=Math.floor(x0/T); tx<=Math.floor((x0+Wp)/T); tx++) for(let ty=Math.floor(y0/T); ty<=Math.floor((y0+Hp)/T); ty++){
+    if(ty<0||ty>=k) continue; const wxT=((tx%k)+k)%k;
+    jobs.push(new Promise(res=>{ const im=new Image(); im.crossOrigin='anonymous'; const to=setTimeout(()=>res(false),12000);
+      im.onload=()=>{ clearTimeout(to); try{ g.drawImage(im, tx*T-x0, ty*T-y0); }catch(_){} res(true); }; im.onerror=()=>{ clearTimeout(to); res(false); };
+      im.src=LLR_MAP_TILES.replace('{z}',zi).replace('{y}',ty).replace('{x}',wxT); }));
+  }
+  const got=await Promise.all(jobs);
+  let data=null; try{ data=c.toDataURL('image/jpeg',0.86); }catch(e){ console.warn('[llrmap] canvas',e); }
+  return {data, tiles:got.filter(Boolean).length, zoom:zi, pxPerPt:S, proj:(lat,lng)=>[(wx(lng)-x0)/S,(wy(lat)-y0)/S]};
+}
+// Pins that would overlap are nudged outward (spiral) and tied back to the true spot with a short leader line.
+function _llrPlacePins(pts, R){
+  const placed=[];
+  pts.forEach(p=>{ let x=p.x, y=p.y, k=0;
+    const clash=(a,b)=>placed.some(q=>(q.x-a)**2+(q.y-b)**2<(2*R+1.5)**2);
+    while(clash(x,y) && k<90){ k++; const ang=k*0.9, rad=R*0.9*Math.sqrt(k)*1.25; x=p.x+Math.cos(ang)*rad; y=p.y+Math.sin(ang)*rad; }
+    placed.push({...p, x, y, moved:k>0}); });
+  return placed;
+}
+async function _llrDrawMap(o){
+  const {doc,F,text,fill,col,W,newPage,pill,footer,pins,rowPage,L,progress}=o;
+  const MX=45, MY=LLR_MAP_TOP, MW=W-90, MH=_llrMapBoxH(pins, W-90, L.mapH), R=7.5;   // LLRMAPZOOM-20261117 — box shaped to the corridor
+  newPage(); pill('Listings Map');
+  const img=await _llrMapImage(pins, MW, MH);
+  if(img.data && img.tiles) doc.addImage(img.data,'JPEG',MX,MY,MW,MH);
+  else { fill([233,234,236]); doc.rect(MX,MY,MW,MH,'F'); text('Map tiles could not be loaded — the pins still show where each listing is.',MX+MW/2,MY+MH/2,{size:9,color:[120,120,120],align:'center'}); }
+  doc.setDrawColor(210,212,216); doc.setLineWidth(0.6); doc.rect(MX,MY,MW,MH,'S');
+  // pins (clip to the map box)
+  const pts=pins.map(p=>{ const [x,y]=img.proj(p.lat,p.lng); return {...p, x:MX+Math.max(R,Math.min(MW-R,x)), y:MY+Math.max(R,Math.min(MH-R,y))}; });
+  const placed=_llrPlacePins(pts.slice().sort((a,b)=>a.no-b.no), R);
+  placed.forEach(p=>{ if(p.moved){ const t=pts.find(q=>q.no===p.no); doc.setDrawColor(40,40,40); doc.setLineWidth(0.7); doc.line(t.x,t.y,p.x,p.y); doc.setFillColor(40,40,40); doc.circle(t.x,t.y,1.4,'F'); } });
+  placed.forEach(p=>{ const c=p.r.uc?LLR_TEAL_DK:LLR_RED; fill(c); doc.setDrawColor(255,255,255); doc.setLineWidth(1.3); doc.circle(p.x,p.y,R,'FD');
+    if(p.approx){ doc.setDrawColor(255,255,255); doc.setLineDashPattern([1.2,1.2],0); doc.circle(p.x,p.y,R+2.2,'S'); doc.setLineDashPattern([],0); }
+    text(String(p.no),p.x,p.y+2.9,{size:p.no>99?5.6:7.6,w:'x',color:[255,255,255],align:'center'});
+    const pg=rowPage[p.r.d.id]; if(pg) doc.link(p.x-R-1,p.y-R-1,2*R+2,2*R+2,{pageNumber:pg}); });
+  // legend + attribution
+  const ly=MY+MH+13; const dot=(x,c,t)=>{ fill(c); doc.circle(x,ly-3,4,'F'); text(t,x+7,ly,{size:8.5,w:'s',color:[70,70,70]}); return x+7+doc.getStringUnitWidth(t)*8.5+14; };
+  let lx=dot(MX+4,LLR_RED,'Available'); if(pins.some(p=>p.r.uc)) lx=dot(lx,LLR_TEAL_DK,'Under contract');
+  text('Click a pin or a listing below to jump to its page.',lx,ly,{size:8.5,color:[110,110,110]});
+  text('Basemap © Esri, HERE, Garmin, © OpenStreetMap contributors',MX+MW,ly,{size:6,color:[150,150,150],align:'right'});
+  // index
+  const colW=(MW-24)/3; let i=0;
+  const drawIdx=(top, rows)=>{ for(let rI=0; rI<rows && i<pins.length; rI++) for(let cI=0; cI<3 && i<pins.length; cI++){
+      // column-major so numbers read down each column
+    }
+    const slice=pins.slice(i, i+rows*3); const per=Math.ceil(slice.length/3);
+    slice.forEach((p,k)=>{ const cI=Math.floor(k/per), rI=k%per; const x=MX+cI*(colW+12), y=top+rI*LLR_IDX_RH+7;
+      fill(p.r.uc?LLR_TEAL_DK:LLR_RED); doc.circle(x+5,y-2.6,4.6,'F'); text(String(p.no),x+5,y-0.6,{size:p.no>99?4.6:5.8,w:'x',color:[255,255,255],align:'center'});
+      const pg=rowPage[p.r.d.id]; const pgT=pg?'p. '+pg:'';
+      text(_llrTitle(p.r.d)+(p.approx?' ~':''),x+13,y,{size:7.6,maxW:colW-13-(pgT?24:0),min:6});
+      if(pgT){ text(pgT,x+colW,y,{size:7,w:'s',color:[120,120,120],align:'right'}); doc.link(x,y-8,colW,LLR_IDX_RH,{pageNumber:pg}); } });
+    i+=slice.length; };
+  drawIdx(ly+10, L.rowsFirst); footer();
+  while(i<pins.length){ newPage(); pill('Listings Map — Index'); drawIdx(LLR_MAP_TOP, L.rowsFull); footer(); }
+  progress&&progress(0.92);
+}
+window._llrPinOf=_llrPinOf; window._llrParseLatLng=_llrParseLatLng;
+
 /* =======================================================
    📸 PHOTO TASKS — reassign or keep off the report — marker LLRPHOTOTASK-20261117
    Ryan (2026-11-17): "On the tasks assigned to users to add photos for land listings, they need to be able to assign the
