@@ -54560,6 +54560,13 @@ window._psIgnore=async function(i,btn){
        (most of the old "Other" listings) and the row is flagged "Section guessed — pick one" so it can be moved.
      • A listing with no photo on the card is left out of the PDF and its advisor gets a one-time task (per quarter) to add one.
      • The closing page fills the space after the advisor directory with both offices, email, phone and website.
+   LLRADV-20261117 (Ryan): "can we also run by advisor, so if I want to only see my listings, then I select myself at top and
+   run report of just my listings?"
+     • Advisor picker in the toolbar (All advisors / ⭐ My listings / each advisor). A listing is in an advisor run when that
+       advisor is the primary or a co-advisor on the card (same rule as the office run). Picking an advisor resets the office
+       run to Company-wide (and picking an office clears the advisor) so the two never combine into an empty report.
+     • The cover band, PDF title and file name carry the advisor's name; the advisor page shows only that advisor.
+     • The 📰 Eshenbaugh Report, which borrows this builder, always runs with no advisor filter.
    ======================================================= */
 const LLR_OWNER_EMAILS=['ryan@thedirtdog.com'];
 const LLR_RED=[238,45,36], LLR_TEAL=[84,196,203], LLR_TEAL_DK=[31,127,134], LLR_INK=[33,33,33], LLR_LINK=[52,170,190];
@@ -54616,6 +54623,7 @@ function _llrState(){
   if(st.includeUc==null) st.includeUc=true;
   if(st.includeSold==null) st.includeSold=false;
   if(st.includeDir==null) st.includeDir=true;
+  if(st.advisor==null) st.advisor='';   // '' all advisors | advisor uid — LLRADV-20261117
   if(st.office==null) st.office='';   // '' company-wide | 'Tampa' | 'Orlando' — LLR2-20261116
   if(!st.land) st.land='all';        // 'all' | 'residential' | 'commercial'
   if(st.search==null) st.search='';
@@ -54722,6 +54730,21 @@ function _llrPhoto(d){ return String(d.llrPhotoUrl||'').trim()||((_llrPhotoCandi
 
 /* ---------- run scope: office + land type (LLR2-20261116) ---------- */
 const LLR_OFFICES=[['','Company-wide'],['Tampa','Tampa advisors'],['Orlando','Orlando advisors']];
+// LLRADV-20261117 — run by advisor (primary or co-advisor on the card)
+function _llrMyUid(){ try{ return (currentUser&&currentUser.uid)||''; }catch(_){ return ''; } }
+function _llrAdvisorList(){ let L=[]; try{ L=(typeof _bioAdvisorList==='function'?_bioAdvisorList():[]).filter(b=>b&&b.uid&&b.name&&!String(b.name).includes('@')); }catch(_){ L=[]; }
+  const me=_llrMyUid(); if(me && !L.some(b=>b.uid===me)){ const p=(allProfiles&&allProfiles[me])||{}; L.unshift({uid:me, name:p.name||(currentUser&&currentUser.name)||'Me', email:(currentUser&&currentUser.email)||''}); }
+  return L; }
+function _llrAdvisorName(uid){ if(!uid) return ''; const b=_llrAdvisorList().find(x=>x.uid===uid); return (b&&b.name)||((allProfiles&&allProfiles[uid]&&allProfiles[uid].name)||''); }
+function _llrDealHasAdvisor(d, uid){ if(!uid) return true; if(typeof isDealAdvisor==='function' && isDealAdvisor(d,uid)) return true;
+  const b=_llrAdvisorList().find(x=>x.uid===uid); const em=String((b&&b.email)||'').toLowerCase(); if(!em) return false;
+  return String(d.advisorEmail||'').toLowerCase()===em || (d.coAdvisors||[]).some(c=>c&&String(c.email||'').toLowerCase()===em); }
+function _llrAdvisorSelect(st){ const me=_llrMyUid(); const L=_llrAdvisorList();
+  const o=[`<option value="" ${!st.advisor?'selected':''}>All advisors</option>`];
+  if(me) o.push(`<option value="${_mrEsc(me)}" ${st.advisor===me?'selected':''}>⭐ My listings</option>`);
+  L.filter(b=>b.uid!==me).forEach(b=>o.push(`<option value="${_mrEsc(b.uid)}" ${st.advisor===b.uid?'selected':''}>${_mrEsc(b.name)}</option>`));
+  if(st.advisor && st.advisor!==me && !L.some(b=>b.uid===st.advisor)) o.push(`<option value="${_mrEsc(st.advisor)}" selected>${_mrEsc(_llrAdvisorName(st.advisor)||'Advisor')}</option>`);
+  return `<select class="mr-select" aria-label="Which advisor's listings" title="Run the report for one advisor's listings" onchange="const s=window._llrState();s.advisor=this.value;if(this.value)s.office='';viewLandListingReport()">${o.join('')}</select>`; }
 const LLR_LANDS=[['all','All land'],['residential','Residential land'],['commercial','Commercial land']];
 const LLR_LAND_CATS={residential:['residential'], commercial:['commercial','industrial']};
 function _llrOfficeOf(uid, email){
@@ -54735,12 +54758,13 @@ function _llrDealOffices(d){ const s=new Set(); if(d.advisorUid||d.advisorEmail)
 function _llrLandCat(d){ const o=String(d.llrSection||''); if(LLR_LAND_KEYS.includes(o)) return o; return _llrAutoCat(d).cat; }   // LLR3 — never blank
 function _llrInScope(d){
   const st=_llrState();
+  if(st.advisor && !_llrDealHasAdvisor(d,st.advisor)) return false;   // LLRADV-20261117
   if(st.office && !_llrDealOffices(d).has(st.office)) return false;
   if(st.land && st.land!=='all' && !(LLR_LAND_CATS[st.land]||[]).includes(_llrLandCat(d))) return false;
   return true;
 }
-function _llrScopeLabel(){ const st=_llrState(); const p=[]; if(st.office) p.push(st.office+' Office'); if(st.land&&st.land!=='all') p.push(st.land==='residential'?'Residential Land':'Commercial Land'); return p.join(' · '); }
-function _llrScopeFile(){ const st=_llrState(); return (st.office?'_'+st.office:'')+(st.land&&st.land!=='all'?'_'+(st.land==='residential'?'Residential':'Commercial'):''); }
+function _llrScopeLabel(){ const st=_llrState(); const p=[]; if(st.advisor) p.push(_llrAdvisorName(st.advisor)||'Advisor'); if(st.office) p.push(st.office+' Office'); if(st.land&&st.land!=='all') p.push(st.land==='residential'?'Residential Land':'Commercial Land'); return p.join(' · '); }
+function _llrScopeFile(){ const st=_llrState(); return (st.advisor?'_'+String(_llrAdvisorName(st.advisor)||'Advisor').replace(/[^A-Za-z0-9]+/g,'_').replace(/^_|_$/g,''):'')+(st.office?'_'+st.office:'')+(st.land&&st.land!=='all'?'_'+(st.land==='residential'?'Residential':'Commercial'):''); }
 
 /* ---------- the list ---------- */
 function _llrCollect(){
@@ -54856,7 +54880,8 @@ function viewLandListingReport(){
       <div class="mr-toolbar">
         <label class="sr-only" for="llr-q">Quarter</label>
         <select id="llr-q" class="mr-select" onchange="window._llrState().q=this.value;viewLandListingReport()">${qOpts}</select>
-        <select class="mr-select" aria-label="Which advisors' listings" onchange="window._llrState().office=this.value;viewLandListingReport()">${LLR_OFFICES.map(([v,t])=>`<option value="${v}" ${st.office===v?'selected':''}>${t}</option>`).join('')}</select>
+        <select class="mr-select" aria-label="Which advisors' listings" onchange="const s=window._llrState();s.office=this.value;if(this.value)s.advisor='';viewLandListingReport()">${LLR_OFFICES.map(([v,t])=>`<option value="${v}" ${st.office===v?'selected':''}>${t}</option>`).join('')}</select>
+        ${_llrAdvisorSelect(st)}
         <select class="mr-select" aria-label="Land type" onchange="window._llrState().land=this.value;viewLandListingReport()">${LLR_LANDS.map(([v,t])=>`<option value="${v}" ${st.land===v?'selected':''}>${t}</option>`).join('')}</select>
         <label class="mr-muted" for="llr-asof" style="display:inline-flex;gap:.35rem;align-items:center">As of <input id="llr-asof" type="date" class="mr-input" value="${_mrEsc(st.asOf)}" onchange="window._llrState().asOf=this.value||'';viewLandListingReport()"></label>
         ${_llrIsOwner()?`<button type="button" class="mr-btn" onclick="window._llrAccess()">⚙ Access</button>`:''}
@@ -55155,7 +55180,7 @@ async function _llrBuild(progress, opts){
   doc.setFont('times','bolditalic'); doc.setFontSize(30); doc.setTextColor(30,30,30); doc.text('The Land Listings',W/2,252,{align:'center'});
   spaced('REPORT',318,74,'x',LLR_RED,6);
   const cover=String(st.cover||'').trim().replace(/\s*\n\s*/g,'  ·  ');
-  const band=[qLabel, (cover||('Available '+(st.land==='residential'?'Residential Land':(st.land==='commercial'?'Commercial Land':'Land'))+'  ·  '+_llrMonthYear(st.asOf))).toUpperCase(), (st.office?st.office.toUpperCase()+' OFFICE':'')].filter(Boolean).join('  ·  ');
+  const band=[qLabel, (cover||('Available '+(st.land==='residential'?'Residential Land':(st.land==='commercial'?'Commercial Land':'Land'))+'  ·  '+_llrMonthYear(st.asOf))).toUpperCase(), (st.advisor?String(_llrAdvisorName(st.advisor)||'').toUpperCase():''), (st.office?st.office.toUpperCase()+' OFFICE':'')].filter(Boolean).join('  ·  ');
   fill(LLR_TEAL_DK); doc.rect(45,334,W-90,28,'F');
   text(band,W/2,352.5,{size:10.5,w:'b',color:[255,255,255],align:'center',maxW:W-110,min:7});
   const avail=rows.filter(r=>!r.uc&&!r.sold), nU=rows.filter(r=>r.uc).length;
@@ -55257,6 +55282,7 @@ async function _llrBuild(progress, opts){
   if(st.includeDir && !opts.skipDir){
     let list=(typeof _bioAdvisorList==='function'?_bioAdvisorList():[]).filter(b=>b&&b.name&&!String(b.name).includes('@'));
     if(st.office) list=list.filter(b=>_llrOfficeOf(b.uid,b.email)===st.office);
+    if(st.advisor) list=list.filter(b=>b.uid===st.advisor);   // LLRADV-20261117 — advisor run: only that advisor's page
     if(list.length){
       const heads={}; await Promise.all(list.map(async b=>{ heads[b.uid||b.email]=b.headshotUrl?await _llrRoundImg(b.headshotUrl,220):null; }));
       const items=[]; ['Tampa','Orlando'].forEach(o=>{ const L=list.filter(b=>_llrOfficeOf(b.uid,b.email)===o); if(L.length){ items.push({head:o+' Advisors', phone:BIO_OFFICE_PHONES[o]||'', loc:BIO_OFFICE_LOCATIONS[o]||''}); L.forEach(b=>items.push({b})); } });
@@ -55305,7 +55331,7 @@ window._llrGenerate=async function(mode, btn){
   finally{ done(); }
 };
 // Run fn with the Land Listing state temporarily replaced (the Eshenbaugh Report borrows the collector / page builder)
-async function _llrWithState(over, fn){ const st=_llrState(); const keep={...st}; Object.assign(st, over); try{ return await fn(); } finally{ Object.keys(st).forEach(k=>delete st[k]); Object.assign(st, keep); } }
+async function _llrWithState(over, fn){ const st=_llrState(); const keep={...st}; Object.assign(st, {advisor:''}, over);   /* LLRADV-20261117 — borrowers never inherit an advisor run */ try{ return await fn(); } finally{ Object.keys(st).forEach(k=>delete st[k]); Object.assign(st, keep); } }
 window._llrWithState=_llrWithState; window._llrBuild=_llrBuild; window._llrCollect=_llrCollect; window._llrFonts=_llrFonts; window._llrRoundImg=_llrRoundImg;
 window.viewLandListingReport=viewLandListingReport;
 /* ===== LLR_BLOCK_END ===== */
