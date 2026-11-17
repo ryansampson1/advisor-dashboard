@@ -2388,6 +2388,7 @@ const APP_CONFIG = {
   agreements: { pdfProxyUrl: 'https://elc-agreements-worker.dirtdog.workers.dev' },   // AGPDF-20261008 — live once agreements-worker is deployed
   // 📬 Monthly Owner Reports (MREPORT-20261006). access: 'owner' | 'admins' | 'all' — overridden from eos/settings.monthlyReports
   monthlyReports: { access: 'all',   /* REPORTSALL-20261016 — opened to all users */ workerUrl: 'https://elc-report-worker.dirtdog.workers.dev' },
+  buyerMatch: { access: 'owner' },   // BUYERMATCH-20261117 — 'owner' = Ryan only | 'admins' | 'all'; overridden from eos/settings.buyerMatch (⚙ Access on the tab)
   landListingReport: { access: 'owner' },   // LLR-20261116 — 'owner' = Ryan only | 'admins' | 'all'; overridden from eos/settings.landListingReport (⚙ Access on the tab)
   eshReport: { access: 'owner', writers: [] },   // ESH-20261116 — 'owner' (Ryan) | 'writers' | 'admins' | 'all'; overridden from eos/settings.eshReport
   social: { workerUrl: 'https://elc-social-worker.dirtdog.workers.dev', defaultLink: 'https://www.thedirtdog.com' },   // SOCIAL-20261006-hooks
@@ -10095,6 +10096,7 @@ const FB = {
           if(payload.social && typeof payload.social==='object') APP_CONFIG.social={...(APP_CONFIG.social||{}), ...payload.social};   // SOCIAL-20261006
           if(payload.mcBlast && typeof payload.mcBlast==='object') APP_CONFIG.mcBlast={...(APP_CONFIG.mcBlast||{}), ...payload.mcBlast};   // MCBLAST-20261007
           if(payload.monthlyReports && typeof payload.monthlyReports==='object'){ const _mrPrev=(APP_CONFIG.monthlyReports||{}).access; APP_CONFIG.monthlyReports={...(APP_CONFIG.monthlyReports||{}), ...payload.monthlyReports}; if(_mrPrev!==APP_CONFIG.monthlyReports.access && currentUser && typeof renderShell==='function'){ try{ renderShell(); renderCurrentView(); }catch(_){} } } // MREPORT-20261006
+          if(payload.buyerMatch && typeof payload.buyerMatch==='object'){ const _bmPrev=(APP_CONFIG.buyerMatch||{}).access; APP_CONFIG.buyerMatch={...(APP_CONFIG.buyerMatch||{}), ...payload.buyerMatch}; if(_bmPrev!==APP_CONFIG.buyerMatch.access && currentUser && typeof renderShell==='function'){ try{ renderShell(); renderCurrentView(); }catch(_){} } }   // BUYERMATCH-20261117
           if(payload.landListingReport && typeof payload.landListingReport==='object'){ const _llrPrev=(APP_CONFIG.landListingReport||{}).access; APP_CONFIG.landListingReport={...(APP_CONFIG.landListingReport||{}), ...payload.landListingReport}; if(_llrPrev!==APP_CONFIG.landListingReport.access && currentUser && typeof renderShell==='function'){ try{ renderShell(); renderCurrentView(); }catch(_){} } }   // LLR-20261116
           if(payload.eshReport && typeof payload.eshReport==='object'){ const _eshPrev=JSON.stringify([(APP_CONFIG.eshReport||{}).access,(APP_CONFIG.eshReport||{}).writers]); APP_CONFIG.eshReport={...(APP_CONFIG.eshReport||{}), ...payload.eshReport}; if(_eshPrev!==JSON.stringify([APP_CONFIG.eshReport.access,APP_CONFIG.eshReport.writers]) && currentUser && typeof renderShell==='function'){ try{ renderShell(); renderCurrentView(); }catch(_){} } }   // ESH-20261116
           eosCache[docId] = payload.data;
@@ -12754,6 +12756,7 @@ function buildNavItems(){
       {id:'buyers',        label:'🏡 Buyers',         advisor:true, admin:true, manager:true},
       {id:'videoProposals',label:'🎬 Video Proposals',advisor:true, admin:true, manager:true, staff:true},
       {id:'monthlyReports',label:'📬 Monthly Reports', reports:true},   // MREPORT-20261006 — gated by _mrNavVisible
+      {id:'buyerMatch',     label:'🎯 Buyer Match',    bm:true},   // BUYERMATCH-20261117 — gated by _bmNavVisible (Ryan only until opened)
       {id:'landListingReport',label:'🏞️ Land Listing Report', llr:true},   // LLR-20261116 — gated by _llrNavVisible (Ryan only until opened)
       {id:'eshReport',     label:'📰 Eshenbaugh Report', esh:true},   // ESH-20261116 — gated by _eshNavVisible (Ryan only until he opens it)
       {id:'marketReports', label:'📊 Market Reports',  always:true},     // MKTREPORT-20261007; REPORTSALL-20261016 — open to every user (editing stays admin-only)
@@ -12764,6 +12767,7 @@ function buildNavItems(){
     ].filter(n=>{
       if(sv){ // staff view: always tabs + staff-flagged tabs + manager tabs (for office managers) + CRM if enabled
         if(n.staffOnly) return true;   // tabs that exist ONLY inside staff view
+        if(n.bm) return _bmNavVisible(false,true);   // BUYERMATCH-20261117
         if(n.llr) return _llrNavVisible(false,true);
         if(n.esh) return _eshNavVisible(false,true);   // ESH-20261116   // LLR-20261116
         if(n.reports) return (_mrCfg().access||'owner')==='all';   // REPORTSALL-20261016 — staff see every monthly report
@@ -12775,6 +12779,7 @@ function buildNavItems(){
       }
       if(!effectiveAdmin && ADVISOR_VIEW_HIDDEN_TABS.includes(n.id)) return false;   // ADVHIDE-20261014
       if(n.esh) return _eshNavVisible(effectiveAdmin,false);   // ESH-20261116
+      if(n.bm) return _bmNavVisible(effectiveAdmin,false);   // BUYERMATCH-20261117
       if(n.llr) return _llrNavVisible(effectiveAdmin,false);   // LLR-20261116
       if(n.reports) return _mrNavVisible(effectiveAdmin);   // MREPORT-20261006
       if(n.always) return true;
@@ -14092,7 +14097,7 @@ function renderCurrentView(){
     bio:viewAdvisorBio,   // ADVBIO-20261006
     splits:viewSplits,automations:viewAutomations,users:viewUsers,leaderboard:viewLeaderboard,
     manageStages:viewManageStages,officeManagers:viewOfficeManagers,approvedUsers:viewApprovedUsers,officeOverview:viewOfficeOverview,
-    eos:()=>viewEOS(window._eosSub||'rocks'),comps:viewComps,drive:viewDrive,documents:viewDocuments,hr:viewHR,crm:viewCRM,leads:viewLeads,inbox:viewSmartInbox,buyers:viewBuyers,videoProposals:viewVideoProposals,earthnotes:viewEarthNotes,valuation:viewValuation,activityLog:viewActivityLog,agreements:viewAgreements,monthlyReports:viewMonthlyReports,marketReports:viewMarketReports,landListingReport:viewLandListingReport,eshReport:viewEshReport};   // LLR-20261116
+    eos:()=>viewEOS(window._eosSub||'rocks'),comps:viewComps,drive:viewDrive,documents:viewDocuments,hr:viewHR,crm:viewCRM,leads:viewLeads,inbox:viewSmartInbox,buyers:viewBuyers,videoProposals:viewVideoProposals,earthnotes:viewEarthNotes,valuation:viewValuation,activityLog:viewActivityLog,agreements:viewAgreements,monthlyReports:viewMonthlyReports,marketReports:viewMarketReports,landListingReport:viewLandListingReport,buyerMatch:viewBuyerMatch,eshReport:viewEshReport};   // LLR-20261116
   try {
     (map[currentView]||viewBoard)();
   } catch(e) {
@@ -27743,6 +27748,7 @@ function viewTasks(){
         ${(window._mwIsReviewTask&&window._mwIsReviewTask(t))?window._mwTaskButtons(t):''}<!-- MWTASK-20261016 -->
         ${(window._caIsTask&&window._caIsTask(t))?window._caTaskButtons(t):''}<!-- CARDASK-20261029 -->
         ${(window._crIsTask&&window._crIsTask(t))?`<div data-cr-box="${t.id}">${window._crTaskButtons(t)}</div>`:''}<!-- CRMASK-20261104 -->
+        ${(window._llrpIsTask&&window._llrpIsTask(t))?`<div data-llrp-box="${t.id}">${window._llrpTaskButtons(t)}</div>`:''}<!-- LLRPHOTOTASK-20261117 -->
         ${(t.autoCompletedEmailUrl||t.emailUrl||t.invoiceDealId||t.gmailUrl||t.attachmentUrl||t.approvePaymentDealId||(window._spIsSocialTask&&window._spIsSocialTask(t))||(window._lpIsPersonalTask&&window._lpIsPersonalTask(t))||(window._mrIsAssetsTask&&window._mrIsAssetsTask(t))||(window._mrIsBlastTask&&window._mrIsBlastTask(t)))?`<div class="flex gap-2 mt-2 flex-wrap">
           ${(window._spIsSocialTask&&window._spIsSocialTask(t))?`<button onclick="window._spOpen('${t.dealId}','${t.id}')" class="text-xs font-semibold px-2.5 py-1 rounded-lg text-white" style="background:#0A66C2">📣 Compose post</button>`:''}
           ${(window._lpIsPersonalTask&&window._lpIsPersonalTask(t))?`<button onclick="window._lpOpen('${t.dealId}','${t.id}')" class="text-xs font-semibold px-2.5 py-1 rounded-lg text-white" style="background:#0A66C2">in Post to my LinkedIn</button>`:''}
@@ -34891,7 +34897,7 @@ window._taRenderDealTasks = function(dealId){
       <input type="checkbox" ${done?'checked':''} onchange="window.toggleTask('${t.id}', this.checked?'complete':'pending')" style="margin-top:.15rem;cursor:pointer;flex-shrink:0"/>
       <div style="flex:1;min-width:0">
         <div onclick="window.openTaskModal('${t.id}','${dealId}')" title="Edit task" style="font-size:.82rem;line-height:1.3;cursor:pointer;color:${done?'#9ca3af':'#111827'};${done?'text-decoration:line-through':''}">${esc(t.title)}</div>
-        ${(window._spIsSocialTask&&window._spIsSocialTask(t))?`<button class="prop-note-btn" style="margin-top:.25rem;font-size:.7rem" onclick="window._spOpen('${dealId}','${t.id}')">📣 Compose post</button>`:''}${(window._lpIsPersonalTask&&window._lpIsPersonalTask(t))?`<button class="prop-note-btn" style="margin-top:.25rem;font-size:.7rem;color:#0A66C2" onclick="window._lpOpen('${dealId}','${t.id}')">in Post to my LinkedIn</button>`:''}
+        ${(window._spIsSocialTask&&window._spIsSocialTask(t))?`<button class="prop-note-btn" style="margin-top:.25rem;font-size:.7rem" onclick="window._spOpen('${dealId}','${t.id}')">📣 Compose post</button>`:''}${(window._lpIsPersonalTask&&window._lpIsPersonalTask(t))?`<button class="prop-note-btn" style="margin-top:.25rem;font-size:.7rem;color:#fff" onclick="window._lpOpen('${dealId}','${t.id}')">in Post to my LinkedIn</button>`:''}
         ${(window._mrIsAssetsTask&&window._mrIsAssetsTask(t))?`<button class="prop-note-btn" style="margin-top:.25rem;font-size:.7rem" onclick="window._mrOpenAssets('${dealId}','${t.id}')">📎 Upload report assets</button>`:''}
         ${(window._mrIsBlastTask&&window._mrIsBlastTask(t))?`<button class="prop-note-btn" style="margin-top:.25rem;font-size:.7rem" onclick="window._mbOpen('${dealId}','${t.id}')">📧 Compose e-blast</button>`:''}
         <div style="font-size:.7rem;color:#6b7280;margin-top:.15rem;display:flex;gap:.6rem;flex-wrap:wrap">
@@ -54914,6 +54920,267 @@ window._psIgnore=async function(i,btn){
 };
 /* ===== PAGESYNC_BLOCK_END ===== */
 /* =======================================================
+   🎯 BUYER MATCH — marker BUYERMATCH-20261117
+   Ryan (2026-11-17): "a new section that only I can see for the time being, but once finalized I can share with other advisors.
+   Read my CoStar alert emails every day of new land listings, sort the allowed uses using AI, pull the data, reformat it into our
+   design standards and send to my top-10 buyer list for each category — apartment, ALF, industrial, homebuilders, retail corners,
+   self storage, car wash, ag, investment, etc. I need to be able to change them out as I see fit; don't cap at 10 or require a
+   minimum. Some uses may match multiple, so OK to send to multiple. State that we aren't the listing agent but noticed it matched
+   their criteria and would like to represent them." Decisions (same day): AUTO-SEND daily · CoStar content reused · HTML e-mail
+   only, one per buyer from ryan@ · lists live in this tab (picked from CRM contacts, not CRM groups) · FL DOE grades · FDOT AADT.
+
+   The work happens server-side in elc-buyermatch-worker (daily cron after the 8 AM CoStar alert). This tab is its control panel:
+     • Buyer lists — name, the uses it receives (from BM_USES, same keys as the worker's uses.js), optional acreage / price / county
+       filters, and any number of CRM contacts. Stored as eos/buyerMatch.lists (with paused / sender settings).
+     • Properties — what the worker did with each CoStar listing (AI uses + why, lists matched, who got it, who was skipped and why),
+       read from eos/buyerMatchLog; 👁 shows the exact e-mail (eos/buyerMatchPreviews).
+     • ⏸ Pause stops all sending immediately (the worker holds matches and e-mails Ryan once a day while paused).
+   BMMAPWISE-20261117 (Ryan, same day): one MapWise parcel search per listing — outlined aerial, property-appraiser zoning, parcel ID —
+   only on a sure match. Each Properties row shows the parcel (📐) or why none was claimed; 🗺 MapWise on/off = eos/buyerMatch.mapwise.
+   A contact who replies "remove" gets contacts/{id}.buyerMatchOptOut = true and is skipped forever (✕ chip shows it here).
+   Access: APP_CONFIG.buyerMatch.access 'owner' (Ryan only — default) | 'admins' | 'all', in eos/settings.buyerMatch (⚙ Access).
+   ======================================================= */
+const BM_OWNER_EMAILS=['ryan@thedirtdog.com'];
+const BM_USES=[   // keep in step with elc-buyermatch-worker/uses.js
+  ['apartment','Apartments / Multifamily'],['homebuilder','Homebuilders (SF / Townhome)'],['alf','ALF / Senior Living'],
+  ['industrial','Industrial / Flex'],['retail','Retail Corners / Outparcels'],['self_storage','Self Storage / RV & Boat'],
+  ['carwash','Car Wash'],['ag','Agricultural'],['investment','Investment / Land Banking'],['gas_cstore','Gas / C-Store'],
+  ['hotel','Hotel / Hospitality'],['medical','Medical / Office'],['mixed_use','Mixed-Use'],['data_center','Data Center / Energy'],['rv_mh','RV / MH Park']];
+const BM_STARTERS=[['Apartment buyers',['apartment']],['ALF / senior living',['alf']],['Industrial buyers',['industrial']],['Homebuilders',['homebuilder']],
+  ['Retail corners',['retail','gas_cstore']],['Self storage',['self_storage']],['Car wash',['carwash']],['Ag / farmland',['ag']],['Investment',['investment']]];
+const BM_STATUS={sent:['Sent','mr-chip-sent'],no_match:['No matching list','mr-chip-new'],held_paused:['Held — paused','mr-chip-draft'],expired:['Too old to send','mr-chip-new'],classified:['Sending…','mr-chip-queued'],new:['Researching…','mr-chip-queued']};
+const _bmUseLabel=k=>(BM_USES.find(u=>u[0]===k)||[k,k])[1];
+const _bmEsc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function _bmCfg(){ return (APP_CONFIG.buyerMatch = APP_CONFIG.buyerMatch || {access:'owner'}); }
+function _bmIsOwner(){ return !!(currentUser && BM_OWNER_EMAILS.includes(String(currentUser.email||'').toLowerCase())); }
+function _bmCanAccess(){ if(!currentUser) return false; if(_bmIsOwner()) return true; const a=_bmCfg().access||'owner'; if(a==='all') return true; if(a==='admins') return !!currentUser.isAdmin; return false; }
+function _bmCanEdit(){ return _bmIsOwner() || !!(currentUser && currentUser.isAdmin && (_bmCfg().access||'owner')!=='owner'); }
+function _bmNavVisible(effectiveAdmin, sv){
+  if(!currentUser) return false; const a=_bmCfg().access||'owner';
+  if(a==='all') return true; if(sv) return false; if(a==='admins') return !!effectiveAdmin; return !!(effectiveAdmin && _bmIsOwner());
+}
+window._bmNavVisible=_bmNavVisible;
+function _bmState(){ return (window._bmSt=window._bmSt||{sub:'lists',cfg:null,log:null,prev:null,loading:false,open:{},q:{}}); }
+
+async function _bmLoad(force){
+  const st=_bmState(); if(st.loading) return; if(st.cfg && !force) return;
+  st.loading=true;
+  try{
+    const {doc,getDoc}=_fbFns;
+    const [c,l]=await Promise.all([getDoc(doc(_fbDb,'eos','buyerMatch')),getDoc(doc(_fbDb,'eos','buyerMatchLog'))]);
+    st.cfg=c.exists()?c.data():{lists:[],paused:false}; st.cfg.lists=Array.isArray(st.cfg.lists)?st.cfg.lists:[];
+    st.log=l.exists()?l.data():{props:[],runs:[]};
+  }catch(e){ console.warn('[bm] load',e); showToast('Could not load Buyer Match: '+e.message,'error',8000); st.cfg=st.cfg||{lists:[]}; st.log=st.log||{props:[],runs:[]}; }
+  finally{ st.loading=false; }
+}
+async function _bmSave(patch, msg){
+  const st=_bmState(); const {doc,setDoc}=_fbFns;
+  Object.assign(st.cfg, patch); patch.updatedAt=Date.now(); patch.updatedBy=currentUser.email;
+  await setDoc(doc(_fbDb,'eos','buyerMatch'), patch, {merge:true});
+  if(msg) showToast(msg,'success');
+}
+async function _bmSaveLists(msg){ await _bmSave({lists:_bmState().cfg.lists}, msg); }
+
+function viewBuyerMatch(){
+  _mrInjectStyles(); _bmInjectStyles();
+  if(!_bmCanAccess()){ setContent(`<div class="mr-wrap"><div class="mr-card" style="padding:2rem;text-align:center"><div style="font-size:2rem">🔒</div><p style="margin-top:.5rem;font-weight:700;color:var(--text-1)">Buyer Match isn’t open to your account yet.</p></div></div>`); return; }
+  const st=_bmState();
+  if(!st.cfg){ setContent(`<div class="mr-wrap" id="bm-loading"><div class="mr-card" style="padding:2rem;text-align:center" role="status"><span class="mr-muted">Loading Buyer Match…</span></div></div>`); _bmLoad().then(()=>{ if(document.getElementById('bm-loading')) viewBuyerMatch(); }); return; }
+  const a=_bmCfg().access||'owner'; const cfg=st.cfg, log=st.log||{}; const ed=_bmCanEdit();
+  const last=log.lastRunAt?new Date(log.lastRunAt).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}):'not yet';
+  const today=new Date().toLocaleDateString('en-CA',{timeZone:'America/New_York'}); const sentToday=(log.sentByDay||{})[today]||0;
+  const people=new Set(cfg.lists.flatMap(l=>l.contactIds||[])).size;
+  setContent(`<div class="mr-wrap" id="bm-root">
+    <div class="mr-head">
+      <h1>🎯 Buyer Match</h1>
+      <span class="mr-chip ${a==='all'?'mr-chip-sent':(a==='admins'?'mr-chip-draft':'mr-chip-new')}" title="Who can see this tab">${a==='all'?'Open to all users':(a==='admins'?'Admins only':'Only you')}</span>
+      ${cfg.paused?'<span class="mr-chip mr-chip-warn" role="status">⏸ Sending paused</span>':'<span class="mr-chip mr-chip-sent">● Auto-send on</span>'}
+      <div class="mr-toolbar">
+        <button type="button" class="mr-btn" onclick="window._bmRefresh(this)" aria-label="Refresh">↻ Refresh</button>
+        ${ed?`<label class="mr-btn" title="One MapWise parcel search per new listing (about $0.06–$0.18): outlined aerial, property-appraiser zoning and parcel ID when the parcel is a sure match" style="cursor:pointer"><input type="checkbox" class="mr-check" ${cfg.mapwise!==false?'checked':''} onchange="window._bmToggleMapwise(this)"> 🗺 MapWise</label>`:''}
+        ${ed?`<button type="button" class="mr-btn ${cfg.paused?'mr-btn-teal':''}" onclick="window._bmTogglePause(this)">${cfg.paused?'▶ Resume sending':'⏸ Pause sending'}</button>`:''}
+        ${_bmIsOwner()?`<button type="button" class="mr-btn" onclick="window._bmAccess()">⚙ Access</button>`:''}
+      </div>
+    </div>
+    <p class="mr-note" style="margin:-.4rem 0 .8rem">Every morning after the CoStar Daily Alert lands, Terra reads the new for-sale land listings, looks up zoning, flood zone, demographics, traffic counts and school grades, has AI decide which buyer types fit, and e-mails each matching buyer from <b>${_bmEsc((cfg.sender&&cfg.sender.email)||'ryan@thedirtdog.com')}</b> — one e-mail per buyer per property, never twice. Each e-mail says ELC is not the listing broker and offers to represent them.</p>
+    <div class="bm-stats">
+      <div class="mr-card bm-stat"><div class="mr-lbl">Last run</div><div class="bm-big">${_bmEsc(last)}</div>${log.lastError?`<div class="bm-err" role="alert">⚠ ${_bmEsc(log.lastError)}</div>`:''}</div>
+      <div class="mr-card bm-stat"><div class="mr-lbl">Sent today</div><div class="bm-big">${sentToday}</div></div>
+      <div class="mr-card bm-stat"><div class="mr-lbl">Buyer lists</div><div class="bm-big">${cfg.lists.length}</div><div class="mr-muted">${people} buyer${people===1?'':'s'}</div></div>
+      <div class="mr-card bm-stat"><div class="mr-lbl">Listings tracked</div><div class="bm-big">${(log.props||[]).length}</div><div class="mr-muted">last 60</div></div>
+    </div>
+    <div class="bm-tabs" role="tablist">
+      <button type="button" role="tab" aria-selected="${st.sub==='lists'}" class="bm-tab ${st.sub==='lists'?'on':''}" onclick="window._bmSub('lists')">📋 Buyer lists</button>
+      <button type="button" role="tab" aria-selected="${st.sub==='props'}" class="bm-tab ${st.sub==='props'?'on':''}" onclick="window._bmSub('props')">🏷 Properties sent</button>
+    </div>
+    <div id="bm-body"></div>
+  </div>`);
+  if(st.sub==='props') _bmRenderProps(); else _bmRenderLists();
+}
+window.viewBuyerMatch=viewBuyerMatch;
+window._bmSub=function(s){ _bmState().sub=s; viewBuyerMatch(); };
+window._bmRefresh=async function(btn){ const done=elcBusy(btn,'Refreshing…'); try{ await _bmLoad(true); viewBuyerMatch(); } finally{ done(); } };
+
+/* ---------- lists ---------- */
+function _bmContact(id){ return (typeof allContacts!=='undefined'?allContacts:[]).find(c=>c.id===id); }
+function _bmCName(c){ return c?([c.firstName,c.lastName].filter(Boolean).join(' ')||c.name||c.email||'(no name)'):'(deleted contact)'; }
+function _bmRenderLists(){
+  const box=document.getElementById('bm-body'); if(!box) return; const st=_bmState(); const ed=_bmCanEdit(); const lists=st.cfg.lists;
+  const starter=!lists.length&&ed?`<div class="mr-card" style="padding:1.2rem 1.3rem;margin-bottom:.9rem"><p style="margin:0 0 .6rem;color:var(--text-1);font-weight:700">No buyer lists yet.</p><p class="mr-note" style="margin:0 0 .8rem">Start with your nine categories — apartment, ALF, industrial, homebuilders, retail corners, self storage, car wash, ag and investment — then add buyers to each from the CRM.</p><button type="button" class="mr-btn mr-btn-teal" onclick="window._bmStarters(this)">＋ Create my 9 starter lists</button></div>`:'';
+  box.innerHTML=starter+`<div class="bm-lists">${lists.map((l,i)=>_bmListCard(l,i,ed)).join('')}</div>
+    ${ed?`<button type="button" class="mr-btn" style="margin-top:.8rem" onclick="window._bmAddList()">＋ New list</button>`:''}`;
+}
+function _bmListCard(l,i,ed){
+  const st=_bmState(); const ids=l.contactIds||[]; const f=l.filters||{}; const open=!!st.open[l.id];
+  const chips=ids.map(id=>{ const c=_bmContact(id); const out=c&&c.buyerMatchOptOut; const noMail=c&&!c.email&&!c.email2;
+    return `<span class="bm-person ${out||noMail||!c?'bm-person-warn':''}" title="${_bmEsc(c?(c.email||c.email2||'no e-mail on file'):'This contact was deleted from the CRM')}${out?' — replied remove; never e-mailed':''}">${_bmEsc(_bmCName(c))}${c&&c.company?` <span class="bm-co">· ${_bmEsc(c.company)}</span>`:''}${out?' <b>✕ opted out</b>':''}${noMail?' <b>no e-mail</b>':''}${ed?`<button type="button" class="bm-x" aria-label="Remove ${_bmEsc(_bmCName(c))} from ${_bmEsc(l.name)}" onclick="window._bmRemovePerson('${l.id}','${id}')">✕</button>`:''}</span>`; }).join('');
+  const useChips=(l.uses||[]).map(k=>`<span class="bm-use">${_bmEsc(_bmUseLabel(k))}</span>`).join('');
+  const fTxt=[f.minAcres?'≥ '+f.minAcres+' ac':'',f.maxAcres?'≤ '+f.maxAcres+' ac':'',f.maxPrice?'≤ $'+Number(f.maxPrice).toLocaleString():'',(f.counties||[]).length?(f.counties.join(', ')):''].filter(Boolean).join(' · ');
+  return `<div class="mr-card bm-list ${l.active===false?'bm-off':''}">
+    <div class="bm-list-h">
+      <div style="min-width:0;flex:1"><div class="bm-list-name">${_bmEsc(l.name)} <span class="mr-muted">· ${ids.length} buyer${ids.length===1?'':'s'}</span>${l.active===false?' <span class="mr-chip mr-chip-new">Off</span>':''}</div>
+        <div class="bm-uses">${useChips||'<span class="mr-muted">No uses picked — this list gets nothing</span>'}${fTxt?`<span class="mr-muted">· ${_bmEsc(fTxt)}</span>`:''}</div></div>
+      ${ed?`<button type="button" class="mr-btn mr-btn-sm" aria-expanded="${open}" onclick="window._bmEditToggle('${l.id}')">${open?'Done':'✎ Edit'}</button>`:''}
+    </div>
+    ${open&&ed?_bmListEditor(l):''}
+    <div class="bm-people">${chips||'<span class="mr-muted">No buyers yet.</span>'}</div>
+    ${ed?`<div class="bm-add"><label class="sr-only" for="bm-q-${l.id}">Add a buyer to ${_bmEsc(l.name)}</label><input id="bm-q-${l.id}" class="mr-input" style="width:100%" autocomplete="off" placeholder="＋ Add a buyer — type a name, company or e-mail from the CRM" value="${_bmEsc(st.q[l.id]||'')}" oninput="window._bmSearch('${l.id}',this.value)" onkeydown="if(event.key==='Escape'){this.value='';window._bmSearch('${l.id}','')}"><div id="bm-res-${l.id}" class="bm-res" role="listbox" aria-label="Matching CRM contacts"></div></div>`:''}
+  </div>`;
+}
+function _bmListEditor(l){
+  const f=l.filters||{};
+  return `<div class="bm-ed">
+    <label class="mr-lbl" for="bm-n-${l.id}">List name</label><input id="bm-n-${l.id}" class="mr-input" style="width:100%;max-width:420px" value="${_bmEsc(l.name)}" onchange="window._bmSetField('${l.id}','name',this.value)">
+    <div class="mr-lbl" style="margin-top:.7rem">Gets listings the AI tags as</div>
+    <div class="bm-usegrid">${BM_USES.map(([k,t])=>`<label class="bm-usebox"><input type="checkbox" class="mr-check" ${(l.uses||[]).includes(k)?'checked':''} onchange="window._bmToggleUse('${l.id}','${k}',this.checked)"> ${_bmEsc(t)}</label>`).join('')}</div>
+    <div class="mr-lbl" style="margin-top:.7rem">Optional filters <span style="text-transform:none;font-weight:400">— leave blank for no limit</span></div>
+    <div class="bm-filters">
+      <label>Min acres <input type="number" min="0" step="0.1" class="mr-input" value="${_bmEsc(f.minAcres||'')}" onchange="window._bmSetFilter('${l.id}','minAcres',this.value)"></label>
+      <label>Max acres <input type="number" min="0" step="0.1" class="mr-input" value="${_bmEsc(f.maxAcres||'')}" onchange="window._bmSetFilter('${l.id}','maxAcres',this.value)"></label>
+      <label>Max price $ <input type="number" min="0" step="1000" class="mr-input" value="${_bmEsc(f.maxPrice||'')}" onchange="window._bmSetFilter('${l.id}','maxPrice',this.value)"></label>
+      <label style="flex:2 1 260px">Counties <input class="mr-input" placeholder="e.g. Hillsborough, Pasco, Polk" value="${_bmEsc((f.counties||[]).join(', '))}" onchange="window._bmSetFilter('${l.id}','counties',this.value)"></label>
+    </div>
+    <div class="mr-row" style="margin-top:.8rem">
+      <label class="mr-muted" style="display:inline-flex;gap:.4rem;align-items:center;min-height:40px;cursor:pointer"><input type="checkbox" class="mr-check" ${l.active!==false?'checked':''} onchange="window._bmSetField('${l.id}','active',this.checked)"> List is on (gets e-mails)</label>
+      <button type="button" class="mr-btn mr-btn-sm" style="margin-left:auto;color:var(--brand-red)" onclick="window._bmDeleteList('${l.id}',this)">🗑 Delete list</button>
+    </div></div>`;
+}
+const _bmFind=id=>_bmState().cfg.lists.find(l=>l.id===id);
+window._bmEditToggle=function(id){ const st=_bmState(); st.open[id]=!st.open[id]; _bmRenderLists(); };
+window._bmStarters=async function(btn){ const done=elcBusy(btn,'Creating…'); try{ const st=_bmState(); st.cfg.lists=BM_STARTERS.map(([n,u],i)=>({id:'bm'+Date.now().toString(36)+i,name:n,uses:u,contactIds:[],filters:{},active:true})); await _bmSaveLists('9 lists created — add buyers to each'); _bmRenderLists(); viewBuyerMatch(); } catch(e){ showToast('Could not create lists: '+e.message,'error'); } finally{ done(); } };
+window._bmAddList=async function(){ const st=_bmState(); const id='bm'+Date.now().toString(36); st.cfg.lists.push({id,name:'New list',uses:[],contactIds:[],filters:{},active:true}); st.open[id]=true; try{ await _bmSaveLists(); }catch(e){ showToast('Could not save: '+e.message,'error'); } _bmRenderLists(); setTimeout(()=>{ const i=document.getElementById('bm-n-'+id); if(i){ i.focus(); i.select(); } },50); };
+window._bmSetField=async function(id,k,v){ const l=_bmFind(id); if(!l) return; l[k]=k==='name'?(String(v).trim()||'Untitled list'):v; try{ await _bmSaveLists('Saved'); }catch(e){ showToast('Could not save: '+e.message,'error'); } _bmRenderLists(); };
+window._bmToggleUse=async function(id,k,on){ const l=_bmFind(id); if(!l) return; l.uses=(l.uses||[]).filter(x=>x!==k); if(on) l.uses.push(k); try{ await _bmSaveLists(); }catch(e){ showToast('Could not save: '+e.message,'error'); } _bmRenderLists(); };
+window._bmSetFilter=async function(id,k,v){ const l=_bmFind(id); if(!l) return; l.filters=l.filters||{}; if(k==='counties') l.filters.counties=String(v).split(',').map(s=>s.trim().replace(/\s+county$/i,'')).filter(Boolean); else { const n=parseFloat(v); if(n>0) l.filters[k]=n; else delete l.filters[k]; } try{ await _bmSaveLists('Saved'); }catch(e){ showToast('Could not save: '+e.message,'error'); } _bmRenderLists(); };
+window._bmDeleteList=async function(id,btn){
+  const st=_bmState(); const i=st.cfg.lists.findIndex(l=>l.id===id); if(i<0) return; const l=st.cfg.lists[i];
+  if(!(await elcConfirm(`Delete the “${l.name}” list?\n\nIts ${ (l.contactIds||[]).length } buyer(s) stay in the CRM; they just stop getting these e-mails for this category.`,{title:'Delete list',okLabel:'Delete',danger:true}))) return;
+  st.cfg.lists.splice(i,1);
+  try{ await _bmSaveLists(); _bmRenderLists(); showUndoToast('“'+l.name+'” deleted', async()=>{ st.cfg.lists.splice(i,0,l); await _bmSaveLists('Restored'); _bmRenderLists(); }); }
+  catch(e){ st.cfg.lists.splice(i,0,l); showToast('Could not delete: '+e.message,'error'); }
+};
+window._bmSearch=function(id,q){
+  const st=_bmState(); st.q[id]=q; const box=document.getElementById('bm-res-'+id); if(!box) return;
+  const s=String(q||'').trim().toLowerCase(); if(s.length<2){ box.innerHTML=''; return; }
+  const l=_bmFind(id); const have=new Set(l.contactIds||[]);
+  const hits=(typeof allContacts!=='undefined'?allContacts:[]).filter(c=>c&&!c._deleted&&!have.has(c.id)&&[_bmCName(c),c.company,c.email,c.email2].join(' ').toLowerCase().includes(s)).slice(0,8);
+  box.innerHTML=hits.length?hits.map(c=>`<button type="button" role="option" class="bm-hit" onclick="window._bmAddPerson('${id}','${c.id}')"><b>${_bmEsc(_bmCName(c))}</b>${c.company?' · '+_bmEsc(c.company):''}<span class="mr-muted"> ${_bmEsc(c.email||c.email2||'— no e-mail')}</span></button>`).join(''):`<div class="mr-muted" style="padding:.5rem .6rem">No CRM contact matches “${_bmEsc(q)}”.</div>`;
+};
+window._bmAddPerson=async function(id,cid){ const l=_bmFind(id); if(!l) return; l.contactIds=[...new Set([...(l.contactIds||[]),cid])]; _bmState().q[id]=''; try{ await _bmSaveLists('Added '+_bmCName(_bmContact(cid))+' to '+l.name); }catch(e){ showToast('Could not save: '+e.message,'error'); } _bmRenderLists(); setTimeout(()=>document.getElementById('bm-q-'+id)?.focus(),30); };
+window._bmRemovePerson=async function(id,cid){ const l=_bmFind(id); if(!l) return; const before=[...(l.contactIds||[])]; l.contactIds=before.filter(x=>x!==cid);
+  try{ await _bmSaveLists(); _bmRenderLists(); showUndoToast(_bmCName(_bmContact(cid))+' removed from '+l.name, async()=>{ l.contactIds=before; await _bmSaveLists('Restored'); _bmRenderLists(); }); }
+  catch(e){ l.contactIds=before; showToast('Could not save: '+e.message,'error'); } };
+
+/* ---------- properties ---------- */
+function _bmRenderProps(){
+  const box=document.getElementById('bm-body'); if(!box) return; const props=(_bmState().log||{}).props||[];
+  if(!props.length){ box.innerHTML=`<div class="mr-card" style="padding:1.4rem"><p class="mr-note" style="margin:0">Nothing yet — the first CoStar Daily Alert after the worker goes live will show up here with what was sent to whom.</p></div>`; return; }
+  box.innerHTML=`<div class="mr-card" style="overflow:auto"><table class="mr-table bm-table"><thead><tr><th>Aerial</th><th>Listing</th><th>AI uses</th><th>Result</th><th></th></tr></thead><tbody>${props.map(p=>{
+    const s=BM_STATUS[p.status]||[p.status,'mr-chip-new'];
+    return `<tr><td>${p.photo?`<img class="mr-thumb" src="${_bmEsc(p.photo)}" alt="" loading="lazy">`:''}</td>
+      <td style="min-width:220px"><div style="font-weight:700">${_bmEsc(p.title)}</div><div class="mr-muted">${_bmEsc([p.street!==p.title?p.street:'',p.city,p.county?p.county+' Co.':''].filter(Boolean).join(' · '))}</div><div class="mr-muted">${_bmEsc([p.acres?p.acres+' ac':'',p.priceText,p.zoning?'Zoning '+p.zoning:'',p.flood?'Flood '+p.flood:''].filter(Boolean).join(' · '))}</div>${p.parcel&&p.parcel.pin?`<div class="bm-parcel" title="Matched by ${_bmEsc(p.parcel.matchedBy||'')}">📐 Parcel ${_bmEsc(p.parcel.pin)} · ${_bmEsc(String(p.parcel.county||'').replace(/_/g,' '))}${p.parcel.landUse?' · '+_bmEsc(p.parcel.landUse.toLowerCase()):''}</div>`:(p.parcel&&p.parcel.miss?`<div class="mr-muted" title="Why no parcel outline / appraiser zoning">📐 No parcel claimed — ${_bmEsc(p.parcel.miss)}</div>`:'')}<div class="mr-muted" title="CoStar saved searches that caught it">🔎 ${_bmEsc((p.searches||[]).join(', '))} · ${_bmEsc(new Date(p.createdAt).toLocaleDateString('en-US',{month:'short',day:'numeric'}))}</div></td>
+      <td style="min-width:170px">${(p.uses||[]).map(u=>`<span class="bm-use" title="${_bmEsc(u.why||'')} (${Math.round((u.confidence||0)*100)}%)">${_bmEsc(_bmUseLabel(u.key))}</span>`).join('')||'<span class="mr-muted">none fit</span>'}${p.by==='keywords'?'<div class="mr-muted">AI was down — keyword match</div>':''}</td>
+      <td style="min-width:200px"><span class="mr-chip ${s[1]}">${_bmEsc(s[0])}</span>${(p.lists||[]).length?`<div class="mr-muted" style="margin-top:.25rem">Lists: ${_bmEsc(p.lists.join(', '))}</div>`:''}${(p.sentTo||[]).length?`<details class="bm-det"><summary>${p.sentTo.length} e-mailed</summary>${_bmEsc(p.sentTo.join(', '))}</details>`:''}${(p.skipped||[]).length?`<details class="bm-det"><summary>${p.skipped.length} skipped</summary>${_bmEsc(p.skipped.join(' · '))}</details>`:''}</td>
+      <td style="white-space:nowrap"><button type="button" class="mr-btn mr-btn-sm" onclick="window._bmPreview('${_bmEsc(p.id)}',this)">👁 E-mail</button> ${p.link?`<a class="mr-btn mr-btn-sm" href="${_bmEsc(p.link)}" target="_blank" rel="noopener">CoStar ↗</a>`:''}</td></tr>`; }).join('')}</tbody></table></div>`;
+}
+window._bmPreview=async function(id,btn){
+  const st=_bmState(); const done=elcBusy(btn,'…');
+  try{ if(!st.prev){ const {doc,getDoc}=_fbFns; const d=await getDoc(doc(_fbDb,'eos','buyerMatchPreviews')); st.prev=d.exists()?(d.data().html||{}):{}; } }
+  catch(e){ showToast('Could not load the e-mail: '+e.message,'error'); return; } finally{ done(); }
+  const html=st.prev[id]; if(!html){ showToast('No preview for this one yet (previews are kept for the newest 25 listings).','info'); return; }
+  document.getElementById('bm-prev-ov')?.remove();
+  const ov=document.createElement('div'); ov.id='bm-prev-ov'; ov.className='mr-ov fixed inset-0 flex items-center justify-center';
+  ov.innerHTML=`<div class="mr-modal" role="dialog" aria-modal="true" aria-label="E-mail preview" style="width:min(700px,100%);height:94vh"><div class="mr-modal-h"><h2>E-mail preview</h2><span class="mr-muted">Each buyer’s copy greets them by first name and names their category.</span><button type="button" class="mr-x" style="margin-left:auto" aria-label="Close" onclick="document.getElementById('bm-prev-ov').remove()">✕</button></div><iframe title="E-mail preview" sandbox="allow-popups" style="flex:1;border:0;width:100%;background:#F2F2F2;border-radius:0 0 14px 14px"></iframe></div>`;
+  ov.addEventListener('click',e=>{ if(e.target===ov) ov.remove(); }); document.body.appendChild(ov); ov.querySelector('iframe').srcdoc=html;
+};
+
+/* ---------- pause / mapwise / access ---------- */
+window._bmToggleMapwise=async function(cb){ const on=cb.checked; try{ await _bmSave({mapwise:on}, on?'MapWise parcel lookup on — one search per new listing':'MapWise off — plain aerial + county-map zoning'); }catch(e){ cb.checked=!on; showToast('Could not change: '+e.message,'error'); } };
+window._bmTogglePause=async function(btn){
+  const st=_bmState(); const next=!st.cfg.paused;
+  if(next===false && !(await elcConfirm('Resume automatic sending?\n\nListings held while paused that are still under 4 days old will go out on the next run.',{title:'Resume sending',okLabel:'Resume'}))) return;
+  const done=elcBusy(btn,next?'Pausing…':'Resuming…');
+  try{ await _bmSave({paused:next}, next?'Sending paused — nothing goes out until you resume':'Sending resumed'); viewBuyerMatch(); }
+  catch(e){ showToast('Could not change: '+e.message,'error'); } finally{ done(); }
+};
+window._bmAccess=function(){
+  if(!_bmIsOwner()) return; const a=_bmCfg().access||'owner';
+  document.getElementById('bm-acc-ov')?.remove();
+  const ov=document.createElement('div'); ov.id='bm-acc-ov'; ov.className='mr-ov fixed inset-0 flex items-center justify-center';
+  const opt=(v,t,s)=>`<label class="mr-sec" style="display:flex;gap:.6rem;align-items:flex-start;cursor:pointer"><input type="radio" name="bm-acc" value="${v}" ${a===v?'checked':''} style="margin-top:.2rem;width:18px;height:18px;accent-color:var(--brand-teal)"><span><b style="color:var(--text-1)">${t}</b><br><span class="mr-muted">${s}</span></span></label>`;
+  ov.innerHTML=`<div class="mr-modal" role="dialog" aria-modal="true" aria-label="Who can see Buyer Match" style="width:min(480px,100%)"><div class="mr-modal-h"><h2>Who can see this tab?</h2><button type="button" class="mr-x" style="margin-left:auto" aria-label="Close" onclick="document.getElementById('bm-acc-ov').remove()">✕</button></div>
+    <div class="mr-modal-b">${opt('owner','Only me','Hidden from everyone else (testing).')}${opt('admins','Admins','Admins see it and can edit the lists.')}${opt('all','All users','Everyone can see the lists and what was sent; only you and admins can change them.')}</div>
+    <div class="mr-modal-f"><button type="button" class="mr-btn" onclick="document.getElementById('bm-acc-ov').remove()">Cancel</button><button type="button" class="mr-btn mr-btn-teal" style="margin-left:auto" onclick="window._bmAccessSave(this)">Save</button></div></div>`;
+  ov.addEventListener('click',e=>{ if(e.target===ov) ov.remove(); }); document.body.appendChild(ov);
+};
+window._bmAccessSave=async function(btn){
+  const v=(document.querySelector('input[name="bm-acc"]:checked')||{}).value||'owner'; const done=elcBusy(btn,'Saving…');
+  try{ const {doc,setDoc}=_fbFns; const cfg={..._bmCfg(),access:v}; await setDoc(doc(_fbDb,'eos','settings'),{buyerMatch:cfg},{merge:true}); APP_CONFIG.buyerMatch=cfg;
+    document.getElementById('bm-acc-ov')?.remove(); showToast('Access saved','success'); try{ renderShell(); }catch(_){} viewBuyerMatch(); }
+  catch(e){ showToast('Could not save: '+e.message,'error'); } finally{ done(); }
+};
+
+function _bmInjectStyles(){
+  if(document.getElementById('bm-styles')) return;
+  const s=document.createElement('style'); s.id='bm-styles'; s.textContent=`
+  .bm-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:.7rem;margin-bottom:1rem}
+  .bm-stat{padding:.75rem .9rem}.bm-big{font-size:1.15rem;font-weight:800;color:var(--text-1);margin-top:.15rem}
+  .bm-err{margin-top:.35rem;font-size:.75rem;color:#b91c1c;font-weight:600}html.dark .bm-err{color:#fca5a5}
+  .bm-tabs{display:flex;gap:.25rem;border-bottom:1px solid var(--border);margin-bottom:.9rem}
+  .bm-tab{border:0;background:none;padding:.65rem .9rem;font-size:.85rem;font-weight:700;color:var(--text-2);border-bottom:3px solid transparent;cursor:pointer;min-height:44px}
+  .bm-tab.on{color:var(--text-1);border-bottom-color:var(--brand-red)}
+  .bm-tab:focus-visible,.bm-x:focus-visible,.bm-hit:focus-visible{outline:2px solid var(--brand-teal);outline-offset:2px}
+  .bm-lists{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:.8rem;align-items:start}
+  .bm-list{padding:.9rem 1rem;overflow:visible}.bm-off{opacity:.65}
+  .bm-list-h{display:flex;gap:.6rem;align-items:flex-start}
+  .bm-list-name{font-weight:800;color:var(--text-1);font-size:.98rem}
+  .bm-uses{display:flex;gap:.3rem;flex-wrap:wrap;align-items:center;margin-top:.35rem}
+  .bm-use{display:inline-block;font-size:.7rem;font-weight:700;border-radius:999px;padding:.18rem .55rem;background:#e0f5f6;color:#155e63;margin:0 .25rem .25rem 0}
+  html.dark .bm-use{background:#134e4a;color:#99f6e4}
+  .bm-people{display:flex;flex-wrap:wrap;gap:.35rem;margin-top:.75rem}
+  .bm-person{display:inline-flex;align-items:center;gap:.2rem;font-size:.78rem;border:1px solid var(--border);border-radius:999px;padding:.15rem .2rem .15rem .6rem;background:var(--surface-1,var(--surface));color:var(--text-1)}
+  .bm-person-warn{border-color:#f59e0b;background:#fffbeb}html.dark .bm-person-warn{background:rgba(245,158,11,.14);border-color:#b45309}
+  .bm-person b{color:#b45309;font-size:.7rem}html.dark .bm-person b{color:#fbbf24}
+  .bm-co{color:var(--text-2)}
+  .bm-x{border:0;background:none;color:var(--text-2);cursor:pointer;border-radius:999px;min-width:28px;min-height:28px;font-size:.8rem}
+  .bm-x:hover{color:var(--brand-red);background:var(--bg)}
+  .bm-add{position:relative;margin-top:.7rem}
+  .bm-res{position:absolute;left:0;right:0;top:100%;z-index:30;background:var(--surface);border:1px solid var(--border);border-radius:8px;box-shadow:var(--shadow-lg);max-height:280px;overflow:auto}
+  .bm-res:empty{display:none}
+  .bm-hit{display:block;width:100%;text-align:left;border:0;background:none;padding:.55rem .7rem;font-size:.82rem;color:var(--text-1);cursor:pointer;min-height:44px;border-bottom:1px solid var(--border)}
+  .bm-hit:hover{background:var(--bg)}
+  .bm-ed{margin-top:.8rem;padding:.8rem .85rem;border:1px solid var(--border);border-radius:10px;background:var(--bg)}
+  .bm-usegrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:.15rem .6rem}
+  #bm-root .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+  .bm-usebox{display:flex;gap:.45rem;align-items:center;font-size:.82rem;color:var(--text-1);min-height:36px;cursor:pointer}
+  .bm-filters{display:flex;flex-wrap:wrap;gap:.6rem}.bm-filters label{display:flex;flex-direction:column;gap:.2rem;font-size:.75rem;color:var(--text-2);flex:1 1 120px}
+  .bm-parcel{font-size:.76rem;font-weight:700;color:#155e63;margin-top:.15rem}html.dark .bm-parcel{color:#5eead4}
+  .bm-table td{vertical-align:top}.bm-det{margin-top:.25rem;font-size:.76rem;color:var(--text-2)}.bm-det summary{cursor:pointer;font-weight:700;color:var(--text-1);min-height:28px}
+  @media(max-width:767px){.bm-stats{grid-template-columns:1fr 1fr}.bm-lists{grid-template-columns:1fr}.bm-table thead{display:none}.bm-table tr{display:grid;grid-template-columns:96px 1fr;gap:.2rem .6rem;padding:.6rem;border-bottom:1px solid var(--border)}.bm-table td{border:0;padding:.1rem}.bm-table td:nth-child(n+3){grid-column:1/-1}.bm-filters input{font-size:16px}}
+  `; document.head.appendChild(s);
+}
+/* ===== BUYERMATCH_BLOCK_END ===== */
+/* =======================================================
    🏞️ LAND LISTING REPORT — marker LLR-20261116
    Ryan (2026-11-16): "Every quarter we prepare a summary of all our land listings, the status of them, the agent for them and
    send to prospective buyers … build this in Terra to pull automatically from the cards — all active listings and all under
@@ -54956,6 +55223,8 @@ window._psIgnore=async function(i,btn){
        (most of the old "Other" listings) and the row is flagged "Section guessed — pick one" so it can be moved.
      • A listing with no photo on the card is left out of the PDF and its advisor gets a one-time task (per quarter) to add one.
      • The closing page fills the space after the advisor directory with both offices, email, phone and website.
+   LLRPHOTOTASK-20261117 (Ryan): the 📸 photo tasks can be reassigned to anyone, or ticked "Keep this property off the Land
+   Listings Report" (sets llrExclude, closes the task) — see the 📸 PHOTO TASKS block below.
    LLRMONTHLY-20261117 (Ryan): the approved report is emailed on the 5th of every month to the "Eshenbaugh Report Newsletter
    Recipients" CRM group (Mailchimp tag), until he says stop; Ryan + Krissy get it first and either approves on the 4th (task).
      • 📨 Monthly email panel at the top of this tab; Krissy (approver) sees the tab too. Details in the 📨 MONTHLY EMAIL block below
@@ -55184,7 +55453,7 @@ function _llrCollect(){
       const guessed=!uc && !(ov&&LLR_PICKABLE.includes(ov)) && auto.src==='guess';
       const r={d, stage:s, uc, sec, auto, guessed, excluded:'', issues:[]};
       if(d.doNotMarket) r.excluded='DO NOT MARKET';
-      else if(d.llrExclude) r.excluded='Left out by hand';
+      else if(d.llrExclude) r.excluded=d.llrExcludeVia==='photo-task'?'Kept off by '+(d.llrExcludeBy||'advisor'):'Left out by hand';   // LLRPHOTOTASK-20261117
       else if(uc && !st.includeUc) r.excluded='Under-contract listings switched off';
       else if(!_llrPhoto(d)){ r.excluded='No photo — left out'; r.noPhoto=true; }   // LLR3-20261116
       rows.push(r);
@@ -55247,7 +55516,7 @@ function _llrRowHtml(r, canEdit){
   const secOpts=r.uc||r.sold?`<option>${_mrEsc(_llrSectionTitle(r.sec))}</option>`:
     `<option value="" ${!LLR_PICKABLE.includes(d.llrSection||'')?'selected':''}>${r.auto&&r.auto.src==='guess'?'Guess':'Auto'} — ${_mrEsc(_llrSectionTitle(r.auto?r.auto.cat:'commercial'))}${r.auto&&r.auto.src!=='guess'?' (from '+_mrEsc(r.auto.src)+')':''}</option>`+LLR_PICKABLE.map(k=>`<option value="${k}" ${d.llrSection===k?'selected':''}>${_mrEsc(_llrSectionTitle(k))}</option>`).join('');
   const st=_llrState(); const taskSent=r.noPhoto && d.llrPhotoTaskQ===st.q;
-  const issues=r.excluded?`<span class="mr-chip mr-chip-new">${_mrEsc(r.excluded)}</span>${r.noPhoto?`<div class="llr-sub">${taskSent?'📸 Task sent to '+_mrEsc((_llrAdvisors(d)[0]||{}).name||'advisor'):'Add a photo on the card (or pick one here) to print it'}</div>`:''}`:(r.issues.map(x=>`<span class="mr-chip mr-chip-warn" style="margin:0 .2rem .2rem 0">${_mrEsc(x)}</span>`).join('')||'<span class="mr-chip mr-chip-sent">Ready</span>');
+  const issues=r.excluded?`<span class="mr-chip mr-chip-new">${_mrEsc(r.excluded)}</span>${r.noPhoto?`<div class="llr-sub">${taskSent?'📸 Task sent to '+_mrEsc(d.llrPhotoTaskTo||(_llrAdvisors(d)[0]||{}).name||'advisor'):'Add a photo on the card (or pick one here) to print it'}</div>`:''}`:(r.issues.map(x=>`<span class="mr-chip mr-chip-warn" style="margin:0 .2rem .2rem 0">${_mrEsc(x)}</span>`).join('')||'<span class="mr-chip mr-chip-sent">Ready</span>');
   const exclLocked=!!d.doNotMarket||!!r.noPhoto;
   return `<tr class="${r.excluded?'llr-off':''}" data-id="${id}">
     <td><input type="checkbox" class="mr-check" aria-label="Include ${_mrEsc(_mrDealName(d))} in the report" ${!r.excluded?'checked':''} ${exclLocked||!canEdit||(r.uc&&!_llrState().includeUc)?'disabled':''} onchange="window._llrSet('${id}','llrExclude',!this.checked)"></td>
@@ -55900,6 +56169,89 @@ window._llrMonthlyBoot=function(attempt){
   setTimeout(()=>window._llrmBuild(null,true), 4000);
 };
 function _llrmCanSeeTab(){ return _llrmIsApprover(); }
+/* =======================================================
+   📸 PHOTO TASKS — reassign or keep off the report — marker LLRPHOTOTASK-20261117
+   Ryan (2026-11-17): "On the tasks assigned to users to add photos for land listings, they need to be able to assign the
+   task to others or check a box to keep property off the land listing report if they prefer to keep it off."
+   On every open "📸 Add a photo for the Land Listings Report" task (source 'llr-photo'), right on the task in the Tasks tab:
+     • 👤 Reassign… → pick anyone (advisors + staff, same list as the task form) → the task moves to them (reassignedBy/At kept,
+       note on the property history); the tab's row then says who has it.
+     • ☐ Keep this property off the Land Listings Report → deal.llrExclude = true (the same switch as unticking the row on the
+       🏞️ tab, so Ryan/staff can tick it back in there), stamped llrExcludeBy/At/Via; the task closes; Undo puts both back.
+     • 🏠 Open the property card — to add the photo.
+   ======================================================= */
+window._llrpIsTask=t=>!!(t && (t.source==='llr-photo' || /^📸 Add a photo for the Land Listings Report/.test(String(t.title||''))));
+window._llrpOpen=window._llrpOpen||{};   // taskId → reassign picker open (survives live-sync re-renders)
+function _llrpUsers(){ try{ return (typeof getAssignableUsers==='function'?getAssignableUsers():[]).filter(u=>u&&u.uid&&u.name).sort((a,b)=>String(a.name).localeCompare(String(b.name))); }catch(_){ return []; } }
+function _llrpBox(id){ return document.querySelector(`[data-llrp-box="${CSS.escape(id)}"]`); }
+function _llrpTask(id){ return (typeof allTasks!=='undefined'?allTasks:[]).find(x=>x.id===id); }
+function _llrpRefresh(id){ const t=_llrpTask(id); const el=_llrpBox(id); if(el&&t) el.innerHTML=window._llrpTaskButtons(t); }
+window._llrpTaskButtons=function(t){
+  const b='text-xs font-semibold px-2.5 py-1 rounded-lg'; const E=_mrEsc;
+  const d=(typeof allDeals!=='undefined'?allDeals:[]).find(x=>x.id===t.dealId);
+  if(t.status==='complete'||t.status==='completed'){
+    if(t.llrpOutcome==='kept-off') return `<div class="text-xs text-gray-600 mt-1">🚫 Kept off the Land Listings Report${t.llrpBy?' by '+E(t.llrpBy):''} — tick it back in on the 🏞️ Land Listing Report tab if that changes.</div>`;
+    return '';
+  }
+  const open=!!window._llrpOpen[t.id];
+  const users=_llrpUsers();
+  const kept=!!(d&&d.llrExclude);
+  const opts=users.map(u=>`<option value="${E(u.uid)}" ${u.uid===t.assignedTo?'disabled':''}>${E(u.name)}${u.uid===t.assignedTo?' (has it now)':''}</option>`).join('');
+  return `${t.reassignedByName?`<div class="text-xs text-gray-500 mt-1">↪ Reassigned by ${E(t.reassignedByName)}${t.reassignedAt?' · '+new Date(t.reassignedAt).toLocaleDateString('en-US',{month:'short',day:'numeric'}):''}</div>`:''}
+  <div class="flex gap-2 mt-2 flex-wrap items-center" role="group" aria-label="Photo task options">
+    ${d?`<button type="button" onclick="openPropertyDetail('${E(t.dealId)}')" class="${b} text-white" style="background:#DA291C;min-height:32px">🏠 Open the card to add a photo</button>`:''}
+    <button type="button" onclick="window._llrpToggle('${E(t.id)}')" aria-expanded="${open?'true':'false'}" class="${b} border border-gray-300 text-gray-700 bg-white" style="min-height:32px">👤 Reassign${open?' ▲':'…'}</button>
+    ${d?`<label class="text-xs text-gray-700 inline-flex items-center gap-1.5 cursor-pointer" style="min-height:32px"><input type="checkbox" ${kept?'checked':''} onchange="window._llrpKeepOff('${E(t.id)}',this)" style="width:16px;height:16px;accent-color:#DA291C"> Keep this property off the Land Listings Report</label>`:''}
+  </div>
+  ${open?`<div class="flex gap-2 mt-2 flex-wrap items-center">
+    <label class="sr-only" for="llrp-sel-${E(t.id)}">Reassign to</label>
+    <select id="llrp-sel-${E(t.id)}" class="border rounded-lg px-2 py-1.5 text-sm outline-none bg-white" style="min-width:180px;min-height:32px"><option value="">Reassign to…</option>${opts}</select>
+    <button type="button" onclick="window._llrpReassign('${E(t.id)}',this)" class="${b} text-white" style="background:#0f766e;min-height:32px">Reassign</button>
+    <button type="button" onclick="window._llrpToggle('${E(t.id)}')" class="${b} border border-gray-300 text-gray-700 bg-white" style="min-height:32px">Cancel</button>
+  </div>`:''}`;
+};
+window._llrpToggle=function(id){ window._llrpOpen[id]=!window._llrpOpen[id]; _llrpRefresh(id); if(window._llrpOpen[id]) setTimeout(()=>document.getElementById('llrp-sel-'+id)?.focus(),0); };
+window._llrpReassign=async function(id, btn){
+  const t=_llrpTask(id); if(!t) return;
+  const sel=document.getElementById('llrp-sel-'+id); const uid=sel&&sel.value;
+  if(!uid){ showToast('Pick who should get this task','warning'); sel&&sel.focus(); return; }
+  const u=_llrpUsers().find(x=>x.uid===uid)||{}; const email=String(u.email||(allProfiles[uid]||{}).email||'').toLowerCase();
+  const prev={assignedTo:t.assignedTo||null, assignedToName:t.assignedToName||'', assignedToEmail:t.assignedToEmail||'', reassignedBy:t.reassignedBy||'', reassignedByName:t.reassignedByName||'', reassignedAt:t.reassignedAt||0};
+  const patch={assignedTo:uid, assignedToName:u.name||'', assignedToEmail:email, reassignedBy:currentUser?.uid||'', reassignedByName:currentUser?.name||currentUser?.email||'', reassignedAt:Date.now(), updatedAt:Date.now()};
+  const done=elcBusy(btn,'Reassigning…');
+  try{
+    await Store.updateTask(id, patch); Object.assign(t, patch); window._llrpOpen[id]=false;
+    try{ if(t.dealId){ await Store.updateDeal(t.dealId,{llrPhotoTaskTo:u.name||''}); const d=(allDeals||[]).find(x=>x.id===t.dealId); if(d) d.llrPhotoTaskTo=u.name||''; } }catch(_){}
+    try{ if(t.dealId && typeof addActivity==='function') addActivity(t.dealId,'note',`📸 Land Listings Report photo task reassigned to ${u.name} by ${currentUser?.name||currentUser?.email||''}`); }catch(_){}
+    const me=uid===currentUser?.uid;
+    showUndoToast(`📸 Task reassigned to ${u.name}`, async()=>{ await Store.updateTask(id, prev); Object.assign(t, prev); if(t.dealId){ try{ await Store.updateDeal(t.dealId,{llrPhotoTaskTo:''}); }catch(_){} } _llrpRefresh(id); if(typeof viewTasks==='function' && currentView==='tasks') viewTasks(); });
+    if(!me && typeof viewTasks==='function' && currentView==='tasks') viewTasks(); else _llrpRefresh(id);
+  }catch(e){ console.error('[llrp] reassign',e); showToast('Could not reassign: '+e.message,'error'); }
+  finally{ done(); }
+};
+window._llrpKeepOff=async function(id, cb){
+  const t=_llrpTask(id); if(!t||!t.dealId){ cb.checked=false; return; }
+  const d=(allDeals||[]).find(x=>x.id===t.dealId); if(!d){ cb.checked=false; showToast('Property not found','error'); return; }
+  const on=cb.checked; cb.disabled=true;
+  const who=currentUser?.name||currentUser?.email||'';
+  const prevDeal={llrExclude:!!d.llrExclude, llrExcludeBy:d.llrExcludeBy||'', llrExcludeAt:d.llrExcludeAt||0, llrExcludeVia:d.llrExcludeVia||''};
+  const prevTask={status:t.status||'pending', completedAt:t.completedAt||null, completedBy:t.completedBy||'', llrpOutcome:t.llrpOutcome||'', llrpBy:t.llrpBy||''};
+  try{
+    if(on){
+      const dp={llrExclude:true, llrExcludeBy:who, llrExcludeAt:Date.now(), llrExcludeVia:'photo-task'};
+      await Store.updateDeal(d.id, dp); Object.assign(d, dp);
+      const tp={status:'complete', completedAt:Date.now(), completedBy:currentUser?.uid||'', llrpOutcome:'kept-off', llrpBy:who};
+      await Store.updateTask(id, tp); Object.assign(t, tp);
+      try{ if(typeof addActivity==='function') addActivity(d.id,'note',`🚫 Kept off the Land Listings Report by ${who} (from the photo task)`); }catch(_){}
+      showUndoToast(`🚫 ${_mrDealName(d)} is kept off the Land Listings Report`, async()=>{ await Store.updateDeal(d.id, prevDeal); Object.assign(d, prevDeal); await Store.updateTask(id, prevTask); Object.assign(t, prevTask); if(typeof viewTasks==='function' && currentView==='tasks') viewTasks(); });
+      if(typeof viewTasks==='function' && currentView==='tasks') viewTasks(); else _llrpRefresh(id);
+    } else {
+      const dp={llrExclude:false, llrExcludeBy:'', llrExcludeAt:0, llrExcludeVia:''};
+      await Store.updateDeal(d.id, dp); Object.assign(d, dp); showToast('Back on the Land Listings Report (once it has a photo)','success'); _llrpRefresh(id);
+    }
+  }catch(e){ console.error('[llrp] keep off',e); cb.checked=!on; showToast('Could not save: '+e.message,'error'); }
+  finally{ cb.disabled=false; }
+};
 /* ===== LLR_BLOCK_END ===== */
 /* =======================================================
    📰 THE ESHENBAUGH REPORT — marker ESH-20261116
@@ -56708,7 +57060,7 @@ window._spMarketingBlock=function(deal){
   const last=posts[0];
   return `<div style="display:flex;flex-wrap:wrap;gap:.4rem;align-items:center">
     <button class="prop-note-btn" onclick="window._spOpen('${deal.id}')" title="Post this listing to the ELC Facebook Page and LinkedIn Company Page">📣 Post to social</button>
-    ${(window._lpCanPost&&window._lpCanPost(deal))?`<button class="prop-note-btn" onclick="window._lpOpen('${deal.id}')" title="Post this listing to YOUR LinkedIn profile — noted on the property history and the monthly report" style="color:#0A66C2;font-weight:700"><span style="display:inline-block;background:#0A66C2;color:#fff;border-radius:3px;padding:0 3px;font-size:.7rem;font-family:Arial,sans-serif;margin-right:3px">in</span>Post to my LinkedIn</button>`:''}
+    ${(window._lpCanPost&&window._lpCanPost(deal))?`<button class="prop-note-btn" onclick="window._lpOpen('${deal.id}')" title="Post this listing to YOUR LinkedIn profile — noted on the property history and the monthly report" style="color:#fff;font-weight:700"><span style="display:inline-block;background:#fff;color:#0A66C2;border-radius:3px;padding:0 3px;font-size:.7rem;font-weight:800;font-family:Arial,sans-serif;margin-right:4px">in</span>Post to my LinkedIn</button><!-- LIBTNFIX-20261117 white text -->`:''}
     ${last?`<span style="font-size:.7rem;color:#6E7480">Last post ${_mrFmtDate(last.at)} · ${posts.map(p=>`<a href="${_mrEsc(p.url||'#')}" target="_blank" rel="noopener" style="color:#0A66C2;font-weight:600">${p.platform==='facebook'?'Facebook':p.platform==='linkedin_personal'?'LinkedIn · '+_mrEsc(String(p.byName||'advisor').split(' ')[0]):'LinkedIn'}</a>`).filter((v,i,a)=>a.indexOf(v)===i).slice(0,2).join(' · ')}</span>`:''}
   </div>`;
 };
