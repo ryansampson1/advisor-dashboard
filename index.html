@@ -2389,7 +2389,7 @@ const APP_CONFIG = {
   // 📬 Monthly Owner Reports (MREPORT-20261006). access: 'owner' | 'admins' | 'all' — overridden from eos/settings.monthlyReports
   monthlyReports: { access: 'all',   /* REPORTSALL-20261016 — opened to all users */ workerUrl: 'https://elc-report-worker.dirtdog.workers.dev' },
   buyerMatch: { access: 'owner' },   // BUYERMATCH-20261117 — 'owner' = Ryan only | 'admins' | 'all'; overridden from eos/settings.buyerMatch (⚙ Access on the tab)
-  landListingReport: { access: 'owner' },   // LLR-20261116 — 'owner' = Ryan only | 'admins' | 'all'; overridden from eos/settings.landListingReport (⚙ Access on the tab)
+  landListingReport: { access: 'all' },   // LLRGROUP-20261119 default — Ryan opened it to all users 2026-11-19 (   // LLR-20261116 — 'owner' = Ryan only | 'admins' | 'all'; overridden from eos/settings.landListingReport (⚙ Access on the tab)
   eshReport: { access: 'owner', writers: [] },   // ESH-20261116 — 'owner' (Ryan) | 'writers' | 'admins' | 'all'; overridden from eos/settings.eshReport
   social: { workerUrl: 'https://elc-social-worker.dirtdog.workers.dev', defaultLink: 'https://www.thedirtdog.com' },   // SOCIAL-20261006-hooks
   mcBlast: { enabled: true, dueDay: 20, autoDay: 25, autoResend: true },
@@ -55531,8 +55531,8 @@ function _llrAdvisorSelect(st){ const me=_llrMyUid(); const L=_llrAdvisorList();
   L.filter(b=>b.uid!==me).forEach(b=>o.push(`<option value="${_mrEsc(b.uid)}" ${st.advisor===b.uid?'selected':''}>${_mrEsc(b.name)}</option>`));
   if(st.advisor && st.advisor!==me && !L.some(b=>b.uid===st.advisor)) o.push(`<option value="${_mrEsc(st.advisor)}" selected>${_mrEsc(_llrAdvisorName(st.advisor)||'Advisor')}</option>`);
   return `<select class="mr-select" aria-label="Which advisor's listings" title="Run the report for one advisor's listings" onchange="const s=window._llrState();s.advisor=this.value;if(this.value)s.office='';viewLandListingReport()">${o.join('')}</select>`; }
-const LLR_LANDS=[['all','All land'],['residential','Residential land'],['commercial','Commercial land']];
-const LLR_LAND_CATS={residential:['residential'], commercial:['commercial','industrial']};
+const LLR_LANDS=[['all','All land'],['residential','Residential land'],['commercial','Commercial land (incl. industrial)'],['industrial','Industrial land only'],['agricultural','Agricultural land']];   // LLRGROUP-20261119 — + Industrial, Agricultural
+const LLR_LAND_CATS={residential:['residential'], commercial:['commercial','industrial'], industrial:['industrial'], agricultural:['agricultural']};
 function _llrOfficeOf(uid, email){
   let o='';
   try{ const b=(typeof getAdvisorBio==='function')?getAdvisorBio(uid||email):null; o=(b&&b.office)||''; }catch(_){}
@@ -55549,8 +55549,8 @@ function _llrInScope(d){
   if(st.land && st.land!=='all' && !(LLR_LAND_CATS[st.land]||[]).includes(_llrLandCat(d))) return false;
   return true;
 }
-function _llrScopeLabel(){ const st=_llrState(); const p=[]; if(st.advisor) p.push(_llrAdvisorName(st.advisor)||'Advisor'); if(st.office) p.push(st.office+' Office'); if(st.land&&st.land!=='all') p.push(st.land==='residential'?'Residential Land':'Commercial Land'); return p.join(' · '); }
-function _llrScopeFile(){ const st=_llrState(); return (st.advisor?'_'+String(_llrAdvisorName(st.advisor)||'Advisor').replace(/[^A-Za-z0-9]+/g,'_').replace(/^_|_$/g,''):'')+(st.office?'_'+st.office:'')+(st.land&&st.land!=='all'?'_'+(st.land==='residential'?'Residential':'Commercial'):''); }
+function _llrScopeLabel(){ const st=_llrState(); const p=[]; if(st.advisor) p.push(_llrAdvisorName(st.advisor)||'Advisor'); if(st.office) p.push(st.office+' Office'); if(st.land&&st.land!=='all') p.push(_llrLandName(st.land)); return p.join(' · '); }
+function _llrScopeFile(){ const st=_llrState(); return (st.advisor?'_'+String(_llrAdvisorName(st.advisor)||'Advisor').replace(/[^A-Za-z0-9]+/g,'_').replace(/^_|_$/g,''):'')+(st.office?'_'+st.office:'')+(st.land&&st.land!=='all'?'_'+_llrLandName(st.land).replace(/ Land$/,'').replace(/[^A-Za-z0-9]+/g,'_'):''); }
 
 /* ---------- the list ---------- */
 function _llrCollect(){
@@ -55674,13 +55674,15 @@ function viewLandListingReport(){
         ${_llrIsOwner()?`<button type="button" class="mr-btn" onclick="window._llrAccess()">⚙ Access</button>`:''}
         <button type="button" class="mr-btn mr-btn-teal" id="llr-prev" onclick="window._llrGenerate('preview',this)">👁 Preview PDF</button>
         <button type="button" class="mr-btn mr-btn-primary" id="llr-dl" onclick="window._llrGenerate('download',this)">⬇ Download PDF</button>
+        <button type="button" class="mr-btn" id="llr-grp" title="Email this report to one of your CRM groups, from your own mailbox — now or scheduled" onclick="window._llrgOpen()">✉️ Email to a group</button>
       </div>
     </div>
     <p class="mr-note" style="margin:-.4rem 0 .6rem">Pulled live from the deal cards: every seller-side listing in Listing / LOI / Signed LOI (AVAILABLE) and Due Diligence / Rezoning / Permitting / Closing (UNDER CONTRACT) on the as-of date. DO NOT MARKET cards are always left out. Grey text in a box is what Terra pulled from the card — type over it to change it on this report only (saved on the card, used only here).</p>
     ${_llrmPanelSlot()}
+    ${_llrgSlot()}
     <div id="llr-stats"></div>
     <div class="mr-card" style="margin-bottom:.9rem"><div class="llr-opts">
-      <label style="flex:1 1 260px">Cover <input class="mr-input" style="flex:1" id="llr-cover" value="${_mrEsc(st.cover||'')}" placeholder="Available ${_mrEsc(st.land==='residential'?'Residential Land':(st.land==='commercial'?'Commercial Land':'Land'))} — ${_mrEsc(_llrMonthYear(st.asOf))}" oninput="window._llrState().cover=this.value"></label>
+      <label style="flex:1 1 260px">Cover <input class="mr-input" style="flex:1" id="llr-cover" value="${_mrEsc(st.cover||'')}" placeholder="Available ${_mrEsc(_llrLandName(st.land))} — ${_mrEsc(_llrMonthYear(st.asOf))}" oninput="window._llrState().cover=this.value"></label>
       <label><input type="checkbox" class="mr-check" ${st.includeUc?'checked':''} onchange="window._llrState().includeUc=this.checked;window._llrRenderRows()"> Under-contract listings</label>
       <label><input type="checkbox" class="mr-check" ${st.includeSold?'checked':''} onchange="window._llrState().includeSold=this.checked;window._llrRenderRows()"> ${_mrEsc(_llrSectionTitle('sold'))} (closed in the quarter)</label>
       <label><input type="checkbox" class="mr-check" ${st.includeDir?'checked':''} onchange="window._llrState().includeDir=this.checked"> Advisor directory page</label>
@@ -55694,6 +55696,7 @@ function viewLandListingReport(){
   </div>`);
   window._llrRenderRows();
   try{ _llrmWatch(); _llrmRenderPanel(); }catch(e){ console.warn('[llrm] panel',e); }   // LLRMONTHLY-20261117
+  try{ _llrgOpenToAll(); window._llrgLoad(); }catch(e){ console.warn('[llrg] panel',e); }   // LLRGROUP-20261119
   try{ _llrGeoKick(); }catch(e){ console.warn('[llrmap] geo',e); }   // LLRMAP-20261117
 }
 window._llrRenderRows=function(){
@@ -55978,13 +55981,13 @@ async function _llrBuild(progress, opts){
   doc.setFont('times','bolditalic'); doc.setFontSize(30); doc.setTextColor(30,30,30); doc.text('The Land Listings',W/2,252,{align:'center'});
   spaced('REPORT',318,74,'x',LLR_RED,6);
   const cover=String(st.cover||'').trim().replace(/\s*\n\s*/g,'  ·  ');
-  const band=[qLabel, (cover||('Available '+(st.land==='residential'?'Residential Land':(st.land==='commercial'?'Commercial Land':'Land'))+'  ·  '+_llrMonthYear(st.asOf))).toUpperCase(), (st.advisor?String(_llrAdvisorName(st.advisor)||'').toUpperCase():''), (st.office?st.office.toUpperCase()+' OFFICE':'')].filter(Boolean).join('  ·  ');
+  const band=[qLabel, (cover||('Available '+_llrLandName(st.land)+'  ·  '+_llrMonthYear(st.asOf))).toUpperCase(), (st.advisor?String(_llrAdvisorName(st.advisor)||'').toUpperCase():''), (st.office?st.office.toUpperCase()+' OFFICE':'')].filter(Boolean).join('  ·  ');
   fill(LLR_TEAL_DK); doc.rect(45,334,W-90,28,'F');
   text(band,W/2,352.5,{size:10.5,w:'b',color:[255,255,255],align:'center',maxW:W-110,min:7});
   const avail=rows.filter(r=>!r.uc&&!r.sold), nU=rows.filter(r=>r.uc).length;
   text(avail.length+' available listing'+(avail.length===1?'':'s')+(nU?'  ·  '+nU+' under contract':'')+(avail.length?'  ·  '+acresOf(avail)+' total acres':''),W/2,384,{size:11,w:'s',color:[80,80,80],align:'center'});
   // jump-to buttons (only the land types this run covers)
-  const cats=st.land==='residential'?['residential']:(st.land==='commercial'?['commercial','industrial']:LLR_LAND_KEYS);
+  const cats=(st.land&&st.land!=='all'&&LLR_LAND_CATS[st.land])||LLR_LAND_KEYS;   // LLRGROUP-20261119
   const CC={commercial:LLR_RED, industrial:[55,65,81], residential:LLR_TEAL_DK, agricultural:[88,124,52]};
   const NM={commercial:'COMMERCIAL',industrial:'INDUSTRIAL',residential:'RESIDENTIAL',agricultural:'AGRICULTURAL'};
   spaced('BROWSE BY LAND TYPE',414,9,'b',[110,110,110],1.6);
@@ -56286,6 +56289,7 @@ window._llrmToggle=async function(cb){
 window._llrMonthlyBoot=function(attempt){
   attempt=attempt||0;
   if(!currentUser) return;
+  if(!attempt) setTimeout(()=>{ try{ _llrgOpenToAll(); }catch(_){} }, 9000);   // LLRGROUP-20261119 — Ryan's next sign-in opens the tab to everyone
   const deep=/llr-monthly/.test(location.hash||'');
   if(deep && _llrNavVisible(true,false)){ try{ history.replaceState(null,'',location.pathname+location.search); }catch(_){} currentView='landListingReport'; renderShell(); renderCurrentView(); }
   if(!_llrmIsApprover() || !_llrmOn()) return;
@@ -56523,6 +56527,131 @@ window._llrpKeepOff=async function(id, cb){
   }catch(e){ console.error('[llrp] keep off',e); cb.checked=!on; showToast('Could not save: '+e.message,'error'); }
   finally{ cb.disabled=false; }
 };
+/* =======================================================
+   ✉️ EMAIL A REPORT TO A CRM GROUP + OPEN TO ALL USERS — marker LLRGROUP-20261119 (sending lives in elc-social-worker)
+   Ryan (2026-11-19): "make this live so all users can see it. All users should be able to create and download any report
+   they wish in here, just not blast to the whole database … pick a group to send a certain report to from the users email
+   address … build a tampa industrial report then send to developer industrial group either immediately or per a scheduled
+   time at users selection."
+     • Everyone sees the tab and can build / download any run (office · advisor · land type, now incl. Industrial and
+       Agricultural). Per-listing overrides stay with Ryan / admins / staff.
+     • ✉️ Email to a group: the report on screen → a CRM group, FROM the user's own @thedirtdog.com mailbox, one email per
+       person, now or at a date/time they pick. Max 300 people; the newsletter database is refused (it only gets the
+       approved monthly email); unsubscribed / departed / invalid addresses skipped (worker).
+     • ✉️ Group sends list on the tab: status, progress, Cancel for anything not finished.
+   ======================================================= */
+const LLR_LAND_NAMES={all:'Land', residential:'Residential Land', commercial:'Commercial Land', industrial:'Industrial Land', agricultural:'Agricultural Land'};
+function _llrLandName(k){ return LLR_LAND_NAMES[k||'all']||'Land'; }
+function _llrRunLabel(){ const st=_llrState(); const p=[];
+  if(st.advisor) p.push(_llrAdvisorName(st.advisor)||'Advisor');
+  if(st.office) p.push(st.office);
+  if(st.land && st.land!=='all') p.push(_llrLandName(st.land).replace(/ Land$/,''));
+  return p.join(' ')||'ELC'; }
+function _llrgWorker(){ return ((APP_CONFIG.social||{}).workerUrl||'').replace(/\/+$/,''); }
+async function _llrgPost(path, body){
+  const base=_llrgWorker(); if(!base) throw new Error('Social worker URL is not set');
+  const tok=await _mrIdToken(); if(!tok) throw new Error('Not signed in');
+  const r=await fetch(base+path,{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+tok},body:JSON.stringify(body||{})});
+  const j=await r.json().catch(()=>({})); if(!r.ok) throw new Error((j.error&&j.error.message)||('worker '+r.status)); return j; }
+const LLRG_BLOCKED_RE=/eshenbaugh\s+report\s+newsletter/i;
+function _llrgGroups(){ return (typeof allCRMGroups!=='undefined'?allCRMGroups:[]).filter(g=>g&&g.id&&g.name&&!LLRG_BLOCKED_RE.test(g.name)).sort((a,b)=>String(a.name).localeCompare(String(b.name))); }
+function _llrgNext9(){ const d=new Date(); d.setDate(d.getDate()+1); while(d.getDay()===0||d.getDay()===6) d.setDate(d.getDate()+1); d.setHours(9,0,0,0); return d; }
+function _llrgLocalInput(d){ const p=n=>String(n).padStart(2,'0'); return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+'T'+p(d.getHours())+':'+p(d.getMinutes()); }
+function _llrgDefaultMsg(){ const st=_llrState(); const land=st.land&&st.land!=='all'?_llrLandName(st.land).replace(/ Land$/,'').toLowerCase()+' ':'';
+  return `Here's our current ${land}land listings report${st.office?' for the '+st.office+' area':''} — every site we have available${st.includeUc?', plus what’s under contract':''}, with aerials, zoning and pricing.\n\nClick any property in the report to open its website, or just reply and I’ll send you more detail.`; }
+
+window._llrgOpen=async function(){
+  if(!_llrCanAccess()) return;
+  const st=_llrState(); const groups=_llrgGroups(); const label=_llrRunLabel();
+  const subj=`${label==='ELC'?'ELC':label} Land Listings — ${new Date().toLocaleDateString('en-US',{month:'long',year:'numeric'})}`;
+  document.getElementById('llrg-ov')?.remove();
+  const ov=document.createElement('div'); ov.id='llrg-ov'; ov.className='mr-ov fixed inset-0 flex items-center justify-center';
+  ov.innerHTML=`<div class="mr-modal" role="dialog" aria-modal="true" aria-labelledby="llrg-h" style="width:min(620px,100%)">
+    <div class="mr-modal-h"><h2 id="llrg-h">✉️ Email this report to a group</h2><button type="button" class="mr-x" style="margin-left:auto" aria-label="Close" onclick="document.getElementById('llrg-ov').remove()">✕</button></div>
+    <div class="mr-modal-b">
+      <div class="mr-note" style="margin:0 0 .7rem">Report: <b>${_mrEsc(label==='ELC'?'Company-wide':label)}</b>${_llrScopeLabel()?' · '+_mrEsc(_llrScopeLabel()):''} — change the dropdowns on the tab to send a different report.</div>
+      <label class="mr-lbl" for="llrg-group">CRM group</label>
+      ${groups.length?`<select id="llrg-group" class="mr-select" style="width:100%" onchange="window._llrgPreview()"><option value="">Pick a group…</option>${groups.map(g=>`<option value="${_mrEsc(g.id)}">${_mrEsc(g.name)}</option>`).join('')}</select>`:'<div class="mr-note">No CRM groups are loaded yet — open the CRM tab once, then try again.</div>'}
+      <div id="llrg-count" class="mr-muted" style="font-size:.85rem;min-height:1.2em;margin:.3rem 0 .6rem" aria-live="polite"></div>
+      <label class="mr-lbl" for="llrg-subj">Subject</label>
+      <input id="llrg-subj" class="mr-input" style="width:100%" maxlength="200" value="${_mrEsc(subj)}">
+      <label class="mr-lbl" for="llrg-msg" style="margin-top:.6rem">Your note <span class="mr-muted">(each person gets “Hi {first name},” then this)</span></label>
+      <textarea id="llrg-msg" class="mr-input" style="width:100%;min-height:120px" maxlength="4000">${_mrEsc(_llrgDefaultMsg())}</textarea>
+      <fieldset style="border:0;padding:0;margin:.7rem 0 0"><legend class="mr-lbl">When</legend>
+        <label style="display:inline-flex;gap:.4rem;align-items:center;min-height:40px;margin-right:1rem;cursor:pointer"><input type="radio" name="llrg-when" value="now" onchange="window._llrgWhen()"> Send now</label>
+        <label style="display:inline-flex;gap:.4rem;align-items:center;min-height:40px;cursor:pointer"><input type="radio" name="llrg-when" value="later" checked onchange="window._llrgWhen()"> Schedule</label>
+        <input id="llrg-at" type="datetime-local" class="mr-input" style="margin-left:.4rem" value="${_llrgLocalInput(_llrgNext9())}" min="${_llrgLocalInput(new Date(Date.now()+10*60000))}" aria-label="Send date and time">
+      </fieldset>
+      <p class="mr-note" style="margin:.7rem 0 0">Sends from <b>${_mrEsc(currentUser?.email||'your mailbox')}</b>, one personal email per person (nobody sees the list), with the report as a PDF link and your signature. Up to 300 people; big groups go out over a few minutes (35 every 5 minutes). Unsubscribed and departed contacts are skipped automatically.</p>
+    </div>
+    <div class="mr-modal-f"><button type="button" class="mr-btn" onclick="document.getElementById('llrg-ov').remove()">Cancel</button><button type="button" id="llrg-go" class="mr-btn mr-btn-primary" style="margin-left:auto" disabled onclick="window._llrgSubmit(this)">Schedule</button></div>
+  </div>`;
+  ov.addEventListener('click',e=>{ if(e.target===ov) ov.remove(); });
+  ov.addEventListener('keydown',e=>{ if(e.key==='Escape') ov.remove(); });
+  document.body.appendChild(ov);
+  setTimeout(()=>document.getElementById('llrg-group')?.focus(),0);
+  window._llrgState={preview:null};
+};
+window._llrgWhen=function(){ const now=(document.querySelector('input[name="llrg-when"]:checked')||{}).value==='now'; const at=document.getElementById('llrg-at'); if(at) at.disabled=now; const b=document.getElementById('llrg-go'); if(b) b.textContent=now?'Send now':'Schedule'; };
+window._llrgPreview=async function(){
+  const id=(document.getElementById('llrg-group')||{}).value; const out=document.getElementById('llrg-count'); const go=document.getElementById('llrg-go');
+  window._llrgState={preview:null}; if(go) go.disabled=true; if(!id){ if(out) out.textContent=''; return; }
+  if(out) out.textContent='Counting who can receive it…';
+  try{ const p=await _llrgPost('/llr/group/preview',{groupId:id}); if((document.getElementById('llrg-group')||{}).value!==id) return;
+    window._llrgState={preview:p};
+    if(p.blocked){ out.innerHTML=`<span style="color:var(--brand-red,#DA291C)">${_mrEsc(p.blocked)}</span>`; return; }
+    if(p.capped){ out.innerHTML=`<span style="color:var(--brand-red,#DA291C)">${p.total.toLocaleString()} people — group sends are capped at ${p.max}. Pick a smaller group.</span>`; return; }
+    if(!p.count){ out.innerHTML=`<span style="color:var(--brand-red,#DA291C)">Nobody in this group has a valid, subscribed email address.</span>`; return; }
+    out.textContent=`${p.count.toLocaleString()} ${p.count===1?'person':'people'} will get it${p.skipped?` · ${p.skipped} skipped (unsubscribed, departed, duplicate or invalid)`:''}.`;
+    if(go) go.disabled=false;
+  }catch(e){ if(out) out.innerHTML=`<span style="color:var(--brand-red,#DA291C)">${_mrEsc(e.message)}</span>`; }
+};
+window._llrgSubmit=async function(btn){
+  const id=(document.getElementById('llrg-group')||{}).value; const p=(window._llrgState||{}).preview;
+  const subject=(document.getElementById('llrg-subj')||{}).value.trim(); const message=(document.getElementById('llrg-msg')||{}).value.trim();
+  const now=(document.querySelector('input[name="llrg-when"]:checked')||{}).value==='now';
+  let sendAt=0; if(!now){ const v=(document.getElementById('llrg-at')||{}).value; const t=v?new Date(v).getTime():NaN; if(!(t>Date.now()+60000)){ showToast('Pick a time in the future','warning'); document.getElementById('llrg-at')?.focus(); return; } sendAt=t; }
+  if(!id||!p||!p.count){ showToast('Pick a CRM group first','warning'); return; }
+  if(!subject){ showToast('Add a subject','warning'); document.getElementById('llrg-subj')?.focus(); return; }
+  const g=_llrgGroups().find(x=>x.id===id)||{name:p.name};
+  if(!(await elcConfirm(`${p.count.toLocaleString()} ${p.count===1?'person':'people'} in “${g.name}” get it from ${currentUser?.email} — ${now?'starting now':'on '+new Date(sendAt).toLocaleString('en-US',{weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})}.`,{title:now?'Send this report now?':'Schedule this report?',okLabel:now?'Send now':'Schedule'}))) return;
+  const done=elcBusy(btn,'Building the PDF…');
+  try{
+    const R=await _llrBuild(pr=>{ btn.innerHTML='<span class="elc-spin"></span>Building… '+Math.round(pr*100)+'%'; });
+    btn.innerHTML='<span class="elc-spin"></span>Uploading…';
+    const blob=R.doc.output('blob'); const stamp=Date.now()+'-'+String(currentUser?.uid||'u').slice(0,8);
+    const pdf=await _llrmUpload(blob,'land-listings-group-'+stamp+'.pdf','application/pdf');
+    const cov=await _llrmCoverJpg(blob); const hero=cov?await _llrmUpload(cov,'land-listings-group-'+stamp+'-cover.jpg','image/jpeg').catch(()=>null):null;
+    const bio=(typeof getAdvisorBio==='function'?(getAdvisorBio(currentUser.uid)||getAdvisorBio(currentUser.email)||{}):{});
+    btn.innerHTML='<span class="elc-spin"></span>'+(now?'Sending…':'Scheduling…');
+    const res=await _llrgPost('/llr/group/send',{groupId:id, subject, message, pdfUrl:pdf.url, heroUrl:hero?hero.url:'', runLabel:_llrRunLabel()==='ELC'?'Land Listings':_llrRunLabel(), sendAt, fromName:bio.name&&!String(bio.name).includes('@')?bio.name:(currentUser?.name||''),
+      signature:{name:bio.name||currentUser?.name||'', designations:bio.designationsStr||'', title:bio.title||'', phone:bio.cell||bio.directLine||''}});
+    document.getElementById('llrg-ov')?.remove();
+    showToast(now?`✉️ Sending to ${res.total} ${res.total===1?'person':'people'} in “${res.groupName}”${res.total>35?' — the rest go out over the next few minutes':''}`:`🗓 Scheduled for ${new Date(res.scheduledAt).toLocaleString('en-US',{weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})} — ${res.total} people in “${res.groupName}”`,'success',8000);
+    setTimeout(()=>window._llrgLoad(),now?4000:300);
+  }catch(e){ console.error('[llrg] send',e); showToast('Couldn’t send: '+e.message,'error',9000); }
+  finally{ done(); }
+};
+/* ---------- ✉️ Group sends list on the tab ---------- */
+function _llrgSlot(){ return `<div id="llrg-panel" class="mr-card" style="margin-bottom:.9rem" aria-live="polite"></div>`; }
+window._llrgLoad=async function(){
+  const el=document.getElementById('llrg-panel'); if(!el) return;
+  let d; try{ d=await _llrgPost('/llr/group/list',{}); }catch(e){ el.innerHTML=`<h3 style="margin:0;font-size:1.05rem;color:var(--text-1)">✉️ Group sends</h3><p class="mr-muted" style="margin:.4rem 0 0">Couldn’t load: ${_mrEsc(e.message)}</p>`; return; }
+  const rows=(d.sends||[]); const fmt=t=>t?new Date(t).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}):'';
+  const chip=s=>({scheduled:['mr-chip-draft','Scheduled'],sending:['mr-chip-draft','Sending'],sent:['mr-chip-sent','Sent'],cancelled:['mr-chip-new','Cancelled'],failed:['mr-chip-new','Didn’t send']}[s]||['mr-chip-new',s]);
+  el.innerHTML=`<div class="mr-row" style="gap:.6rem;align-items:center"><h3 style="margin:0;font-size:1.05rem;color:var(--text-1)">✉️ Group sends${d.all?' — everyone’s':''}</h3><button type="button" class="mr-btn mr-btn-sm" style="margin-left:auto" onclick="window._llrgLoad()">↻ Refresh</button></div>
+    ${rows.length?`<div class="llr-scroll" style="margin-top:.5rem"><table class="mr-table"><thead><tr><th>Report</th><th>Group</th>${d.all?'<th>From</th>':''}<th>When</th><th>Progress</th><th>Status</th><th></th></tr></thead><tbody>
+    ${rows.map(r=>{ const c=chip(r.status); return `<tr><td>${_mrEsc(r.subject||r.runLabel||'')}${r.pdfUrl?` · <a href="${_mrEsc(r.pdfUrl)}" target="_blank" rel="noopener" style="color:var(--brand-teal);font-weight:600">PDF ↗</a>`:''}</td><td>${_mrEsc(r.groupName||'')}</td>${d.all?`<td>${_mrEsc((r.from||'').split('@')[0])}</td>`:''}<td>${_mrEsc(r.status==='sent'?fmt(r.sentAt):fmt(r.scheduledAt))}</td><td>${r.sentCount||0} / ${r.total||0}${r.failedCount?` · <span style="color:var(--brand-red,#DA291C)">${r.failedCount} failed</span>`:''}</td><td><span class="mr-chip ${c[0]}">${_mrEsc(c[1])}</span>${r.error?`<div class="llr-sub" style="color:var(--brand-red,#DA291C)">${_mrEsc(r.error)}</div>`:''}</td><td>${(r.status==='scheduled'||r.status==='sending')&&(r.mine||d.all)?`<button type="button" class="mr-btn mr-btn-sm" onclick="window._llrgCancel('${_mrEsc(r.id)}',this)">Cancel</button>`:''}</td></tr>`; }).join('')}
+    </tbody></table></div>`:`<p class="mr-muted" style="margin:.4rem 0 0">Nothing sent yet. Build a report with the dropdowns above, then <b>✉️ Email to a group</b>.</p>`}`;
+};
+window._llrgCancel=async function(id, btn){
+  if(!(await elcConfirm('Anyone who hasn’t received it yet won’t get it.',{title:'Cancel this send?',okLabel:'Cancel the send',danger:true}))) return;
+  const done=elcBusy(btn,'Cancelling…');
+  try{ const r=await _llrgPost('/llr/group/cancel',{id}); showToast(`Cancelled — ${r.sentCount} of ${r.total} had already gone out`,'info',6000); window._llrgLoad(); }
+  catch(e){ showToast('Could not cancel: '+e.message,'error'); } finally{ done(); }
+};
+// One-time: Ryan's next sign-in opens the tab to all users (his 2026-11-19 instruction). ⚙ Access can still change it later.
+function _llrgOpenToAll(){ try{ const c=_llrCfg(); if(_llrIsOwner() && c.access!=='all' && !c.openedAllAt) _llrSaveSettings({access:'all', openedAllAt:Date.now(), openedAllBy:'LLRGROUP-20261119', accessChangedAt:Date.now(), accessChangedBy:currentUser?.name||currentUser?.email||''}).then(()=>{ try{ renderShell(); }catch(_){} }).catch(e=>console.warn('[llrg] open to all',e)); }catch(_){} }
 /* ===== LLR_BLOCK_END ===== */
 /* =======================================================
    📰 THE ESHENBAUGH REPORT — marker ESH-20261116
