@@ -11751,7 +11751,7 @@ function _elcSalesVolSection(advisors){
   const esc = s => String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const uids = new Set((advisors||[]).map(a=>a.uid));
   const rows = (advisors||[]).map(a=>({adv:a, ...(sv.by.get(a.uid)||{vol:0,sales:0,deals:[]})}))
-    .sort((a,b)=>b.vol-a.vol || String(a.adv.name||'').localeCompare(String(b.adv.name||'')));
+    .sort((a,b)=>b.vol-a.vol || b.deals.length-a.deals.length || String(a.adv.name||'').localeCompare(String(b.adv.name||'')));   // SALESVOLALL-20261119
   const shownTotal = rows.reduce((s,r)=>s+r.vol,0);
   const max = Math.max(...rows.map(r=>r.vol), 1);
   const medals = ['🥇','🥈','🥉'];
@@ -11769,10 +11769,10 @@ function _elcSalesVolSection(advisors){
       <table class="w-full text-sm">
         <thead>
           <tr class="border-b bg-gray-50/60 text-xs text-gray-500 uppercase tracking-wide">
-            <th class="px-4 py-2.5 text-center w-12">#</th>
-            <th class="px-4 py-2.5 text-left">Advisor</th>
-            <th class="px-4 py-2.5 text-center">Sales</th>
-            <th class="px-4 py-2.5 text-right">Sales Volume</th>
+            <th class="px-2 sm:px-4 py-2.5 text-center w-10">#</th>
+            <th class="px-2 sm:px-4 py-2.5 text-left">Advisor</th>
+            <th class="px-2 sm:px-4 py-2.5 text-center"># Deals Sold</th>
+            <th class="px-3 sm:px-4 py-2.5 text-right">Total Sales Volume</th>
           </tr>
         </thead>
         <tbody class="divide-y divide-gray-100">
@@ -11790,22 +11790,22 @@ function _elcSalesVolSection(advisors){
                 </ul>
               </details>` : '';
             return `<tr class="hover:bg-gray-50 transition-colors">
-              <td class="px-4 py-3 text-center font-bold text-gray-500 align-top">${r.vol>0?(medals[i]||`#${i+1}`):'—'}</td>
-              <td class="px-4 py-3 align-top">
+              <td class="px-2 sm:px-4 py-3 text-center font-bold text-gray-500 align-top">${(r.vol>0&&medals[i])||`#${i+1}`}</td>
+              <td class="px-2 sm:px-4 py-3 align-top">
                 <div class="font-semibold text-gray-800 text-sm">${esc(r.adv.name)}</div>
-                <div class="text-xs text-gray-500">${esc(r.adv.office||'')}</div>
-                ${r.vol>0?`<div class="mt-1.5 bg-gray-100 rounded-full h-1.5 w-40 max-w-full"><div class="h-1.5 rounded-full" style="width:${w}%;background:var(--brand-teal)"></div></div>`:''}
+                ${r.vol>0?`<div class="mt-1.5 bg-gray-100 rounded-full h-1.5 w-28 sm:w-40 max-w-full"><div class="h-1.5 rounded-full" style="width:${w}%;background:var(--brand-teal)"></div></div>`:''}
                 ${detail}
               </td>
-              <td class="px-4 py-3 text-center align-top ${r.sales>0?'font-semibold text-gray-800':'text-gray-500'}">${r.sales>0?fmtN(r.sales):'0'}</td>
-              <td class="px-4 py-3 text-right align-top font-bold ${r.vol>0?'text-gray-800':'text-gray-500'}">${fmt$(r.vol)}</td>
+              <td class="px-2 sm:px-4 py-3 text-center align-top ${r.deals.length>0?'font-semibold text-gray-800':'text-gray-500'}">${r.deals.length}</td>
+              <td class="px-3 sm:px-4 py-3 text-right align-top font-bold whitespace-nowrap ${r.vol>0?'text-gray-800':'text-gray-500'}">${fmt$(r.vol)}</td>
             </tr>`;
           }).join('')}
         </tbody>
       </table>
       </div>
       ${missing.length?`<div class="px-5 py-2.5 border-t text-xs" role="note" style="color:#92400e;background:#fffbeb">⚠️ ${missing.length} sold deal${missing.length!==1?'s':''} this year ${missing.length!==1?'have':'has'} no sale price and ${missing.length!==1?'aren\'t':'isn\'t'} counted: ${missing.map(d=>esc(d.propertyAddress||d.projectName||'Unnamed')).join(', ')}. Add the sale price on the deal card.</div>`:''}
-      <div class="px-5 py-2 border-t text-xs text-gray-500">Sales = number of closed sales, counting a shared deal as your fraction of it (a 50/50 deal = 0.5).</div>
+      <div class="px-5 py-2 border-t text-xs text-gray-500"># Deals Sold counts each closed sale once for every advisor on it. Total Sales Volume is each advisor's % share of the sale price.</div>
+      ${(!currentUser.isAdmin && !((typeof allDealsCompany!=='undefined'&&allDealsCompany)||[]).length)?`<div class="px-5 py-2 border-t text-xs" role="note" style="color:#92400e;background:#fffbeb">⚠️ Company-wide deals didn't load, so this shows only deals you're on. Refresh to try again.</div>`:''}
     </div>`;
 }
 window._elcDealSplitPcts = _elcDealSplitPcts;
@@ -12938,7 +12938,7 @@ function buildNavItems(){
       {id:'users',         label:'👤 Users',           admin:true},
       {id:'splits',        label:'⚖️ Splits',         admin:true},
       {id:'automations',   label:'⚡ Automations',    admin:true},
-      {id:'leaderboard',   label:'🏆 Leaderboard',    admin:true, manager:true},
+      {id:'leaderboard',   label:'🏆 Leaderboard',    advisor:true, admin:true, manager:true},   // SALESVOLALL-20261119 — advisors see the Sales Volume card only
       {id:'officeOverview',label:'🏢 My Office',      manager:true},
       {id:'manageStages',  label:'🗂 Stages',         admin:true},
       {id:'officeManagers',label:'🏢 Offices',        admin:true},
@@ -36619,6 +36619,14 @@ function updateStageDropdowns(){
    ======================================================= */
 function viewLeaderboard(){
   if(activeChart){ activeChart.destroy(); activeChart=null; }
+  // SALESVOLALL-20261119 — every advisor can open the Leaderboard but sees ONLY the company-wide
+  // Sales Volume ranking (sale price, never commission). The commission / pipeline / goal tables
+  // stay admin + office-manager only, exactly as before.
+  const _lbFull = (currentUser.isAdmin && !adminViewAsAdvisor && !staffViewMode) || currentUser.isOfficeManager;
+  if(!_lbFull){
+    setContent(`<h2 class="text-xl font-bold text-gray-800 mb-4">🏆 Leaderboard</h2>${_elcSalesVolSection(getDistinctAdvisors())}`);
+    return;
+  }
   // officeLabel: prefer adminOfficeFilter, fall back to office-manager label
   const officeLabel = adminOfficeFilter!=='both' ? ` — ${adminOfficeFilter}` : (currentUser.isOfficeManager ? ` — ${currentUser.officeManagerOffice}` : '');
   // Filter advisors: office manager lock takes priority, then adminOfficeFilter
@@ -55232,7 +55240,8 @@ window._bmRefresh=async function(btn){ const done=elcBusy(btn,'Refreshing…'); 
 /* ---------- approvals (BMAPPROVE-20261117) ---------- */
 function _bmPending(){ const st=_bmState(); return (st.queue||[]).filter(q=>!(st.dec||{})[q.id]); }
 function _bmRenderApprovals(){
-  const box=document.getElementById('bm-body'); if(!box) return; const st=_bmState(); const ed=_bmCanEdit(); const q=st.queue||[]; const dec=st.dec||{};
+  // BMDENY-20261119 (Ryan): "when we deny, they should disappear" — denied e-mails drop off the list at once (Undo is on the toast)
+  const box=document.getElementById('bm-body'); if(!box) return; const st=_bmState(); const ed=_bmCanEdit(); const dec=st.dec||{}; const q=(st.queue||[]).filter(it=>!(dec[it.id]&&dec[it.id].d==='deny'));
   if(!q.length){ box.innerHTML=`<div class="mr-card" style="padding:1.4rem"><p style="margin:0;font-weight:700;color:var(--text-1)">Nothing waiting for approval.</p><p class="mr-note" style="margin:.35rem 0 0">New matches show up here after the morning CoStar alert. You’ll also get one e-mail a day when something is waiting.</p></div>`; return; }
   const props=new Map(((st.log||{}).props||[]).map(p=>[p.id,p]));
   const groups=new Map(); q.forEach(it=>{ (groups.get(it.costarId)||groups.set(it.costarId,[]).get(it.costarId)).push(it); });
@@ -55257,14 +55266,17 @@ async function _bmWriteDecisions(ids, d){
   await setDoc(doc(_fbDb,'eos','buyerMatchApprovals'), {decisions:m}, {merge:true});
   st.dec=st.dec||{}; ids.forEach(id=>{ if(d) st.dec[id]={d,at:Date.now(),by:currentUser.email}; else delete st.dec[id]; });
 }
-window._bmDecide=async function(ids,d,btn){ const done=elcBusy(btn,'…'); try{ await _bmWriteDecisions(ids,d); viewBuyerMatch(); showToast(d==='approve'?(ids.length===1?'Approved — it goes out within about 15 minutes':ids.length+' e-mails approved'):(ids.length===1?'Denied — it won’t be sent':ids.length+' e-mails denied'),'success'); }catch(e){ showToast('Could not save: '+e.message,'error'); } finally{ done(); } };
+window._bmDecide=async function(ids,d,btn,quiet){ const done=elcBusy(btn,'…'); try{ await _bmWriteDecisions(ids,d); viewBuyerMatch();
+    if(quiet) return true;
+    if(d==='deny') showUndoToast(ids.length===1?'Denied — removed, it won’t be sent':ids.length+' e-mails denied and removed', ()=>window._bmUndecide(ids,null));
+    else showToast(ids.length===1?'Approved — it goes out within about 15 minutes':ids.length+' e-mails approved','success'); return true; }catch(e){ showToast('Could not save: '+e.message,'error'); return false; } finally{ done(); } };
 window._bmUndecide=async function(ids,btn){ const done=elcBusy(btn,'…'); try{ await _bmWriteDecisions(ids,null); viewBuyerMatch(); showToast('Back to waiting','info'); }catch(e){ showToast('Could not undo: '+e.message,'error'); } finally{ done(); } };
 window._bmDecideProp=async function(cid,d,btn){ const ids=_bmPending().filter(q=>q.costarId===cid).map(q=>q.id); if(!ids.length) return;
   if(d==='deny' && !(await elcConfirm('Deny all '+ids.length+' e-mail(s) for this property?\n\nNone of these buyers will get it.',{title:'Deny all',okLabel:'Deny all',danger:true}))) return;
-  await window._bmDecide(ids,d,btn); showUndoToast((d==='approve'?'Approved ':'Denied ')+ids.length+' e-mail(s)', ()=>window._bmUndecide(ids,null)); };
+  if(await window._bmDecide(ids,d,btn,true)) showUndoToast(d==='approve'?'Approved '+ids.length+' e-mail(s)':'Denied and removed '+ids.length+' e-mail(s)', ()=>window._bmUndecide(ids,null)); };
 window._bmDecideAll=async function(d,btn){ const ids=_bmPending().map(q=>q.id); if(!ids.length) return;
   if(!(await elcConfirm('Approve all '+ids.length+' waiting e-mails?\n\nEach buyer gets the property e-mail from your address within about 15 minutes.',{title:'Approve all',okLabel:'Approve all'}))) return;
-  await window._bmDecide(ids,d,btn); showUndoToast('Approved '+ids.length+' e-mails', ()=>window._bmUndecide(ids,null)); };
+  if(await window._bmDecide(ids,d,btn,true)) showUndoToast('Approved '+ids.length+' e-mails', ()=>window._bmUndecide(ids,null)); };
 /* #buyer-match deep link (from the daily "waiting for your approval" e-mail) */
 window._bmBoot=function(){ if(!currentUser || !/buyer-match/.test(location.hash||'') || !_bmNavVisible(true,false)) return; try{ history.replaceState(null,'',location.pathname+location.search); }catch(_){} _bmState().sub='approve'; currentView='buyerMatch'; renderShell(); renderCurrentView(); };
 
