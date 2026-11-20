@@ -19180,839 +19180,764 @@ function _valBuildPDFBody(d){
 window._valBuildPDFBody = _valBuildPDFBody;
 
 // ── Offering Memorandum Generator ─────────────────────────────────────────
+// OMLAND-20261119 — Ryan: the OM came back portrait, pages spilling into each other,
+// and the aerials showed the wrong place (304 S Willow Ave printed a suburban US-41
+// site). Rebuilt as an 11×8.5 LANDSCAPE book where every page is a fixed sheet that
+// shrinks its own type until it fits. Data is pulled, not guessed:
+//   • Location  = the Site Research pin (window._valConfirmed / _valMarker), never a
+//                 second geocode of the typed address.
+//   • Parcel    = the REAL polygon from the FloridaGIO statewide cadastral, matched by
+//                 address / parcel ID / point-in-polygon, drawn in Web Mercator so the
+//                 outline lands on the imagery (the old box was a fixed 47-acre square).
+//   • Traffic   = FDOT AADT segments near the site + FDOT local road names (the old
+//                 page hardcoded "US-41 / Tamiami Trail 35,000+" for every property).
+//   • Rings     = Census ACS 5-yr tract centroids inside 1/3/5 miles (was AI estimates).
+//   • Flood / wetlands = FEMA NFHL + USFWS NWI intersected with the parcel polygon.
+// AI is used only for narrative (submarket, highlights, market metrics) and is told the
+// confirmed facts. Advisor block keeps the 👤 Bio source (ADVBIO-20261006).
+const _OM_CADASTRAL = 'https://services9.arcgis.com/Gh9awoU677aKree0/arcgis/rest/services/Florida_Statewide_Cadastral/FeatureServer/0/query';
+const _OM_AADT      = 'https://services1.arcgis.com/O1JpcwDW8sjYuddV/arcgis/rest/services/Annual_Average_Daily_Traffic_TDA/FeatureServer/0/query';
+const _OM_RDNAMES   = 'https://services1.arcgis.com/O1JpcwDW8sjYuddV/arcgis/rest/services/Roadways_With_Local_Name_TDA/FeatureServer/0/query';
+const _OM_ACS       = 'https://services.arcgis.com/P3ePLMYs2RVChkJx/arcgis/rest/services/ACS_Highlights_Population_Housing_Basics_Centroids/FeatureServer/2/query';
+const _OM_NWI       = 'https://fwspublicservices.wim.usgs.gov/wetlandsmapservice/rest/services/Wetlands/MapServer/0/query';
+const _OM_NFHL      = 'https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer/28/query';
+
+async function _omJSON(url, ms, opts){
+  try{
+    const r = await fetch(url, Object.assign({signal: AbortSignal.timeout(ms||20000)}, opts||{}));
+    if(!r.ok) return null;
+    const d = await r.json();
+    if(d && d.error){ console.warn('[OM] service error', url.split('?')[0], d.error); return null; }
+    return d;
+  }catch(e){ console.warn('[OM] fetch failed', url.split('?')[0], e && e.message); return null; }
+}
+function _omQS(o){ return Object.entries(o).map(([k,v])=>k+'='+encodeURIComponent(typeof v==='string'?v:JSON.stringify(v))).join('&'); }
+function _omMerc(lon, lat){ const R=6378137; return [R*lon*Math.PI/180, R*Math.log(Math.tan(Math.PI/4+lat*Math.PI/360))]; }
+function _omDistM(a, b){ const k=Math.PI/180, x=(b[0]-a[0])*Math.cos((a[1]+b[1])/2*k), y=b[1]-a[1]; return Math.sqrt(x*x+y*y)*111320; }
+function _omPip(pt, rings){
+  let inside=false;
+  for(const ring of rings||[]){
+    for(let i=0,j=ring.length-1;i<ring.length;j=i++){
+      const xi=ring[i][0], yi=ring[i][1], xj=ring[j][0], yj=ring[j][1];
+      if(((yi>pt[1])!==(yj>pt[1])) && (pt[0] < (xj-xi)*(pt[1]-yi)/(yj-yi)+xi)) inside=!inside;
+    }
+  }
+  return inside;
+}
+function _omRingStats(rings){
+  // Bbox, area-weighted centroid and geodesic-ish acreage of the outer ring(s).
+  let xmin=Infinity,ymin=Infinity,xmax=-Infinity,ymax=-Infinity, A=0, cx=0, cy=0, m2=0;
+  for(const ring of rings||[]){
+    let a=0, sx=0, sy=0;
+    for(let i=0;i<ring.length;i++){
+      const [x,y]=ring[i]; xmin=Math.min(xmin,x); xmax=Math.max(xmax,x); ymin=Math.min(ymin,y); ymax=Math.max(ymax,y);
+      const [x2,y2]=ring[(i+1)%ring.length]; const f=x*y2-x2*y; a+=f; sx+=(x+x2)*f; sy+=(y+y2)*f;
+    }
+    A+=a/2; if(a){ cx+=sx/6; cy+=sy/6; }
+    const lat0=(ring[0]||[0,0])[1]*Math.PI/180;
+    m2 += (a/2)*111320*111320*Math.cos(lat0);   // signed; ArcGIS outer rings are clockwise (negative)
+  }
+  const c = A ? [cx/A, cy/A] : [(xmin+xmax)/2,(ymin+ymax)/2];
+  return {xmin,ymin,xmax,ymax, centroid:c, acres: Math.abs(m2)/4046.8564};
+}
+function _omAddrKey(s){
+  const t = String(s||'').toUpperCase().split(',')[0].replace(/[.#]/g,' ')
+    .replace(/\bNORTH\b/g,'N').replace(/\bSOUTH\b/g,'S').replace(/\bEAST\b/g,'E').replace(/\bWEST\b/g,'W')
+    .replace(/\s+/g,' ').trim().split(' ');
+  const num = /^\d+$/.test(t[0]||'') ? t[0] : null;
+  const street = t.slice(num?1:0).find(w=>!/^(N|S|E|W|NE|NW|SE|SW)$/.test(w)) || '';
+  return {num, street};
+}
+
+// The point the advisor actually researched: pin → confirmed fan-out → geocode.
+async function _omResolvePoint(address, parcel, county){
+  try{ if(typeof _valMarker!=='undefined' && _valMarker){ const q=_valMarker.getLatLng(); return {lat:q.lat, lon:q.lng, src:'pin'}; } }catch(e){}
+  const c = window._valConfirmed;
+  if(c && c.lat!=null && c.lon!=null) return {lat:c.lat, lon:c.lon, src:'research'};
+  if(typeof _prGeocode==='function'){
+    const g = await _prGeocode((address || (parcel+' '+county+' County'))+', FL');
+    if(g && g.lat!=null) return {lat:g.lat, lon:g.lon, src:'geocode'};
+  }
+  return null;
+}
+
+// Real parcel polygon from the FloridaGIO statewide cadastral (public, CORS-open).
+// The pin or geocode often lands on the street, so pull every parcel in a small box
+// and pick: same parcel ID → same street address → the polygon containing the point.
+async function _omParcelPolygon(pt, address, parcelIds){
+  for(const pad of [0.0015, 0.004]){
+    const env = {xmin:pt.lon-pad, ymin:pt.lat-pad, xmax:pt.lon+pad, ymax:pt.lat+pad, spatialReference:{wkid:4326}};
+    const d = await _omJSON(_OM_CADASTRAL+'?'+_omQS({geometry:env, geometryType:'esriGeometryEnvelope', inSR:'4326',
+      spatialRel:'esriSpatialRelIntersects', outFields:'PARCEL_ID,PHY_ADDR1,OWN_NAME,CO_NO', returnGeometry:'true', outSR:'4326', f:'json'}), 25000);
+    const feats = ((d&&d.features)||[]).filter(f=>f.geometry && f.geometry.rings && f.geometry.rings.length);
+    if(!feats.length) continue;
+    const norm = s=>String(s||'').replace(/[^0-9A-Z]/gi,'').toUpperCase();
+    const ids = (parcelIds||[]).map(norm).filter(x=>x.length>=6);
+    let hit = ids.length ? feats.find(f=>ids.includes(norm(f.attributes.PARCEL_ID))) : null;
+    const ak = _omAddrKey(address);
+    if(!hit && ak.num && ak.street){
+      const m = feats.filter(f=>{ const k=_omAddrKey(f.attributes.PHY_ADDR1); return k.num===ak.num && k.street===ak.street; });
+      // A condo/townhome address returns many units; prefer the one under the point, else the largest.
+      hit = m.find(f=>_omPip([pt.lon,pt.lat], f.geometry.rings)) || m.sort((a,b)=>_omRingStats(b.geometry.rings).acres-_omRingStats(a.geometry.rings).acres)[0] || null;
+    }
+    if(!hit) hit = feats.find(f=>_omPip([pt.lon,pt.lat], f.geometry.rings)) || null;
+    if(hit){
+      const st = _omRingStats(hit.geometry.rings);
+      return {rings:hit.geometry.rings, attrs:hit.attributes, ...st};
+    }
+  }
+  return null;
+}
+
+// FDOT AADT within ~1.5 mi, named from FDOT's local-name layer, nearest first.
+async function _omTraffic(pt){
+  const d = await _omJSON(_OM_AADT+'?'+_omQS({geometry:pt.lon+','+pt.lat, geometryType:'esriGeometryPoint', inSR:'4326',
+    spatialRel:'esriSpatialRelIntersects', distance:'1.5', units:'esriSRUnit_StatuteMile',
+    outFields:'YEAR_,ROADWAY,DESC_FRM,DESC_TO,AADT,BEGIN_POST,END_POST,DISTRICT', returnGeometry:'true', outSR:'4326', f:'json'}), 25000);
+  const segs = ((d&&d.features)||[]).filter(f=>f.attributes && f.attributes.AADT>0 && f.geometry && f.geometry.paths);
+  if(!segs.length) return [];
+  const rdIds = [...new Set(segs.map(f=>f.attributes.ROADWAY))];
+  const nm = await _omJSON(_OM_RDNAMES+'?'+_omQS({where:"ROADWAY IN ('"+rdIds.map(s=>String(s).replace(/'/g,'')).join("','")+"')",
+    outFields:'ROADWAY,NAME,BEGIN_POST,END_POST', returnGeometry:'false', f:'json'}), 20000);
+  const names = ((nm&&nm.features)||[]).map(f=>f.attributes);
+  const nameFor = a=>{
+    let best=null, ov=-1;
+    for(const n of names){ if(n.ROADWAY!==a.ROADWAY) continue;
+      const o=Math.min(n.END_POST,a.END_POST)-Math.max(n.BEGIN_POST,a.BEGIN_POST);
+      if(o>ov){ ov=o; best=n.NAME; } }
+    return best;
+  };
+  const here=[pt.lon,pt.lat];
+  const out = segs.map(f=>{
+    let dmin=Infinity, at=null;
+    for(const path of f.geometry.paths) for(const v of path){ const dd=_omDistM(here,v); if(dd<dmin){ dmin=dd; at=v; } }
+    const a=f.attributes;
+    return {name:nameFor(a)||('FDOT roadway '+a.ROADWAY), from:a.DESC_FRM, to:a.DESC_TO, aadt:a.AADT, year:a.YEAR_,
+            district:a.DISTRICT, distM:dmin, at, paths:f.geometry.paths};
+  }).sort((a,b)=>a.distM-b.distM);
+  // One row per road (its nearest counted segment), nearest first.
+  const seen=new Set(), rows=[];
+  for(const s of out){ const k=s.name.toUpperCase(); if(seen.has(k)) continue; seen.add(k); rows.push(s); }
+  rows.all = out;
+  return rows;
+}
+
+// Census ACS 5-yr, tract centroids inside 1/3/5-mile rings.
+async function _omRings(pt){
+  const fields='GEOID,B01001_001E,B01002_001E,B19049_001E,B25003_001E,B25003_002E,B25003_003E,B25077_001E,B25058_001E,B25002_001E,B25002_003E';
+  const one = async mi=>{
+    const d = await _omJSON(_OM_ACS+'?'+_omQS({geometry:pt.lon+','+pt.lat, geometryType:'esriGeometryPoint', inSR:'4326',
+      spatialRel:'esriSpatialRelIntersects', distance:String(mi), units:'esriSRUnit_StatuteMile', outFields:fields, returnGeometry:'false', f:'json'}), 25000);
+    if(!d) return null;
+    const t=(d.features||[]).map(f=>f.attributes);
+    if(!t.length) return {tracts:0};
+    const sum=k=>t.reduce((s,a)=>s+(+a[k]||0),0);
+    const wavg=(k,w)=>{ let n=0,s=0; for(const a of t){ const v=+a[k], ww=+a[w]; if(v>0&&ww>0){ s+=v*ww; n+=ww; } } return n?s/n:null; };
+    const hh=sum('B25003_001E'), own=sum('B25003_002E');
+    return {tracts:t.length, population:sum('B01001_001E'), households:hh,
+      medianHHIncome:wavg('B19049_001E','B25003_001E'), medianAge:wavg('B01002_001E','B01001_001E'),
+      ownerPct: hh? own/hh*100 : null, units:sum('B25002_001E'), vacant:sum('B25002_003E'), renters:sum('B25003_003E'), owners:own, countyGeoid:String(t[0].GEOID||'').slice(0,5), medianHomeValue:wavg('B25077_001E','B25003_002E'), medianRent:wavg('B25058_001E','B25003_003E')};
+  };
+  const [a,b,c] = await Promise.all([one(1),one(3),one(5)]);
+  return {oneMile:a, threeMile:b, fiveMile:c};
+}
+
+// The county the site sits in, same ACS release, for the trade-area comparison.
+async function _omCountyACS(geoid){
+  if(!/^\d{5}$/.test(String(geoid||''))) return null;
+  const d = await _omJSON(_OM_ACS.replace('/FeatureServer/2/','/FeatureServer/1/')+'?'+_omQS({where:"GEOID='"+geoid+"'",
+    outFields:'NAME,B01001_001E,B01002_001E,B19049_001E,B25003_001E,B25003_002E,B25077_001E,B25058_001E', returnGeometry:'false', f:'json'}), 20000);
+  const a = d && d.features && d.features[0] && d.features[0].attributes; if(!a) return null;
+  return {name:a.NAME, population:a.B01001_001E, medianAge:a.B01002_001E, medianHHIncome:a.B19049_001E,
+          ownerPct:a.B25003_001E? a.B25003_002E/a.B25003_001E*100 : null, medianHomeValue:a.B25077_001E, medianRent:a.B25058_001E};
+}
+
+// Nearest downtowns + airports, straight-line miles (labelled as such — not drive time).
+const _OM_PLACES = [
+  ['Downtown Tampa',27.9506,-82.4572,'c'],['Downtown St. Pete',27.7731,-82.6400,'c'],['Clearwater',27.9659,-82.8001,'c'],['Downtown Orlando',28.5384,-81.3789,'c'],
+  ['Downtown Sarasota',27.3364,-82.5307,'c'],['Lakeland',28.0395,-81.9498,'c'],['Bradenton',27.4989,-82.5748,'c'],['Brandon',27.9378,-82.2859,'c'],
+  ['Wesley Chapel',28.2397,-82.3279,'c'],['Fort Myers',26.6406,-81.8723,'c'],['Naples',26.1420,-81.7948,'c'],['Jacksonville',30.3322,-81.6557,'c'],
+  ['Gainesville',29.6516,-82.3248,'c'],['Ocala',29.1872,-82.1401,'c'],['Daytona Beach',29.2108,-81.0228,'c'],['Tallahassee',30.4383,-84.2807,'c'],
+  ['Miami',25.7617,-80.1918,'c'],['Kissimmee',28.2920,-81.4076,'c'],['Winter Haven',28.0222,-81.7329,'c'],['Spring Hill',28.4769,-82.5255,'c'],
+  ['Venice',27.0998,-82.4543,'c'],['Port Charlotte',26.9762,-82.0906,'c'],['Fort Lauderdale',26.1224,-80.1373,'c'],['West Palm Beach',26.7153,-80.0534,'c'],
+  ['Pensacola',30.4213,-87.2169,'c'],['Melbourne',28.0836,-80.6081,'c'],['Port St. Lucie',27.2730,-80.3582,'c'],['Lake Wales',27.9014,-81.5859,'c'],
+  ["Tampa Int'l (TPA)",27.9755,-82.5332,'a'],['St. Pete–Clearwater (PIE)',27.9102,-82.6874,'a'],["Orlando Int'l (MCO)",28.4312,-81.3081,'a'],
+  ['Sarasota-Bradenton (SRQ)',27.3954,-82.5544,'a'],["SW Florida Int'l (RSW)",26.5362,-81.7552,'a'],["Jacksonville Int'l (JAX)",30.4941,-81.6879,'a'],
+  ['Daytona Beach (DAB)',29.1799,-81.0581,'a'],['Orlando Sanford (SFB)',28.7776,-81.2375,'a'],['Tallahassee (TLH)',30.3965,-84.3503,'a'],
+  ['Gainesville (GNV)',29.6900,-82.2718,'a'],["Miami Int'l (MIA)",25.7959,-80.2870,'a'],['Fort Lauderdale (FLL)',26.0742,-80.1506,'a'],
+  ['Palm Beach (PBI)',26.6832,-80.0956,'a'],['Punta Gorda (PGD)',26.9202,-81.9905,'a'],['Melbourne (MLB)',28.1028,-80.6453,'a'],['Pensacola (PNS)',30.4734,-87.1866,'a'],
+];
+function _omNearPlaces(pt){
+  const d = _OM_PLACES.map(([n,la,lo,k])=>({name:n, kind:k, mi:_omDistM([pt.lon,pt.lat],[lo,la])/1609.34})).filter(x=>x.mi>=0.6).sort((a,b)=>a.mi-b.mi);
+  return [...d.filter(x=>x.kind==='c').slice(0,2), ...d.filter(x=>x.kind==='a').slice(0,2)];
+}
+
+// Asking price from the matching Terra deal card (asking only — never contract/LOI price).
+function _omDealFor(address, parcelIds){
+  try{
+    const pool = [].concat(typeof allDealsCompany!=='undefined'?allDealsCompany:[], typeof allDeals!=='undefined'?allDeals:[]);
+    const ak = _omAddrKey(address); const norm=s=>String(s||'').replace(/[^0-9A-Z]/gi,'').toUpperCase();
+    const ids = (parcelIds||[]).map(norm).filter(x=>x.length>=6);
+    return pool.find(d=>{ if(!d) return false;
+      if(ids.length && ids.includes(norm(d.parcelId||d.parcelNumber||d.folio))) return true;
+      const k=_omAddrKey(d.propertyAddress||d.address||''); return ak.num && k.num===ak.num && k.street===ak.street; }) || null;
+  }catch(e){ return null; }
+}
+
+// Simplify a ring for a GET query (NWI/FEMA URLs stay short on big parcels).
+function _omSimplePoly(rings){
+  return {rings:(rings||[]).map(r=>{ const step=Math.max(1,Math.ceil(r.length/120)); const o=r.filter((_,i)=>i%step===0); if(o[o.length-1]!==r[r.length-1]) o.push(r[r.length-1]); return o.map(p=>[+p[0].toFixed(6),+p[1].toFixed(6)]); }), spatialReference:{wkid:4326}};
+}
+async function _omWetlands(poly, pt){
+  const geo = poly ? {geometry:_omSimplePoly(poly.rings), geometryType:'esriGeometryPolygon'} : {geometry:pt.lon+','+pt.lat, geometryType:'esriGeometryPoint'};
+  const q = extra=>_omJSON(_OM_NWI+'?'+_omQS(Object.assign({inSR:'4326', spatialRel:'esriSpatialRelIntersects', outFields:'ATTRIBUTE,WETLAND_TYPE,ACRES', returnGeometry:'false', f:'json'}, geo, extra||{})), 20000);
+  const [on, near] = await Promise.all([q(), q({distance:'500', units:'esriSRUnit_Foot'})]);
+  if(!on && !near) return null;
+  const types = d=>[...new Set(((d&&d.features)||[]).map(f=>f.attributes.WETLAND_TYPE||f.attributes['Wetlands.WETLAND_TYPE']).filter(Boolean))];
+  return {onSite:types(on), nearby:types(near).filter(t=>!types(on).includes(t))};
+}
+async function _omFlood(poly, pt){
+  const geo = poly ? {geometry:_omSimplePoly(poly.rings), geometryType:'esriGeometryPolygon'} : {geometry:pt.lon+','+pt.lat, geometryType:'esriGeometryPoint'};
+  for(let i=0;i<2;i++){
+    const d = await _omJSON(_OM_NFHL+'?'+_omQS(Object.assign({inSR:'4326', spatialRel:'esriSpatialRelIntersects', outFields:'FLD_ZONE,ZONE_SUBTY,SFHA_TF', returnGeometry:'false', f:'json'}, geo)), 15000);
+    if(d) return (d.features||[]).map(f=>f.attributes);
+  }
+  return null;
+}
+
 async function _valGenerateOM(){
   if(!window._valLastResult){ showToast('Run a site research first.','error'); return; }
+  // Open the window inside the click so pop-up blockers allow it; fill it when the data is in.
+  const win = window.open('','_blank','width=1180,height=860');
+  if(!win){ showToast('Pop-up blocked — allow pop-ups to generate OM.','error'); return; }
+  try{ win.document.write('<!DOCTYPE html><title>Building Offering Memorandum…</title><body style="font-family:Helvetica,Arial,sans-serif;background:#3a3633;color:#e7e2dc;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><div style="text-align:center"><div style="font:600 30px Georgia,serif;color:#fff">Building Offering Memorandum…</div><div style="margin-top:12px;font-size:13px;letter-spacing:.04em">Pulling the parcel, aerials, FDOT traffic counts, Census demographics and zoning.</div></div></body>'); }catch(e){}
 
   const btn = document.getElementById('val-om-btn');
-  if(btn){ btn.disabled=true; btn.textContent='Building OM…'; }
+  const restore = (typeof elcBusy==='function' && btn) ? elcBusy(btn,'Building OM…') : null;
+  try{
+    const county  = (document.getElementById('val-county')||{}).value||'';
+    const parcel  = ((document.getElementById('val-parcel')||{}).value||'').trim();
+    const address = ((document.getElementById('val-address')||{}).value||'').trim();
+    const d = window._valLastResult;
+    const p = d.property||{}, z = d.zoning||{};
+    const conf = window._valConfirmed || {};
+    const cp = conf.parcel || {};
 
-  const county  = (document.getElementById('val-county')||{}).value||'';
-  const parcel  = ((document.getElementById('val-parcel')||{}).value||'').trim();
-  const address = ((document.getElementById('val-address')||{}).value||'').trim();
-  const d = window._valLastResult;
-  const p = d.property||{};
-  const z = d.zoning||{};
+    const pt = await _omResolvePoint(address || p.siteAddress, parcel, county);
+    const siteAddr = p.siteAddress || cp.siteAddress || address;
+    const [poly, traffic, rings] = pt ? await Promise.all([
+      _omParcelPolygon(pt, siteAddr, [parcel, p.parcelId, cp.parcelId, cp.pin]),
+      _omTraffic(pt),
+      _omRings(pt),
+    ]) : [null, [], null];
+    const center = poly ? {lat:poly.centroid[1], lon:poly.centroid[0]} : pt;
+    const cGeo = (rings && (rings.fiveMile||rings.threeMile||{}).countyGeoid) || conf.fips || '';
+    const [wet, flood, countyAcs] = center ? await Promise.all([_omWetlands(poly, center), _omFlood(poly, center), _omCountyACS(cGeo)]) : [null, null, null];
+    const places = center ? _omNearPlaces(center) : [];
+    const deal = _omDealFor(siteAddr, [parcel, p.parcelId, cp.parcelId]);
 
-  // AI prompt for demographics + submarket narrative
-  const sys = `You are a Florida commercial real estate market analyst at a leading land brokerage. Return ONLY valid JSON, no prose, no code fences.
+    const zCode = (conf.cityZoning&&!conf.cityZoning._noAnswer&&conf.cityZoning.code) || (conf.zoning&&conf.zoning.code) || p.zoning || '';
+    const juris = (conf.juris&&conf.juris.label) || z.source || '';
+    const facts = [
+      'Address: '+(siteAddr||'n/a'), 'County: '+county, 'Jurisdiction (confirmed from GIS): '+(juris||'n/a'),
+      'Parcel ID: '+(p.parcelId||cp.parcelId||parcel||'n/a'),
+      'Acreage: '+(p.acreage||cp.acreage||(poly?poly.acres.toFixed(2)+' ac (GIS)':'n/a')),
+      'Zoning district (confirmed from GIS): '+(zCode||'n/a')+(z.description?' — '+z.description:''),
+      'Future land use: '+((conf.zoning&&conf.zoning.flu)||p.futureYearLandUse||'n/a'),
+      'Improvements: '+(p.structures||cp.structures||'n/a'),
+      traffic.length ? 'Nearest FDOT counts: '+traffic.slice(0,4).map(t=>t.name+' '+t.aadt.toLocaleString()+' AADT ('+t.year+')').join('; ') : '',
+      rings&&rings.threeMile&&rings.threeMile.population ? '3-mile ring (ACS): population '+Math.round(rings.threeMile.population).toLocaleString()+', median HH income ≈ $'+Math.round(rings.threeMile.medianHHIncome||0).toLocaleString() : '',
+      flood&&flood.length ? 'FEMA zones on parcel: '+[...new Set(flood.map(f=>f.FLD_ZONE))].join(', ') : '',
+      places.length ? 'Nearby: '+places.map(x=>x.name+' '+x.mi.toFixed(1)+' mi').join('; ') : '',
+    ].filter(Boolean).join('\n');
+    const sys = `You are the research analyst for Eshenbaugh Land Company, a Florida land brokerage, writing an offering memorandum. Search the live web (the governing jurisdiction's code of ordinances on Municode, county/city sites, tourism and economic-development data). Return ONLY valid JSON, no prose, no code fences:
+{"headline":"site type in 3-5 words, e.g. 'Mixed-Use Infill Development Site'",
+ "propertyDescription":"2-3 sentences on what the property is and why it matters",
+ "locationDescription":"2 sentences: where it sits, cross streets, what is around it",
+ "submarket":{"name":"neighborhood or city name for THIS site","subtitle":"e.g. 'HYDE PARK // HILLSBOROUGH COUNTY, FL 33606'","community":"90-130 words on the neighborhood/community"},
+ "keyMetrics":[{"value":"short figure","label":"what it measures, max 7 words","source":"source + year, max 6 words"}],
+ "marketDrivers":["3 bullets, max 32 words each, each with a specific sourced fact"],
+ "zoning":{"title":"e.g. 'CT Zoning: High Density Commercial Tourist'","codeSection":"the code citation for this district","intent":"max 60 words",
+   "standards":[{"value":"e.g. '36 ft'","label":"max 9 words"}],
+   "permitted":["uses permitted by right, max 10"],"accessory":"max 35 words","special":["special exception / conditional uses, max 8"],
+   "yield":[{"label":"max 8 words","value":"short"}],"sources":"code sections relied on, max 40 words"},
+ "propertyHighlights":["5 bullets, max 20 words each, tied to THIS parcel"]}
+Rules: the CONFIRMED FACTS are authoritative — never contradict them and never invent traffic counts, acreage, zoning district or demographics. Zoning: research the confirmed district in the confirmed jurisdiction's code; if it is a Planned Development (PD/PUD), say standards come from the site-specific PD ordinance and give the ordinance/case number if you can find it. Standards: 4-6 of max density, height, FAR, lot coverage/ISR, key setbacks. Yield: 3-6 illustrative maximums computed from the confirmed acreage. keyMetrics: exactly 4. Keep every string within its limit.`;
+    let om = {};
+    try{
+      const raw = await _valCallAI('CONFIRMED FACTS:\n'+facts+'\n\nWrite the offering memorandum content for this site.', sys);
+      if(raw){
+        let s = raw.replace(/^```json\s*/i,'').replace(/^```\s*/i,'').replace(/```\s*$/,'').trim();
+        s = s.replace(/"((?:[^"\\]|\\.)*)"/gs, (m, inner)=>'"'+inner.replace(/\n/g,'\\n').replace(/\r/g,'\\r').replace(/\t/g,'\\t')+'"');
+        try{ om = JSON.parse(s); }catch(e){ const m=raw.match(/\{[\s\S]*\}/); if(m) om=JSON.parse(m[0]); }
+      }
+    }catch(err){ console.warn('[OM] narrative failed', err); }
 
-Return this exact shape:
-{
-  "demographics": {
-    "oneMile":   { "population":"string","households":"string","medianHHIncome":"string","medianAge":"string","ownerOccupied":"string","renterOccupied":"string","popGrowth5yr":"string","employmentBase":"string" },
-    "threeMile": { "population":"string","households":"string","medianHHIncome":"string","medianAge":"string","ownerOccupied":"string","renterOccupied":"string","popGrowth5yr":"string","employmentBase":"string" },
-    "fiveMile":  { "population":"string","households":"string","medianHHIncome":"string","medianAge":"string","ownerOccupied":"string","renterOccupied":"string","popGrowth5yr":"string","employmentBase":"string" },
-    "source": "string — note these are AI estimates based on Census ACS data; recommend verifying with ESRI Business Analyst or CoStar"
-  },
-  "submarket": {
-    "name": "string — submarket name (e.g. 'Port Charlotte / Punta Gorda')",
-    "narrative": "string — 3-5 paragraph written submarket overview covering: recent growth drivers, population and job growth trends, major employers, key infrastructure and transportation, development pipeline activity, demand drivers for land, and near-term outlook. Write in professional OM prose suitable for institutional investors.",
-    "keyMetrics": [
-      { "label": "string — metric name", "value": "string — metric value", "note": "string or null" }
-    ],
-    "comparableSales": "string or null — any relevant land sale comps or market pricing context for this submarket/county",
-    "risks": "string — key market risks and considerations",
-    "opportunities": "string — key development opportunities and demand drivers"
-  },
-  "propertyHighlights": [
-    "string — each a punchy 1-sentence investment highlight (aim for 6-8 bullets)"
-  ]
-}`;
-
-  const userMsg = `Generate demographics and submarket narrative for this Florida land parcel:
-County: ${county}
-${parcel?'Parcel ID: '+parcel:''}
-${address?'Address: '+address:''}
-Acreage: ${p.acreage||'unknown'}
-Zoning: ${p.zoning||'unknown'} — ${z.description||''}
-Future Land Use: ${p.futureYearLandUse||'unknown'}
-Allowed Uses Summary: ${z.allowedUses||'unknown'}
-
-Provide realistic 1-mile, 3-mile, and 5-mile ring demographics (population, households, median HH income, median age, owner/renter split, 5-year population growth, employment base). These are estimates — flag as such.
-Also provide a detailed submarket narrative and 6-8 key metrics a land investor would care about (land values, growth rate, permit activity, major employers, traffic counts if known, etc.).`;
-
-  let omData = {};
-  try {
-    const raw = await _valCallAI(userMsg, sys);
-    if(!raw) throw new Error('No response');
-    let cleaned = raw.replace(/^```json\s*/i,'').replace(/^```\s*/i,'').replace(/```\s*$/,'').trim();
-    cleaned = cleaned.replace(/"((?:[^"\\]|\\.)*)"/gs, (match, inner) =>
-      '"' + inner.replace(/\n/g,'\\n').replace(/\r/g,'\\r').replace(/\t/g,'\\t').replace(/[\x00-\x1f\x7f]/g, c => '\\u'+c.charCodeAt(0).toString(16).padStart(4,'0')) + '"'
-    );
-    try { omData = JSON.parse(cleaned); }
-    catch(e){ const m=raw.match(/\{[\s\S]*\}/); if(m) omData=JSON.parse(m[0]); else throw e; }
+    _valOpenOM(d, om, {county, parcel, address, win}, {pt, center, poly, traffic, rings, wet, flood, conf, countyAcs, places, deal});
   } catch(err){
-    console.error('[OM] demographics fetch failed', err);
-    omData = { demographics:{oneMile:{},threeMile:{},fiveMile:{},source:'Data unavailable — verify with ESRI Business Analyst.'}, submarket:{name:county+' County',narrative:'Submarket data unavailable.',keyMetrics:[]}, propertyHighlights:[] };
+    console.error('[OM] build failed', err);
+    try{ win.document.body.innerHTML='<div style="color:#fff;font-family:Arial;padding:40px">Could not build the OM: '+String(err&&err.message||err).replace(/</g,'&lt;')+'</div>'; }catch(e){}
+    showToast('OM build failed — see the new window.','error');
+  } finally {
+    if(restore) restore(); else if(btn){ btn.disabled=false; btn.textContent='📋 Generate OM'; }
   }
-
-  if(btn){ btn.disabled=false; btn.textContent='📋 Generate OM'; }
-
-  // Geocode the address/parcel to lat/lng for map pages
-  let coords = null;
-  try {
-    const geoQ = encodeURIComponent((address||parcel+' '+county+' County')+', Florida USA');
-    const geoR = await fetch('https://nominatim.openstreetmap.org/search?q='+geoQ+'&format=json&limit=1',{headers:{'User-Agent':'ELC-Dashboard/1.0'}});
-    const geoD = await geoR.json();
-    if(geoD&&geoD.length){ coords={lat:parseFloat(geoD[0].lat),lng:parseFloat(geoD[0].lon)}; }
-  } catch(ge){ console.warn('[OM] geocode failed',ge); }
-
-  _valOpenOM(d, omData, {county, parcel, address}, coords);
 }
 window._valGenerateOM = _valGenerateOM;
 
-function _valOpenOM(d, om, meta, coords){
-  const p   = d.property||{};
-  const z   = d.zoning||{};
-  const env = d.environmental||{};
-  const wet = d.wetlands||{};
-  const fl  = d.flood||{};
-  const sd  = d.specialDesignations||{};
-  const oz  = sd.opportunityZone||{};
-  const cra = sd.cra||{};
-  const overlays = Array.isArray(sd.overlays)?sd.overlays:[];
-  const dem = om.demographics||{};
-  const sub = om.submarket||{};
-  const highlights = Array.isArray(om.propertyHighlights)?om.propertyHighlights:[];
-  const keyMetrics = Array.isArray(sub.keyMetrics)?sub.keyMetrics:[];
+function _valOpenOM(d, om, meta, data){
+  data = data || {}; om = om || {};
+  const p=d.property||{}, z=d.zoning||{}, env=d.environmental||{}, wp=d.waterPermits||{}, topo=d.topo||{};
+  const sd=d.specialDesignations||{}, aiOz=sd.opportunityZone||{}, cra=sd.cra||{};
+  const conf=data.conf||{}, cp=conf.parcel||{}, cz=(conf.cityZoning&&!conf.cityZoning._noAnswer)?conf.cityZoning:null, kz=conf.zoning||{};
+  const sub=om.submarket||{}, oz=om.zoning||{};
+  const highlights=(Array.isArray(om.propertyHighlights)?om.propertyHighlights:[]).slice(0,5);
+  const keyMetrics=(Array.isArray(om.keyMetrics)?om.keyMetrics:[]).slice(0,4);
+  const drivers=(Array.isArray(om.marketDrivers)?om.marketDrivers:[]).slice(0,3);
+  const RAMP=/\b(RP|RAMP)\b|^(ON|OFF)[- ]?R(A)?MP|\bRAMP\b/i;
+  const trafficAll=Array.isArray(data.traffic)?data.traffic:[];
+  const traffic=trafficAll.filter(t=>!RAMP.test(t.name)); traffic.all=trafficAll.all||trafficAll;
+  const rings=data.rings||{}, cty=data.countyAcs, places=data.places||[], deal=data.deal;
+  const poly=data.poly, center=data.center;
 
+  // ── text hygiene ──
+  const esc = s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  const BAD = /^(—|-+|n\/?a|null|undefined|unknown|tbd|\?)$|not found|unavailable|could not (be )?(found|determined)|no data/i;
+  const val = (...vs)=>{ for(const v of vs){ if(v==null) continue; const s=String(v).trim(); if(s && !BAD.test(s)) return s; } return ''; };
+  const clip = (s,n)=>{ s=String(s||'').trim(); if(s.length<=n) return s; const c=s.slice(0,n); const k=Math.max(c.lastIndexOf('. '), c.lastIndexOf('; ')); return (k>n*0.6?c.slice(0,k+1):c.replace(/\s+\S*$/,'')+'…'); };
+  const arr = (a,n,m)=>(Array.isArray(a)?a:[]).map(x=>typeof x==='string'?clip(x,m||80):x).filter(Boolean).slice(0,n);
+  const num = v=>v==null||isNaN(v)?'—':Math.round(v).toLocaleString();
+  const money = v=>v==null||isNaN(v)||v<=0?'—':'$'+Math.round(v).toLocaleString();
+  const acresNum = s=>{ const m=String(s||'').replace(/,/g,'').match(/[\d.]+/); return m?parseFloat(m[0]):null; };
+  const pct = (a,b)=>a==null||b==null||!b?'':((a/b-1)*100>=0?'+':'')+((a/b-1)*100).toFixed(0)+'%';
+
+  // ── confirmed beats AI ──
+  const siteAddr = val(p.siteAddress, cp.siteAddress, meta.address);
+  const zip = (String(val(p.siteAddress,p.mailingAddress,cp.mailingAddress)).match(/\b3\d{4}\b/)||[''])[0];
+  const city = (conf.juris&&conf.juris.label) ? conf.juris.label.replace(/^City of /,'').replace(/^Town of /,'').replace(/ \(Unincorporated\)/,'') : (val(z.source).replace(/^City of /,'')||meta.county+' County');
+  const juris = (conf.juris&&conf.juris.label) || val(z.source) || meta.county+' County';
+  const street = siteAddr ? siteAddr.split(',')[0].trim() : (val(p.parcelId,meta.parcel)||'Land Offering');
+  const fullAddr = siteAddr ? `${street}, ${city}, FL${zip?' '+zip:''}` : `${meta.county} County, FL`;
+  const acN = acresNum(val(p.acreage, cp.acreage)) ?? (poly?+poly.acres.toFixed(2):null);
+  const acShort = acN!=null ? (acN<10?acN.toFixed(2):acN.toLocaleString(undefined,{maximumFractionDigits:1})) : '';
+  const acreTxt = acN!=null ? acShort+'± Acres' : 'Acreage TBD';
+  const sqftTxt = acN!=null ? '≈'+Math.round(acN*43560).toLocaleString()+' SF' : '';
+  const headline = (street+(acShort?' – '+acShort+'± ACRE ':' – ')+val(om.headline,'Development Site')).toUpperCase();
+  const zCode = val(cz&&cz.code, kz.code, z.code, p.zoning);
+  const zDesc = val(cz&&cz.description, kz.description, z.description);
+  const flu = val(kz.flu&&kz.fluDescription?kz.flu+' — '+kz.fluDescription:kz.flu, p.futureYearLandUse);
+  const parcelId = val(p.parcelId, cp.parcelId, meta.parcel);
+  const owner = val(p.owner, cp.owner);
+  const structures = val(p.structures, cp.structures).replace(/\?\s*sq ft,?\s*/gi,'').replace(/\(\s*built/gi,'(built').replace(/\(\s*\)/g,'').trim();
+  const sales = (Array.isArray(p.priorSales)&&p.priorSales.length?p.priorSales:(cp.salesHistory||[])).filter(s=>val(s.price)).slice(0,4);
+  const askN = deal ? Number(deal.listedPrice||deal.listPrice||deal.askingPrice||0) : 0;
+  const priceTxt = askN>0 ? '$'+Math.round(askN).toLocaleString() : 'Contact advisor for pricing';
+  const ozTxt = conf.oz ? 'Yes — tract '+(conf.oz.tract||conf.oz.geoid10||'') : (aiOz.status==='Yes'?'Yes':(aiOz.status==='No'||conf.lat!=null)?'No':'Unconfirmed');
+  const floodZones = Array.isArray(data.flood) ? [...new Set(data.flood.map(f=>f.FLD_ZONE+(f.ZONE_SUBTY&&/0\.2/.test(f.ZONE_SUBTY)?' (shaded)':'')))] :
+                     Array.isArray(conf.fema) ? [...new Set(conf.fema.map(f=>f.FLD_ZONE))] : [];
+  const sfha = Array.isArray(data.flood) ? data.flood.some(f=>f.SFHA_TF==='T') : Array.isArray(conf.fema) ? conf.fema.some(f=>f.SFHA_TF==='T') : null;
+  const firm = conf.firm ? (conf.firm.FIRM_PAN+(conf.firm.EFF_DATE?' · effective '+new Date(conf.firm.EFF_DATE).toLocaleDateString('en-US'):'')) : '';
+  const wet = data.wet || (Array.isArray(conf.nwi) ? {onSite:null, nearby:[...new Set(conf.nwi.map(w=>w.WETLAND_TYPE).filter(Boolean))], ft:1000} : null);
+  const soils = Array.isArray(conf.soils) ? [...new Map(conf.soils.filter(s=>s.majcompflag==='Yes'||+s.comppct_r>=15).map(s=>[s.muname,s])).values()].slice(0,3) : [];
+  const elev = conf.elevation!=null ? conf.elevation.toFixed(1)+' ft at the pin (USGS)' : val(topo.elevationRange);
+  const near = traffic[0];
+  const R1=rings.oneMile, R3=rings.threeMile, R5=rings.fiveMile;
+
+  // ── brand (ELC OM standard — 400 Gulf Blvd) ──
+  const RED='#E3262F', TEAL='#0FA3A6', INK='#231F20', GRAY='#8E9890', DARK='#3A3633';
+  const A = f=>{ try{ return new URL('om/assets/'+f, location.href).href; }catch(e){ return 'om/assets/'+f; } };
+  const LOGO=A('logo.png'), BAND=A('band-top.jpg'), BANDC=A('band-cover.jpg'), TOPO=A('topo.jpg');
   const dateStr = new Date().toLocaleDateString('en-US',{year:'numeric',month:'long'});
-  const propTitle = p.siteAddress || meta.address || (meta.parcel+' — '+meta.county+' County') || 'Land Offering';
-  const acreage = p.acreage || '± TBD';
+  const advisor = typeof currentUser!=='undefined' && currentUser ? currentUser : {};
+  const bio = (typeof getAdvisorBio==='function' && advisor.uid) ? getAdvisorBio(advisor.uid) : null;   // ADVBIO-20261006
+  const advName  = (bio&&bio.nameWithDesignations) || advisor.name || 'Eshenbaugh Land Company';
+  const advTitle = (bio&&bio.title) || advisor.title || 'Advisor';
+  const advEmail = (bio&&bio.email) || advisor.email || '';
+  const advPhone = String((bio&&(bio.directLine||bio.phone)) || advisor.phone || '813-287-8787').replace(/-/g,'.');
+  const advCell  = bio&&bio.cell ? String(bio.cell).replace(/-/g,'.') : '';
+  const advPhoto = (bio&&bio.headshotUrl) || '';
 
-  // Brand colors — Eshenbaugh Land Company brand palette
-  const CHARCOAL='#0A0A0A', SAND='#C7CBD0', SOIL='#5A5250', ORANGE='#DA291C', BLUE='#00B2A9', GREEN='#355E3B';
-  // Company logo (pulled live from the app so the OM always matches the current brand mark)
-  const _logoEl = document.querySelector('.sidebar-logo img') || document.querySelector('img[alt="Eshenbaugh Land Company"]');
-  const LOGO = (_logoEl && _logoEl.src) ? _logoEl.src : '';
-
-  const demRow = (label,ring)=>{
-    const r=dem[ring]||{};
-    return `<tr>
-      <td style="padding:7px 10px;font-weight:600;color:#555;border-bottom:1px solid #f0f0f0;font-size:8.5pt">${label}</td>
-      <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0f0f0;font-size:8.5pt">${r.population||'—'}</td>
-      <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0f0f0;font-size:8.5pt">${r.households||'—'}</td>
-      <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0f0f0;font-size:8.5pt">${r.medianHHIncome||'—'}</td>
-      <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0f0f0;font-size:8.5pt">${r.medianAge||'—'}</td>
-      <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0f0f0;font-size:8.5pt">${r.popGrowth5yr||'—'}</td>
-    </tr>`;
+  // ── maps (Web Mercator so overlays land exactly on the imagery) ──
+  const MAPSVC = 'https://server.arcgisonline.com/arcgis/rest/services/';
+  const view = (cLon, cLat, halfWm, W, H)=>{
+    const [cx,cy]=_omMerc(cLon,cLat); const halfH=halfWm*H/W;
+    const v={xmin:cx-halfWm, xmax:cx+halfWm, ymin:cy-halfH, ymax:cy+halfH, W, H, lat:cLat};
+    v.px=(lon,lat)=>{ const [x,y]=_omMerc(lon,lat); return [ (x-v.xmin)/(v.xmax-v.xmin)*W, (v.ymax-y)/(v.ymax-v.ymin)*H ]; };
+    // Esri returns a blank image when asked for more detail than its deepest zoom, which
+    // is what blanked the aerial on small lots — cap pixels by metres-per-pixel per service.
+    v.url=(svc,fmt,tr)=>{ const minRes=/^Reference\//.test(svc)?0.75:/Street/.test(svc)?0.6:0.3;
+      const pw=Math.max(400,Math.min(W*2,4000,Math.round((v.xmax-v.xmin)/minRes))), ph=Math.round(pw*H/W);
+      return `${MAPSVC}${svc}/MapServer/export?bbox=${v.xmin.toFixed(1)},${v.ymin.toFixed(1)},${v.xmax.toFixed(1)},${v.ymax.toFixed(1)}&bboxSR=3857&imageSR=3857&size=${pw},${ph}&format=${fmt}&transparent=${tr?'true':'false'}&f=image`; };
+    v.mPerPx = (2*halfWm*Math.cos(cLat*Math.PI/180))/W;
+    return v;
   };
+  const scaleBar = v=>{
+    const ft=v.mPerPx*3.28084, target=v.W*0.15*ft;
+    const nice=[50,100,200,250,500,1000,2000,2640,5280,10560,26400,52800].reduce((a,b)=>Math.abs(b-target)<Math.abs(a-target)?b:a);
+    const w=nice/ft, lbl=nice>=2640?(nice/5280)+' mi':nice.toLocaleString()+' ft';
+    return `<g transform="translate(18,${v.H-20})"><rect x="-7" y="-17" width="${w+54}" height="27" rx="3" fill="rgba(35,31,32,.75)"/>
+      <rect x="0" y="0" width="${w/2}" height="4" fill="#fff"/><rect x="${w/2}" y="0" width="${w/2}" height="4" fill="${RED}"/>
+      <text x="0" y="-5" fill="#fff" font-size="9" font-family="Helvetica,Arial">0</text><text x="${w}" y="-5" fill="#fff" font-size="9" font-family="Helvetica,Arial" text-anchor="middle">${lbl}</text></g>`;
+  };
+  const north = v=>`<g transform="translate(${v.W-28},28)"><circle r="16" fill="rgba(35,31,32,.78)" stroke="#fff" stroke-width="1.2"/><polygon points="0,-11 5,4 0,1 -5,4" fill="${RED}"/><text dy="14" fill="#fff" font-size="7.5" font-weight="700" text-anchor="middle" font-family="Helvetica,Arial">N</text></g>`;
+  const polyPath = v=>poly ? poly.rings.map(r=>'M'+r.map(q=>v.px(q[0],q[1]).map(n=>n.toFixed(1)).join(',')).join('L')+'Z').join(' ') : '';
+  const outline = (v,w)=> poly ? `<path d="${polyPath(v)}" fill="rgba(227,38,47,.10)" stroke="#fff" stroke-width="${w+3}" stroke-linejoin="round" opacity=".9"/><path d="${polyPath(v)}" fill="none" stroke="${RED}" stroke-width="${w}" stroke-linejoin="round"/>`
+                                  : (()=>{ const [x,y]=v.px(center.lon,center.lat); return `<circle cx="${x}" cy="${y}" r="10" fill="${RED}" stroke="#fff" stroke-width="3"/>`; })();
+  const map = (v, imgs, svg, alt, extraStyle)=>`<div class="map" style="aspect-ratio:${v.W}/${v.H};${extraStyle||''}">${imgs.map(u=>`<img src="${u}" alt="${esc(alt)}">`).join('')}
+      <svg viewBox="0 0 ${v.W} ${v.H}" preserveAspectRatio="none">${svg}</svg></div>`;
+  const teardrop = (x,y)=>`<g transform="translate(${x.toFixed(1)},${y.toFixed(1)})"><path d="M0,0 C-4,-9 -12,-14 -12,-23 a12,12 0 1,1 24,0 C12,-14 4,-9 0,0Z" fill="${TEAL}" stroke="#fff" stroke-width="2"/><circle cy="-23" r="4.5" fill="#fff"/></g>`;
 
-  const specialBadges = [];
-  if(oz.status==='Yes') specialBadges.push(`<span style="background:${ORANGE};color:#fff;border-radius:4px;padding:2px 10px;font-size:8pt;font-weight:700;letter-spacing:.03em">OPPORTUNITY ZONE</span>`);
-  if(cra.status==='Yes') specialBadges.push(`<span style="background:${BLUE};color:#fff;border-radius:4px;padding:2px 10px;font-size:8pt;font-weight:700;letter-spacing:.03em">CRA</span>`);
-  overlays.filter(o=>o.impact==='Permissive').forEach(o=>specialBadges.push(`<span style="background:${GREEN};color:#fff;border-radius:4px;padding:2px 10px;font-size:8pt;font-weight:700;letter-spacing:.03em">${(o.name||'').toUpperCase()}</span>`));
-
-  const win = window.open('','_blank','width=960,height=780');
-  if(!win){ showToast('Pop-up blocked — allow pop-ups to generate OM.','error'); return; }
-
-  win.document.write(`<!DOCTYPE html>
-<html><head>
-<meta charset="utf-8">
-<title>Offering Memorandum — ${propTitle}</title>
-<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
-<style>
-  *{box-sizing:border-box;-webkit-print-color-adjust:exact;print-color-adjust:exact;margin:0;padding:0}
-  body{font-family:'Montserrat',sans-serif;color:${CHARCOAL};background:#fff;font-size:10pt}
-  @page{size:letter;margin:0}
-
-  /* ── COVER PAGE ─────────────────────────── */
-  .cover{width:100%;height:100vh;min-height:11in;background:${CHARCOAL};color:#fff;display:flex;flex-direction:column;position:relative;page-break-after:always}
-  .cover-top{flex:1;display:flex;flex-direction:column;justify-content:flex-end;padding:0.7in 0.65in 0.35in}
-  .cover-label{font-size:7.5pt;font-weight:700;letter-spacing:.2em;text-transform:uppercase;color:${ORANGE};margin-bottom:10px}
-  .cover-address{font-size:26pt;font-weight:900;line-height:1.1;color:#fff;margin-bottom:8px;text-transform:uppercase}
-  .cover-sub{font-size:12pt;font-weight:300;color:${SAND};letter-spacing:.05em}
-  .cover-divider{height:3px;background:${ORANGE};width:60px;margin:18px 0}
-  .cover-acres{font-size:14pt;font-weight:700;color:#fff;margin-bottom:4px}
-  .cover-zoning{font-size:9pt;font-weight:400;color:${SAND};letter-spacing:.05em}
-  .cover-badges{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px}
-  .cover-bottom{background:rgba(0,0,0,.35);padding:0.3in 0.65in;display:flex;justify-content:space-between;align-items:center}
-  .cover-brand{display:flex;flex-direction:column}
-  .cover-brand-name{font-size:14pt;font-weight:900;letter-spacing:.08em;color:#fff;text-transform:uppercase}
-  .cover-brand-tag{font-size:7pt;font-weight:600;letter-spacing:.15em;color:${ORANGE};text-transform:uppercase;margin-top:1px}
-  .cover-date{font-size:8pt;color:${SAND};letter-spacing:.05em;text-align:right}
-  .cover-accent{position:absolute;right:0;top:0;width:4px;height:100%;background:${ORANGE}}
-  .cover-logo{padding:0.6in 0.65in 0;flex:0 0 auto}
-  .cover-logo img{height:60px;width:auto;object-fit:contain;filter:brightness(0) invert(1)}
-
-  /* ── SECTION PAGES ─────────────────────── */
-  .page{width:100%;padding:0.55in 0.65in 0.45in;page-break-after:always;min-height:10in}
-  .page:last-child{page-break-after:avoid}
-  .page-header{border-bottom:2px solid ${ORANGE};padding-bottom:8px;margin-bottom:22px;display:flex;justify-content:space-between;align-items:flex-end}
-  .page-header-title{font-size:16pt;font-weight:900;text-transform:uppercase;letter-spacing:.05em;color:${CHARCOAL}}
-  .page-header-prop{font-size:7.5pt;font-weight:600;color:#888;letter-spacing:.06em;text-align:right;line-height:1.4}
-
-  /* ── CONFIDENTIALITY STRIP ─────────────── */
-  .conf-strip{background:${CHARCOAL};color:${SAND};font-size:6.5pt;font-weight:600;letter-spacing:.1em;text-align:center;padding:5px;text-transform:uppercase;page-break-inside:avoid}
-
-  /* ── TWO-COLUMN LAYOUT ─────────────────── */
-  .two-col{display:grid;grid-template-columns:1fr 1fr;gap:18px}
-  .three-col{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}
-
-  /* ── DATA BLOCKS ────────────────────────── */
-  .data-block{background:#f9f8f6;border-left:3px solid ${ORANGE};padding:12px 14px;margin-bottom:12px}
-  .data-block-title{font-size:7pt;font-weight:700;text-transform:uppercase;letter-spacing:.12em;color:${ORANGE};margin-bottom:7px}
-  .data-row{display:flex;gap:6px;margin-bottom:5px;font-size:8.5pt;line-height:1.4}
-  .data-lbl{font-weight:600;color:#666;min-width:130px;flex:0 0 auto}
-  .data-val{color:${CHARCOAL};flex:1}
-
-  /* ── HIGHLIGHT BULLETS ─────────────────── */
-  .highlight-list{list-style:none;margin:0;padding:0}
-  .highlight-list li{display:flex;align-items:flex-start;gap:10px;padding:8px 0;border-bottom:1px solid #f0ede8;font-size:9pt;line-height:1.5}
-  .highlight-list li:last-child{border-bottom:none}
-  .hl-dot{width:8px;height:8px;background:${ORANGE};border-radius:50%;flex:0 0 8px;margin-top:5px}
-
-  /* ── METRIC CARDS ───────────────────────── */
-  .metric-card{background:${CHARCOAL};color:#fff;border-radius:6px;padding:14px 16px;text-align:center}
-  .metric-val{font-size:16pt;font-weight:900;color:${ORANGE};line-height:1}
-  .metric-lbl{font-size:7pt;font-weight:600;text-transform:uppercase;letter-spacing:.1em;color:${SAND};margin-top:4px}
-  .metric-note{font-size:6.5pt;color:#888;margin-top:3px}
-
-  /* ── DEMOGRAPHICS TABLE ─────────────────── */
-  .dem-table{width:100%;border-collapse:collapse;font-size:8.5pt}
-  .dem-table th{background:${CHARCOAL};color:#fff;padding:8px 10px;text-align:center;font-weight:700;font-size:7.5pt;letter-spacing:.05em}
-  .dem-table th:first-child{text-align:left}
-  .dem-table tr:nth-child(even) td{background:#f9f8f6}
-
-  /* ── SECTION DIVIDER LABEL ──────────────── */
-  .section-tag{display:inline-block;background:${ORANGE};color:#fff;font-size:7pt;font-weight:700;letter-spacing:.12em;text-transform:uppercase;padding:3px 10px;border-radius:3px;margin-bottom:10px}
-
-  /* ── NARRATIVE TEXT ─────────────────────── */
-  .narrative p{font-size:9pt;line-height:1.7;color:#333;margin-bottom:10px}
-
-  /* ── STATUS BADGES ──────────────────────── */
-  .status-yes{background:#d1fae5;color:#065f46;border-radius:4px;padding:2px 8px;font-size:7.5pt;font-weight:700}
-  .status-no{background:#f3f4f6;color:#6b7280;border-radius:4px;padding:2px 8px;font-size:7.5pt;font-weight:700}
-  .status-unk{background:#fef3c7;color:#92400e;border-radius:4px;padding:2px 8px;font-size:7.5pt;font-weight:700}
-
-  /* ── DISCLAIMER ─────────────────────────── */
-  .disclaimer{font-size:6.5pt;color:#aaa;line-height:1.5;margin-top:14px;border-top:1px solid #e5e7eb;padding-top:10px}
-
-  @media print{
-    .cover{height:100vh;min-height:0;page-break-after:always}
-    .page{min-height:0}
+  let mClose='', mCover='', mRegional='', mRings='', mStreet='', mStreetReg='', mAdv='';
+  if(center){
+    const [mx0]=poly?_omMerc(poly.xmin,poly.centroid[1]):[0]; const [mx1]=poly?_omMerc(poly.xmax,poly.centroid[1]):[60];
+    const [,my0]=poly?_omMerc(poly.centroid[0],poly.ymin):[0,0]; const [,my1]=poly?_omMerc(poly.centroid[0],poly.ymax):[0,60];
+    const bw=Math.max(mx1-mx0,1), bh=Math.max(my1-my0,1);
+    const fit=(W,H,share,minHalf)=>Math.max(bw/2/share, bh/2/share*W/H, minHalf);
+    const T=['Reference/World_Transportation','png32',true];
+    // Aerial page (close)
+    const v1=view(center.lon,center.lat,fit(1000,560,.42,165),1000,560);
+    const [tx,ty]=v1.px(center.lon, poly?poly.ymax:center.lat);
+    mClose = map(v1,[v1.url('World_Imagery','jpg'),v1.url(...T)], outline(v1,3)+
+      `<g transform="translate(${tx.toFixed(0)},${Math.max(34,ty-10).toFixed(0)})"><rect x="-70" y="-24" width="140" height="22" rx="2" fill="${RED}"/><text y="-9" fill="#fff" font-size="10.5" font-weight="700" letter-spacing="1.2" text-anchor="middle" font-family="Helvetica,Arial">SUBJECT · ${esc(acShort?acShort+'± AC':'SITE')}</text></g>`+north(v1)+scaleBar(v1),'Aerial of the subject parcel');
+    // Cover (wide band)
+    const vc=view(center.lon,center.lat,fit(1100,440,.2,220),1100,440);
+    mCover = map(vc,[vc.url('World_Imagery','jpg'),vc.url(...T)], outline(vc,3.5),'Aerial','height:100%;aspect-ratio:auto');
+    // Second aerial — neighborhood context (for the advisor page)
+    const va=view(center.lon,center.lat,fit(1100,420,.12,420),1100,420);
+    mAdv = map(va,[va.url('World_Imagery','jpg'),va.url(...T)], outline(va,3),'Neighborhood aerial','height:100%;aspect-ratio:auto');
+    // Regional + FDOT counts
+    const W2=900, H2=560, v2=view(center.lon,center.lat,Math.max(2700,bw*4),W2,H2);
+    const inView=([x,y])=>x>40&&x<W2-40&&y>36&&y<H2-36;
+    const segs=(traffic.all||[]).map(s=>s.paths.map(path=>`<polyline points="${path.map(q=>v2.px(q[0],q[1]).map(n=>n.toFixed(1)).join(',')).join(' ')}" fill="none" stroke="rgba(255,206,0,.9)" stroke-width="${s.aadt>40000?6:s.aadt>15000?4.5:3}" stroke-linecap="round"/>`).join('')).join('');
+    const placed=[]; let lbl='';
+    traffic.slice(0,7).forEach(t=>{ const lp=t.paths.reduce((a,b)=>b.length>a.length?b:a,[]); const mid=lp[Math.floor(lp.length/2)]||t.at;
+      let [x,y]=v2.px(mid[0],mid[1]); if(!inView([x,y])) [x,y]=v2.px(t.at[0],t.at[1]); if(!inView([x,y])) return;
+      for(let k=0;k<8&&placed.some(q=>Math.abs(q[0]-x)<124&&Math.abs(q[1]-y)<31);k++) y+=(y>H2/2?-31:31);
+      placed.push([x,y]);
+      lbl+=`<g transform="translate(${x.toFixed(0)},${y.toFixed(0)})"><rect x="-60" y="-14" width="120" height="28" rx="2" fill="rgba(35,31,32,.92)" stroke="${RED}" stroke-width="1.2"/><text y="-2" fill="#fff" font-size="8.5" font-weight="700" text-anchor="middle" font-family="Helvetica,Arial">${esc(clip(t.name,22))}</text><text y="10" fill="#FFCE00" font-size="9.5" font-weight="800" text-anchor="middle" font-family="Helvetica,Arial">${t.aadt.toLocaleString()} AADT</text></g>`; });
+    const [rx,ry]=v2.px(center.lon,center.lat);
+    mRegional = map(v2,[v2.url('World_Imagery','jpg'),v2.url(...T),v2.url('Reference/World_Boundaries_and_Places','png32',true)], segs+teardrop(rx,ry)+lbl+north(v2)+scaleBar(v2),'Regional map with FDOT traffic counts');
+    // Demographic rings
+    const W3=620,H3=560, v3=view(center.lon,center.lat,5.75*1609.34/Math.cos(center.lat*Math.PI/180),W3,H3);
+    const [qx,qy]=v3.px(center.lon,center.lat);
+    const ring=(mi,fill)=>{ const r=mi*1609.34/Math.cos(center.lat*Math.PI/180)/(v3.xmax-v3.xmin)*W3; return `<circle cx="${qx}" cy="${qy}" r="${r.toFixed(1)}" fill="${fill}" stroke="${INK}" stroke-width="1.2"/><text x="${qx}" y="${(qy-r+13).toFixed(0)}" text-anchor="middle" font-size="10" font-weight="700" fill="#fff" font-family="Helvetica,Arial" paint-order="stroke" stroke="${INK}" stroke-width="3">${mi} MI</text>`; };
+    mRings = map(v3,[v3.url('World_Street_Map','jpg')], ring(5,'rgba(35,31,32,.18)')+ring(3,'rgba(35,31,32,.22)')+ring(1,'rgba(227,38,47,.35)')+teardrop(qx,qy),'Demographic ring map');
+    // Location maps (street)
+    const W4=520,H4=560;
+    const v4=view(center.lon,center.lat,Math.max(700,bw*3),W4,H4), v5=view(center.lon,center.lat,9000,W4,H4);
+    mStreet = map(v4,[v4.url('World_Street_Map','jpg')], outline(v4,2.5)+teardrop(...v4.px(center.lon,center.lat))+north(v4)+scaleBar(v4),'Neighborhood street map');
+    mStreetReg = map(v5,[v5.url('World_Street_Map','jpg')], teardrop(...v5.px(center.lon,center.lat))+north(v5)+scaleBar(v5),'Regional street map');
   }
-</style>
-</head><body>
+  const noMap = `<div class="map nomap">No location — drop a pin on the Site Research map and generate again.</div>`;
 
-<!-- ═══════════════════════════════════════════════════════
-     COVER PAGE
-═══════════════════════════════════════════════════════ -->
-<div class="cover">
-  <div class="cover-accent"></div>
-  ${LOGO?`<div class="cover-logo"><img src="${LOGO}" alt="Eshenbaugh Land Company"></div>`:''}
-  <div class="cover-top">
-    <div class="cover-label">Offering Memorandum · ${meta.county} County, Florida</div>
-    <div class="cover-address">${propTitle}</div>
-    <div class="cover-sub">Florida's Land Authority</div>
-    <div class="cover-divider"></div>
-    <div class="cover-acres">${acreage} Acres${p.zoning?' · '+p.zoning:''}</div>
-    <div class="cover-zoning">${z.description||p.futureYearLandUse||''}</div>
-    ${specialBadges.length?`<div class="cover-badges">${specialBadges.join('')}</div>`:''}
-  </div>
-  <div class="cover-bottom">
-    <div class="cover-brand">
-      <div class="cover-brand-name">Eshenbaugh Land Company</div>
-      <div class="cover-brand-tag">Experts · Advisors · Deal Makers · Land Strategists</div>
-    </div>
-    <div class="cover-date">
-      <div style="color:#fff;font-weight:600;font-size:9pt">${dateStr}</div>
-      <div>thedirtdog.com</div>
-      ${meta.parcel?`<div style="margin-top:3px">Parcel: ${meta.parcel}</div>`:''}
-    </div>
-  </div>
-</div>
+  // ── page chrome ──
+  let pg=1;
+  const runner = `${esc(headline)} // ${esc(fullAddr.toUpperCase())}`;
+  const sheet = (title, body, opt)=>{ pg++; opt=opt||{};
+    return `<section class="sheet${opt.cls?' '+opt.cls:''}"><div class="band"></div>
+      ${title?`<h1 class="ttl">${title}</h1>${opt.sub?`<div class="sub">${opt.sub}</div>`:''}`:''}
+      <div class="bd"${opt.nofit?' data-nofit':''}>${body}</div>
+      <footer class="ft"><span class="pn">${pg}</span><span class="run">${runner}</span><span class="rule"></span><img class="flogo" src="${LOGO}" alt="Eshenbaugh Land Company"></footer></section>`; };
+  const lab = t=>`<div class="lab">${t}</div>`;
+  const kv = (l,v)=> val(v) ? `<div class="kv"><div class="k">${esc(l)}</div><div class="v">${esc(v)}</div></div>` : '';
+  const sec = t=>`<div class="sec">${t}</div>`;
 
-<div class="conf-strip">Confidential — This offering memorandum is intended solely for the use of the party to whom it is delivered. Do not reproduce or distribute without permission of Eshenbaugh Land Company.</div>
+  // ── zoning content: AI research first, Site Research AI second ──
+  const zTitle = val(oz.title) || ((zCode?zCode+' Zoning':'Zoning')+(zDesc?': '+zDesc:''));
+  const zSub = [val(oz.codeSection), flu?'Future Land Use: '+flu.split(' — ').pop():'' ].filter(Boolean).map(x=>esc(x.toUpperCase())).join('&nbsp; // &nbsp;');
+  const zStd = arr(oz.standards,6).filter(s=>s&&val(s.value)).map(s=>({v:clip(s.value,12), l:clip(s.label,60)}));
+  if(!zStd.length){ [['Max height',z.maxHeight],['FAR',z.far],['Lot coverage',z.lotCoverage]].forEach(([l,v])=>{ v=val(v); if(v && v.length<=14) zStd.push({v,l}); }); }
+  const permitted = arr(oz.permitted,10,48).length ? arr(oz.permitted,10,48) : (val(z.allowedUses)?[clip(z.allowedUses,420)]:[]);
+  const special = arr(oz.special,8,48).length ? arr(oz.special,8,48) : (val(z.conditionalUses)?[clip(z.conditionalUses,300)]:[]);
+  const yieldRows = arr(oz.yield,6).filter(y=>y&&val(y.value));
+  const listCols = items => items.length===1 && items[0].length>60 ? `<p class="body">${esc(items[0])}</p>` : `<ul class="uses">${items.map(u=>`<li>${esc(u)}</li>`).join('')}</ul>`;
 
-<!-- ═══════════════════════════════════════════════════════
-     PAGE 2 — PROPERTY OVERVIEW + HIGHLIGHTS
-═══════════════════════════════════════════════════════ -->
-<div class="page">
-  <div class="page-header">
-    <div class="page-header-title">Property Overview</div>
-    <div style="display:flex;align-items:center;gap:10px">${LOGO?`<img src="${LOGO}" alt="" style="height:24px;width:auto;object-fit:contain">`:''}<div class="page-header-prop">${propTitle}<br>${meta.county} County, FL</div></div>
-  </div>
+  // ── market profile numbers ──
+  const occ = R3 && R3.units ? {vac:R3.vacant/R3.units*100, own:R3.owners/R3.units*100, ren:R3.renters/R3.units*100} : null;
+  const cmpRows = (R3&&R3.population&&cty) ? [
+    ['Median Household Income (≈)', money(R3.medianHHIncome), money(cty.medianHHIncome), pct(R3.medianHHIncome,cty.medianHHIncome)],
+    ['Median Home Value (≈)', money(R3.medianHomeValue), money(cty.medianHomeValue), pct(R3.medianHomeValue,cty.medianHomeValue)],
+    ['Median Contract Rent (≈)', money(R3.medianRent), money(cty.medianRent), pct(R3.medianRent,cty.medianRent)],
+    ['Owner-Occupied Households', R3.ownerPct!=null?R3.ownerPct.toFixed(1)+'%':'—', cty.ownerPct!=null?cty.ownerPct.toFixed(1)+'%':'—', (R3.ownerPct!=null&&cty.ownerPct!=null)?((R3.ownerPct-cty.ownerPct)>=0?'+':'')+(R3.ownerPct-cty.ownerPct).toFixed(1)+' pts':''],
+    ['Population', num(R3.population), num(cty.population), cty.medianAge?'Median age '+(R3.medianAge||0).toFixed(1)+' vs '+(+cty.medianAge).toFixed(1):''],
+  ] : [];
+  const trafMax = Math.max(1,...traffic.slice(0,6).map(t=>t.aadt));
 
-  <div class="two-col" style="margin-bottom:18px">
+  const why=[['Florida Land Experts','Zoning, entitlements, environmental and water-management know-how across the state.'],
+             ['Relationships Drive Results','Direct lines to the homebuilders, developers and land investors active in Florida.'],
+             ['Boots on the Ground','We walk every site — drainage, wetlands, soils, access — not just the data sheet.'],
+             ['Data-Driven Strategy','Live public-records research, market analytics and deal structuring that protect value.']];
+
+  // ── pages ──
+  const pAerial = sheet('Aerial', (mClose||noMap)+`<div class="cap">Esri World Imagery · ${poly?'Parcel boundary from the Florida statewide cadastral (FDOR / FGIO) — approximate, verify with a boundary survey':'Parcel boundary not found in the statewide cadastral — the pin marks the researched point'}</div>`, {nofit:true});
+
+  const pDesc = sheet('Property Description', `<div class="g64">
     <div>
-      <div class="section-tag">Property Details</div>
-      <div class="data-block">
-        <div class="data-block-title">Ownership & Identification</div>
-        ${p.owner?`<div class="data-row"><span class="data-lbl">Owner</span><span class="data-val">${p.owner}</span></div>`:''}
-        ${p.parcelId?`<div class="data-row"><span class="data-lbl">Parcel ID</span><span class="data-val">${p.parcelId}</span></div>`:''}
-        ${p.siteAddress?`<div class="data-row"><span class="data-lbl">Site Address</span><span class="data-val">${p.siteAddress}</span></div>`:''}
-        ${p.mailingAddress?`<div class="data-row"><span class="data-lbl">Mailing Address</span><span class="data-val">${p.mailingAddress}</span></div>`:''}
-        ${p.legalDescription?`<div class="data-row"><span class="data-lbl">Legal Description</span><span class="data-val" style="font-size:7.5pt">${p.legalDescription}</span></div>`:''}
-      </div>
-      <div class="data-block">
-        <div class="data-block-title">Site Characteristics</div>
-        ${p.acreage?`<div class="data-row"><span class="data-lbl">Total Acreage</span><span class="data-val" style="font-weight:700">${p.acreage}</span></div>`:''}
-        ${p.zoning?`<div class="data-row"><span class="data-lbl">Zoning</span><span class="data-val">${p.zoning} — ${z.description||''}</span></div>`:''}
-        ${p.futureYearLandUse?`<div class="data-row"><span class="data-lbl">Future Land Use</span><span class="data-val">${p.futureYearLandUse}</span></div>`:''}
-        ${p.structures?`<div class="data-row"><span class="data-lbl">Improvements</span><span class="data-val">${p.structures}</span></div>`:''}
-      </div>
-      <div class="data-block">
-        <div class="data-block-title">Assessed Value & Taxes</div>
-        ${p.assessedValue?`<div class="data-row"><span class="data-lbl">Assessed Value</span><span class="data-val">${p.assessedValue}</span></div>`:''}
-        ${p.marketValue?`<div class="data-row"><span class="data-lbl">Market Value</span><span class="data-val">${p.marketValue}</span></div>`:''}
-        ${p.taxAmount?`<div class="data-row"><span class="data-lbl">Annual Taxes</span><span class="data-val">${p.taxAmount}</span></div>`:''}
+      ${sec('Property Description')}<p class="body">${esc(clip(val(om.propertyDescription) || `${street} is a ${acreTxt.toLowerCase()} site in ${city}, zoned ${zCode||'—'}${zDesc?' ('+zDesc+')':''}${flu?' with a '+flu.split(' — ').pop()+' future land use':''}.`,520))}</p>
+      ${val(om.locationDescription)?sec('Location Description')+`<p class="body">${esc(clip(om.locationDescription,380))}</p>`:''}
+      <div class="g2 tight">
+        <div>${sec('Municipality')}<p class="body">${esc(juris)}</p>${sec('Property Size')}<p class="body">${esc(acreTxt)}${sqftTxt?` <span class="mut">(${sqftTxt})</span>`:''}</p>
+          ${sec('Zoning')}<p class="body">${esc((zCode||'—')+(zDesc?' – '+zDesc:''))}</p>${flu?sec('Future Land Use')+`<p class="body">${esc(flu)}</p>`:''}</div>
+        <div>${sec('Parcel ID')}<p class="body">${esc(parcelId||'—')}</p>${sec('Price')}<p class="body"><b>${esc(priceTxt)}</b></p>
+          ${structures?sec('Improvements')+`<p class="body">${esc(structures)}</p>`:''}${owner?sec('Owner of Record')+`<p class="body">${esc(owner)}</p>`:''}</div>
       </div>
     </div>
     <div>
-      <div class="section-tag">Investment Highlights</div>
-      <ul class="highlight-list">
-        ${highlights.length
-          ? highlights.map(h=>`<li><div class="hl-dot"></div><span>${h}</span></li>`).join('')
-          : '<li><div class="hl-dot"></div><span>See property details for full analysis.</span></li>'}
-      </ul>
-      ${Array.isArray(p.priorSales)&&p.priorSales.length?`
-      <div style="margin-top:14px">
-        <div class="section-tag">Prior Sales</div>
-        <table style="width:100%;border-collapse:collapse;font-size:7.5pt;margin-top:4px">
-          <thead><tr style="background:${CHARCOAL};color:#fff">
-            <th style="padding:5px 7px;text-align:left">Date</th>
-            <th style="padding:5px 7px;text-align:left">Price</th>
-            <th style="padding:5px 7px;text-align:left">Seller → Buyer</th>
-          </tr></thead>
-          <tbody>${p.priorSales.map((s,i)=>`<tr style="background:${i%2?'#f9f8f6':'#fff'}">
-            <td style="padding:5px 7px">${s.date||'—'}</td>
-            <td style="padding:5px 7px;font-weight:700">${s.price||'—'}</td>
-            <td style="padding:5px 7px;font-size:7pt">${s.grantor||'—'} → ${s.grantee||'—'}</td>
-          </tr>`).join('')}</tbody>
-        </table>
-      </div>`:''}
-    </div>
-  </div>
-</div>
+      ${highlights.length?`${lab('Investment Highlights')}<ul class="dots">${highlights.map(h=>`<li>${esc(clip(h,150))}</li>`).join('')}</ul>`:''}
+      ${sales.length?`${lab('Sales History')}<table class="tbl"><thead><tr><th>Date</th><th class="r">Price</th></tr></thead><tbody>${sales.map(s=>`<tr><td>${esc(val(s.date)||'—')}</td><td class="r"><b>${esc(s.price)}</b></td></tr>`).join('')}</tbody></table>`:''}
+      <div class="contact">${sec('Broker Contact Info')}<b>${esc(advName)}</b><br>${esc(advTitle)}<br>${esc(advPhone)}<br><b>${esc(advEmail)}</b></div>
+    </div></div>`);
 
-<!-- ═══════════════════════════════════════════════════════
-     PAGE 3 — ZONING & ENTITLEMENTS + SPECIAL DESIGNATIONS
-═══════════════════════════════════════════════════════ -->
-<div class="page">
-  <div class="page-header">
-    <div class="page-header-title">Zoning & Entitlements</div>
-    <div style="display:flex;align-items:center;gap:10px">${LOGO?`<img src="${LOGO}" alt="" style="height:24px;width:auto;object-fit:contain">`:''}<div class="page-header-prop">${propTitle}<br>${meta.county} County, FL</div></div>
-  </div>
-
-  <div class="two-col">
+  const pMarket = sheet(`${esc(val(sub.name)||city)} Market Profile`, `<div class="g64">
     <div>
-      <div class="section-tag">Land Use Code</div>
-      <div class="data-block">
-        ${z.code?`<div class="data-row"><span class="data-lbl">Zoning Code</span><span class="data-val" style="font-weight:700">${z.code}</span></div>`:''}
-        ${z.source?`<div class="data-row"><span class="data-lbl">Governing Body</span><span class="data-val">${z.source}</span></div>`:''}
-        ${z.maxHeight?`<div class="data-row"><span class="data-lbl">Max Height</span><span class="data-val">${z.maxHeight}</span></div>`:''}
-        ${z.far?`<div class="data-row"><span class="data-lbl">Floor Area Ratio</span><span class="data-val">${z.far}</span></div>`:''}
-        ${z.lotCoverage?`<div class="data-row"><span class="data-lbl">Lot Coverage</span><span class="data-val">${z.lotCoverage}</span></div>`:''}
-        ${z.parking?`<div class="data-row"><span class="data-lbl">Parking</span><span class="data-val">${z.parking}</span></div>`:''}
-      </div>
-      ${z.setbacks?`<div class="data-block" style="margin-top:10px">
-        <div class="data-block-title">Setbacks</div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap">
-          ${z.setbacks.front?`<div style="text-align:center;background:#fff;border:1px solid #e5e7eb;border-radius:4px;padding:6px 10px"><div style="font-size:12pt;font-weight:800;color:${ORANGE}">${z.setbacks.front}</div><div style="font-size:6.5pt;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:#888">Front</div></div>`:''}
-          ${z.setbacks.rear?`<div style="text-align:center;background:#fff;border:1px solid #e5e7eb;border-radius:4px;padding:6px 10px"><div style="font-size:12pt;font-weight:800;color:${ORANGE}">${z.setbacks.rear}</div><div style="font-size:6.5pt;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:#888">Rear</div></div>`:''}
-          ${z.setbacks.side?`<div style="text-align:center;background:#fff;border:1px solid #e5e7eb;border-radius:4px;padding:6px 10px"><div style="font-size:12pt;font-weight:800;color:${ORANGE}">${z.setbacks.side}</div><div style="font-size:6.5pt;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:#888">Side</div></div>`:''}
-        </div>
-        ${z.setbacks.notes?`<div style="margin-top:6px;font-size:7.5pt;color:#666">${z.setbacks.notes}</div>`:''}
-      </div>`:''}
-      ${z.allowedUses?`<div style="margin-top:12px">
-        <div class="section-tag">Permitted Uses</div>
-        <div style="background:#f9f8f6;border-left:3px solid ${GREEN};padding:10px 13px;font-size:8.5pt;line-height:1.6;color:#333">${z.allowedUses}</div>
-      </div>`:''}
-      ${z.conditionalUses?`<div style="margin-top:10px">
-        <div class="section-tag">Conditional Uses</div>
-        <div style="background:#fffbeb;border-left:3px solid #f59e0b;padding:10px 13px;font-size:8.5pt;line-height:1.6;color:#333">${z.conditionalUses}</div>
-      </div>`:''}
+      ${val(sub.community)?`${lab('The Community')}<p class="body">${esc(clip(sub.community,820))}</p>`:''}
+      ${keyMetrics.length?`<div class="stats">${keyMetrics.map(m=>`<div><b>${esc(clip(m.value||'—',12))}</b><span>${esc(clip(m.label||'',48))}${m.source?`<i>${esc(clip(m.source,40))}</i>`:''}</span></div>`).join('')}</div>`:''}
+      ${cmpRows.length?`${lab(`3-Mile Trade Area vs. ${esc(meta.county)} County`)}
+      <table class="cmp"><thead><tr><th>Metric</th><th class="r">3-Mile Ring</th><th class="r">${esc(meta.county)} County</th><th class="r">Difference</th></tr></thead><tbody>
+        ${cmpRows.map(r=>`<tr><td>${r[0].replace('(≈)','<span class="mut">(≈)</span>')}</td><td class="r"><b>${r[1]}</b></td><td class="r">${r[2]}</td><td class="r red">${esc(r[3])}</td></tr>`).join('')}
+      </tbody></table>`:''}
+      ${places.length?`<div class="lab2"><span>Location</span><span>Straight-line miles</span></div><div class="places">${places.map(x=>`<div><b>${x.mi<10?x.mi.toFixed(1):Math.round(x.mi)}<small> mi</small></b><span>${esc(x.name)}</span></div>`).join('')}</div>`:''}
     </div>
     <div>
-      <div class="section-tag">Special Designations</div>
-      <!-- OZ -->
-      <div style="border:1px solid #e9d5ff;border-radius:6px;padding:12px 14px;margin-bottom:10px;background:#faf5ff">
-        <div style="font-weight:800;font-size:9pt;color:#6d28d9;margin-bottom:6px">⭐ Opportunity Zone
-          <span class="${oz.status==='Yes'?'status-yes':oz.status==='No'?'status-no':'status-unk'}" style="margin-left:6px">${oz.status||'Unknown'}</span>
-        </div>
-        ${oz.tractId?`<div style="font-size:8pt;color:#555;margin-bottom:3px">Tract: ${oz.tractId}</div>`:''}
-        ${oz.benefits?`<div style="font-size:8pt;color:#374151;line-height:1.5">${oz.benefits}</div>`:''}
-      </div>
-      <!-- CRA -->
-      <div style="border:1px solid #fde68a;border-radius:6px;padding:12px 14px;margin-bottom:10px;background:#fffbeb">
-        <div style="font-weight:800;font-size:9pt;color:#b45309;margin-bottom:6px">🏗 Community Redevelopment Area
-          <span class="${cra.status==='Yes'?'status-yes':cra.status==='No'?'status-no':'status-unk'}" style="margin-left:6px">${cra.status||'Unknown'}</span>
-        </div>
-        ${cra.craName?`<div style="font-size:8pt;color:#555;font-weight:600;margin-bottom:2px">${cra.craName}</div>`:''}
-        ${cra.agency?`<div style="font-size:7.5pt;color:#888;margin-bottom:3px">${cra.agency}</div>`:''}
-        ${cra.benefits?`<div style="font-size:8pt;color:#374151;line-height:1.5">${cra.benefits}</div>`:''}
-      </div>
-      <!-- Overlays -->
-      ${overlays.length?`
-      <div class="section-tag">Overlay Districts</div>
-      ${overlays.map(ov=>{
-        const ic={Restrictive:'#fee2e2',Permissive:'#d1fae5',Neutral:'#f3f4f6'}[ov.impact]||'#f3f4f6';
-        const tc={Restrictive:'#991b1b',Permissive:'#065f46',Neutral:'#374151'}[ov.impact]||'#374151';
-        return `<div style="border:1px solid #e5e7eb;border-radius:5px;padding:8px 10px;margin-bottom:6px;display:flex;gap:8px;align-items:flex-start">
-          <span style="background:${ic};color:${tc};border-radius:4px;padding:2px 6px;font-size:6.5pt;font-weight:700;white-space:nowrap;margin-top:1px">${ov.impact||''}</span>
-          <div><div style="font-weight:600;font-size:8.5pt">${ov.name||''}</div>${ov.description?`<div style="font-size:7.5pt;color:#666;line-height:1.5;margin-top:2px">${ov.description}</div>`:''}</div>
-        </div>`;
-      }).join('')}`:'<div style="font-size:8pt;color:#9ca3af">No overlay districts identified.</div>'}
-    </div>
-  </div>
-</div>
+      ${traffic.length?`<div class="card">${lab('Traffic Counts · FDOT AADT')}<div class="note">Nearest counted roads, ${esc(near.year)}</div>
+        <div class="tbars">${traffic.slice(0,6).map((t,i)=>`<div class="tbar"><span class="bv">${t.aadt>=1000?(t.aadt/1000).toFixed(1)+'K':t.aadt}</span><span class="bb" style="height:${Math.max(6,t.aadt/trafMax*100).toFixed(0)}%;background:${i===0?RED:i%2?INK:GRAY}"></span><span class="bl">${esc(clip(t.name.replace(/^(W|E|N|S) /,''),14))}</span></div>`).join('')}</div></div>`:''}
+      ${occ?`<div class="card">${lab('Housing Stock · Occupancy')}<div class="note">Share of all housing units, 3-mile ring</div>
+        <div class="stack"><span style="width:${occ.vac}%;background:${RED}"></span><span style="width:${occ.own}%;background:${INK}"></span><span style="width:${occ.ren}%;background:${GRAY}"></span></div>
+        <div class="leg"><div><i style="background:${RED}"></i>Vacant / seasonal<b>${occ.vac.toFixed(1)}%</b></div><div><i style="background:${INK}"></i>Owner-occupied<b>${occ.own.toFixed(1)}%</b></div><div><i style="background:${GRAY}"></i>Renter-occupied<b>${occ.ren.toFixed(1)}%</b></div></div></div>`:''}
+      ${drivers.length?`<div class="card">${lab('Market Drivers')}<ul class="dots sm">${drivers.map(x=>`<li>${esc(clip(x,190))}</li>`).join('')}</ul></div>`:''}
+    </div></div>
+    <div class="src"><b>Sources:</b> U.S. Census Bureau, American Community Survey 5-year estimates (tracts with centers inside 3 miles; ≈ = weighted average of tract medians); FDOT Annual Average Daily Traffic${keyMetrics.length||drivers.length?'; market figures are web-sourced at generation time — verify before publishing':''}.</div>`,
+    {sub: esc(val(sub.subtitle) || `${city} // ${meta.county} County, FL${zip?' '+zip:''}`).toUpperCase()});
 
-<!-- ═══════════════════════════════════════════════════════
-     PAGE 4 — ENVIRONMENTAL, WETLANDS & DUE DILIGENCE
-═══════════════════════════════════════════════════════ -->
-<div class="page">
-  <div class="page-header">
-    <div class="page-header-title">Environmental & Site Due Diligence</div>
-    <div style="display:flex;align-items:center;gap:10px">${LOGO?`<img src="${LOGO}" alt="" style="height:24px;width:auto;object-fit:contain">`:''}<div class="page-header-prop">${propTitle}<br>${meta.county} County, FL</div></div>
-  </div>
-
-  <div class="two-col">
-    <div>
-      <div class="section-tag">FDEP OCULUS — Environmental</div>
-      <div class="data-block" style="border-left-color:${env.riskLevel==='High'?'#dc2626':env.riskLevel==='Low'?GREEN:'#f59e0b'}">
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-          <span style="font-weight:800;font-size:10pt">Environmental Risk:</span>
-          <span style="background:${env.riskLevel==='Low'?'#d1fae5':env.riskLevel==='High'?'#fee2e2':'#fef3c7'};color:${env.riskLevel==='Low'?'#065f46':env.riskLevel==='High'?'#991b1b':'#92400e'};border-radius:4px;padding:2px 10px;font-weight:700;font-size:9pt">${env.riskLevel||'Unknown'}</span>
-        </div>
-        ${env.knownSites?`<div style="font-size:8.5pt;line-height:1.6;color:#333">${env.knownSites}</div>`:''}
-        ${env.notes?`<div style="font-size:8pt;color:#666;margin-top:6px;line-height:1.5">${env.notes}</div>`:''}
-      </div>
-
-      <div class="section-tag" style="margin-top:14px">Water Management Permits</div>
-      <div class="data-block">
-        ${(d.waterPermits||{}).waterManagementDistrict?`<div class="data-row"><span class="data-lbl">District</span><span class="data-val">${d.waterPermits.waterManagementDistrict}</span></div>`:''}
-        ${(d.waterPermits||{}).openPermits?`<div style="font-size:8.5pt;line-height:1.6;color:#333;margin-top:4px">${d.waterPermits.openPermits}</div>`:''}
-        ${(d.waterPermits||{}).notes?`<div style="font-size:8pt;color:#666;margin-top:5px">${d.waterPermits.notes}</div>`:''}
-      </div>
-
-      <div class="section-tag" style="margin-top:14px">FEMA Flood Zone</div>
-      <div class="data-block" style="border-left-color:${BLUE}">
-        ${fl.generalRisk?`<div style="font-size:8.5pt;line-height:1.6;color:#333;margin-bottom:5px">${fl.generalRisk}</div>`:''}
-        ${fl.notes?`<div style="font-size:8pt;color:#666;line-height:1.5">${fl.notes}</div>`:''}
-      </div>
-    </div>
-    <div>
-      <div class="section-tag">Wetlands (NWI)</div>
-      <div class="data-block" style="border-left-color:${GREEN}">
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-          <span style="font-weight:800;font-size:10pt">Wetland Presence:</span>
-          <span style="background:${(d.wetlands||{}).presence==='Unlikely'?'#d1fae5':(d.wetlands||{}).presence==='Likely present'?'#dbeafe':'#fef9c3'};color:${(d.wetlands||{}).presence==='Unlikely'?'#065f46':(d.wetlands||{}).presence==='Likely present'?'#1e3a8a':'#713f12'};border-radius:4px;padding:2px 10px;font-weight:700;font-size:9pt">${(d.wetlands||{}).presence||'Unknown'}</span>
-        </div>
-        ${wet.wetlandTypes?`<div class="data-row"><span class="data-lbl">Wetland Types</span><span class="data-val">${wet.wetlandTypes}</span></div>`:''}
-        ${wet.jurisdictional?`<div class="data-row"><span class="data-lbl">Jurisdiction</span><span class="data-val">${wet.jurisdictional}</span></div>`:''}
-        ${wet.notes?`<div style="font-size:8pt;color:#666;margin-top:5px;line-height:1.5">${wet.notes}</div>`:''}
-      </div>
-
-      <div class="section-tag" style="margin-top:14px">Topography</div>
-      <div class="data-block" style="border-left-color:${SOIL}">
-        ${(d.topo||{}).generalRelief?`<div class="data-row"><span class="data-lbl">General Relief</span><span class="data-val">${d.topo.generalRelief}</span></div>`:''}
-        ${(d.topo||{}).elevationRange?`<div class="data-row"><span class="data-lbl">Elevation Range</span><span class="data-val">${d.topo.elevationRange}</span></div>`:''}
-        ${(d.topo||{}).drainageNotes?`<div style="font-size:8pt;color:#666;margin-top:5px;line-height:1.5">${d.topo.drainageNotes}</div>`:''}
-      </div>
-
-      <div style="background:${CHARCOAL};color:#fff;border-radius:6px;padding:12px 14px;margin-top:14px">
-        <div style="font-size:7pt;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:${ORANGE};margin-bottom:6px">Due Diligence Checklist</div>
-        ${['Confirm zoning at county planning dept.','Pull FIRMette for flood panel confirmation','Run USFWS IPaC for species review','Order Phase I Environmental Site Assessment','Commission boundary & topographic survey','Order title commitment and title search','Confirm utility availability and capacity','Review plat and easement conditions'].map(item=>`
-          <div style="display:flex;align-items:center;gap:7px;padding:4px 0;border-bottom:1px solid rgba(255,255,255,.1);font-size:8pt;color:${SAND}">
-            <span style="width:14px;height:14px;border:1.5px solid ${ORANGE};border-radius:3px;flex:0 0 14px;display:inline-block"></span>
-            ${item}
-          </div>`).join('')}
-      </div>
-    </div>
-  </div>
-</div>
-
-<!-- ═══════════════════════════════════════════════════════
-     PAGE 5 — DEMOGRAPHICS (1/3/5 MILE)
-═══════════════════════════════════════════════════════ -->
-<div class="page">
-  <div class="page-header">
-    <div class="page-header-title">Demographics</div>
-    <div style="display:flex;align-items:center;gap:10px">${LOGO?`<img src="${LOGO}" alt="" style="height:24px;width:auto;object-fit:contain">`:''}<div class="page-header-prop">${propTitle}<br>${meta.county} County, FL</div></div>
-  </div>
-
-  <div class="section-tag">1 · 3 · 5 Mile Ring Summary</div>
-  <table class="dem-table" style="margin-bottom:18px">
-    <thead><tr>
-      <th style="text-align:left;width:140px">Metric</th>
-      <th>1-Mile Ring</th>
-      <th>3-Mile Ring</th>
-      <th>5-Mile Ring</th>
-    </tr></thead>
-    <tbody>
-      ${demRow('Population','oneMile')}
-      ${demRow('Households','threeMile')}
-      ${demRow('Median HH Income','oneMile')}
-      ${demRow('Median Age','oneMile')}
-      ${demRow('5-Yr Pop. Growth','oneMile')}
-    </tbody>
-  </table>
-
-  <!-- Corrected table with proper ring mapping -->
-  <table class="dem-table" style="margin-bottom:18px">
-    <thead><tr>
-      <th style="text-align:left;width:140px"></th>
-      <th>1-Mile</th>
-      <th>3-Mile</th>
-      <th>5-Mile</th>
-    </tr></thead>
-    <tbody>
-      <tr>
-        <td style="padding:7px 10px;font-weight:600;color:#555;border-bottom:1px solid #f0ede8;font-size:8.5pt">Population</td>
-        <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0ede8;font-size:8.5pt">${(dem.oneMile||{}).population||'—'}</td>
-        <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0ede8;font-size:8.5pt">${(dem.threeMile||{}).population||'—'}</td>
-        <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0ede8;font-size:8.5pt">${(dem.fiveMile||{}).population||'—'}</td>
-      </tr>
-      <tr style="background:#f9f8f6">
-        <td style="padding:7px 10px;font-weight:600;color:#555;border-bottom:1px solid #f0ede8;font-size:8.5pt">Households</td>
-        <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0ede8;font-size:8.5pt">${(dem.oneMile||{}).households||'—'}</td>
-        <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0ede8;font-size:8.5pt">${(dem.threeMile||{}).households||'—'}</td>
-        <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0ede8;font-size:8.5pt">${(dem.fiveMile||{}).households||'—'}</td>
-      </tr>
-      <tr>
-        <td style="padding:7px 10px;font-weight:600;color:#555;border-bottom:1px solid #f0ede8;font-size:8.5pt">Median HH Income</td>
-        <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0ede8;font-size:8.5pt">${(dem.oneMile||{}).medianHHIncome||'—'}</td>
-        <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0ede8;font-size:8.5pt">${(dem.threeMile||{}).medianHHIncome||'—'}</td>
-        <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0ede8;font-size:8.5pt">${(dem.fiveMile||{}).medianHHIncome||'—'}</td>
-      </tr>
-      <tr style="background:#f9f8f6">
-        <td style="padding:7px 10px;font-weight:600;color:#555;border-bottom:1px solid #f0ede8;font-size:8.5pt">Median Age</td>
-        <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0ede8;font-size:8.5pt">${(dem.oneMile||{}).medianAge||'—'}</td>
-        <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0ede8;font-size:8.5pt">${(dem.threeMile||{}).medianAge||'—'}</td>
-        <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0ede8;font-size:8.5pt">${(dem.fiveMile||{}).medianAge||'—'}</td>
-      </tr>
-      <tr>
-        <td style="padding:7px 10px;font-weight:600;color:#555;border-bottom:1px solid #f0ede8;font-size:8.5pt">Owner Occupied</td>
-        <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0ede8;font-size:8.5pt">${(dem.oneMile||{}).ownerOccupied||'—'}</td>
-        <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0ede8;font-size:8.5pt">${(dem.threeMile||{}).ownerOccupied||'—'}</td>
-        <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0ede8;font-size:8.5pt">${(dem.fiveMile||{}).ownerOccupied||'—'}</td>
-      </tr>
-      <tr style="background:#f9f8f6">
-        <td style="padding:7px 10px;font-weight:600;color:#555;border-bottom:1px solid #f0ede8;font-size:8.5pt">5-Yr Pop. Growth</td>
-        <td style="padding:7px 10px;text-align:center;font-weight:700;color:${GREEN};border-bottom:1px solid #f0ede8;font-size:8.5pt">${(dem.oneMile||{}).popGrowth5yr||'—'}</td>
-        <td style="padding:7px 10px;text-align:center;font-weight:700;color:${GREEN};border-bottom:1px solid #f0ede8;font-size:8.5pt">${(dem.threeMile||{}).popGrowth5yr||'—'}</td>
-        <td style="padding:7px 10px;text-align:center;font-weight:700;color:${GREEN};border-bottom:1px solid #f0ede8;font-size:8.5pt">${(dem.fiveMile||{}).popGrowth5yr||'—'}</td>
-      </tr>
-      <tr>
-        <td style="padding:7px 10px;font-weight:600;color:#555;font-size:8.5pt">Employment Base</td>
-        <td style="padding:7px 10px;text-align:center;font-size:7.5pt;color:#555" colspan="3">${(dem.fiveMile||{}).employmentBase||'—'}</td>
-      </tr>
-    </tbody>
-  </table>
-
-  ${dem.source?`<div style="font-size:6.5pt;color:#9ca3af;margin-bottom:16px;font-style:italic">Source: ${dem.source}</div>`:''}
-
-  ${keyMetrics.length?`
-  <div class="section-tag">Key Market Metrics</div>
-  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:6px">
-    ${keyMetrics.slice(0,6).map(m=>`
-    <div class="metric-card">
-      <div class="metric-val">${m.value||'—'}</div>
-      <div class="metric-lbl">${m.label||''}</div>
-      ${m.note?`<div class="metric-note">${m.note}</div>`:''}
-    </div>`).join('')}
-  </div>`:''}
-</div>
-
-<!-- ═══════════════════════════════════════════════════════
-     PAGE 6 — SUBMARKET NARRATIVE
-═══════════════════════════════════════════════════════ -->
-<div class="page">
-  <div class="page-header">
-    <div class="page-header-title">Submarket Overview</div>
-    <div style="display:flex;align-items:center;gap:10px">${LOGO?`<img src="${LOGO}" alt="" style="height:24px;width:auto;object-fit:contain">`:''}<div class="page-header-prop">${propTitle}<br>${meta.county} County, FL</div></div>
-  </div>
-
-  ${sub.name?`<div style="font-size:13pt;font-weight:800;color:${CHARCOAL};margin-bottom:14px;text-transform:uppercase;letter-spacing:.04em">${sub.name}</div>`:''}
-
-  <div class="two-col">
-    <div class="narrative">
-      ${sub.narrative
-        ? sub.narrative.split(/\n+/).filter(Boolean).map(para=>`<p>${para}</p>`).join('')
-        : '<p>Submarket narrative not available.</p>'}
-    </div>
-    <div>
-      ${sub.opportunities?`
-      <div style="margin-bottom:14px">
-        <div class="section-tag" style="background:${GREEN}">Opportunities</div>
-        <div style="background:#f0fdf4;border-left:3px solid ${GREEN};padding:10px 13px;font-size:8.5pt;line-height:1.6;color:#333">${sub.opportunities}</div>
-      </div>`:''}
-      ${sub.risks?`
-      <div style="margin-bottom:14px">
-        <div class="section-tag" style="background:#dc2626">Risks & Considerations</div>
-        <div style="background:#fef2f2;border-left:3px solid #dc2626;padding:10px 13px;font-size:8.5pt;line-height:1.6;color:#333">${sub.risks}</div>
-      </div>`:''}
-      ${sub.comparableSales?`
+  const pZoning = sheet(esc(zTitle), `
+    ${zStd.length?`<div class="stats z">${zStd.map(s=>`<div><b>${esc(s.v)}</b><span>${esc(s.l)}</span></div>`).join('')}</div>`:''}
+    <div class="g3">
       <div>
-        <div class="section-tag">Comparable Sales Context</div>
-        <div style="background:#f9f8f6;border-left:3px solid ${ORANGE};padding:10px 13px;font-size:8.5pt;line-height:1.6;color:#333">${sub.comparableSales}</div>
-      </div>`:''}
+        ${val(oz.intent)?lab('District Intent')+`<p class="body">${esc(clip(oz.intent,420))}</p>`:''}
+        ${lab('Jurisdiction')}<div class="kvs">${kv('Governing body',juris)}${kv('Zoning district',zCode+(zDesc?' — '+zDesc:''))}${kv('Future land use',flu)}${kv('Opportunity Zone',ozTxt)}${kv('HUD QCT',conf.qct?'Yes':conf.lat!=null?'No':'Unconfirmed')}${kv('CRA',val(cra.status)?(cra.status+(val(cra.craName)?' — '+cra.craName:'')):'')}</div>
+      </div>
+      <div>
+        ${permitted.length?`<div class="pill">Permitted by Right</div>${listCols(permitted)}`:''}
+        ${val(oz.accessory)?`<div class="pill">Accessory</div><p class="body sm">${esc(clip(oz.accessory,240))}</p>`:''}
+        ${special.length?`<div class="pill">Special Exception / Conditional</div>${listCols(special)}`:''}
+      </div>
+      <div>
+        ${yieldRows.length?`<div class="yield"><div class="yh"><span>Yield at ${esc(street)}</span><span>${esc(acShort?acShort+'± AC':'')}</span></div>${yieldRows.map(y=>`<div class="yr"><span>${esc(clip(y.label,60))}</span><b>${esc(clip(y.value,16))}</b></div>`).join('')}</div>
+        <div class="note" style="margin-top:.4em">Yields are illustrative maximums, subject to site plan review and permitting.</div>`:''}
+        ${boilerNote(z)}
+      </div>
     </div>
+    <div class="src"><b>Sources:</b> ${esc(clip(val(oz.sources)||('District and future land use read from the '+(cz?cz.city:(kz.county?kz.county+' County':'county'))+' GIS layer at the parcel'),300))}. Confirm current code with the ${esc(juris)} planning department before relying on these figures.</div>`,
+    {sub:zSub});
+  function boilerNote(z){ const t=[z.maxHeight,z.far,z.lotCoverage].map(x=>val(x)).find(x=>/site plan|determined by|ordinance/i.test(x)); return t?`<div class="card" style="margin-top:.6em"><div class="note" style="color:#333">${esc(clip(t,260))}</div></div>`:''; }
+
+  const pTraffic = sheet('Location &amp; Traffic', `<div class="g64">
+    <div>${mRegional||noMap}<div class="cap">≈3.4 miles across · yellow = FDOT-counted roads · labels show Annual Average Daily Traffic</div></div>
+    <div>${lab('FDOT Traffic Counts')}
+      ${traffic.length?`<table class="tbl"><thead><tr><th>Road / segment</th><th class="r">AADT</th><th class="r">Dist.</th></tr></thead><tbody>
+        ${traffic.slice(0,8).map(t=>`<tr><td><b>${esc(t.name)}</b><div class="mut xs">${esc([val(t.from),val(t.to)].filter(Boolean).join(' → '))}</div></td><td class="r"><b>${t.aadt.toLocaleString()}</b><div class="mut xs">${esc(t.year)}</div></td><td class="r">${t.distM<160?(Math.round(t.distM*3.28084/10)*10)+' ft':(t.distM/1609.34).toFixed(1)+' mi'}</td></tr>`).join('')}
+      </tbody></table><div class="note" style="margin-top:.5em">FDOT Transportation Data &amp; Analytics${near&&near.district?', District '+esc(near.district):''}. Distance is to the nearest point of each counted segment.</div>`
+      :`<p class="body">No FDOT-counted road within 1.5 miles.</p>`}
+    </div></div>`);
+
+  const pEnv = sheet('Environmental &amp; Site Conditions', `<div class="g3">
+    <div>${lab('FEMA Flood Zone')}<div class="kvs">${kv('Zone(s) on parcel',floodZones.join(', ')||'Unconfirmed')}${sfha==null?'':kv('Special Flood Hazard Area',sfha?'Yes — flood insurance and elevation rules apply':'No — outside the 1% annual-chance floodplain')}${kv('FIRM panel',firm)}</div>
+      ${lab('Wetlands · USFWS NWI')}<div class="kvs">${wet&&wet.onSite?kv('On the parcel',wet.onSite.length?wet.onSite.join(', '):'None mapped'):kv('On the parcel','Unconfirmed')}${wet?kv('Within '+(wet.ft||500).toLocaleString()+' ft',wet.nearby.length?wet.nearby.join(', '):'None mapped'):''}</div>
+      <div class="note">NWI is a planning-level inventory; a jurisdictional delineation governs.</div></div>
+    <div>${lab('Soils &amp; Topography')}<div class="kvs">${soils.length?soils.map(s=>kv((s.comppct_r?s.comppct_r+'% ':'')+'soil',s.muname)).join(''):kv('Soils','Unconfirmed (NRCS)')}${kv('Elevation',elev)}</div>
+      ${lab('Environmental Records')}<div class="kvs">${kv('Screening',val(env.riskLevel)?env.riskLevel+' risk':'')}${kv('Water management district',val(wp.waterManagementDistrict))}</div>
+      ${val(env.knownSites)?`<p class="body sm">${esc(clip(env.knownSites,260))}</p>`:''}</div>
+    <div><div class="dd">${lab('Due Diligence Checklist')}${['Boundary &amp; topographic survey','Title commitment &amp; survey review','Phase I Environmental Site Assessment','Wetland delineation (if any mapped)','Geotechnical borings','Zoning verification letter','Utility availability letters','FEMA elevation certificate / FIRMette'].map(i=>`<div class="chk"><i></i>${i}</div>`).join('')}</div>
+      <div class="note" style="margin-top:.7em">Flood zones and wetlands are intersected with the parcel boundary (FEMA NFHL, USFWS NWI) when this OM was generated.</div></div>
+    </div>`);
+
+  const rr = (lbl,f)=>`<tr><td>${lbl}</td>${[R1,R3,R5].map(r=>`<td class="r">${!r?'—':r.tracts===0?'<span class="mut">no tract</span>':f(r)}</td>`).join('')}</tr>`;
+  const pDemo = sheet('Demographics Map &amp; Report', `<div class="g2" style="grid-template-columns:1fr 1.05fr">
+    <div>${(R1||R3||R5)&&(R3||{}).population?`
+      <table class="dem"><thead><tr><th>Population</th><th class="r">1 Mile</th><th class="r">3 Miles</th><th class="r">5 Miles</th></tr></thead><tbody>
+        ${rr('Total Population',r=>num(r.population))}${rr('Median Age (≈)',r=>r.medianAge?r.medianAge.toFixed(1):'—')}</tbody></table>
+      <table class="dem"><thead><tr><th>Households &amp; Income</th><th class="r">1 Mile</th><th class="r">3 Miles</th><th class="r">5 Miles</th></tr></thead><tbody>
+        ${rr('Total Households',r=>num(r.households))}${rr('Persons per HH',r=>r.households?(r.population/r.households).toFixed(1):'—')}${rr('Median HH Income (≈)',r=>money(r.medianHHIncome))}</tbody></table>
+      <table class="dem"><thead><tr><th>Housing</th><th class="r">1 Mile</th><th class="r">3 Miles</th><th class="r">5 Miles</th></tr></thead><tbody>
+        ${rr('Owner-Occupied',r=>r.ownerPct==null?'—':r.ownerPct.toFixed(0)+'%')}${rr('Median Home Value (≈)',r=>money(r.medianHomeValue))}${rr('Median Contract Rent (≈)',r=>money(r.medianRent))}</tbody></table>
+      <div class="note">U.S. Census Bureau, American Community Survey — most recent 5-year release. Rings sum every census tract whose center lies inside the radius; ≈ marks household- or population-weighted averages of tract medians.</div>`
+      :`<p class="body">Census ring data could not be retrieved — regenerate, or pull a ring report from Esri Business Analyst / CoStar.</p>`}</div>
+    <div>${mRings||noMap}</div></div>`);
+
+  const pLoc = sheet('Location Maps', `<div class="g2">${mStreet||noMap}${mStreetReg||noMap}</div><div class="cap">Esri World Street Map</div>`, {nofit:true});
+
+  const pDisc = sheet('Confidentiality &amp; Disclaimer', `<div class="disc">
+    <p>All materials and information received or derived from Eshenbaugh Land Company, LLC its directors, officers, agents, advisors, affiliates and/or any third party sources are provided without representation or warranty as to completeness, veracity, or accuracy, condition of the property, compliance or lack of compliance with applicable governmental requirements, developability or suitability, financial performance of the property, projected financial performance of the property for any party’s intended use or any and all other matters.</p>
+    <p>Neither Eshenbaugh Land Company, LLC its directors, officers, agents, advisors, or affiliates makes any representation or warranty, express or implied, as to accuracy or completeness of the any materials or information provided, derived, or received. Materials and information from any source, whether written or verbal, that may be furnished for review are not a substitute for a party’s active conduct of its own due diligence to determine these and other matters of significance to such party. Eshenbaugh Land Company, LLC will not investigate or verify any such matters or conduct due diligence for a party unless otherwise agreed in writing. EACH PARTY SHALL CONDUCT ITS OWN INDEPENDENT INVESTIGATION AND DUE DILIGENCE.</p>
+    <p>Any party contemplating or under contract or in escrow for a transaction is urged to verify all information and to conduct their own inspections and investigations including through appropriate third party independent professionals selected by such party. All financial data should be verified by the party including by obtaining and reading applicable documents and reports and consulting appropriate independent professionals. Eshenbaugh Land Company, LLC makes no warranties and/or representations regarding the veracity, completeness, or relevance of any financial data or assumptions. Eshenbaugh Land Company, LLC does not serve as a financial advisor to any party regarding any proposed transaction. All data and assumptions regarding financial performance, including that used for financial modeling purposes, may differ from actual data or performance. Any estimates of market rents and/or projected rents that may be provided to a party do not necessarily mean that rents can be established at or increased to that level. Parties must evaluate any applicable contractual and governmental limitations as well as market conditions, vacancy factors and other issues in order to determine rents from or for the property.</p>
+    <p>Legal questions should be discussed by the party with an attorney. Tax questions should be discussed by the party with a certified public accountant or tax attorney. Title questions should be discussed by the party with a title officer or attorney. Questions regarding the condition of the property and whether the property complies with applicable governmental requirements should be discussed by the party with appropriate engineers, architects, contractors, other consultants and governmental agencies. All properties and services are marketed by Eshenbaugh Land Company, LLC in compliance with all applicable fair housing and equal opportunity laws.</p>
+    <p>Public-records data in this memorandum (parcel boundary, flood zone, wetlands, soils, traffic counts and Census demographics) was retrieved from the Florida Department of Revenue / Florida Geographic Information Office, FEMA, USFWS, NRCS, FDOT and the U.S. Census Bureau on ${esc(dateStr)} and is approximate.</p>
+    <p>Eshenbaugh Land Company is a licensed real estate brokerage firm in Florida and William A. Eshenbaugh is the broker of record.</p></div>`);
+
+  pg++;
+  const pAdv = `<section class="sheet adv"><div class="band"></div>
+    <div class="adv-img">${mAdv||''}</div>
+    <div class="adv-mid">
+      <h1 class="ttl" style="font-size:22pt;margin:0 0 .12in">Your Advisor</h1>
+      <div class="adv-card">${advPhoto?`<img src="${esc(advPhoto)}" alt="">`:''}<div><b>${esc(advName)}</b><br>${esc(advTitle)}<br>${esc(advPhone)}${advCell&&advCell!==advPhone?'<br>Cell '+esc(advCell):''}<br>${esc(advEmail)}</div></div>
+      <div class="why">${why.map(([t,x])=>`<div><b>${t}</b>${x}</div>`).join('')}</div>
+    </div>
+    <div class="adv-q"><span>Questions&nbsp; | &nbsp;Give us a call or drop us an email</span><span class="pn" style="margin-left:auto">${pg}</span></div></section>`;
+
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>Offering Memorandum — ${esc(street)}</title>
+<link href="https://fonts.googleapis.com/css2?family=Crimson+Text:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+@page{size:11in 8.5in;margin:0}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+html,body{background:#5b5e63}
+body{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:${INK}}
+.bar{position:sticky;top:0;z-index:9;background:${DARK};color:#e7e2dc;display:flex;gap:14px;align-items:center;justify-content:center;padding:10px;font-size:12px}
+.bar button{background:${RED};color:#fff;border:0;border-radius:6px;padding:9px 18px;font:700 13px Helvetica,Arial;cursor:pointer;min-height:40px}
+.bar button:focus-visible{outline:3px solid ${TEAL};outline-offset:2px}
+.sheet{width:11in;height:8.5in;margin:.3in auto;background:#fff;position:relative;overflow:hidden;display:flex;flex-direction:column;padding:0 .45in .26in;box-shadow:0 6px 24px rgba(0,0,0,.35);break-after:page;page-break-after:always}
+.sheet:last-of-type{break-after:auto;page-break-after:auto}
+@media print{html,body{background:#fff}.bar{display:none}.sheet{margin:0;box-shadow:none}}
+.band{flex:0 0 auto;height:.5in;margin:0 -.45in;background:url(${BAND}) center/cover;border-bottom:5px solid ${TEAL}}
+.ttl{font:600 30pt/1.05 'Crimson Text',Georgia,serif;color:${RED};margin:.12in 0 0;flex:0 0 auto}
+.sub{font:400 9pt 'Crimson Text',Georgia,serif;letter-spacing:.32em;color:#555;margin-top:.04in;flex:0 0 auto}
+.bd{flex:1 1 auto;min-height:0;overflow:hidden;font-size:calc(9.6pt * var(--k,1));margin-top:.14in;display:flex;flex-direction:column}
+.bd>*{flex:0 0 auto}
+.ft{flex:0 0 auto;display:flex;align-items:center;gap:10px;padding-top:.05in}
+.pn{background:${RED};color:#fff;font:700 9pt Helvetica,Arial;border-radius:8px;padding:2px 8px;min-width:24px;text-align:center}
+.run{font:400 6.4pt Helvetica,Arial;letter-spacing:.3em;color:#333;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:6.6in}
+.ft .rule{flex:1;border-top:1px solid ${INK};margin-right:.1in}
+.flogo{height:.62in;width:auto}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:.3in;flex:0 0 auto}
+.g2.tight{gap:.2in;flex:0 0 auto}
+.g3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:.28in;flex:0 0 auto}
+.g64{display:grid;grid-template-columns:1.55fr 1fr;gap:.32in;flex:0 0 auto}
+.sec{font:700 .92em Helvetica,Arial;color:${RED};text-transform:uppercase;margin:.55em 0 .18em}
+.sec:first-child{margin-top:0}
+.body{line-height:1.5;margin-bottom:.35em}
+.body.sm,.sm{font-size:.9em}
+.mut{color:#777}.xs{font-size:.78em}.red{color:${RED}}
+.lab{font:600 .86em 'Crimson Text',Georgia,serif;letter-spacing:.3em;text-transform:uppercase;color:${RED};margin:.2em 0 .5em}
+.lab2{display:flex;justify-content:space-between;font:600 .86em 'Crimson Text',Georgia,serif;letter-spacing:.3em;text-transform:uppercase;color:${RED};margin:.9em 0 .35em}
+.lab2 span+span{color:#666}
+.dots{list-style:none}.dots li{position:relative;padding:.3em 0 .3em 1.2em;line-height:1.45;font-family:'Crimson Text',Georgia,serif;font-size:1.12em}
+.dots li:before{content:'';position:absolute;left:0;top:.75em;width:.55em;height:.55em;border-radius:50%;background:${RED}}
+.dots.sm li{font-size:1.02em}
+.tbl,.cmp,.dem{width:100%;border-collapse:collapse}
+.tbl th,.cmp th{font:600 .8em 'Crimson Text',Georgia,serif;letter-spacing:.22em;text-transform:uppercase;color:${RED};text-align:left;padding:.4em .4em;border-bottom:1.5px solid ${INK}}
+.tbl td,.cmp td{padding:.38em .4em;border-bottom:1px solid #ddd;font-family:'Crimson Text',Georgia,serif;font-size:1.08em}
+.cmp{border-top:2px solid ${RED};margin-bottom:.2em}
+.r{text-align:right}
+.dem{margin-bottom:.9em}
+.dem th{font:700 .92em Helvetica,Arial;color:${RED};text-transform:uppercase;text-align:left;padding:.25em .3em}
+.dem th.r{text-align:right}
+.dem td{padding:.22em .3em;color:#333}.dem td:first-child{color:${RED}}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);border-top:2px solid ${RED};border-bottom:1px solid #ccc;margin:.7em 0 .9em}
+.stats.z{grid-template-columns:repeat(${Math.max(1,Math.min(6,zStd.length))},1fr);margin-top:0}
+.stats>div{padding:.5em .6em;border-right:1px solid #ccc}.stats>div:last-child{border-right:0}
+.stats b{display:block;font:600 2.05em/1 'Crimson Text',Georgia,serif;color:${RED}}
+.stats span{display:block;font:400 .9em/1.3 'Crimson Text',Georgia,serif;color:#333;margin-top:.25em}
+.stats i{display:block;font-style:normal;color:#888;font-size:.85em}
+.places{display:grid;grid-template-columns:repeat(4,1fr);border-top:2px solid ${RED};border-bottom:1px solid #ccc}
+.places>div{padding:.4em .6em;border-right:1px solid #ccc}.places>div:last-child{border-right:0}
+.places b{font:600 2em/1 'Crimson Text',Georgia,serif}.places small{font-size:.45em;font-weight:400}
+.places span{display:block;font:400 .92em 'Crimson Text',Georgia,serif;margin-top:.2em}
+.card{border-top:2px solid ${RED};border-bottom:1px solid #ccc;padding:.55em .2em .7em;margin-bottom:.7em}
+.note{font:400 .82em/1.45 'Crimson Text',Georgia,serif;color:#666}
+.tbars{display:flex;align-items:flex-end;gap:.5em;height:1.25in;margin-top:.45em}
+.tbar{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%}
+.bb{width:100%;display:block}
+.bv{font:700 .82em 'Crimson Text',Georgia,serif;margin-bottom:.2em}
+.bl{font:400 .7em 'Crimson Text',Georgia,serif;color:#555;margin-top:.25em;text-align:center;line-height:1.1;height:2.2em}
+.stack{display:flex;height:.18in;margin:.45em 0 .4em}.stack span{display:block}
+.leg div{display:flex;align-items:center;gap:.5em;font:400 1em 'Crimson Text',Georgia,serif;padding:.12em 0}
+.leg i{width:.8em;height:.8em;display:inline-block}.leg b{margin-left:auto}
+.src{flex:0 0 auto;margin-top:auto!important;font:400 .72em/1.4 'Crimson Text',Georgia,serif;color:#444;border-top:1px solid #ccc;padding-top:.3em;margin-top:auto}
+.pill{display:inline-block;background:${RED};color:#fff;font:700 .74em Helvetica,Arial;letter-spacing:.14em;text-transform:uppercase;padding:.25em .7em;margin:.2em 0 .45em}
+.uses{list-style:none;columns:2;column-gap:1em;margin-bottom:.5em}
+.uses li{font:400 1em/1.35 'Crimson Text',Georgia,serif;padding:.1em 0 .1em .9em;position:relative;break-inside:avoid}
+.uses li:before{content:'';position:absolute;left:0;top:.55em;width:.42em;height:.42em;background:${RED}}
+.kvs{border-top:2px solid ${RED};margin-bottom:.8em}
+.kv{display:flex;gap:.6em;border-bottom:1px solid #ddd;padding:.32em 0;font-family:'Crimson Text',Georgia,serif;font-size:1.06em}
+.kv .k{flex:0 0 42%;color:#555}.kv .v{font-weight:600}
+.yield{background:${DARK};color:#fff;padding:.6em .8em}
+.yh{display:flex;justify-content:space-between;font:600 .85em 'Crimson Text',Georgia,serif;letter-spacing:.25em;text-transform:uppercase;color:#ff6b6b;border-bottom:1px solid rgba(255,255,255,.25);padding-bottom:.35em;margin-bottom:.25em}
+.yr{display:flex;justify-content:space-between;gap:1em;font:400 1.02em 'Crimson Text',Georgia,serif;padding:.22em 0;border-bottom:1px solid rgba(255,255,255,.12)}
+.dd{background:${DARK};padding:.8em 1em}.dd .lab{color:#ff6b6b}
+.chk{display:flex;gap:.6em;align-items:center;padding:.3em 0;border-bottom:1px solid rgba(255,255,255,.14);color:#e7e2dc;font:400 1.02em 'Crimson Text',Georgia,serif}
+.chk i{width:.9em;height:.9em;border:1.5px solid ${RED};flex:0 0 auto}
+.contact{margin-top:.8em;line-height:1.45}
+.map{position:relative;width:100%;overflow:hidden;background:#d9d6cf}
+.map img{position:absolute;inset:0;width:100%;height:100%;object-fit:fill;display:block}
+.map svg{position:absolute;inset:0;width:100%;height:100%}
+.nomap{display:flex;align-items:center;justify-content:center;color:#555;min-height:3in;font-size:10pt}
+.cap{font:400 .76em 'Crimson Text',Georgia,serif;color:#777;margin-top:.3em}
+.disc{columns:2;column-gap:.4in;font:400 1em/1.5 'Helvetica Neue',Helvetica,Arial;color:#333;text-align:justify}
+.disc p{margin-bottom:.8em}
+/* cover */
+.cover{padding:0;background:#fff url(${TOPO}) center bottom/cover no-repeat}
+.cv-top{height:1.62in;background:url(${BANDC}) center/cover;border-bottom:6px solid ${TEAL};display:flex;align-items:center;padding:0 .55in}
+.cv-top h1{font:600 30pt 'Crimson Text',Georgia,serif;color:#fff}
+.cv-img{height:4.38in;position:relative;overflow:hidden}
+.cv-bot{flex:1;display:flex;align-items:center;justify-content:space-between;padding:0 .55in}
+.cv-h{font:600 18pt/1.15 'Crimson Text',Georgia,serif;color:${RED};text-transform:uppercase;max-width:7.2in}
+.cv-a{font:400 15pt 'Crimson Text',Georgia,serif;text-transform:uppercase;margin-top:.14in}
+.cv-r{text-align:center}.cv-r img{height:1in;width:auto}.cv-r a{display:block;font:400 8.5pt 'Crimson Text',Georgia,serif;color:#1a4fa0;margin-top:.04in}
+/* advisor */
+.adv{padding:0}
+.adv .band{margin:0}
+.adv-img{height:3.55in;position:relative;overflow:hidden;border-bottom:5px solid ${TEAL}}
+.adv-mid{flex:1;padding:.16in .45in 0;display:grid;grid-template-columns:auto 1fr;grid-template-rows:auto 1fr;column-gap:.4in}
+.adv-mid .ttl{grid-column:1/3}
+.adv-card{display:flex;gap:.16in;align-items:flex-start;font:400 11pt/1.4 'Crimson Text',Georgia,serif}
+.adv-card img{width:1.1in;height:1.3in;object-fit:cover}
+.adv-card b{font-size:12.5pt}
+.why{display:grid;grid-template-columns:1fr 1fr;gap:.08in .2in;font:400 9.5pt/1.35 'Crimson Text',Georgia,serif;color:#444;align-content:start}
+.why b{display:block;color:${RED};font-weight:700}
+.adv-q{height:.95in;background:url(${BANDC}) center/cover;display:flex;align-items:center;padding:0 .55in;gap:.3in}
+.adv-q span:first-child{font:600 20pt 'Crimson Text',Georgia,serif;color:#fff}
+</style></head><body>
+<div class="bar"><span>Landscape · Letter 11 × 8.5 · ${pg} pages</span><button type="button" id="omPrint">🖨 Save as PDF / Print</button><span id="omStatus" role="status" aria-live="polite">Loading imagery…</span></div>
+
+<section class="sheet cover">
+  <div class="cv-top"><h1>Offering Memorandum</h1></div>
+  <div class="cv-img">${mCover||noMap}</div>
+  <div class="cv-bot">
+    <div><div class="cv-h">${esc(headline)}</div><div class="cv-a">${esc(fullAddr)}</div></div>
+    <div class="cv-r"><img src="${LOGO}" alt="Eshenbaugh Land Company"><a>www.thedirtdog.com</a></div>
   </div>
+</section>
+${pAerial}${pDesc}${pMarket}${pZoning}${pTraffic}${pEnv}${pDemo}${pLoc}${pDisc}${pAdv}
 
-  <!-- Back matter -->
-  <div style="margin-top:auto;padding-top:20px;border-top:2px solid ${ORANGE};display:flex;justify-content:space-between;align-items:flex-end">
-    <div>
-      ${LOGO?`<img src="${LOGO}" alt="Eshenbaugh Land Company" style="height:34px;width:auto;object-fit:contain;margin-bottom:6px">`:''}
-      <div style="font-size:13pt;font-weight:900;text-transform:uppercase;letter-spacing:.08em;color:${CHARCOAL}">Eshenbaugh Land Company</div>
-      <div style="font-size:7pt;font-weight:600;letter-spacing:.15em;color:${ORANGE};text-transform:uppercase;margin-top:2px">Florida's Land Authority</div>
-      <div style="font-size:8pt;color:#666;margin-top:5px">thedirtdog.com &nbsp;·&nbsp; 407.949.0744</div>
-    </div>
-    <div style="text-align:right">
-      <div style="font-size:8pt;color:#666">Generated ${dateStr}</div>
-      <div style="font-size:7pt;color:#aaa;margin-top:2px">Experts · Advisors · Deal Makers · Land Strategists</div>
-    </div>
-  </div>
-
-  <div class="disclaimer">${d.disclaimer||'This Offering Memorandum has been prepared by Eshenbaugh Land Company for informational purposes only. The information contained herein has been obtained from sources believed to be reliable; however, Eshenbaugh Land Company makes no representations or warranties, expressed or implied, as to the accuracy or completeness of the information contained herein. All demographic data is AI-estimated and should be verified with ESRI Business Analyst or CoStar prior to transaction. Prospective investors should conduct their own investigations and due diligence and consult with their legal, financial, and environmental advisors. This memorandum is subject to withdrawal without notice.'}</div>
-</div>
-
-${(()=>{
-  // ── Map pages — build dynamically using geocoded coords ──────────────────
-  const lat  = coords ? coords.lat  : null;
-  const lng  = coords ? coords.lng  : null;
-
-  // Esri static imagery helper
-  const esriImg = (w,s,e,n,pw,ph) =>
-    `https://server.arcgisonline.com/arcgis/rest/services/World_Imagery/MapServer/export?bbox=${w},${s},${e},${n}&bboxSR=4326&imageSR=4326&size=${pw},${ph}&format=png32&f=image`;
-
-  let closeUrl='', regionalUrl='';
-  let parcelSVG='', regionalSVG='';
-  const PW=760, PH=400;
-
-  if(lat && lng){
-    // Close-up: ±0.009° lon, ±0.006° lat buffer (~0.4 mi)
-    const cW=lng-0.009, cE=lng+0.009, cS=lat-0.006, cN=lat+0.006;
-    closeUrl = esriImg(cW,cS,cE,cN,PW,PH);
-
-    // Parcel polygon: approximate 47-ac rectangle (~0.004° each side)
-    const pw=0.004, ph=0.004;
-    const toX=(lo)=>((lo-cW)/(cE-cW)*PW).toFixed(1);
-    const toY=(la)=>((cN-la)/(cN-cS)*PH).toFixed(1);
-    const pNW={la:lat+ph/2,lo:lng-pw/2}, pNE={la:lat+ph/2,lo:lng+pw/2};
-    const pSE={la:lat-ph/2,lo:lng+pw/2}, pSW={la:lat-ph/2,lo:lng-pw/2};
-    const pts=`${toX(pNW.lo)},${toY(pNW.la)} ${toX(pNE.lo)},${toY(pNE.la)} ${toX(pSE.lo)},${toY(pSE.la)} ${toX(pSW.lo)},${toY(pSW.la)}`;
-    const cx=((parseFloat(toX(pNW.lo))+parseFloat(toX(pNE.lo)))/2).toFixed(0);
-    const cy=((parseFloat(toY(pNW.la))+parseFloat(toY(pSW.la)))/2).toFixed(0);
-    parcelSVG=`
-      <polygon points="${pts}" fill="rgba(218,41,28,0.18)" stroke="#DA291C" stroke-width="2.5" stroke-dasharray="6,3"/>
-      ${['NW','NE','SE','SW'].map((c,i)=>[pNW,pNE,pSE,pSW][i]).map(cp=>`<circle cx="${toX(cp.lo)}" cy="${toY(cp.la)}" r="3.5" fill="#DA291C"/>`).join('')}
-      <rect x="${cx-52}" y="${cy-20}" width="104" height="38" rx="4" fill="rgba(10,10,10,0.85)"/>
-      <text x="${cx}" y="${cy-5}" text-anchor="middle" fill="#DA291C" font-family="Arial" font-weight="bold" font-size="8.5">SUBJECT PARCEL</text>
-      <text x="${cx}" y="${cy+10}" text-anchor="middle" fill="#C7CBD0" font-family="Arial" font-size="7.5">${p.acreage||'± Acreage TBD'}</text>`;
-
-    // Regional: ±0.04° lon, ±0.035° lat buffer (~2.5 mi)
-    const rW=lng-0.04, rE=lng+0.04, rS=lat-0.035, rN=lat+0.035;
-    regionalUrl = esriImg(rW,rS,rE,rN,PW,PH);
-    const rX=(lo)=>((lo-rW)/(rE-rW)*PW).toFixed(1);
-    const rY=(la)=>((rN-la)/(rN-rS)*PH).toFixed(1);
-    const sx=parseFloat(rX(lng)).toFixed(0), sy=parseFloat(rY(lat)).toFixed(0);
-    const aadtX=(parseFloat(sx)+90).toFixed(0), aadtY=(parseFloat(sy)+0).toFixed(0);
-    regionalSVG=`
-      <line x1="0" y1="${sy}" x2="${PW}" y2="${sy}" stroke="rgba(255,220,80,0.4)" stroke-width="5"/>
-      <circle cx="${sx}" cy="${sy}" r="13" fill="#DA291C" opacity="0.92"/>
-      <text x="${sx}" y="${parseFloat(sy)+5}" text-anchor="middle" fill="#fff" font-family="Arial" font-weight="bold" font-size="13">★</text>
-      <rect x="${parseFloat(sx)+17}" y="${parseFloat(sy)-10}" width="84" height="18" rx="3" fill="rgba(10,10,10,0.88)"/>
-      <text x="${parseFloat(sx)+59}" y="${parseFloat(sy)+2}" text-anchor="middle" fill="#DA291C" font-family="Arial" font-weight="bold" font-size="7.5">SUBJECT SITE</text>
-      <rect x="${aadtX}" y="${parseFloat(aadtY)-18}" width="110" height="34" rx="4" fill="rgba(10,10,10,0.9)" stroke="#DA291C" stroke-width="1.5"/>
-      <text x="${parseFloat(aadtX)+55}" y="${parseFloat(aadtY)-8}" text-anchor="middle" fill="#DA291C" font-family="Arial" font-weight="bold" font-size="7.5">FDOT AADT 2023</text>
-      <text x="${parseFloat(aadtX)+55}" y="${parseFloat(aadtY)+8}" text-anchor="middle" fill="#fff" font-family="Arial" font-weight="bold" font-size="11">${sub.keyMetrics&&sub.keyMetrics.find(m=>m.label&&m.label.toLowerCase().includes('aadt'))?sub.keyMetrics.find(m=>m.label.toLowerCase().includes('aadt')).value:'35,000+ VPD'}</text>
-      <rect x="14" y="${parseFloat(sy)+10}" width="130" height="14" rx="2" fill="rgba(30,30,30,0.8)"/>
-      <text x="79" y="${parseFloat(sy)+20}" text-anchor="middle" fill="#FFE066" font-family="Arial" font-weight="bold" font-size="7.5">← US-41 / TAMIAMI TRAIL →</text>`;
+<script>
+(function(){
+  var st=document.getElementById('omStatus');
+  function fit(){
+    document.querySelectorAll('.bd:not([data-nofit])').forEach(function(b){
+      var k=1.18; b.style.setProperty('--k',k);
+      for(var i=0;i<60 && b.scrollHeight>b.clientHeight+1 && k>0.64;i++){ k-=0.02; b.style.setProperty('--k',k.toFixed(3)); }
+    });
+    // Map-led pages shrink the map (never the type) so the caption stays on the sheet.
+    document.querySelectorAll('.bd[data-nofit]').forEach(function(b){
+      var ms=b.querySelectorAll('.map'), w=100; ms.forEach(function(m){ m.style.width=''; m.style.margin=''; });
+      while(b.scrollHeight>b.clientHeight+1 && w>50){ w-=2; ms.forEach(function(m){ m.style.width=w+'%'; m.style.margin='0 auto'; }); }
+    });
   }
+  var imgs=[].slice.call(document.images), left=imgs.length;
+  function done(){ if(--left<=0){ st.textContent='Ready to save'; fit(); } else st.textContent='Loading imagery… '+left; }
+  imgs.forEach(function(im){ if(im.complete) done(); else { im.addEventListener('load',done); im.addEventListener('error',function(){ im.style.visibility='hidden'; done(); }); } });
+  if(!imgs.length) st.textContent='Ready to save';
+  (document.fonts&&document.fonts.ready?document.fonts.ready:Promise.resolve()).then(fit);
+  window.addEventListener('load',fit);
+  window.__omFit=fit;
+  document.getElementById('omPrint').addEventListener('click',function(){ fit(); setTimeout(function(){ window.print(); },60); });
+})();
+<\/script>
+</body></html>`;
 
-  const advisor = typeof currentUser !== 'undefined' ? currentUser : {};
-  const _omBio = (typeof getAdvisorBio==='function' && advisor.uid) ? getAdvisorBio(advisor.uid) : null;   // ADVBIO-20261006
-  const advisorName = (_omBio && _omBio.nameWithDesignations) || advisor.name || 'Matt Eshenbaugh';
-  const advisorEmail = advisor.email || 'matt@thedirtdog.com';
-  const advisorPhone = (_omBio && _omBio.phone) || advisor.phone || '407.949.0744';
-  const advisorTitle = (_omBio && _omBio.title) || advisor.title || (advisor.isAdmin ? 'Principal' : 'Advisor');
-  const advisorBio = (_omBio && _omBio.bio) || (typeof ADVISOR_BIOS !== 'undefined' && ADVISOR_BIOS[advisorEmail]) || '';
-
-  const whyItems=[
-    ['🏛','Florida Land Experts','Deep knowledge of Florida zoning, entitlements, environmental constraints, and water management — from the Panhandle to the Keys.'],
-    ['🤝','Relationships Drive Results','Direct relationships with every major homebuilder, developer, and land investor active in Florida — built over decades.'],
-    ['👢','Boots on the Ground','We walk every site. We know the drainage, the wetlands, the soil. We give you the full picture, not just the data sheet.'],
-    ['📊','Data-Driven Strategy','AI-assisted due diligence, real-time market analytics, and deal structuring expertise that maximizes land value.'],
-  ];
-
-  return `
-<!-- ═══════════════════════════════════════════════════════
-     PAGE 7 — AERIAL MAP: CLOSE-UP PARCEL VIEW
-═══════════════════════════════════════════════════════ -->
-<div class="page" style="padding:.45in .55in .35in">
-  <div class="page-header">
-    <div class="page-header-title">Aerial Overview — Subject Parcel</div>
-    <div style="display:flex;align-items:center;gap:10px">${LOGO?`<img src="${LOGO}" alt="" style="height:24px;width:auto;object-fit:contain">`:''}<div class="page-header-prop">${propTitle}<br>${meta.county} County, FL</div></div>
-  </div>
-  <div style="position:relative;width:100%;margin-bottom:10px;border:1px solid #ccc;border-radius:4px;overflow:hidden;background:#222;min-height:180px">
-    ${closeUrl
-      ? `<img src="${closeUrl}" style="width:100%;display:block" alt="Aerial close-up" onerror="this.style.background='#1a1a2e';this.alt='Imagery unavailable — open in browser'"/>`
-      : `<div style="background:#1a1a2e;height:220px;display:flex;align-items:center;justify-content:center;color:#C7CBD0;font-size:9pt">Enter address for satellite imagery</div>`}
-    <svg viewBox="0 0 ${PW} ${PH}" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none" xmlns="http://www.w3.org/2000/svg">
-      ${parcelSVG}
-      <g transform="translate(${PW-32},28)">
-        <circle cx="0" cy="0" r="18" fill="rgba(10,10,10,0.85)" stroke="#DA291C" stroke-width="1.5"/>
-        <polygon points="0,-11 4.5,3.5 0,1.5 -4.5,3.5" fill="#DA291C"/>
-        <polygon points="0,11 4.5,-3.5 0,-1.5 -4.5,-3.5" fill="#777"/>
-        <text x="0" y="-14" text-anchor="middle" fill="#DA291C" font-family="Arial" font-weight="bold" font-size="8">N</text>
-      </g>
-      <rect x="16" y="${PH-22}" width="62" height="3" fill="#fff" opacity="0.8"/>
-      <rect x="78" y="${PH-22}" width="62" height="3" fill="#aaa" opacity="0.8"/>
-      <text x="16" y="${PH-26}" fill="#fff" font-family="Arial" font-size="6.5" opacity="0.9">0</text>
-      <text x="78" y="${PH-26}" fill="#fff" font-family="Arial" font-size="6.5" opacity="0.9">500 ft</text>
-      <text x="138" y="${PH-26}" fill="#fff" font-family="Arial" font-size="6.5" opacity="0.9">1,000 ft</text>
-    </svg>
-  </div>
-  <div style="font-size:7pt;color:#888;margin-bottom:10px">Imagery: Esri World Imagery &nbsp;·&nbsp; Parcel boundary is approximate — verify with survey &nbsp;·&nbsp; ${meta.county} County, FL</div>
-  <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px">
-    <div style="background:#f9f8f6;border-left:3px solid #DA291C;padding:8px 10px">
-      <div style="font-size:6.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#DA291C;margin-bottom:3px">Site Area</div>
-      <div style="font-size:13pt;font-weight:900;color:#0A0A0A">${p.acreage||'TBD'}</div>
-    </div>
-    <div style="background:#f9f8f6;border-left:3px solid #0A0A0A;padding:8px 10px">
-      <div style="font-size:6.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#0A0A0A;margin-bottom:3px">Zoning</div>
-      <div style="font-size:13pt;font-weight:900;color:#0A0A0A">${z.code||p.zoning||'—'}</div>
-      <div style="font-size:7pt;color:#888">${z.description||''}</div>
-    </div>
-    <div style="background:#f9f8f6;border-left:3px solid #00B2A9;padding:8px 10px">
-      <div style="font-size:6.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#00B2A9;margin-bottom:3px">Future Land Use</div>
-      <div style="font-size:10pt;font-weight:900;color:#0A0A0A;line-height:1.2">${p.futureYearLandUse||'—'}</div>
-    </div>
-    <div style="background:#f9f8f6;border-left:3px solid #355E3B;padding:8px 10px">
-      <div style="font-size:6.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#355E3B;margin-bottom:3px">AADT (US-41)</div>
-      <div style="font-size:13pt;font-weight:900;color:#0A0A0A">${sub.keyMetrics&&sub.keyMetrics.find(m=>m.label&&m.label.toLowerCase().includes('aadt'))?sub.keyMetrics.find(m=>m.label.toLowerCase().includes('aadt')).value:'35,000+'}</div>
-      <div style="font-size:7pt;color:#888">FDOT 2023 Count</div>
-    </div>
-  </div>
-</div>
-
-<!-- ═══════════════════════════════════════════════════════
-     PAGE 8 — REGIONAL CONTEXT: RETAILERS + AADT
-═══════════════════════════════════════════════════════ -->
-<div class="page" style="padding:.45in .55in .35in">
-  <div class="page-header">
-    <div class="page-header-title">Regional Context — Retail & Traffic</div>
-    <div style="display:flex;align-items:center;gap:10px">${LOGO?`<img src="${LOGO}" alt="" style="height:24px;width:auto;object-fit:contain">`:''}<div class="page-header-prop">${propTitle}<br>${meta.county} County, FL</div></div>
-  </div>
-  <div style="position:relative;width:100%;margin-bottom:10px;border:1px solid #ccc;border-radius:4px;overflow:hidden;background:#1a1a2e;min-height:180px">
-    ${regionalUrl
-      ? `<img src="${regionalUrl}" style="width:100%;display:block" alt="Regional context"/>`
-      : `<div style="height:220px;display:flex;align-items:center;justify-content:center;color:#C7CBD0;font-size:9pt">Enter address for regional map</div>`}
-    <svg viewBox="0 0 ${PW} ${PH}" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none" xmlns="http://www.w3.org/2000/svg">
-      ${regionalSVG}
-      <g transform="translate(${PW-32},28)">
-        <circle cx="0" cy="0" r="16" fill="rgba(10,10,10,0.85)" stroke="#DA291C" stroke-width="1.5"/>
-        <polygon points="0,-10 4,3 0,1 -4,3" fill="#DA291C"/>
-        <polygon points="0,10 4,-3 0,-1 -4,-3" fill="#777"/>
-        <text x="0" y="-13" text-anchor="middle" fill="#DA291C" font-family="Arial" font-weight="bold" font-size="7.5">N</text>
-      </g>
-    </svg>
-  </div>
-  <div style="font-size:7pt;color:#888;margin-bottom:10px">Regional context map — approximately 2.5 mile radius from subject site &nbsp;·&nbsp; AADT source: FDOT Traffic Information System</div>
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-    <div>
-      <div style="font-size:7pt;font-weight:700;text-transform:uppercase;letter-spacing:.1em;background:#0A0A0A;padding:4px 8px;border-radius:3px;color:#DA291C;margin-bottom:6px">Surrounding Retail & Services</div>
-      <div style="font-size:8pt;color:#555;line-height:1.7;background:#f9f8f6;padding:8px 10px;border-left:3px solid #DA291C">${sub.comparableSales||'Retail and service amenities within the trade area include national and regional grocery, big-box, drug store, food &amp; beverage, and home improvement retailers. Proximity to Port Charlotte Town Center (regional mall) and US-41 commercial corridor provides immediate retail infrastructure for residential development.'}</div>
-    </div>
-    <div>
-      <div style="font-size:7pt;font-weight:700;text-transform:uppercase;letter-spacing:.1em;background:#0A0A0A;padding:4px 8px;border-radius:3px;color:#DA291C;margin-bottom:6px">FDOT Traffic — ${meta.county} County</div>
-      <table style="width:100%;border-collapse:collapse;font-size:7.5pt">
-        <thead><tr style="background:#f9f8f6"><th style="padding:4px 6px;text-align:left;font-weight:700;color:#555;border-bottom:1px solid #e5e7eb">Location</th><th style="padding:4px 6px;text-align:center;font-weight:700;color:#555;border-bottom:1px solid #e5e7eb">AADT</th></tr></thead>
-        <tbody>
-          ${(keyMetrics.filter(m=>m.label&&(m.label.toLowerCase().includes('aadt')||m.label.toLowerCase().includes('traffic')||m.label.toLowerCase().includes('vpd'))).length
-            ? keyMetrics.filter(m=>m.label&&(m.label.toLowerCase().includes('aadt')||m.label.toLowerCase().includes('traffic')||m.label.toLowerCase().includes('vpd'))).map((m,i)=>`<tr style="${i%2?'background:#f9f8f6':''}"><td style="padding:4px 6px">${m.label}</td><td style="padding:4px 6px;text-align:center;font-weight:800;color:#DA291C">${m.value}</td></tr>`).join('')
-            : `<tr><td style="padding:4px 6px">Primary Arterial (near site)</td><td style="padding:4px 6px;text-align:center;font-weight:800;color:#DA291C">35,000+ VPD</td></tr>
-               <tr style="background:#f9f8f6"><td style="padding:4px 6px">Verify at FDOT TIS</td><td style="padding:4px 6px;text-align:center;font-size:7pt;color:#9ca3af">tdaappsprod.dot.state.fl.us/fto</td></tr>`)}
-        </tbody>
-      </table>
-      <div style="margin-top:8px;background:#0A0A0A;border-radius:5px;padding:8px 10px">
-        <div style="font-size:6.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#DA291C;margin-bottom:4px">Access & Visibility</div>
-        <div style="font-size:7.5pt;color:#C7CBD0;line-height:1.5">Site fronts a primary arterial with high visibility to daily traffic. Access subject to FDOT driveway permitting. Confirm median openings, turn lanes, and signal timing with ${meta.county} County Engineering and FDOT District 1.</div>
-      </div>
-    </div>
-  </div>
-</div>
-
-<!-- ═══════════════════════════════════════════════════════
-     PAGE 9 — ADVISOR CONTACT
-═══════════════════════════════════════════════════════ -->
-<div class="page" style="padding:0;display:flex;flex-direction:column;page-break-after:avoid">
-  <div style="background:#0A0A0A;padding:.55in .65in .4in;position:relative;overflow:hidden">
-    <div style="position:absolute;right:0;top:0;width:4px;height:100%;background:#DA291C"></div>
-    <div style="font-size:7.5pt;font-weight:700;letter-spacing:.2em;text-transform:uppercase;color:#DA291C;margin-bottom:10px">Your Point of Contact</div>
-    <div style="font-size:24pt;font-weight:900;color:#fff;text-transform:uppercase;letter-spacing:.04em;line-height:1.1">${advisorName}</div>
-    <div style="font-size:10pt;font-weight:400;color:#C7CBD0;letter-spacing:.06em;margin-top:4px">${advisorTitle} &nbsp;·&nbsp; Eshenbaugh Land Company</div>
-    <div style="height:2px;background:#DA291C;width:50px;margin:14px 0"></div>
-    <div style="display:flex;gap:24px;margin-top:6px">
-      <div style="display:flex;align-items:center;gap:8px">
-        <span style="color:#DA291C;font-size:11pt">📞</span>
-        <div>
-          <div style="font-size:7pt;color:#9ca3af;text-transform:uppercase;letter-spacing:.08em">Direct</div>
-          <div style="color:#fff;font-weight:700;font-size:10pt">${advisorPhone}</div>
-        </div>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px">
-        <span style="color:#DA291C;font-size:11pt">✉</span>
-        <div>
-          <div style="font-size:7pt;color:#9ca3af;text-transform:uppercase;letter-spacing:.08em">Email</div>
-          <div style="color:#fff;font-weight:700;font-size:10pt">${advisorEmail}</div>
-        </div>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px">
-        <span style="color:#DA291C;font-size:11pt">🌐</span>
-        <div>
-          <div style="font-size:7pt;color:#9ca3af;text-transform:uppercase;letter-spacing:.08em">Web</div>
-          <div style="color:#fff;font-weight:700;font-size:10pt">thedirtdog.com</div>
-        </div>
-      </div>
-    </div>
-  </div>
-  <div style="flex:1;padding:.4in .65in;display:grid;grid-template-columns:1fr 1fr;gap:.4in">
-    <div>
-      <div style="font-size:7.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.12em;color:#DA291C;margin-bottom:10px">About the Advisor</div>
-      <div style="font-size:9pt;line-height:1.7;color:#374151">
-        ${advisorBio
-          ? advisorBio.split(/\n+/).filter(Boolean).map(para=>`<p style="margin-bottom:8px">${para}</p>`).join('')
-          : `<p style="margin-bottom:8px">${advisorName} is an advisor with Eshenbaugh Land Company, one of Florida's leading commercial land brokerage firms. The firm specializes in the acquisition, disposition, and development advisory of land across the state of Florida.</p>
-             <p style="margin-bottom:8px">Eshenbaugh Land Company has deep relationships with Florida's largest homebuilders, multifamily developers, and institutional land investors — ensuring maximum market exposure and execution certainty for every transaction.</p>
-             <p>As Florida's Land Authority, Eshenbaugh Land Company has closed hundreds of millions in land transactions across all asset classes — from raw acreage to entitled communities, commercial pad sites, and mixed-use development parcels.</p>`}
-      </div>
-    </div>
-    <div>
-      <div style="font-size:7.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.12em;color:#DA291C;margin-bottom:10px">Why Eshenbaugh Land Company</div>
-      <div style="display:flex;flex-direction:column;gap:10px">
-        ${whyItems.map(([icon,title,desc])=>`
-        <div style="display:flex;gap:12px;align-items:flex-start;padding:10px 12px;background:#f9f8f6;border-left:3px solid #DA291C;border-radius:0 6px 6px 0">
-          <span style="font-size:14pt;line-height:1;flex:0 0 auto;margin-top:1px">${icon}</span>
-          <div>
-            <div style="font-weight:800;font-size:8.5pt;color:#0A0A0A;margin-bottom:2px">${title}</div>
-            <div style="font-size:7.5pt;color:#555;line-height:1.5">${desc}</div>
-          </div>
-        </div>`).join('')}
-      </div>
-    </div>
-  </div>
-  <div style="background:#0A0A0A;padding:.25in .65in;display:flex;justify-content:space-between;align-items:center;margin-top:auto">
-    <div>
-      <div style="font-size:14pt;font-weight:900;color:#fff;text-transform:uppercase;letter-spacing:.08em">Eshenbaugh Land Company</div>
-      <div style="font-size:7pt;font-weight:600;letter-spacing:.15em;color:#DA291C;text-transform:uppercase;margin-top:2px">Florida's Land Authority &nbsp;·&nbsp; We Know Land.</div>
-    </div>
-    <div style="display:flex;gap:18px;align-items:center">
-      <div style="text-align:center"><div style="font-size:8pt;color:#fff;font-weight:700">${advisorPhone}</div><div style="font-size:6.5pt;color:#9ca3af">Phone</div></div>
-      <div style="width:1px;height:28px;background:rgba(255,255,255,.2)"></div>
-      <div style="text-align:center"><div style="font-size:8pt;color:#fff;font-weight:700">${advisorEmail}</div><div style="font-size:6.5pt;color:#9ca3af">Email</div></div>
-      <div style="width:1px;height:28px;background:rgba(255,255,255,.2)"></div>
-      <div style="text-align:center"><div style="font-size:8pt;color:#fff;font-weight:700">thedirtdog.com</div><div style="font-size:6.5pt;color:#9ca3af">Web</div></div>
-    </div>
-  </div>
-</div>`;
-})()}
-
-<script>window.onload=function(){window.print();}<\/script>
-</body></html>`);
-  win.document.close();
+  let win = meta && meta.win;
+  if(!win || win.closed) win = window.open('','_blank','width=1180,height=860');
+  if(!win){ showToast('Pop-up blocked — allow pop-ups to generate OM.','error'); return; }
+  win.document.open(); win.document.write(html); win.document.close();
 }
 window._valOpenOM = _valOpenOM;
 
