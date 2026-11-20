@@ -11744,8 +11744,19 @@ function _elcSalesVolume(deals, year){
   by.forEach(r=>r.deals.sort((a,b)=>b.ts-a.ts));
   return {by, noPrice, total, count};
 }
+// SVOFFICE-20261119 — Tampa / Orlando / Both. Defaults to the viewer's own office (advisor profile
+// office, else the office they manage); 'Both' when they have none. A pick lasts for the session.
+let _svOffice = null;
+function _svOffices(){ return [...new Set(Object.values(allProfiles||{}).filter(p=>p&&!p.removed).map(p=>String(p.office||'').trim()).filter(Boolean))].sort(); }
+function _svDefaultOffice(){ const cu=(typeof currentUser!=='undefined'&&currentUser)||{}; return String((allProfiles||{})[cu.uid]?.office||cu.officeManagerOffice||'').trim()||'both'; }
+function _svCurrentOffice(){ const offs=_svOffices(); const s=_svOffice||_svDefaultOffice(); return (s==='both'||offs.includes(s))?s:'both'; }
+window._svSetOffice = v => { _svOffice = v; renderCurrentView(); };
 function _elcSalesVolSection(advisors){
   const year = new Date().getFullYear();
+  const _svOffs = _svOffices(), _svSel = _svCurrentOffice();   // SVOFFICE-20261119
+  if(_svSel!=='both') advisors = (advisors||[]).filter(a=>String((allProfiles||{})[a.uid]?.office||'').trim()===_svSel);
+  const _svBtn = (v,l) => `<button type="button" onclick="_svSetOffice('${String(v).replace(/'/g,"\\'")}')" aria-pressed="${_svSel===v}" class="px-3 py-1.5 text-xs font-semibold rounded-full border" style="min-height:32px;${_svSel===v?'background:var(--brand-teal);color:#fff;border-color:var(--brand-teal)':''}">${l}</button>`;
+  const _svBar = _svOffs.length>1 ? `<div class="px-5 py-2.5 border-b flex items-center gap-2 flex-wrap" role="group" aria-label="Office"><span class="text-xs font-semibold text-gray-500 uppercase tracking-wide mr-1">Office</span>${_svOffs.map(o=>_svBtn(o,o)).join('')}${_svBtn('both','Both')}</div>` : '';
   const src = (typeof _payLadderDeals==='function') ? _payLadderDeals() : allDeals;   // company feed when a manager's own list is partial
   const sv = _elcSalesVolume(src, year);
   const esc = s => String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -11761,10 +11772,11 @@ function _elcSalesVolSection(advisors){
   return `
     <div class="bg-white rounded-2xl border overflow-hidden mb-6" data-salesvol="SALESVOL-20261119">
       <div class="px-5 py-3.5 border-b bg-gray-50 flex items-center gap-3 flex-wrap">
-        <span class="font-bold text-gray-800 text-sm">🏆 ${year} Sales Volume</span>
+        <span class="font-bold text-gray-800 text-sm">🏆 ${year} Sales Volume${_svSel!=='both'?` — ${esc(_svSel)}`:''}</span>
         <span class="text-xs text-gray-500">Closed sale price, Jan 1 – today · deals with more than one advisor split by each advisor's % of the deal · resets Jan 1</span>
         <span class="ml-auto text-sm font-bold text-gray-800">Total: ${fmt$(shownTotal)}</span>
       </div>
+      ${_svBar}
       <div class="overflow-x-auto">
       <table class="w-full text-sm">
         <thead>
@@ -36688,7 +36700,7 @@ function viewLeaderboard(){
     <h2 class="text-xl font-bold text-gray-800 mb-2">Advisor Leaderboard${officeLabel}</h2>
     <p class="text-xs text-gray-400 mb-5">UC Goal = quarterly Under Contract volume target per advisor (set in Splits). Deals with more than one advisor credit each an equal share (Q4 2026 on). 🔴 = below · 🟢 = at or above goal</p>
 
-    ${_elcSalesVolSection(advisors)}   <!-- SALESVOL-20261119 -->
+    ${_elcSalesVolSection(getDistinctAdvisors())}   <!-- SALESVOL-20261119 · SVOFFICE-20261119: own office toggle -->
 
     <!-- ── Trailing 4 Quarters: Goal % Achieved ── -->
     <div class="bg-white rounded-2xl border overflow-hidden mb-6">
