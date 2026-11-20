@@ -19308,6 +19308,63 @@ async function _omParcelPolygon(pt, address, parcelIds){
   return null;
 }
 
+// Multi-parcel assemblages (PROPGEN-20261119, Ryan: "if we add multiple parcels it should total
+// aggregate"). Every parcel on the card is found in the statewide cadastral and outlined; acreage is
+// the SUM (FDOR land square feet, else polygon area). Matching tries PARCEL_ID, PARCELNO and ALT_KEY
+// (Hillsborough folios live in ALT_KEY), with and without punctuation, and the Sec-Twn-Rng ↔
+// Rng-Twn-Sec swap (Pinellas cards say 33-31-16-…, the state roll says 16 31 33 …).
+function _omPidKeys(raw){
+  const s=String(raw||'').toUpperCase().trim(); if(!s) return [];
+  const out=new Set([s.replace(/[^0-9A-Z]/g,''), s.replace(/\D/g,'')]);
+  const g=s.split(/[\s\-.\/]+/).filter(Boolean);
+  if(g.length>=4 && /^\d{2}$/.test(g[0]) && /^\d{2}$/.test(g[2])) out.add([g[2],g[1],g[0]].concat(g.slice(3)).join('').replace(/[^0-9A-Z]/g,''));
+  return [...out].filter(k=>k.length>=6);
+}
+function _omSplitIds(list){
+  const out=[]; (list||[]).forEach(x=>String(x||'').split(/[,;\n]+/).forEach(y=>{ y=y.trim(); if(y && !out.includes(y)) out.push(y); }));
+  return out;
+}
+async function _omParcelSet(pt, address, ids){
+  ids=_omSplitIds(ids);
+  if(ids.length<2){ const one=await _omParcelPolygon(pt, address, ids); if(one){ one.count=1; one.ids=ids.slice(0,1); } return one; }
+  const want=ids.map(id=>({id, keys:_omPidKeys(id), feat:null}));
+  const featKeys=a=>[a.PARCEL_ID,a.PARCELNO,a.ALT_KEY].map(v=>String(v||'').toUpperCase()).flatMap(v=>[v.replace(/[^0-9A-Z]/g,''), v.replace(/\D/g,'')]).filter(k=>k.length>=6);
+  const take=feats=>{ for(const f of feats){ if(!f.geometry||!f.geometry.rings) continue; const fk=featKeys(f.attributes);
+    for(const w of want){ if(!w.feat && w.keys.some(k=>fk.includes(k))) w.feat=f; } } };
+  for(const pad of [0.004, 0.012]){
+    if(want.every(w=>w.feat)) break;
+    const env={xmin:pt.lon-pad, ymin:pt.lat-pad, xmax:pt.lon+pad, ymax:pt.lat+pad, spatialReference:{wkid:4326}};
+    for(let page=0; page<6; page++){
+      const d=await _omJSON(_OM_CADASTRAL+'?'+_omQS({geometry:env, geometryType:'esriGeometryEnvelope', inSR:'4326', spatialRel:'esriSpatialRelIntersects',
+        outFields:'PARCEL_ID,PARCELNO,ALT_KEY,PHY_ADDR1,LND_SQFOOT', returnGeometry:'true', outSR:'4326', resultOffset:String(page*2000), resultRecordCount:'2000', f:'json'}), 30000);
+      if(!d) break; take(d.features||[]);
+      if(!d.exceededTransferLimit || want.every(w=>w.feat)) break;
+    }
+  }
+  const miss=want.filter(w=>!w.feat);
+  if(miss.length){   // last try: the raw IDs as the roll may store them
+    const forms=[...new Set(miss.flatMap(w=>[w.id.toUpperCase(), w.id.toUpperCase().replace(/[-.]/g,' ').replace(/\s+/g,' ')]))].map(x=>"'"+x.replace(/'/g,"''")+"'");
+    const d=await _omJSON(_OM_CADASTRAL+'?'+_omQS({where:'PARCEL_ID IN ('+forms.join(',')+')', outFields:'PARCEL_ID,PARCELNO,ALT_KEY,PHY_ADDR1,LND_SQFOOT', returnGeometry:'true', outSR:'4326', f:'json'}), 20000);
+    if(d) take(d.features||[]);
+  }
+  const got=want.filter(w=>w.feat);
+  if(!got.length){ const one=await _omParcelPolygon(pt, address, ids); if(one){ one.count=1; one.ids=ids.slice(0,1); one.unmatched=ids.slice(1); } return one; }
+  const rings=[].concat(...got.map(w=>w.feat.geometry.rings));
+  const st=_omRingStats(rings);
+  const sqft=got.reduce((s,w)=>s+((+w.feat.attributes.LND_SQFOOT>0)?+w.feat.attributes.LND_SQFOOT:_omRingStats(w.feat.geometry.rings).acres*43560),0);
+  return Object.assign(st, {rings, acres:sqft/43560, sqft, count:got.length, ids:got.map(w=>w.id), unmatched:want.filter(w=>!w.feat).map(w=>w.id),
+    attrs:got[0].feat.attributes, parcels:got.map(w=>({id:w.id, rings:w.feat.geometry.rings, sqft:+w.feat.attributes.LND_SQFOOT||null, addr:w.feat.attributes.PHY_ADDR1}))});
+}
+// After an assemblage is totalled, a blank card acreage gets the total (never overwrites).
+async function _omFillAssemblageAcres(deal, poly){
+  try{
+    if(!deal || !poly || !(poly.count>1)) return;
+    if(!(deal.acreage==null || String(deal.acreage).trim()==='') || !(deal.acres==null || String(deal.acres).trim()==='')) return;
+    const ac=Math.round(poly.acres*100)/100; await Store.updateDeal(deal.id,{acreage:ac}); deal.acreage=ac;
+    showToast('Acreage filled on the card: '+ac+'± ac across '+poly.count+' parcels.','success');
+  }catch(e){ console.warn('[OM] assemblage acreage fill failed', e); }
+}
+
 // FDOT AADT within ~1.5 mi, named from FDOT's local-name layer, nearest first.
 async function _omTraffic(pt){
   const d = await _omJSON(_OM_AADT+'?'+_omQS({geometry:pt.lon+','+pt.lat, geometryType:'esriGeometryPoint', inSR:'4326',
@@ -19451,11 +19508,14 @@ async function _valGenerateOM(opts){
     const pt = await _omResolvePoint(address || p.siteAddress, parcel, county, opts ? conf : null);
     const siteAddr = p.siteAddress || cp.siteAddress || address;
     const [poly, traffic, rings] = pt ? await Promise.all([
-      _omParcelPolygon(pt, siteAddr, [parcel, p.parcelId, cp.parcelId, cp.pin]),
+      _omParcelSet(pt, siteAddr, _omSplitIds((opts&&opts.deal&&Array.isArray(opts.deal.parcelRaw)&&opts.deal.parcelRaw.length>1)?opts.deal.parcelRaw:[parcel]).length>1
+        ? ((opts&&opts.deal&&Array.isArray(opts.deal.parcelRaw)&&opts.deal.parcelRaw.length>1)?opts.deal.parcelRaw:[parcel])
+        : [parcel, p.parcelId, cp.parcelId, cp.pin]),
       _omTraffic(pt),
       _omRings(pt),
     ]) : [null, [], null];
     const center = poly ? {lat:poly.centroid[1], lon:poly.centroid[0]} : pt;
+    if(opts && opts.deal) _omFillAssemblageAcres(opts.deal, poly);
     const cGeo = (rings && (rings.fiveMile||rings.threeMile||{}).countyGeoid) || conf.fips || '';
     const [wet, flood, countyAcs] = center ? await Promise.all([_omWetlands(poly, center), _omFlood(poly, center), _omCountyACS(cGeo)]) : [null, null, null];
     const places = center ? _omNearPlaces(center) : [];
@@ -19536,7 +19596,8 @@ function _omCardFill(deal, d, conf, county, pt){
     labels.push('parcel ID');
   }
   const ac = parseFloat(String([p.acreage, cp.acreage].find(ok)||'').replace(/,/g,''));
-  if(blank(deal.acreage) && blank(deal.acres) && ac>0){ patch.acreage=ac; labels.push('acreage'); }
+  const isAssemblage = Array.isArray(deal.parcelRaw) && deal.parcelRaw.length>1;   // totalled from the cadastral when the document builds
+  if(blank(deal.acreage) && blank(deal.acres) && ac>0 && !isAssemblage){ patch.acreage=ac; labels.push('acreage'); }
   const zc = [cz&&cz.code, kz.code, z.code, p.zoning].find(ok);
   if(blank(deal.zoning) && zc){ patch.zoning=String(zc).trim(); labels.push('zoning'); }
   const flu = [kz.flu?(kz.flu+(kz.fluDescription?' — '+kz.fluDescription:'')):null, p.futureYearLandUse].find(ok);
@@ -19649,15 +19710,16 @@ function _valOpenOM(d, om, meta, data){
   const juris = (conf.juris&&conf.juris.label) || val(z.source) || meta.county+' County';
   const street = siteAddr ? siteAddr.split(',')[0].trim() : (val(p.parcelId,meta.parcel)||'Land Offering');
   const fullAddr = siteAddr ? `${street}, ${city}, FL${zip?' '+zip:''}` : `${meta.county} County, FL`;
-  const acN = acresNum(val(p.acreage, cp.acreage)) ?? (poly?+poly.acres.toFixed(2):null);
+  const multi = !!(poly && poly.count>1);   // assemblage: total of every parcel on the card
+  const acN = multi ? +poly.acres.toFixed(2) : (acresNum(val(p.acreage, cp.acreage)) ?? (poly?+poly.acres.toFixed(2):null));
   const acShort = acN!=null ? (acN<10?acN.toFixed(2):acN.toLocaleString(undefined,{maximumFractionDigits:1})) : '';
   const acreTxt = acN!=null ? acShort+'± Acres' : 'Acreage TBD';
-  const sqftTxt = acN!=null ? '≈'+Math.round(acN*43560).toLocaleString()+' SF' : '';
+  const sqftTxt = acN!=null ? '≈'+Math.round(multi&&poly.sqft?poly.sqft:acN*43560).toLocaleString()+' SF'+(multi?' · '+poly.count+' parcels':'') : '';
   const headline = (street+(acShort?' – '+acShort+'± ACRE ':' – ')+val(om.headline,'Development Site')).toUpperCase();
   const zCode = val(cz&&cz.code, kz.code, z.code, p.zoning);
   const zDesc = val(cz&&cz.description, kz.description, z.description);
   const flu = val(kz.flu&&kz.fluDescription?kz.flu+' — '+kz.fluDescription:kz.flu, p.futureYearLandUse);
-  const parcelId = val(p.parcelId, cp.parcelId, meta.parcel);
+  const parcelId = multi ? poly.ids.join(', ') : val(p.parcelId, cp.parcelId, meta.parcel);
   const owner = val(p.owner, cp.owner);
   const structures = val(p.structures, cp.structures).replace(/\?\s*sq ft,?\s*/gi,'').replace(/\(\s*built/gi,'(built').replace(/\(\s*\)/g,'').trim();
   const sales = (Array.isArray(p.priorSales)&&p.priorSales.length?p.priorSales:(cp.salesHistory||[])).filter(s=>val(s.price)).slice(0,4);
@@ -20086,13 +20148,14 @@ window._valOpenOM = _valOpenOM;
 //   commission only when those are blank. From Site Research nothing is saved.
 // • NOREALTOR-20261118: the sign graphic's block-R icon was removed and the Florida Realtors
 //   association logo left off the Engaged wall; institute names stay as titled.
-async function _omGatherSite(address, parcel, county, conf, d){
+async function _omGatherSite(address, parcel, county, conf, d, deal){
   const p=(d&&d.property)||{}, cp=(conf&&conf.parcel)||{};
   const pt = await _omResolvePoint(address || p.siteAddress, parcel, county, conf && conf.__card ? conf : null);
   const siteAddr = p.siteAddress || cp.siteAddress || address;
   const [poly, traffic, rings] = pt ? await Promise.all([
-    _omParcelPolygon(pt, siteAddr, [parcel, p.parcelId, cp.parcelId, cp.pin]), _omTraffic(pt), _omRings(pt) ]) : [null, [], null];
+    _omParcelSet(pt, siteAddr, (deal&&Array.isArray(deal.parcelRaw)&&deal.parcelRaw.length>1)?deal.parcelRaw:(_omSplitIds([parcel]).length>1?[parcel]:[parcel, p.parcelId, cp.parcelId, cp.pin])), _omTraffic(pt), _omRings(pt) ]) : [null, [], null];
   const center = poly ? {lat:poly.centroid[1], lon:poly.centroid[0]} : pt;
+  if(deal) _omFillAssemblageAcres(deal, poly);
   const cGeo = (rings && (rings.fiveMile||rings.threeMile||{}).countyGeoid) || (conf&&conf.fips) || '';
   const [wet, flood, countyAcs] = center ? await Promise.all([_omWetlands(poly, center), _omFlood(poly, center), _omCountyACS(cGeo)]) : [null,null,null];
   return {pt, center, poly, traffic, rings, wet, flood, countyAcs, places: center?_omNearPlaces(center):[], siteAddr};
@@ -20114,15 +20177,16 @@ async function _valGenerateProposal(opts){
     const conf = Object.assign({}, (opts ? opts.conf : window._valConfirmed) || {}, opts?{__card:true}:{});
     const deal = (opts && opts.deal) || null;
     _omStep(win,'Finding the parcel, aerials, traffic counts and Census rings…');
-    const site = await _omGatherSite(address, parcel, county, conf, d);
+    const site = await _omGatherSite(address, parcel, county, conf, d, deal);
     const p=d.property||{}, z=d.zoning||{}, cp=conf.parcel||{};
     const zCode=(conf.cityZoning&&!conf.cityZoning._noAnswer&&conf.cityZoning.code)||(conf.zoning&&conf.zoning.code)||p.zoning||'';
-    const acres = parseFloat(String(p.acreage||cp.acreage||'').replace(/,/g,'')) || (site.poly?+site.poly.acres.toFixed(2):null);
+    const acres = (site.poly && site.poly.count>1) ? +site.poly.acres.toFixed(2)   // assemblage → total of all parcels
+      : (parseFloat(String(p.acreage||cp.acreage||'').replace(/,/g,'')) || (site.poly?+site.poly.acres.toFixed(2):null));
     const saved = (deal && deal.proposalDoc) || null;
     const cardPrice = deal ? Number(deal.suggestedPrice||0) : 0;
     const facts=[
       'Address: '+(site.siteAddr||'n/a'),'County: '+county,'Jurisdiction (confirmed GIS): '+((conf.juris&&conf.juris.label)||z.source||'n/a'),
-      'Parcel ID: '+(p.parcelId||cp.parcelId||parcel||'n/a'),'Acreage: '+(acres!=null?acres+' ac':'n/a'),
+      'Parcel ID(s): '+((site.poly&&site.poly.count>1)?site.poly.ids.join(', ')+' ('+site.poly.count+'-parcel assemblage)':(p.parcelId||cp.parcelId||parcel||'n/a')),'Total acreage: '+(acres!=null?acres+' ac':'n/a'),
       'Zoning (confirmed GIS): '+(zCode||'n/a')+(z.description?' — '+z.description:''),
       'Future land use: '+((conf.zoning&&conf.zoning.flu)||p.futureYearLandUse||'n/a'),
       'Improvements: '+(p.structures||cp.structures||'n/a'),
@@ -20238,10 +20302,11 @@ function _propOpen(win, X){
   const street=siteAddr?siteAddr.split(',')[0].trim():(val(p.parcelId,X.parcel)||'Land Offering');
   const fullAddr=siteAddr?`${street}, ${city}, FL${zip?' '+zip:''}`:`${county} County, FL`;
   const projectName=val(deal&&deal.projectName, saved&&saved.projectName, ai.projectName, street);
-  const acres=X.acres, sf=acres!=null?Math.round(acres*43560):null;
+  const acres=X.acres, sf=(site.poly&&site.poly.count>1&&site.poly.sqft)?Math.round(site.poly.sqft):(acres!=null?Math.round(acres*43560):null);
   const zCode=val(X.zCode), zDesc=val(cz&&cz.description,kz.description,z.description);
   const flu=val(kz.flu&&kz.fluDescription?kz.flu+' — '+kz.fluDescription:kz.flu, p.futureYearLandUse);
-  const parcelIds=[].concat(deal&&Array.isArray(deal.parcelRaw)&&deal.parcelRaw.length?deal.parcelRaw:[val(p.parcelId,cp.parcelId,X.parcel)]).filter(Boolean).join(', ');
+  const parcelIds=(site.poly&&site.poly.count>1)?site.poly.ids.join(', '):[].concat(deal&&Array.isArray(deal.parcelRaw)&&deal.parcelRaw.length?deal.parcelRaw:[val(p.parcelId,cp.parcelId,X.parcel)]).filter(Boolean).join(', ');
+  const nParcels=(site.poly&&site.poly.count>1)?site.poly.count:((deal&&Array.isArray(deal.parcelRaw))?deal.parcelRaw.length:1);
   const owner=val(deal&&deal.ownershipEntity, p.owner, cp.owner);
   const bovAI=ai.bov||{};
   const S={  // editable state (panel)
@@ -20303,6 +20368,21 @@ function _propOpen(win, X){
   }
   const noMap='<div class="map nomap">No location — check the address or drop a pin and generate again.</div>';
 
+  // The sign shows THIS advisor and THIS property (Ryan, 2026-11-19): text drawn over a blanked
+  // sign graphic, so the name, phone, extension and acreage are always exact.
+  const nameParts=String((bio&&bio.name)||advName.split(',')[0]).trim().split(/\s+/);
+  const desig=(bio&&bio.designationsStr)||((advName.split(',').slice(1).join(',')||'').trim());
+  const signLines=(nameParts.length>2?[nameParts.slice(0,-1).join(' '), nameParts.slice(-1)[0]]:nameParts).concat(desig?[desig]:[]);
+  const acSign = acres!=null ? (acres>=100?Math.round(acres).toLocaleString():acres>=10?(Math.round(acres*10)/10).toString():acres>=1?(Math.round(acres*10)/10).toString():acres.toFixed(2)) : '';
+  const signPhone=String((bio&&(bio.cell||bio.directLine))||'813-287-8787').replace(/\./g,'-').replace(/\s*x\s*/i,' x');
+  const signExt=bio&&bio.ext?String(bio.ext).replace(/\D/g,''):'';
+  const signHtml=`<div class="sign"><img src="${A('prop-sign-base.jpg')}" alt="Eshenbaugh for-sale sign mock-up">
+    <span class="sg-name">${signLines.map(esc).join('<br>')}</span>
+    <span class="sg-ac">${acSign?esc(acSign)+'±<br>Acres':'Acres'}</span>
+    <span class="sg-ph">${esc(signPhone.replace(/ x.*$/,''))}</span>
+    <span class="sg-rph">813-287-8787${signExt?'x'+esc(signExt):''}</span>
+    <span class="sg-rac">${acSign?esc(acSign)+' ACRES':''}</span></div>`;
+
   // site facts for the location/market page
   const R1=site.rings&&site.rings.oneMile, R3=site.rings&&site.rings.threeMile, R5=site.rings&&site.rings.fiveMile;
   const floodZones=Array.isArray(site.flood)?[...new Set(site.flood.map(f=>f.FLD_ZONE))]:Array.isArray(conf.fema)?[...new Set(conf.fema.map(f=>f.FLD_ZONE))]:[];
@@ -20311,8 +20391,8 @@ function _propOpen(win, X){
 
   // ── pages ── (data-sec = TOC title; pages can hide themselves, then TOC + page pills renumber)
   const runner=`${esc(projectName.toUpperCase())} // ${esc(fullAddr.toUpperCase())}`;
-  const sheet=(id,title,body,opt)=>{ opt=opt||{}; return `<section class="sheet${opt.cls?' '+opt.cls:''}" id="pg-${id}" data-sec="${esc(opt.toc||title)}"><div class="band"></div>
-    ${title?`<h1 class="ttl">${title}</h1>`:''}<div class="bd"${opt.nofit?' data-nofit':''}>${body}</div>
+  const sheet=(id,title,body,opt)=>{ opt=opt||{}; const grp=['desc','aerial','market','photos'].includes(id)?'Appendix — Property Details':'The Proposal'; return `<section class="sheet${opt.cls?' '+opt.cls:''}" id="pg-${id}" data-sec="${esc(opt.toc||title)}" data-grp="${grp}"><div class="band"></div>
+    ${title?`<h1 class="ttl">${title}</h1>`:''}<div class="bd"${opt.nofit?' data-nofit':''}${opt.grow?' data-grow="'+opt.grow+'"':''}>${body}</div>
     <footer class="ft"><span class="pn"></span><span class="run">${runner}</span><span class="rule"></span><img class="flogo" src="${LOGO}" alt="Eshenbaugh Land Company"></footer></section>`; };
   const sec=t=>`<div class="sec">${t}</div>`;
 
@@ -20323,21 +20403,39 @@ function _propOpen(win, X){
   const pToc=sheet('toc','Table of Contents',`<div class="toc"><div class="toc-h">Contents</div><div id="tocList"></div></div>`,{toc:'Table of Contents'});
   const fiveE=[['Ethics','The integrity of our conduct matters.','Integrity is at the heart of everything we do. Our entire team adheres to the National Association of Realtors Code of Ethics with unwavering dedication. Every advisor at Eshenbaugh Land Company completes ethics training every two years and we take immense pride in our spotless ethical record. This commitment ensures that our clients can trust us to handle their transactions with honesty, transparency, and respect.'],
     ['Education','We are lifelong learners.',"We believe that knowledge is power, and we invest heavily in our advisors' education to stay at the forefront of the industry. Our team includes Accredited Land Consultants (ALC), Certified Commercial Investment Members (CCIM), licensed Florida Appraisers, real estate developers, prior national home builders, professionals who have majored in real estate, and masters' degrees in agricultural business. This depth of knowledge allows us to navigate complex transactions and provide our clients with the informed guidance they need."],
-    ['Experience','$2.5 billion in transactions since 1992.','With over one billion dollars in land sales over the last five years alone, our track record speaks for itself. The average advisor at Eshenbaugh Land Company brings over 10 years of brokerage and development experience to the table, so our clients benefit from seasoned professionals who anticipate challenges, craft innovative solutions, and close deals efficiently.'],
+    ['Experience','Over $3 billion in transactions since 1992.','With over one billion dollars in land sales over the last five years alone, our track record speaks for itself. The average advisor at Eshenbaugh Land Company brings over 10 years of brokerage and development experience to the table, so our clients benefit from seasoned professionals who anticipate challenges, craft innovative solutions, and close deals efficiently.'],
     ['Engaged','Rooted in the community. Driven to make it better.','Our advisors are not just participants in the market — they strive to be leaders. Our team serves in leadership roles and on the boards of the Realtors Land Institute Florida Chapter, Real Estate Investment Councils, NAIOP, the Florida Gulf Coast Commercial Association of Realtors, the Builders Association and the Florida CCIM Chapter. This engagement keeps us at the pulse of the industry and lets us advocate for our clients at the highest levels.'],
     ['Enthusiasm','We are passionate about what we do.','At Eshenbaugh Land Company, we love what we do. That passion drives us to go above and beyond for our clients. We are enthusiastic about every deal, no matter the size, and we bring that energy to every interaction — it fuels our commitment to getting deals done and achieving the best possible outcome.']];
   const p5E=sheet('5es','',`<div style="text-align:center"><img src="${A('prop-5es.png')}" alt="Eshenbaugh 5 E's Core Values" style="height:.5in"></div>
     <p class="intro">Our commitment to excellence is embodied in our core values. These principles guide every aspect of our work, ensuring that we provide our clients with the highest level of service and expertise.</p>
     <div class="fivee">${fiveE.map(([h,s,t],i)=>`<div><h3>${h}</h3><b>${s}</b>${ed('5e.'+i,t,'p','sm')}</div>`).join('')}</div>`,{toc:"The Five E's"});
+  // Bio page = everything on the advisor's 👤 Bio (Ryan, 2026-11-19: "pull the full bio and education
+  // so the page doesn't look blank") + their closed sales from Terra, like the examples' track record.
+  const advUid=bio&&bio.uid;
+  const allPool=[...new Map([].concat(typeof allDealsCompany!=='undefined'?allDealsCompany:[], typeof allDeals!=='undefined'?allDeals:[]).filter(x=>x&&x.id).map(x=>[x.id,x])).values()];
+  const wonSt=x=>{ const st=(typeof STAGE_ALIAS!=='undefined'&&STAGE_ALIAS[x.stage])||x.stage||''; return typeof isWonStage==='function'?isWonStage(st):/closed won|sold/i.test(st); };
+  const soldPrice=x=>Number(x.purchasePrice||x.contractPrice||0)||0;
+  const soldTs=x=>{ try{ if(typeof _elcSoldTs==='function') return _elcSoldTs(x); }catch(_){} const t=Date.parse(String(x.closeDate||'').slice(0,10)); return isNaN(t)?(x.updatedAt||0):t; };
+  const advSales=advUid?allPool.filter(x=>wonSt(x)&&x.dealType!=='lease'&&soldPrice(x)>0&&(x.advisorUid===advUid||(x.coAdvisorUids||[]).includes(advUid)||(x.coAdvisors||[]).some(c=>c&&c.uid===advUid))).sort((a,b)=>soldTs(b)-soldTs(a)):[];
+  const advVol=advSales.reduce((t,x)=>t+soldPrice(x),0);
+  const saleName=x=>val(x.projectName)||String(x.propertyAddress||'').split(',')[0]||'Land sale';
+  const desigList=(bio&&Array.isArray(bio.designations)?bio.designations:[]);
+  const DESIG={ALC:'Accredited Land Consultant',CCIM:'Certified Commercial Investment Member',MAI:'Member, Appraisal Institute',SIOR:'Society of Industrial and Office Realtors',CPA:'Certified Public Accountant',MBA:'Master of Business Administration',JD:'Juris Doctor',CRE:'Counselor of Real Estate',CPM:'Certified Property Manager',GRI:'Graduate, Realtor Institute'};
+  const bioParas=(advBio||`${advName} is ${/^[AEIOU]/i.test(advTitle)?'an':'a'} ${advTitle} with Eshenbaugh Land Company, advising owners, developers and investors on the acquisition and disposition of land across Florida.`).split(/\n+/).map(x=>x.trim()).filter(Boolean);
   const pBio=sheet('bio',esc((bio&&bio.name)||advName.split(',')[0])+' Bio',`<div class="biog">
-    <div class="bio-l">${advPhoto?`<img src="${esc(advPhoto)}" alt="">`:''}<b>${esc(advName.toUpperCase())}</b><br><span class="red">${esc(advTitle)}</span>
-      <div class="bio-c">${esc(advLoc)}<br>T ${esc(advDirect)}${advCell?'<br>C '+esc(advCell):''}<br>${esc(advEmail)}</div></div>
-    <div>${sec('Professional Background')}${ed('bio.text',advBio||`${advName} is an advisor with Eshenbaugh Land Company, specializing in the acquisition, disposition and development advisory of land across Florida.`,'div','body bio-t')}
-      ${advEdu?sec('Education')+`<p class="body">${esc(advEdu)}</p>`:''}${advMembers?sec('Memberships &amp; Accolades')+`<p class="body">${esc(advMembers)}</p>`:''}</div></div>`,{toc:'Advisor Bio'});
+    <div class="bio-l">${advPhoto?`<img src="${esc(advPhoto)}" alt="${esc(advName)}">`:''}<b>${esc(advName.toUpperCase())}</b><br><span class="red">${esc(advTitle)}</span>
+      <div class="bio-c">${esc(advLoc)}<br>T ${esc(advDirect)}${advCell?'<br>C '+esc(advCell):''}<br>${esc(advEmail)}${bio&&val(bio.linkedin)?'<br>'+esc(String(bio.linkedin).replace(/^https?:\/\/(www\.)?/,'')):''}</div>
+      ${desigList.length?`<div class="bio-d">${desigList.map(dg=>`<div><b>${esc(dg)}</b>${DESIG[String(dg).toUpperCase()]?' — '+esc(DESIG[String(dg).toUpperCase()]):''}</div>`).join('')}</div>`:''}</div>
+    <div>${sec('Professional Background')}<div data-k="bio.text" contenteditable="true" spellcheck="true" class="body bio-t">${esc(E['bio.text']!=null?E['bio.text']:bioParas.join('\n\n'))}</div>
+      <div class="g2 tight">${advEdu?`<div>${sec('Education')}<p class="body bio-t">${esc(advEdu)}</p></div>`:''}${advMembers?`<div>${sec('Memberships &amp; Accolades')}${/[;\n•]/.test(advMembers)?`<ul class="dots sm">${advMembers.split(/[;\n•]+/).map(x=>x.trim()).filter(Boolean).map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`:`<p class="body bio-t">${esc(advMembers)}</p>`}</div>`:''}</div>
+      ${advSales.length?`${sec('Recent Closed Transactions')}<table class="tbl"><thead><tr><th>Property</th><th>County</th><th class="r">Acres</th><th class="r">Price</th><th class="r">Closed</th></tr></thead><tbody>
+        ${advSales.slice(0,6).map(x=>{ const t=soldTs(x); return `<tr><td>${esc(saleName(x))}</td><td>${esc(val(x.county)||'')}</td><td class="r">${val(x.acreage,x.acres)?esc(String(val(x.acreage,x.acres))):'—'}</td><td class="r">${money(soldPrice(x))}</td><td class="r">${t?new Date(t).getFullYear():''}</td></tr>`; }).join('')}
+      </tbody></table><div class="note">${advSales.length} closed sale${advSales.length>1?'s':''} · ${money(advVol)} in Terra records.</div>`:''}
+    </div></div>`,{toc:'Advisor Bio'});
   const pDesc=sheet('desc','Property Description',`<div class="g64"><div>
       ${sec('Property Description')}${ed('desc.prop',val(ai.propertyDescription)||`${street} is a ${acres!=null?acres+'± acre':''} site in ${city}, zoned ${zCode||'—'}${zDesc?' ('+zDesc+')':''}.`)}
       ${sec('Location Description')}${ed('desc.loc',val(ai.locationDescription)||`The property is located at ${fullAddr}.`)}
-      <div class="g2 tight"><div>${sec('Municipality')}<p class="body">${esc(juris)}</p>${sec('Property Size')}<p class="body">${acres!=null?esc(acres+'± Acres'):'—'}${sf?` <span class="mut">(≈${sf.toLocaleString()} SF)</span>`:''}</p>
+      <div class="g2 tight"><div>${sec('Municipality')}<p class="body">${esc(juris)}</p>${sec('Property Size')}<p class="body">${acres!=null?esc(acres+'± Acres'):'—'}${sf?` <span class="mut">(≈${sf.toLocaleString()} SF${nParcels>1?' · '+nParcels+' parcels':''})</span>`:''}</p>
         ${sec('Zoning')}<p class="body">${esc((zCode||'—')+(zDesc?' – '+zDesc:''))}</p>${flu?sec('Future Land Use')+`<p class="body">${esc(flu)}</p>`:''}</div>
         <div>${sec('Parcel ID')}<p class="body">${esc(parcelIds||'—')}</p>${owner?sec('Property Owner')+`<p class="body">${esc(owner)}</p>`:''}
         ${sec('Broker Opinion of Value')}<p class="body"><b data-b="value">—</b></p><div data-show="ask">${sec('Suggested Asking Price')}<p class="body"><b data-b="ask">—</b></p></div></div></div>
@@ -20380,7 +20478,7 @@ function _propOpen(win, X){
   const pNet=sheet('net','Internet Marketing',`<p class="intro l">Our goal is to position your property for a timely sale at maximum value. We deploy a comprehensive plan built for immediate, far-reaching exposure — targeted, data-driven digital campaigns and search optimization across the most-trafficked commercial real estate platforms. We invest more than $200,000 a year in marketing and technology; if you prefer the property not appear on certain platforms, we tailor the plan to your preferences.</p>
     <img src="${A('prop-platforms.jpg')}" alt="Listing platforms" style="width:86%;display:block;margin:.15in auto 0">`);
   const pSign=sheet('sign','Signage &amp; Technology',`<div class="g2"><div><p class="body">We believe in signage and technology. Our typical sign is a custom 4' × 8' with black posts; for larger parcels with highway frontage we can use a custom 40' banner on a container. If you prefer no signage on your site, we're happy to forgo it.</p>
-      <img src="${A('prop-sign.jpg')}" alt="Eshenbaugh sign" style="width:100%;margin-top:.1in"></div>
+      ${signHtml}</div>
     <div>${sec('Property-Specific Extensions &amp; QR Codes')}<p class="body">Each sign carries a QR code and a property-specific extension so prospects get real-time information while they are looking at the site.</p>
       ${sec('Automated Text Response')}<p class="body">A call or text to the sign extension gets an immediate reply with the property details and a link to its website; we track that data and follow up with every lead.</p>
       ${sec('Email &amp; Automation')}<p class="body">We place a sign and post online, then target asset-specific buyer groups in our database of more than 17,000 contacts, followed by phone calls and texts so key prospects see your property.</p></div></div>`);
@@ -20390,14 +20488,35 @@ function _propOpen(win, X){
     <div><h3 class="feeh">The success fee for human and technical resources shall be:</h3>
       <ul class="dots"><li><b data-b="fee">—</b> for a sale by Eshenbaugh Land Company.</li><li>We propose an EXCLUSIVE LISTING through <b data-b="term">—</b> from the signed listing agreement.</li></ul>
       ${ed('fee.note','','p','body sm feenote')}</div></div>`);
-  const pThanks=sheet('thanks','Thank You For Your Partnership',`<div class="g2"><div>
+  const pThanks=sheet('thanks','Thank You &amp; Next Steps',`<div class="g2"><div>
       ${ed('thanks.1','We want to say Thank You for the opportunity to provide a disposition strategy for your property. This asset will appeal to a variety of local, regional, and national developers and investors, all of whom are active in the Florida marketplace. It would be our distinct pleasure and honor to be the firm selected to market this property on your behalf.','p','body big')}
       ${ed('thanks.2','We have a strong desire to work with you in monetizing your land asset in the near term. From the start of a project through the sale, we take pride in our comprehensive approach to both understanding the market and evaluating the land asset to achieve optimal results for our clients.','p','body big')}
+      <div class="lab" style="margin-top:.15in">Next Steps</div><ol class="steps"><li>Review our opinion of value and marketing plan — we're glad to walk through it with you.</li><li>Sign the exclusive listing agreement.</li><li>We photograph the site, build the property website and launch marketing.</li><li>You get a written report every month until closing.</li></ol>
       <p class="ready">We’re Ready To Make a Great Land Deal Happen For You</p>
       <p class="body" style="margin-top:.2in"><b>${esc(advName)}</b><br>${esc(advTitle)} · ${esc(advDirect)} · ${esc(advEmail)}</p></div>
     <div class="thanks-img">${mSmall||''}</div></div>`);
 
-  const pages=[pCover,pToc,p5E,pBio,pDesc,pBov,pAerial,pMarket,pPhotos,pExp,pEng,pMkt,pNet,pSign,pFee,pThanks].join('\n');
+  // Seller-first order (Ryan, 2026-11-19): what is it worth → how will you sell it → what will it
+  // cost me → who are you and why hire you. Property details the owner already knows go to the back.
+  const pGlance=sheet('glance','At a Glance',`<div class="ag">
+    <div><h3>What it's worth</h3><div class="big" data-b="value">—</div><div class="sub">Range <b data-b="range">—</b> · <span data-b="pac">—</span> per acre · <span data-b="psf">—</span> per SF</div>
+      <div class="sub" data-show="ask" style="margin-top:.2em">Suggested asking price <b data-b="ask">—</b></div></div>
+    <div><h3>What it costs you</h3><div class="big"><span data-b="fee">—</span> <span style="font-size:.45em;font-weight:400">of the sale price</span></div>
+      <div class="sub">Paid only at closing — if it doesn't sell, you owe nothing. At our opinion of value that is <b data-b="feeAmt">—</b>. Exclusive listing for <span data-b="term">—</span>.</div></div>
+    <div><h3>How we'll sell it</h3><ul>
+      <li>Direct outreach to the targeted buyers in our 17,000+ contact database</li>
+      <li>Listed on CREXi, LoopNet, CoStar, Land.com and the other major land platforms</li>
+      <li>A dedicated property website and an NDA-tracked virtual data room</li>
+      <li>On-site sign with QR code and instant text response</li>
+      <li>A written report every month on interest, activity and feedback</li></ul></div>
+    <div><h3>Who we are</h3><ul>
+      <li>Over $3 billion in Florida land sales since 1992</li>
+      <li>3-time National Commercial Land Broker of the Year (Realtors Land Institute)</li>
+      <li>Accredited Land Consultants, CCIMs and licensed appraisers on the team</li>
+      <li>Your advisor: <b>${esc(advName)}</b>, ${esc(advTitle)} · ${esc(advDirect)}</li></ul></div>
+  </div>`,{toc:'At a Glance', grow:1.45});
+  const appendix=['desc','aerial','market','photos'];
+  const pages=[pCover,pGlance,pToc,pBov,pMkt,pNet,pSign,pFee,p5E,pExp,pBio,pEng,pThanks,pDesc,pAerial,pMarket,pPhotos].join('\n');
   const state=JSON.stringify({S, cardPhotos:cardPhotoSet}).replace(/</g,'\\u003c').replace(/[\u2028\u2029]/g,' ');
 
   const html=`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Proposal — ${esc(projectName)}</title>
@@ -20451,7 +20570,7 @@ body{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:${INK}}
 .lab{font:600 .86em 'Crimson Text',Georgia,serif;letter-spacing:.3em;text-transform:uppercase;color:${RED};margin:.2em 0 .45em}
 .intro{font:400 1.05em/1.5 'Crimson Text',Georgia,serif;text-align:center;max-width:8in;margin:.1in auto .14in}.intro.l{text-align:left;max-width:none;margin:0 0 .14in;font-size:1.15em}
 .fivee{display:grid;grid-template-columns:repeat(5,1fr);gap:.16in}.fivee h3{font:600 1.5em 'Crimson Text',Georgia,serif;color:${RED}}.fivee b{display:block;font:700 .9em 'Crimson Text',Georgia,serif;margin:.1em 0 .35em}
-.biog{display:grid;grid-template-columns:2.3in 1fr;gap:.35in}.bio-l img{width:1.9in;height:2.25in;object-fit:cover;display:block;margin-bottom:.12in}.bio-l b{font-size:1.05em}.bio-c{margin-top:.15in;font-size:.9em;line-height:1.55;color:#444}.bio-t{white-space:pre-wrap}
+.biog{display:grid;grid-template-columns:2.3in 1fr;gap:.35in}.bio-l img{width:1.9in;height:2.25in;object-fit:cover;display:block;margin-bottom:.12in}.bio-l b{font-size:1.05em}.bio-c{margin-top:.15in;font-size:.9em;line-height:1.55;color:#444}.bio-t{white-space:pre-wrap}.bio-d{margin-top:.14in;border-top:2px solid ${RED};padding-top:.06in;font-size:.85em;line-height:1.45}.bio-d b{color:${RED}}
 .facts{margin-top:.12in;border-top:2px solid ${RED}}.facts div{display:flex;justify-content:space-between;gap:1em;padding:.32em 0;border-bottom:1px solid #ddd;font-family:'Crimson Text',Georgia,serif;font-size:1.05em}.facts span{color:#555}
 .stats{display:grid;grid-template-columns:repeat(4,1fr);border-top:2px solid ${RED};border-bottom:1px solid #ccc;margin-bottom:.2in}
 .stats>div{padding:.55em .7em;border-right:1px solid #ccc}.stats>div:last-child{border-right:0}
@@ -20472,6 +20591,23 @@ body{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:${INK}}
 .feeh{font:600 1.45em 'Crimson Text',Georgia,serif;color:${RED};margin-bottom:.3em}.feeg{min-height:5.5in}
 .ready{font:600 1.35em 'Crimson Text',Georgia,serif;color:${RED};margin-top:.2in}
 .thanks-img .map{height:5in;aspect-ratio:auto!important}
+.sign{position:relative;width:100%;container-type:inline-size;margin-top:.1in}.sign img{width:100%;display:block}
+.sign span{position:absolute;display:flex;align-items:center;justify-content:center;text-align:center;line-height:1.02;white-space:nowrap}
+.sg-name{left:77.4%;top:.4%;width:20.3%;height:24.8%;color:#fff;font:600 4.2cqw/1.02 'Crimson Text',Georgia,serif}
+.sg-ac{left:77.4%;top:26.8%;width:20.3%;height:24%;color:#fff;font:800 5.6cqw/1 Arial,Helvetica,sans-serif}
+.sg-ph{left:1.7%;top:33.6%;width:74.4%;height:10%;color:#D31E2D;font:900 8cqw/1 'Arial Black',Arial,sans-serif;letter-spacing:.02em}
+.sg-rph{left:1.7%;top:71.6%;width:74.1%;height:12.4%;color:#D31E2D;font:900 7.3cqw/1 'Arial Black',Arial,sans-serif}
+.sg-rac{left:1.7%;top:86.2%;width:37.4%;height:8%;color:#fff;font:400 5.6cqw/1 'Crimson Text',Georgia,serif;justify-content:flex-start!important;padding-left:2.4%}
+.ag{display:grid;grid-template-columns:1fr 1fr;gap:.2in .3in}
+.ag>div{border-top:3px solid ${RED};padding-top:.08in}
+.ag h3{font:600 .82em 'Crimson Text',Georgia,serif;letter-spacing:.3em;text-transform:uppercase;color:${RED};margin-bottom:.12em}
+.ag .big{font:600 2.6em/1 'Crimson Text',Georgia,serif;color:${INK};margin:.05em 0 .12em}
+.ag .sub{font:400 1.08em/1.4 'Crimson Text',Georgia,serif;color:#444}
+.ag ul{list-style:none}.ag li{position:relative;padding:.18em 0 .18em 1.1em;font:400 1.08em/1.35 'Crimson Text',Georgia,serif}
+.ag li:before{content:'';position:absolute;left:0;top:.62em;width:.45em;height:.45em;border-radius:50%;background:${RED}}
+.toc-g{font:600 .85em 'Crimson Text',Georgia,serif;letter-spacing:.3em;text-transform:uppercase;color:${RED};margin:.6em 0 .1em}
+.steps{counter-reset:s;list-style:none;margin-top:.1in}.steps li{counter-increment:s;position:relative;padding:.3em 0 .3em 2em;font:400 1.15em/1.4 'Crimson Text',Georgia,serif}
+.steps li:before{content:counter(s);position:absolute;left:0;top:.25em;width:1.4em;height:1.4em;border-radius:50%;background:${RED};color:#fff;font:700 .8em/1.75em Helvetica,Arial;text-align:center}
 .cover{padding:0;background:#fff url(${TOPO}) center bottom/cover no-repeat}
 .cv-top{height:1.62in;background:url(${BANDC}) center/cover;border-bottom:6px solid ${TEAL};display:flex;align-items:center;padding:0 .55in}
 .cv-top h1{font:600 28pt 'Crimson Text',Georgia,serif;color:#fff}
@@ -20516,6 +20652,7 @@ body{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:${INK}}
     setB('psf', (S.bovValue>0&&S.sqft>0)? '$'+(S.bovValue/S.sqft).toFixed(S.bovValue/S.sqft<10?2:0) : '—');
     setB('pac', (S.bovValue>0&&S.acres>0)? short(S.bovValue/S.acres) : '—');
     setB('fee', (S.feePct>0? (+S.feePct).toString().replace(/\\.0+$/,'')+'%':'—'));
+    setB('feeAmt', (S.feePct>0&&S.bovValue>0)? m(S.bovValue*S.feePct/100) : '—');
     var t=+S.termMonths||0; setB('term', t? (t===12?'twelve months':t===6?'six months':t===18?'eighteen months':t===24?'twenty-four months':t+' months'):'—');
     document.querySelectorAll('[data-show="ask"]').forEach(function(e){ e.style.display=S.askPrice>0?'':'none'; });
     var b=$('bovText'); b.innerHTML=''; String(S.bovText||'').split(/\\n\\s*\\n/).map(function(x){return x.trim();}).filter(Boolean).forEach(function(x){ var p=document.createElement('p'); p.textContent=x; b.appendChild(p); });
@@ -20540,11 +20677,12 @@ body{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:${INK}}
   }
   function toc(){
     var n=0, rows=[];
-    document.querySelectorAll('.sheet').forEach(function(s){ if(s.classList.contains('off')) return; n++; var pn=s.querySelector('.pn'); if(pn) pn.textContent=n; rows.push([s.getAttribute('data-sec'),n]); });
-    $('tocList').innerHTML=rows.map(function(r){ return '<div class="toc-r"><span>'+r[0]+'</span><span>'+r[1]+'</span></div>'; }).join('');
+    document.querySelectorAll('.sheet').forEach(function(s){ if(s.classList.contains('off')) return; n++; var pn=s.querySelector('.pn'); if(pn) pn.textContent=n; if(s.id!=='pg-cover'&&s.id!=='pg-toc') rows.push([s.getAttribute('data-sec'),n,s.getAttribute('data-grp')]); });
+    var g='', html=''; rows.forEach(function(r){ if(r[2]&&r[2]!==g){ g=r[2]; html+='<div class="toc-g">'+g+'</div>'; } html+='<div class="toc-r"><span>'+r[0]+'</span><span>'+r[1]+'</span></div>'; });
+    $('tocList').innerHTML=html;
   }
   function fit(){
-    document.querySelectorAll('.bd:not([data-nofit])').forEach(function(b){ var k=1.12; b.style.setProperty('--k',k);
+    document.querySelectorAll('.bd:not([data-nofit])').forEach(function(b){ var k=parseFloat(b.getAttribute('data-grow'))||1.12; b.style.setProperty('--k',k);
       for(var i=0;i<60&&b.scrollHeight>b.clientHeight+1&&k>0.6;i++){ k-=0.02; b.style.setProperty('--k',k.toFixed(3)); } });
     document.querySelectorAll('.bd[data-nofit]').forEach(function(b){ var ms=b.querySelectorAll('.map'), w=100; ms.forEach(function(x){x.style.width='';});
       while(b.scrollHeight>b.clientHeight+1&&w>50){ w-=2; ms.forEach(function(x){ x.style.width=w+'%'; x.style.margin='0 auto'; }); } });
