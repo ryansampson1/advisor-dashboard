@@ -5166,7 +5166,7 @@ function _mwCardHtml(d){
     <div class="mw-actions" role="group" aria-label="MapWise lookups">
       <button type="button" class="mw-btn" data-mw-action="nearby" ${hasPt?'':'disabled'} title="Recorded land sales ≥ $10,000 within ${cfg.nearbyRadiusMiles||1} mi, last ${cfg.nearbyMonths||24} months">📍 Nearby land sales ${cost('≈ $0.06 / record, max '+(cfg.nearbyLimit||25))}</button>
       <button type="button" class="mw-btn" data-mw-action="holdings" ${hasOwner?'':'disabled'} title="Every other Florida parcel under this owner name">🧑‍🌾 Owner's other holdings ${cost('≈ $0.06 / record, max '+(cfg.holdingsLimit||25))}</button>
-      <button type="button" class="mw-btn" data-mw-action="report" ${hasParcel?'':'disabled'} title="MapWise PDF property report (owner, valuation, buildings, sales)">📄 PDF property report ${cost('$1.00')}</button>
+      <!-- NOMWPDF-20261119 — 📄 $1.00 MapWise PDF report button removed (Ryan: no PDF, no $1 charges) -->
     </div>
     <div id="mw-nearby"></div>
     <div id="mw-holdings"></div>
@@ -5193,14 +5193,16 @@ async function _mwAutoLoad(d){
       rec=_mwRecords(out.data)[0];
     }
     // The roll's PARCEL_ID normally matches MapWise pin2; when it doesn't, resolve by point and retry by MapWise's own PIN.
+    // MW1REC-20261119 (Ryan: "each parcel search should only use one record") — on a PIN miss, ONE point lookup and stop;
+    // no second get_parcel_detail call. The point record carries the latest sale, not the full history.
+    let pointOnly=false;
     if(!rec && d.lat && d.lon){
-      const at=await _mwCall('get_parcel', _MW_ARGS.parcelAtPoint(d));
-      const found=_mwRecords(at.data)[0]; const pin=found&&_mwPick(found,'identifiers.pin','pin');
-      if(pin){ out=await _mwCall('get_parcel_detail', {pin, county:_mwCounty(_mwPick(found,'meta.county','county')||d.county), outputRaw:true, includeHazards:true}); rec=_mwRecords(out.data)[0]; }
+      out=await _mwCall('get_parcel', _MW_ARGS.parcelAtPoint(d));
+      rec=_mwRecords(out.data)[0]; pointOnly=!!rec;
     }
     if(!rec){ el.innerHTML=`<div class="mw-note">MapWise has no record for this parcel.</div>`; return; }
     d._mwPin=_mwPick(rec,'identifiers.pin')||d.parcel.parcelId; d._mwCounty=_mwPick(rec,'meta.county');
-    el.innerHTML=_mwRenderDetail(rec, out.cached)+(out.cached?`<div class="mw-note">Served from Terra’s ${_MW().cacheDays||30}-day cache — not billed.</div>`:'');
+    el.innerHTML=_mwRenderDetail(rec, out.cached)+(pointOnly?`<div class="mw-note">Matched by location (one record) — shows the latest sale; full sale history needs the county PIN.</div>`:'')+(out.cached?`<div class="mw-note">Served from Terra’s ${_MW().cacheDays||30}-day cache — not billed.</div>`:'');
   }catch(e){ console.warn('[mapwise] detail',e); _mwErr(el,e,'detail'); }
 }
 
@@ -5209,7 +5211,8 @@ async function _mwAction(action, btn){
   const map={nearby:'mw-nearby', 'nearby-all':'mw-nearby', holdings:'mw-holdings', report:'mw-report', detail:'mw-detail'};
   const el=document.getElementById(map[action]); if(!el) return;
   if(action==='detail'){ el.innerHTML=`<div class="mw-note"><span class="mw-spin">⏳</span> Pulling sales history from MapWise…</div>`; return _mwAutoLoad(d); }
-  if(action==='report'){
+  if(action==='report'){ return; } /* NOMWPDF-20261119 — PDF report disabled; worker refuses it too */
+  if(false){
     const ok = typeof elcConfirm==='function'
       ? await elcConfirm('Generate a MapWise PDF property report for this parcel? This bills $1.00 to ELC’s MapWise account.', {okLabel:'Generate ($1.00)', title:'MapWise PDF report', icon:'📄', danger:false})
       : confirm('Generate the MapWise PDF property report? Bills $1.00.');
@@ -5225,7 +5228,7 @@ async function _mwAction(action, btn){
     } else if(action==='holdings'){
       const out=await _mwCall('find_owner_holdings', _MW_ARGS.ownerHoldings(d));
       el.innerHTML=_mwRenderHoldings(out.data, out.cached, d.parcel.owner);
-    } else if(action==='report'){
+    } else if(false && action==='report'){   // NOMWPDF-20261119 — never called
       const args=_MW_ARGS.report(d,'property'); if(d._mwPin) args.pin=d._mwPin; if(d._mwCounty) args.county=d._mwCounty;
       const out=await _mwCall('generate_parcel_report', args, {confirmCost:true, noCache:true});
       const data=out.data; let link=null, rid=null;
