@@ -11763,18 +11763,24 @@ function _elcSalesVolSection(advisors){
   const uids = new Set((advisors||[]).map(a=>a.uid));
   const rows = (advisors||[]).map(a=>({adv:a, ...(sv.by.get(a.uid)||{vol:0,sales:0,deals:[]})}))
     .sort((a,b)=>b.vol-a.vol || b.deals.length-a.deals.length || String(a.adv.name||'').localeCompare(String(b.adv.name||'')));   // SALESVOLALL-20261119
-  const shownTotal = rows.reduce((s,r)=>s+r.vol,0);
+  // SVCOTOTAL-20261119 — the header total is the COMPANY total: every closed sale this year, including
+  // advisors who aren't ranked (departed, deactivated, unlisted). Office pick → that office's share of
+  // every sale (by each advisor's profile office); Both → the sum of every sale price.
+  const _svOfficeOf = uid => String((allProfiles||{})[uid]?.office||'').trim();
+  let shownTotal = 0;
+  if(_svSel==='both') shownTotal = sv.total;
+  else sv.by.forEach((r,uid)=>{ if(_svOfficeOf(uid)===_svSel) shownTotal += r.vol; });
   const max = Math.max(...rows.map(r=>r.vol), 1);
   const medals = ['🥇','🥈','🥉'];
   const fmtN = n => (Math.round(n*10)/10).toLocaleString('en-US',{maximumFractionDigits:1});
   const fmtD = ts => new Date(ts).toLocaleDateString('en-US',{month:'short',day:'numeric'});
-  const missing = sv.noPrice.filter(d=>[...(_elcDealSplitPcts(d).keys())].some(u=>uids.has(u)));
+  const missing = sv.noPrice.filter(d=>_svSel==='both' || [...(_elcDealSplitPcts(d).keys())].some(u=>_svOfficeOf(u)===_svSel));   // SVCOTOTAL-20261119
   return `
     <div class="bg-white rounded-2xl border overflow-hidden mb-6" data-salesvol="SALESVOL-20261119">
       <div class="px-5 py-3.5 border-b bg-gray-50 flex items-center gap-3 flex-wrap">
         <span class="font-bold text-gray-800 text-sm">🏆 ${year} Sales Volume${_svSel!=='both'?` — ${esc(_svSel)}`:''}</span>
         <span class="text-xs text-gray-500">Closed sale price, Jan 1 – today · deals with more than one advisor split by each advisor's % of the deal · resets Jan 1</span>
-        <span class="ml-auto text-sm font-bold text-gray-800">Total: ${fmt$(shownTotal)}</span>
+        <span class="ml-auto text-sm font-bold text-gray-800">${_svSel==='both'?'Company':esc(_svSel)} Total: ${fmt$(shownTotal)}</span>
       </div>
       ${_svBar}
       <div class="overflow-x-auto">
