@@ -1479,6 +1479,9 @@ html.dark ::-webkit-scrollbar-thumb { background: #3D444F; }
 html.dark ::-webkit-scrollbar-track { background: transparent; }
 html.dark #prop-detail-drawer { background: var(--surface); }
 html.dark #pdw-om-btn { background: rgba(0,178,169,.16) !important; color: #5eead4 !important; }   /* OMCARD-20261119 */
+html.dark #pdw-prop-btn { background: rgba(227,38,47,.18) !important; color: #fda4a8 !important; }   /* PROPGEN-20261119 */
+#pdw-prop-btn:focus-visible, #val-prop-btn:focus-visible { outline: 3px solid #00B2A9; outline-offset: 2px; }
+@media (pointer:coarse){ #pdw-prop-btn { min-height: 44px; } }
 #pdw-om-btn:focus-visible { outline: 3px solid #00B2A9; outline-offset: 2px; }
 @media (pointer:coarse){ #pdw-om-btn { min-height: 44px; } }
 html.dark .stage-pip { background: #262B34; color: #CFD4DC; }
@@ -1926,6 +1929,7 @@ html.dark .mw-pre{background:rgba(255,255,255,.04);color:var(--text-2,#d1d5db)}
     </div>
     <div style="display:flex;align-items:center;gap:.5rem;flex-shrink:0">
       <button id="pdw-ext-btn" onclick="" style="background:#eff6ff;border:none;border-radius:8px;padding:.4rem .8rem;font-size:.8rem;font-weight:600;color:#2563eb;cursor:pointer;display:none">📋 Extension</button>
+      <button id="pdw-prop-btn" type="button" onclick="" title="Build the Broker Opinion of Value &amp; Marketing Proposal for this owner (runs Site Research and fills blank card fields)" style="background:#fdeced;border:none;border-radius:8px;padding:.4rem .8rem;font-size:.8rem;font-weight:600;color:#b3141c;cursor:pointer;white-space:nowrap;display:none">📝 Proposal</button><!-- PROPGEN-20261119 -->
       <button id="pdw-om-btn" type="button" onclick="" title="Run Site Research on this property, fill any blank card fields, and build the Offering Memorandum" style="background:#e6f7f6;border:none;border-radius:8px;padding:.4rem .8rem;font-size:.8rem;font-weight:600;color:#047a72;cursor:pointer;white-space:nowrap">📋 Generate OM</button><!-- OMCARD-20261119 -->
       <button id="pdw-edit-btn" onclick="" style="background:#f3f4f6;border:none;border-radius:8px;padding:.4rem .8rem;font-size:.8rem;font-weight:600;color:#374151;cursor:pointer">✏️ Edit</button>
       <button onclick="requestClosePropertyDetail()" aria-label="Close" title="Close (Esc)" style="background:none;border:none;font-size:1.4rem;color:#6b7280;cursor:pointer;line-height:1;width:2.5rem;height:2.5rem;display:flex;align-items:center;justify-content:center;border-radius:9999px;transition:background .15s,color .15s" onmouseover="this.style.background='#f3f4f6';this.style.color='#111827'" onmouseout="this.style.background='none';this.style.color='#6b7280'">&times;</button>
@@ -17814,6 +17818,7 @@ function viewValuation(){
       <button onclick="_valRun()" id="val-run-btn" style="background:var(--brand-teal,#00B2A9);color:#fff;border:0;border-radius:9px;padding:.48rem 1.2rem;font-size:.88rem;font-weight:700;cursor:pointer;white-space:nowrap;flex:0 0 auto">🔍 Run Research</button>
       <button onclick="_valExportPDF()" id="val-pdf-btn" style="display:none;background:#fff;color:#374151;border:1px solid #d1d5db;border-radius:9px;padding:.48rem 1rem;font-size:.88rem;font-weight:600;cursor:pointer;white-space:nowrap;flex:0 0 auto" title="Export to PDF">📄 Export PDF</button>
       <button onclick="_valGenerateOM()" id="val-om-btn" style="display:none;background:#282A2D;color:#fff;border:0;border-radius:9px;padding:.48rem 1.1rem;font-size:.88rem;font-weight:700;cursor:pointer;white-space:nowrap;flex:0 0 auto" title="Generate Offering Memorandum">📋 Generate OM</button>
+      <button type="button" onclick="_valGenerateProposal()" id="val-prop-btn" style="display:none;background:#E3262F;color:#fff;border:0;border-radius:9px;padding:.48rem 1.1rem;font-size:.88rem;font-weight:700;cursor:pointer;white-space:nowrap;flex:0 0 auto" title="Build a Broker Opinion of Value &amp; Marketing Proposal for the owner">📝 Proposal</button><!-- PROPGEN-20261119 -->
     </div>
 
     <!-- ── Body: map left, results right ──────────────────────── -->
@@ -18715,6 +18720,8 @@ function _valRenderResults(d, pa, inSwfwmd){
   if(pdfBtn) pdfBtn.style.display='';
   const omBtn = document.getElementById('val-om-btn');
   if(omBtn) omBtn.style.display='';
+  const propBtn = document.getElementById('val-prop-btn');   // PROPGEN-20261119
+  if(propBtn) propBtn.style.display='';
   // Store last result for PDF export
   window._valLastResult = d;
 
@@ -19541,20 +19548,13 @@ function _omCardFill(deal, d, conf, county, pt){
   return {patch, labels};
 }
 
-async function _dealGenerateOM(dealId, btn){
-  const pool=[].concat(typeof allDeals!=='undefined'?allDeals:[], typeof allDealsCompany!=='undefined'?allDealsCompany:[]);
-  const deal=pool.find(x=>x&&x.id===dealId);
-  if(!deal){ showToast('Property not found.','error'); return; }
-  if(typeof _dnmGuard==='function' && _dnmGuard(deal,'the Offering Memorandum')) return;
+// Shared by 📋 Generate OM and 📝 Proposal on the card (OMCARD/PROPGEN-20261119): headless Site
+// Research on the card's own address/parcel/county, then fill BLANK card fields (Undo toast).
+// Returns {d, conf, county, parcel} or null when the advisor has to add something first.
+async function _omCardResearch(deal, win){
   const address=(deal.propertyAddress||'').trim();
   const parcel=String(deal.folioNumber||(Array.isArray(deal.parcelRaw)&&deal.parcelRaw[0])||'').trim();
-  if(!address && !parcel){ await elcAlert('Add an address or a parcel ID to this card first, then Generate OM.'); return; }
-  const win=window.open('','_blank','width=1180,height=860');
-  if(!win){ showToast('Pop-up blocked — allow pop-ups to generate OM.','error'); return; }
-  try{ win.document.write(_OM_LOADING); }catch(e){}
-  const restore=(typeof elcBusy==='function' && btn) ? elcBusy(btn,'Researching…') : null;
   const keep={r:window._valLastResult, c:window._valConfirmed, x:window._valCtx};
-  try{
     _omStep(win,'Running Site Research on '+(address||parcel)+'…');
     let county=String(deal.county||'').trim().replace(/\s+county$/i,'');
     let pt=(typeof deal.geoLat==='number' && typeof deal.geoLng==='number' && deal.geoAddr===address && (deal.geoPrecision||'exact')==='exact') ? {lat:deal.geoLat, lon:deal.geoLng} : null;
@@ -19563,7 +19563,7 @@ async function _dealGenerateOM(dealId, btn){
       if(g && g.lat!=null) pt={lat:g.lat, lon:g.lon};
     }
     if(!county && pt && typeof _prCountyAtPoint==='function'){ const c=await _prCountyAtPoint(pt.lat, pt.lon); if(c && c.name) county=String(c.name).replace(/\s+county$/i,''); }
-    if(!county){ try{ win.close(); }catch(e){} await elcAlert('Terra could not tell which county this property is in. Add the county to the card, then Generate OM.'); return; }
+    if(!county){ try{ win.close(); }catch(e){} await elcAlert('Terra could not tell which county this property is in. Add the county to the card, then try again.'); return null; }
 
     let d=null, conf=null;
     try{ d=await _valRun({silent:true, county, parcel, address, lat:pt&&pt.lat, lon:pt&&pt.lon}); conf=window._valConfirmed||null; }
@@ -19582,12 +19582,30 @@ async function _dealGenerateOM(dealId, btn){
           if(typeof showUndoToast==='function') showUndoToast('Filled from Site Research: '+labels.join(', ')+'.', undo, 10000);
           else showToast('Filled from Site Research: '+labels.join(', ')+'.','success');
         }
-      }catch(e){ console.warn('[OM card] fill failed', e); showToast('Could not save the Site Research fills to the card — the OM will still build.','warning'); }
+      }catch(e){ console.warn('[OM card] fill failed', e); showToast('Could not save the Site Research fills to the card — the document will still build.','warning'); }
     } else {
-      showToast('Card already has county, parcel, acreage, zoning and land use — building the OM.','success');
+      showToast('Card already has county, parcel, acreage, zoning and land use — building it now.','success');
     }
 
-    await _valGenerateOM({win, d, conf:conf||{}, county, parcel:parcel||patch.folioNumber||'', address, deal});
+    return {d, conf, county, parcel:parcel||patch.folioNumber||''};
+}
+
+async function _dealGenerateOM(dealId, btn){
+  const pool=[].concat(typeof allDeals!=='undefined'?allDeals:[], typeof allDealsCompany!=='undefined'?allDealsCompany:[]);
+  const deal=pool.find(x=>x&&x.id===dealId);
+  if(!deal){ showToast('Property not found.','error'); return; }
+  if(typeof _dnmGuard==='function' && _dnmGuard(deal,'the Offering Memorandum')) return;
+  const address=(deal.propertyAddress||'').trim();
+  const parcel=String(deal.folioNumber||(Array.isArray(deal.parcelRaw)&&deal.parcelRaw[0])||'').trim();
+  if(!address && !parcel){ await elcAlert('Add an address or a parcel ID to this card first, then Generate OM.'); return; }
+  const win=window.open('','_blank','width=1180,height=860');
+  if(!win){ showToast('Pop-up blocked — allow pop-ups to generate OM.','error'); return; }
+  try{ win.document.write(_OM_LOADING); }catch(e){}
+  const restore=(typeof elcBusy==='function' && btn) ? elcBusy(btn,'Researching…') : null;
+  try{
+    const r=await _omCardResearch(deal, win);
+    if(!r) return;
+    await _valGenerateOM({win, d:r.d, conf:r.conf||{}, county:r.county, parcel:r.parcel, address, deal});
   }catch(err){
     console.error('[OM card] failed', err);
     try{ win.document.body.innerHTML='<div style="color:#fff;font-family:Arial;padding:40px">Could not build the OM: '+String(err&&err.message||err).replace(/</g,'&lt;')+'</div>'; }catch(e){}
@@ -20054,6 +20072,522 @@ ${pAerial}${pDesc}${pMarket}${pZoning}${pTraffic}${pEnv}${pDemo}${pLoc}${pDisc}$
   win.document.open(); win.document.write(html); win.document.close();
 }
 window._valOpenOM = _valOpenOM;
+
+// ── 📝 Listing Proposal / BOV generator (PROPGEN-20261119) ──────────────────────
+// Ryan: a Proposal button on Site Research and on cards in any stage before Listing,
+// built from the best of the Willow Design District proposal and the Gulfport BOV, where
+// the advisor can edit the success fee, the BOV section and upload photos.
+// • Same data spine as the OM (OMLAND-20261119): pin/parcel polygon, Esri aerials, FDOT AADT,
+//   Census ACS rings, FEMA/NWI, confirmed GIS zoning. AI drafts the descriptions and BOV.
+// • Opens as an editor: side panel (fee %, term, value/range/asking, BOV text, photos) +
+//   click-to-edit text on every page. 🖨 prints the pages only (11 × 8.5 landscape).
+// • From a card: 💾 Save keeps the edits + photos on the deal (deal.proposalDoc; photos in
+//   Storage under dealPhotos/{id}/proposal_*) and fills the card's suggested price / ELC
+//   commission only when those are blank. From Site Research nothing is saved.
+// • NOREALTOR-20261118: the sign graphic's block-R icon was removed and the Florida Realtors
+//   association logo left off the Engaged wall; institute names stay as titled.
+async function _omGatherSite(address, parcel, county, conf, d){
+  const p=(d&&d.property)||{}, cp=(conf&&conf.parcel)||{};
+  const pt = await _omResolvePoint(address || p.siteAddress, parcel, county, conf && conf.__card ? conf : null);
+  const siteAddr = p.siteAddress || cp.siteAddress || address;
+  const [poly, traffic, rings] = pt ? await Promise.all([
+    _omParcelPolygon(pt, siteAddr, [parcel, p.parcelId, cp.parcelId, cp.pin]), _omTraffic(pt), _omRings(pt) ]) : [null, [], null];
+  const center = poly ? {lat:poly.centroid[1], lon:poly.centroid[0]} : pt;
+  const cGeo = (rings && (rings.fiveMile||rings.threeMile||{}).countyGeoid) || (conf&&conf.fips) || '';
+  const [wet, flood, countyAcs] = center ? await Promise.all([_omWetlands(poly, center), _omFlood(poly, center), _omCountyACS(cGeo)]) : [null,null,null];
+  return {pt, center, poly, traffic, rings, wet, flood, countyAcs, places: center?_omNearPlaces(center):[], siteAddr};
+}
+
+async function _valGenerateProposal(opts){
+  opts = (opts && typeof opts==='object' && opts.d) ? opts : null;
+  if(!opts && !window._valLastResult){ showToast('Run a site research first.','error'); return; }
+  const win = (opts && opts.win && !opts.win.closed) ? opts.win : window.open('','_blank','width=1320,height=900');
+  if(!win){ showToast('Pop-up blocked — allow pop-ups to build the proposal.','error'); return; }
+  if(!opts) try{ win.document.write(_OM_LOADING.replace(/Offering Memorandum/g,'Proposal')); }catch(e){}
+  const btn = opts ? null : document.getElementById('val-prop-btn');
+  const restore = (typeof elcBusy==='function' && btn) ? elcBusy(btn,'Building…') : null;
+  try{
+    const county  = opts ? (opts.county||'') : ((document.getElementById('val-county')||{}).value||'');
+    const parcel  = opts ? String(opts.parcel||'').trim() : ((document.getElementById('val-parcel')||{}).value||'').trim();
+    const address = opts ? String(opts.address||'').trim() : ((document.getElementById('val-address')||{}).value||'').trim();
+    const d = opts ? opts.d : window._valLastResult;
+    const conf = Object.assign({}, (opts ? opts.conf : window._valConfirmed) || {}, opts?{__card:true}:{});
+    const deal = (opts && opts.deal) || null;
+    _omStep(win,'Finding the parcel, aerials, traffic counts and Census rings…');
+    const site = await _omGatherSite(address, parcel, county, conf, d);
+    const p=d.property||{}, z=d.zoning||{}, cp=conf.parcel||{};
+    const zCode=(conf.cityZoning&&!conf.cityZoning._noAnswer&&conf.cityZoning.code)||(conf.zoning&&conf.zoning.code)||p.zoning||'';
+    const acres = parseFloat(String(p.acreage||cp.acreage||'').replace(/,/g,'')) || (site.poly?+site.poly.acres.toFixed(2):null);
+    const saved = (deal && deal.proposalDoc) || null;
+    const cardPrice = deal ? Number(deal.suggestedPrice||0) : 0;
+    const facts=[
+      'Address: '+(site.siteAddr||'n/a'),'County: '+county,'Jurisdiction (confirmed GIS): '+((conf.juris&&conf.juris.label)||z.source||'n/a'),
+      'Parcel ID: '+(p.parcelId||cp.parcelId||parcel||'n/a'),'Acreage: '+(acres!=null?acres+' ac':'n/a'),
+      'Zoning (confirmed GIS): '+(zCode||'n/a')+(z.description?' — '+z.description:''),
+      'Future land use: '+((conf.zoning&&conf.zoning.flu)||p.futureYearLandUse||'n/a'),
+      'Improvements: '+(p.structures||cp.structures||'n/a'),
+      'Owner of record: '+(p.owner||cp.owner||(deal&&deal.ownershipEntity)||'n/a'),
+      'Assessor just value: '+(p.marketValue||cp.marketValue||'n/a'),
+      site.traffic.length?'Nearest FDOT counts: '+site.traffic.slice(0,3).map(t=>t.name+' '+t.aadt.toLocaleString()+' AADT').join('; '):'',
+      site.flood&&site.flood.length?'FEMA zones on parcel: '+[...new Set(site.flood.map(f=>f.FLD_ZONE))].join(', '):'',
+      site.places.length?'Nearby: '+site.places.map(x=>x.name+' '+x.mi.toFixed(1)+' mi').join('; '):'',
+      cardPrice>0?'ADVISOR SUGGESTED PRICE (use as the opinion of value): $'+Math.round(cardPrice).toLocaleString():'',
+    ].filter(Boolean).join('\n');
+    const sys=`You are a senior land broker at Eshenbaugh Land Company drafting a listing proposal and Broker Opinion of Value (BOV) for the OWNER of a Florida property. Search the live web for recent land sales and listings near the site. Return ONLY valid JSON, no prose, no code fences:
+{"projectName":"short marketing name for the property, 2-4 words, e.g. 'Willow Design District'",
+ "propertyDescription":"3-4 sentences: what the site is, size, zoning, frontage/condition, the opportunity",
+ "locationDescription":"2-3 sentences: exact location, cross streets, distance to key destinations",
+ "bov":{"value":number,"low":number,"high":number,"narrative":"3-4 paragraphs separated by \\n\\n, 180-260 words total: the value conclusion and range with $/SF and $/acre, who the buyer pool is, how you valued it (lot-by-lot, per-unit, per-acre or comps), and any constraint a buyer will price in","comps":"1-2 sentences naming the comparable sales or pricing you relied on, with dates"}}
+Rules: never contradict the CONFIRMED FACTS. If an ADVISOR SUGGESTED PRICE is given, bov.value must equal it and the range should bracket it. Values are whole dollars. Write like the broker, first person plural ("we value…"). No filler about Florida growth.`;
+    let ai={};
+    if(!(saved && saved.bovText)){   // a saved proposal keeps the advisor's own BOV; no need to redraft
+      _omStep(win,'Drafting the property description and Broker Opinion of Value…');
+      try{
+        const raw=await _valCallAI('CONFIRMED FACTS:\n'+facts+'\n\nDraft the proposal content.', sys);
+        if(raw){ let s=raw.replace(/^```json\s*/i,'').replace(/^```\s*/i,'').replace(/```\s*$/,'').trim();
+          s=s.replace(/"((?:[^"\\]|\\.)*)"/gs,(m,inner)=>'"'+inner.replace(/\n/g,'\\n').replace(/\r/g,'\\r').replace(/\t/g,'\\t')+'"');
+          try{ ai=JSON.parse(s); }catch(e){ const m=raw.match(/\{[\s\S]*\}/); if(m) ai=JSON.parse(m[0]); } }
+      }catch(e){ console.warn('[Proposal] AI draft failed', e); }
+    }
+    _propOpen(win, {d, conf, deal, county, parcel, address, site, ai, saved, acres, zCode});
+  }catch(err){
+    console.error('[Proposal] build failed', err);
+    try{ win.document.body.innerHTML='<div style="color:#fff;font-family:Arial;padding:40px">Could not build the proposal: '+String(err&&err.message||err).replace(/</g,'&lt;')+'</div>'; }catch(e){}
+    showToast('Proposal build failed — see the new window.','error');
+  }finally{ if(restore) restore(); }
+}
+window._valGenerateProposal=_valGenerateProposal;
+
+// Stages "before Listing" in the live (admin-editable) stage order; never buyer-side cards.
+function _propStageOk(deal){
+  if(!deal) return false;
+  if((deal.representation||'seller')==='buyer') return false;
+  const st = (typeof STAGE_ALIAS!=='undefined' && STAGE_ALIAS[deal.stage]) || deal.stage || '';
+  if(/buyer/i.test(st)) return false;
+  if(typeof isLostStage==='function' && isLostStage(st)) return false;
+  if(typeof isWonStage==='function' && isWonStage(st)) return false;
+  const order = (typeof STAGES!=='undefined' && Array.isArray(STAGES)) ? STAGES : [];
+  const li = order.indexOf('Listing'), si = order.indexOf(st);
+  if(!st) return true;
+  if(li>=0 && si>=0) return si<li;
+  return ['Prospect','Proposal To Do','Proposal Outstanding'].includes(st);
+}
+window._propStageOk=_propStageOk;
+
+// Card → research → fill blanks → proposal (same research step as the card's Generate OM).
+async function _dealGenerateProposal(dealId, btn){
+  const pool=[].concat(typeof allDeals!=='undefined'?allDeals:[], typeof allDealsCompany!=='undefined'?allDealsCompany:[]);
+  const deal=pool.find(x=>x&&x.id===dealId);
+  if(!deal){ showToast('Property not found.','error'); return; }
+  if(!_propStageOk(deal)){ showToast('Proposals are for properties before the Listing stage.','warning'); return; }
+  const address=(deal.propertyAddress||'').trim();
+  const parcel=String(deal.folioNumber||(Array.isArray(deal.parcelRaw)&&deal.parcelRaw[0])||'').trim();
+  if(!address && !parcel){ await elcAlert('Add an address or a parcel ID to this card first, then build the proposal.'); return; }
+  const win=window.open('','_blank','width=1320,height=900');
+  if(!win){ showToast('Pop-up blocked — allow pop-ups to build the proposal.','error'); return; }
+  try{ win.document.write(_OM_LOADING.replace(/Offering Memorandum/g,'Proposal')); }catch(e){}
+  const restore=(typeof elcBusy==='function' && btn) ? elcBusy(btn,'Researching…') : null;
+  try{
+    const r = await _omCardResearch(deal, win);
+    if(!r) return;
+    await _valGenerateProposal({win, d:r.d, conf:r.conf||{}, county:r.county, parcel:r.parcel, address, deal});
+  }catch(err){
+    console.error('[Proposal card] failed', err);
+    try{ win.document.body.innerHTML='<div style="color:#fff;font-family:Arial;padding:40px">Could not build the proposal: '+String(err&&err.message||err).replace(/</g,'&lt;')+'</div>'; }catch(e){}
+    showToast('Proposal build failed — '+(err&&err.message||err),'error');
+  }finally{ if(restore) restore(); }
+}
+window._dealGenerateProposal=_dealGenerateProposal;
+
+// Called from the proposal window (same origin). Photo → Storage; doc → deal.proposalDoc.
+window._propUploadPhoto = async function(dealId, blob, name){
+  if(typeof _fbStorage==='undefined' || !_fbStorage || !_fbFns) throw new Error('Storage not connected');
+  const {ref:fbRef, uploadBytes, getDownloadURL} = _fbFns;
+  const path=`dealPhotos/${dealId}/proposal_${Date.now()}_${String(name||'photo').replace(/[^a-zA-Z0-9._-]/g,'_').slice(0,60)}`;
+  const snap=await uploadBytes(fbRef(_fbStorage, path), blob, {contentType: blob.type||'image/jpeg'});
+  return await getDownloadURL(snap.ref);
+};
+window._propSaveDoc = async function(dealId, doc){
+  const pool=[].concat(typeof allDeals!=='undefined'?allDeals:[], typeof allDealsCompany!=='undefined'?allDealsCompany:[]);
+  const deal=pool.find(x=>x&&x.id===dealId); if(!deal) throw new Error('Property not found');
+  const by=(typeof currentUser!=='undefined'&&currentUser&&(currentUser.name||currentUser.email))||'';
+  const patch={ proposalDoc:Object.assign({}, doc, {savedAt:Date.now(), savedBy:by}), updatedAt:Date.now() };
+  const filled=[];
+  if(!(Number(deal.suggestedPrice)>0) && Number(doc.askPrice||doc.bovValue)>0){ patch.suggestedPrice=Math.round(Number(doc.askPrice||doc.bovValue)); filled.push('suggested price'); }
+  if(!(Number(deal.elcCommissionPct)>0) && Number(doc.feePct)>0){ patch.elcCommissionPct=Number(doc.feePct); filled.push('ELC commission'); }
+  await Store.updateDeal(dealId, patch); Object.assign(deal, patch);
+  try{ showToast('📝 Proposal saved to the card'+(filled.length?' · filled '+filled.join(' + '):'')+'.','success'); }catch(e){}
+  return {filled};
+};
+
+function _propOpen(win, X){
+  const {d, conf, deal, county, site, ai, saved} = X;
+  const p=d.property||{}, z=d.zoning||{}, cp=conf.parcel||{}, kz=conf.zoning||{}, cz=(conf.cityZoning&&!conf.cityZoning._noAnswer)?conf.cityZoning:null;
+  const esc=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  const BAD=/^(—|-+|n\/?a|null|undefined|unknown|tbd|\?)$|not found|unavailable|could not (be )?(found|determined)|no data/i;
+  const val=(...vs)=>{ for(const v of vs){ if(v==null) continue; const s=String(v).trim(); if(s&&!BAD.test(s)) return s; } return ''; };
+  const money=v=>v==null||isNaN(v)||v<=0?'—':'$'+Math.round(v).toLocaleString();
+  const num=v=>v==null||isNaN(v)?'—':Math.round(v).toLocaleString();
+  const E=saved&&saved.edits||{};
+  const ed=(k,txt,tag,cls)=>`<${tag||'p'} class="${cls||'body'}" data-k="${k}" contenteditable="true" spellcheck="true">${esc(E[k]!=null?E[k]:txt)}</${tag||'p'}>`;
+
+  const siteAddr=val(p.siteAddress,cp.siteAddress,X.address);
+  const zip=(String(val(p.siteAddress,p.mailingAddress,cp.mailingAddress)).match(/\b3\d{4}\b/)||[''])[0];
+  const city=(conf.juris&&conf.juris.label)?conf.juris.label.replace(/^(City|Town|Village) of /,'').replace(/ \(Unincorporated\)/,''):(val(z.source).replace(/^City of /,'')||county+' County');
+  const juris=(conf.juris&&conf.juris.label)||val(z.source)||county+' County';
+  const street=siteAddr?siteAddr.split(',')[0].trim():(val(p.parcelId,X.parcel)||'Land Offering');
+  const fullAddr=siteAddr?`${street}, ${city}, FL${zip?' '+zip:''}`:`${county} County, FL`;
+  const projectName=val(deal&&deal.projectName, saved&&saved.projectName, ai.projectName, street);
+  const acres=X.acres, sf=acres!=null?Math.round(acres*43560):null;
+  const zCode=val(X.zCode), zDesc=val(cz&&cz.description,kz.description,z.description);
+  const flu=val(kz.flu&&kz.fluDescription?kz.flu+' — '+kz.fluDescription:kz.flu, p.futureYearLandUse);
+  const parcelIds=[].concat(deal&&Array.isArray(deal.parcelRaw)&&deal.parcelRaw.length?deal.parcelRaw:[val(p.parcelId,cp.parcelId,X.parcel)]).filter(Boolean).join(', ');
+  const owner=val(deal&&deal.ownershipEntity, p.owner, cp.owner);
+  const bovAI=ai.bov||{};
+  const S={  // editable state (panel)
+    dealId: deal?deal.id:null,
+    feePct: saved&&saved.feePct!=null?saved.feePct:(deal&&Number(deal.elcCommissionPct)>0?Number(deal.elcCommissionPct):6),
+    termMonths: saved&&saved.termMonths!=null?saved.termMonths:12,
+    bovValue: saved&&saved.bovValue!=null?saved.bovValue:(deal&&Number(deal.suggestedPrice)>0?Number(deal.suggestedPrice):(Number(bovAI.value)||null)),
+    bovLow: saved&&saved.bovLow!=null?saved.bovLow:(Number(bovAI.low)||null),
+    bovHigh: saved&&saved.bovHigh!=null?saved.bovHigh:(Number(bovAI.high)||null),
+    askPrice: saved&&saved.askPrice!=null?saved.askPrice:(deal&&Number(deal.suggestedPrice)>0?Number(deal.suggestedPrice):null),
+    bovText: saved&&saved.bovText?saved.bovText:[val(bovAI.narrative), val(bovAI.comps)].filter(Boolean).join('\n\n'),
+    photos: (saved&&Array.isArray(saved.photos)?saved.photos:[]).slice(),
+    coverUrl: saved&&saved.coverUrl||'',
+    aiDraft: !(saved&&saved.bovText) && !!val(bovAI.narrative),
+    sqft: sf, acres, projectName,
+  };
+  // Card photos the advisor already has (banner + image attachments) are offered, not forced.
+  const cardPhotos = deal ? [deal.primaryPhotoUrl].concat((deal.dealAttachments||[]).filter(a=>a&&a.url&&/\.(jpe?g|png|webp|gif)(\?|$)/i.test(a.name||a.url)).map(a=>a.url)).filter(Boolean) : [];
+  const cardPhotoSet=[...new Set(cardPhotos)].filter(u=>!S.photos.some(ph=>ph.url===u)).slice(0,12);
+
+  // brand + assets
+  const RED='#E3262F', TEAL='#0FA3A6', INK='#231F20', GRAY='#8E9890', DARK='#3A3633';
+  const A=f=>{ try{ return new URL('om/assets/'+f, location.href).href; }catch(e){ return 'om/assets/'+f; } };
+  const LOGO=A('logo.png'), BAND=A('band-top.jpg'), BANDC=A('band-cover.jpg'), TOPO=A('topo.jpg');
+  const advisor=typeof currentUser!=='undefined'&&currentUser?currentUser:{};
+  const bioKey=(deal&&deal.advisorUid)||advisor.uid;
+  const bio=(typeof getAdvisorBio==='function'&&bioKey)?getAdvisorBio(bioKey):null;   // ADVBIO-20261006 — the card's advisor
+  const advName=(bio&&bio.nameWithDesignations)||(deal&&deal.advisorName)||advisor.name||'Eshenbaugh Land Company';
+  const advTitle=(bio&&bio.title)||'Advisor', advEmail=(bio&&bio.email)||(deal&&deal.advisorEmail)||advisor.email||'';
+  const advDirect=String((bio&&bio.directLine)||'813-287-8787').replace(/-/g,'.'), advCell=bio&&bio.cell?String(bio.cell).replace(/-/g,'.'):'';
+  const advPhoto=(bio&&bio.headshotUrl)||'', advBio=val(bio&&bio.bio), advLoc=val(bio&&bio.location)||'304 S. Willow Avenue, Tampa, FL 33606';
+  const advMembers=val(bio&&bio.memberships), advEdu=val(bio&&bio.education);
+
+  // maps
+  const MAPSVC='https://server.arcgisonline.com/arcgis/rest/services/';
+  const view=(cLon,cLat,halfWm,W,H)=>{ const [cx,cy]=_omMerc(cLon,cLat), halfH=halfWm*H/W;
+    const v={xmin:cx-halfWm,xmax:cx+halfWm,ymin:cy-halfH,ymax:cy+halfH,W,H};
+    v.px=(lon,lat)=>{ const [x,y]=_omMerc(lon,lat); return [(x-v.xmin)/(v.xmax-v.xmin)*W,(v.ymax-y)/(v.ymax-v.ymin)*H]; };
+    v.url=(svc,fmt,tr)=>{ const minRes=/^Reference\//.test(svc)?0.75:/Street/.test(svc)?0.6:0.3;
+      const pw=Math.max(400,Math.min(W*2,4000,Math.round((v.xmax-v.xmin)/minRes))), ph=Math.round(pw*H/W);
+      return `${MAPSVC}${svc}/MapServer/export?bbox=${v.xmin.toFixed(1)},${v.ymin.toFixed(1)},${v.xmax.toFixed(1)},${v.ymax.toFixed(1)}&bboxSR=3857&imageSR=3857&size=${pw},${ph}&format=${fmt}&transparent=${tr?'true':'false'}&f=image`; };
+    return v; };
+  const poly=site.poly, center=site.center;
+  const pathOf=v=>poly?poly.rings.map(r=>'M'+r.map(q=>v.px(q[0],q[1]).map(n=>n.toFixed(1)).join(',')).join('L')+'Z').join(' '):'';
+  const outline=(v,w)=>poly?`<path d="${pathOf(v)}" fill="rgba(227,38,47,.10)" stroke="#fff" stroke-width="${w+3}" stroke-linejoin="round"/><path d="${pathOf(v)}" fill="none" stroke="${RED}" stroke-width="${w}" stroke-linejoin="round"/>`
+                              :(()=>{ const [x,y]=v.px(center.lon,center.lat); return `<circle cx="${x}" cy="${y}" r="10" fill="${RED}" stroke="#fff" stroke-width="3"/>`; })();
+  const map=(v,imgs,svg,cls)=>`<div class="map ${cls||''}" style="aspect-ratio:${v.W}/${v.H}">${imgs.map(u=>`<img src="${u}" alt="">`).join('')}<svg viewBox="0 0 ${v.W} ${v.H}" preserveAspectRatio="none">${svg}</svg></div>`;
+  let mCover='', mAerial='', mSmall='', mRegion='';
+  if(center){
+    const bw=poly?Math.max(_omMerc(poly.xmax,poly.centroid[1])[0]-_omMerc(poly.xmin,poly.centroid[1])[0],1):60;
+    const bh=poly?Math.max(_omMerc(poly.centroid[0],poly.ymax)[1]-_omMerc(poly.centroid[0],poly.ymin)[1],1):60;
+    const fit=(W,H,share,minHalf)=>Math.max(bw/2/share,bh/2/share*W/H,minHalf);
+    const T=['Reference/World_Transportation','png32',true];
+    const vc=view(center.lon,center.lat,fit(1100,440,.2,220),1100,440); mCover=map(vc,[vc.url('World_Imagery','jpg'),vc.url(...T)],outline(vc,3.5),'fill');
+    const va=view(center.lon,center.lat,fit(1000,560,.42,165),1000,560); mAerial=map(va,[va.url('World_Imagery','jpg'),va.url(...T)],outline(va,3));
+    const vs=view(center.lon,center.lat,fit(600,460,.3,200),600,460); mSmall=map(vs,[vs.url('World_Imagery','jpg'),vs.url(...T)],outline(vs,2.5));
+    const vr=view(center.lon,center.lat,Math.max(2400,bw*4),1000,560); const [rx,ry]=vr.px(center.lon,center.lat);
+    mRegion=map(vr,[vr.url('World_Imagery','jpg'),vr.url(...T),vr.url('Reference/World_Boundaries_and_Places','png32',true)],`<circle cx="${rx}" cy="${ry}" r="12" fill="${RED}" stroke="#fff" stroke-width="3"/><text x="${rx}" y="${ry+4.5}" fill="#fff" font-size="13" font-weight="900" text-anchor="middle">★</text>`);
+  }
+  const noMap='<div class="map nomap">No location — check the address or drop a pin and generate again.</div>';
+
+  // site facts for the location/market page
+  const R1=site.rings&&site.rings.oneMile, R3=site.rings&&site.rings.threeMile, R5=site.rings&&site.rings.fiveMile;
+  const floodZones=Array.isArray(site.flood)?[...new Set(site.flood.map(f=>f.FLD_ZONE))]:Array.isArray(conf.fema)?[...new Set(conf.fema.map(f=>f.FLD_ZONE))]:[];
+  const traffic=(site.traffic||[]).filter(t=>!/\b(RP|RAMP)\b/i.test(t.name)).slice(0,4);
+  const wet=site.wet;
+
+  // ── pages ── (data-sec = TOC title; pages can hide themselves, then TOC + page pills renumber)
+  const runner=`${esc(projectName.toUpperCase())} // ${esc(fullAddr.toUpperCase())}`;
+  const sheet=(id,title,body,opt)=>{ opt=opt||{}; return `<section class="sheet${opt.cls?' '+opt.cls:''}" id="pg-${id}" data-sec="${esc(opt.toc||title)}"><div class="band"></div>
+    ${title?`<h1 class="ttl">${title}</h1>`:''}<div class="bd"${opt.nofit?' data-nofit':''}>${body}</div>
+    <footer class="ft"><span class="pn"></span><span class="run">${runner}</span><span class="rule"></span><img class="flogo" src="${LOGO}" alt="Eshenbaugh Land Company"></footer></section>`; };
+  const sec=t=>`<div class="sec">${t}</div>`;
+
+  const pCover=`<section class="sheet cover" id="pg-cover" data-sec="Cover Page"><div class="cv-top"><h1>Broker Opinion of Value &amp; Marketing Proposal</h1></div>
+    <div class="cv-img" id="cvImg">${mCover||noMap}</div>
+    <div class="cv-bot"><div>${ed('cover.title',projectName.toUpperCase(),'div','cv-h')}<div class="cv-a">${esc(fullAddr.toUpperCase())}</div></div>
+    <div class="cv-r"><img src="${LOGO}" alt="Eshenbaugh Land Company"><a>www.thedirtdog.com</a></div></div></section>`;
+  const pToc=sheet('toc','Table of Contents',`<div class="toc"><div class="toc-h">Contents</div><div id="tocList"></div></div>`,{toc:'Table of Contents'});
+  const fiveE=[['Ethics','The integrity of our conduct matters.','Integrity is at the heart of everything we do. Our entire team adheres to the National Association of Realtors Code of Ethics with unwavering dedication. Every advisor at Eshenbaugh Land Company completes ethics training every two years and we take immense pride in our spotless ethical record. This commitment ensures that our clients can trust us to handle their transactions with honesty, transparency, and respect.'],
+    ['Education','We are lifelong learners.',"We believe that knowledge is power, and we invest heavily in our advisors' education to stay at the forefront of the industry. Our team includes Accredited Land Consultants (ALC), Certified Commercial Investment Members (CCIM), licensed Florida Appraisers, real estate developers, prior national home builders, professionals who have majored in real estate, and masters' degrees in agricultural business. This depth of knowledge allows us to navigate complex transactions and provide our clients with the informed guidance they need."],
+    ['Experience','$2.5 billion in transactions since 1992.','With over one billion dollars in land sales over the last five years alone, our track record speaks for itself. The average advisor at Eshenbaugh Land Company brings over 10 years of brokerage and development experience to the table, so our clients benefit from seasoned professionals who anticipate challenges, craft innovative solutions, and close deals efficiently.'],
+    ['Engaged','Rooted in the community. Driven to make it better.','Our advisors are not just participants in the market — they strive to be leaders. Our team serves in leadership roles and on the boards of the Realtors Land Institute Florida Chapter, Real Estate Investment Councils, NAIOP, the Florida Gulf Coast Commercial Association of Realtors, the Builders Association and the Florida CCIM Chapter. This engagement keeps us at the pulse of the industry and lets us advocate for our clients at the highest levels.'],
+    ['Enthusiasm','We are passionate about what we do.','At Eshenbaugh Land Company, we love what we do. That passion drives us to go above and beyond for our clients. We are enthusiastic about every deal, no matter the size, and we bring that energy to every interaction — it fuels our commitment to getting deals done and achieving the best possible outcome.']];
+  const p5E=sheet('5es','',`<div style="text-align:center"><img src="${A('prop-5es.png')}" alt="Eshenbaugh 5 E's Core Values" style="height:.5in"></div>
+    <p class="intro">Our commitment to excellence is embodied in our core values. These principles guide every aspect of our work, ensuring that we provide our clients with the highest level of service and expertise.</p>
+    <div class="fivee">${fiveE.map(([h,s,t],i)=>`<div><h3>${h}</h3><b>${s}</b>${ed('5e.'+i,t,'p','sm')}</div>`).join('')}</div>`,{toc:"The Five E's"});
+  const pBio=sheet('bio',esc((bio&&bio.name)||advName.split(',')[0])+' Bio',`<div class="biog">
+    <div class="bio-l">${advPhoto?`<img src="${esc(advPhoto)}" alt="">`:''}<b>${esc(advName.toUpperCase())}</b><br><span class="red">${esc(advTitle)}</span>
+      <div class="bio-c">${esc(advLoc)}<br>T ${esc(advDirect)}${advCell?'<br>C '+esc(advCell):''}<br>${esc(advEmail)}</div></div>
+    <div>${sec('Professional Background')}${ed('bio.text',advBio||`${advName} is an advisor with Eshenbaugh Land Company, specializing in the acquisition, disposition and development advisory of land across Florida.`,'div','body bio-t')}
+      ${advEdu?sec('Education')+`<p class="body">${esc(advEdu)}</p>`:''}${advMembers?sec('Memberships &amp; Accolades')+`<p class="body">${esc(advMembers)}</p>`:''}</div></div>`,{toc:'Advisor Bio'});
+  const pDesc=sheet('desc','Property Description',`<div class="g64"><div>
+      ${sec('Property Description')}${ed('desc.prop',val(ai.propertyDescription)||`${street} is a ${acres!=null?acres+'± acre':''} site in ${city}, zoned ${zCode||'—'}${zDesc?' ('+zDesc+')':''}.`)}
+      ${sec('Location Description')}${ed('desc.loc',val(ai.locationDescription)||`The property is located at ${fullAddr}.`)}
+      <div class="g2 tight"><div>${sec('Municipality')}<p class="body">${esc(juris)}</p>${sec('Property Size')}<p class="body">${acres!=null?esc(acres+'± Acres'):'—'}${sf?` <span class="mut">(≈${sf.toLocaleString()} SF)</span>`:''}</p>
+        ${sec('Zoning')}<p class="body">${esc((zCode||'—')+(zDesc?' – '+zDesc:''))}</p>${flu?sec('Future Land Use')+`<p class="body">${esc(flu)}</p>`:''}</div>
+        <div>${sec('Parcel ID')}<p class="body">${esc(parcelIds||'—')}</p>${owner?sec('Property Owner')+`<p class="body">${esc(owner)}</p>`:''}
+        ${sec('Broker Opinion of Value')}<p class="body"><b data-b="value">—</b></p><div data-show="ask">${sec('Suggested Asking Price')}<p class="body"><b data-b="ask">—</b></p></div></div></div>
+      ${sec('Broker Contact Info')}<p class="body"><b>${esc(advName)}</b><br>${esc(advTitle)}<br>${esc(advDirect)}<br><b>${esc(advEmail)}</b></p>
+    </div><div>${mSmall||noMap}<div class="facts">
+      ${floodZones.length?`<div><span>FEMA flood zone</span><b>${esc(floodZones.join(', '))}</b></div>`:''}
+      ${wet&&wet.onSite?`<div><span>NWI wetlands on parcel</span><b>${wet.onSite.length?esc(wet.onSite.join(', ')):'None mapped'}</b></div>`:''}
+      ${traffic[0]?`<div><span>Traffic (FDOT AADT)</span><b>${esc(traffic[0].name)} · ${traffic[0].aadt.toLocaleString()}</b></div>`:''}
+      ${R3&&R3.population?`<div><span>3-mile population (ACS)</span><b>${num(R3.population)}</b></div>`:''}
+      ${val(p.marketValue,cp.marketValue)?`<div><span>Assessor just value</span><b>${esc(val(p.marketValue,cp.marketValue))}</b></div>`:''}
+    </div></div></div>`);
+  const pBov=sheet('bov','Broker Opinion of Value',`
+    <div class="stats"><div><b data-b="value">—</b><span>Opinion of value</span></div><div><b data-b="range">—</b><span>Value range</span></div>
+      <div><b data-b="psf">—</b><span>Per square foot of land</span></div><div><b data-b="pac">—</b><span>Per acre</span></div></div>
+    <div id="bovText" class="bovt"></div>`,{toc:'Broker Opinion of Value'});
+  const pAerial=sheet('aerial','Aerial Photo',`${mAerial||noMap}<div class="cap">Esri World Imagery · ${poly?'parcel boundary from the Florida statewide cadastral — approximate':'pin marks the researched point'}</div>`,{nofit:true});
+  const pMarket=sheet('market','Location &amp; Market Snapshot',`<div class="g64"><div>${mRegion||noMap}</div><div>
+      ${R3&&R3.population?`<div class="lab">Census ACS · Trade Area</div><table class="tbl"><thead><tr><th></th><th class="r">1 mi</th><th class="r">3 mi</th><th class="r">5 mi</th></tr></thead><tbody>
+        <tr><td>Population</td>${[R1,R3,R5].map(r=>`<td class="r">${r&&r.population?num(r.population):'—'}</td>`).join('')}</tr>
+        <tr><td>Households</td>${[R1,R3,R5].map(r=>`<td class="r">${r&&r.households?num(r.households):'—'}</td>`).join('')}</tr>
+        <tr><td>Median HH income (≈)</td>${[R1,R3,R5].map(r=>`<td class="r">${r?money(r.medianHHIncome):'—'}</td>`).join('')}</tr>
+        <tr><td>Median home value (≈)</td>${[R1,R3,R5].map(r=>`<td class="r">${r?money(r.medianHomeValue):'—'}</td>`).join('')}</tr></tbody></table>`:''}
+      ${traffic.length?`<div class="lab" style="margin-top:.8em">FDOT Traffic Counts</div><table class="tbl"><tbody>${traffic.map(t=>`<tr><td>${esc(t.name)}</td><td class="r"><b>${t.aadt.toLocaleString()}</b> <span class="mut">AADT ${esc(t.year)}</span></td></tr>`).join('')}</tbody></table>`:''}
+      ${site.places.length?`<div class="lab" style="margin-top:.8em">Straight-line miles</div><table class="tbl"><tbody>${site.places.map(x=>`<tr><td>${esc(x.name)}</td><td class="r">${x.mi<10?x.mi.toFixed(1):Math.round(x.mi)} mi</td></tr>`).join('')}</tbody></table>`:''}
+      <div class="note" style="margin-top:.5em">U.S. Census ACS 5-year (tract centers inside each ring; ≈ = weighted average of tract medians) · FDOT Annual Average Daily Traffic.</div>
+    </div></div>`);
+  const pPhotos=sheet('photos','Additional Photos',`<div id="photoGrid" class="pgrid"></div>`,{nofit:true});
+  const pExp=sheet('exp','Experience',`<p class="intro l">With over one billion dollars in land sales over the last five years alone, our track record speaks for itself. Some of our past accolades include:</p>
+    <div class="g2"><div><ul class="dots">${['19 time “1st Overall Top Producing Regional Land Broker” — Florida Gulfcoast Commercial Association of Realtors','3 time “National Commercial Land Broker of the Year” — Realtors Land Institute APEX Awards','8 time “Top 20 Producer Nationally” — Realtors Land Institute APEX Awards','“Top 10 Largest Commercial Real Estate Firms in Tampa Bay” — Tampa Bay Business Journal','14 time “Land Deal of the Year” — Florida Gulfcoast Commercial Association of Realtors','5 time “Best Brokerage Firm / Company of the Year” — NAIOP Tampa Bay / FGCAR'].map(x=>`<li>${esc(x)}</li>`).join('')}</ul></div>
+    <div><div class="lab">Land Deals Cumulative Sales Volume</div><img src="${A('prop-sales-chart.jpg')}" alt="Cumulative sales volume" style="width:100%"></div></div>`);
+  const pEng=sheet('eng','Engaged',`<p class="intro l">Staying engaged in the community and professional real estate organizations matters for two reasons: it keeps our advisors in front of the people who move the market, and it lets us give back where we live and work. Below are some of the organizations and events we have attended, sponsored or spoken at:</p>
+    <img src="${A('prop-engaged.jpg')}" alt="Organizations" style="width:100%;margin-top:.15in">`);
+  const pMkt=sheet('mkt','Marketing Approach',`<div class="g2"><div>
+      <p class="body">Our approach delivers comprehensive, strategic marketing exposure for your property to a broad network of local, regional, national and international buyers and developers.</p>
+      <p class="body">The Eshenbaugh team tailors the marketing strategy to your property, presenting it as a compelling, well-supported investment opportunity, and focuses on engaging the right buyer to achieve the strongest possible outcome.</p>
+      <img src="${A('prop-website.jpg')}" alt="Property website example" style="width:88%;margin-top:.12in;border:1px solid #ddd"><div class="cap">Property Website Example</div></div>
+    <div>${sec('Monthly Reports')}<p class="body">A written monthly report covering market feedback, online activity and prospective buyer interest — by email, or a monthly call or meeting if you prefer.</p>
+      ${sec('Property Website')}<p class="body">A dedicated property website houses every relevant document and, when needed, a secure virtual data room for buyers to underwrite the opportunity.</p>
+      ${sec('Virtual Vault')}<p class="body">Buyers sign a confidentiality agreement before entering the vault. We track who accessed which materials and summarize it in your monthly report.</p></div></div>`);
+  const pNet=sheet('net','Internet Marketing',`<p class="intro l">Our goal is to position your property for a timely sale at maximum value. We deploy a comprehensive plan built for immediate, far-reaching exposure — targeted, data-driven digital campaigns and search optimization across the most-trafficked commercial real estate platforms. We invest more than $200,000 a year in marketing and technology; if you prefer the property not appear on certain platforms, we tailor the plan to your preferences.</p>
+    <img src="${A('prop-platforms.jpg')}" alt="Listing platforms" style="width:86%;display:block;margin:.15in auto 0">`);
+  const pSign=sheet('sign','Signage &amp; Technology',`<div class="g2"><div><p class="body">We believe in signage and technology. Our typical sign is a custom 4' × 8' with black posts; for larger parcels with highway frontage we can use a custom 40' banner on a container. If you prefer no signage on your site, we're happy to forgo it.</p>
+      <img src="${A('prop-sign.jpg')}" alt="Eshenbaugh sign" style="width:100%;margin-top:.1in"></div>
+    <div>${sec('Property-Specific Extensions &amp; QR Codes')}<p class="body">Each sign carries a QR code and a property-specific extension so prospects get real-time information while they are looking at the site.</p>
+      ${sec('Automated Text Response')}<p class="body">A call or text to the sign extension gets an immediate reply with the property details and a link to its website; we track that data and follow up with every lead.</p>
+      ${sec('Email &amp; Automation')}<p class="body">We place a sign and post online, then target asset-specific buyer groups in our database of more than 17,000 contacts, followed by phone calls and texts so key prospects see your property.</p></div></div>`);
+  const pFee=sheet('fee','The Success Fee',`<div class="g2 feeg" style="background:url(${A('prop-compass.jpg')}) left bottom/55% no-repeat">
+    <div><p class="body big">We only get paid when you get paid. Our compensation is entirely performance-based and aligned with your financial outcome. We earn a “success fee” only after delivering a qualified buyer, resulting in proceeds to you, on terms you approve. Simply put, if the sale does not put money in your pocket, you owe us nothing.</p>
+      <p class="body big">The partnership we build and maintain with you throughout the entire process is critical to achieving this shared objective and delivering the strongest possible result.</p></div>
+    <div><h3 class="feeh">The success fee for human and technical resources shall be:</h3>
+      <ul class="dots"><li><b data-b="fee">—</b> for a sale by Eshenbaugh Land Company.</li><li>We propose an EXCLUSIVE LISTING through <b data-b="term">—</b> from the signed listing agreement.</li></ul>
+      ${ed('fee.note','','p','body sm feenote')}</div></div>`);
+  const pThanks=sheet('thanks','Thank You For Your Partnership',`<div class="g2"><div>
+      ${ed('thanks.1','We want to say Thank You for the opportunity to provide a disposition strategy for your property. This asset will appeal to a variety of local, regional, and national developers and investors, all of whom are active in the Florida marketplace. It would be our distinct pleasure and honor to be the firm selected to market this property on your behalf.','p','body big')}
+      ${ed('thanks.2','We have a strong desire to work with you in monetizing your land asset in the near term. From the start of a project through the sale, we take pride in our comprehensive approach to both understanding the market and evaluating the land asset to achieve optimal results for our clients.','p','body big')}
+      <p class="ready">We’re Ready To Make a Great Land Deal Happen For You</p>
+      <p class="body" style="margin-top:.2in"><b>${esc(advName)}</b><br>${esc(advTitle)} · ${esc(advDirect)} · ${esc(advEmail)}</p></div>
+    <div class="thanks-img">${mSmall||''}</div></div>`);
+
+  const pages=[pCover,pToc,p5E,pBio,pDesc,pBov,pAerial,pMarket,pPhotos,pExp,pEng,pMkt,pNet,pSign,pFee,pThanks].join('\n');
+  const state=JSON.stringify({S, cardPhotos:cardPhotoSet}).replace(/</g,'\\u003c').replace(/[\u2028\u2029]/g,' ');
+
+  const html=`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Proposal — ${esc(projectName)}</title>
+<link href="https://fonts.googleapis.com/css2?family=Crimson+Text:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+@page{size:11in 8.5in;margin:0}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+html,body{background:#5b5e63}
+body{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:${INK}}
+#panel{position:fixed;left:0;top:0;bottom:0;width:330px;background:#1f1c1d;color:#ece7e1;overflow-y:auto;padding:14px 16px 90px;z-index:20;font-size:13px}
+#panel h2{font:600 20px 'Crimson Text',Georgia,serif;color:#fff;margin-bottom:2px}
+#panel .hint{color:#b8b1aa;font-size:11.5px;line-height:1.4;margin-bottom:10px}
+#panel fieldset{border:1px solid #3d3839;border-radius:8px;padding:10px 10px 8px;margin:10px 0}
+#panel legend{padding:0 6px;color:#ff8a8f;font-weight:700;font-size:11px;letter-spacing:.12em;text-transform:uppercase}
+#panel label{display:block;font-size:11.5px;color:#cfc8c1;margin:6px 0 3px}
+#panel input[type=number],#panel input[type=text],#panel textarea{width:100%;background:#2b2728;border:1px solid #4a4445;border-radius:6px;color:#fff;padding:8px;font:14px Helvetica,Arial;min-height:38px}
+#panel textarea{min-height:220px;line-height:1.45;resize:vertical}
+#panel input:focus-visible,#panel textarea:focus-visible,#panel button:focus-visible{outline:3px solid ${TEAL};outline-offset:1px}
+#panel .row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+#panel button{background:#3a3536;color:#fff;border:0;border-radius:6px;padding:9px 12px;font:600 13px Helvetica,Arial;cursor:pointer;min-height:40px}
+#panel button.pri{background:${RED}}#panel button.ok{background:${TEAL}}
+#panel .acts{position:fixed;left:0;bottom:0;width:330px;background:#151314;padding:10px 16px;display:flex;gap:8px;border-top:1px solid #333}
+#panel .acts button{flex:1}
+#panel .warn{background:#4a3b12;color:#ffe08a;border-radius:6px;padding:7px 9px;font-size:11.5px;margin:6px 0}
+#status{font-size:11.5px;color:#9be7df;margin-top:6px;min-height:15px}
+.thumbs{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:8px}
+.thumbs div{position:relative;aspect-ratio:4/3;background:#333 center/cover;border-radius:4px;border:2px solid transparent}
+.thumbs div.cv{border-color:${TEAL}}
+.thumbs button{position:absolute;top:2px;padding:0 6px!important;min-height:22px!important;font-size:11px!important;background:rgba(0,0,0,.7)!important}
+.thumbs .x{right:2px}.thumbs .c{left:2px}
+.cardph{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}.cardph img{width:62px;height:46px;object-fit:cover;border-radius:3px;cursor:pointer;border:2px solid transparent}.cardph img:hover{border-color:${TEAL}}
+#pages{margin-left:330px;padding:.25in 0}
+.sheet{width:11in;height:8.5in;margin:0 auto .3in;background:#fff;position:relative;overflow:hidden;display:flex;flex-direction:column;padding:0 .45in .26in;box-shadow:0 6px 24px rgba(0,0,0,.35);break-after:page;page-break-after:always}
+.sheet.off{display:none}
+[contenteditable]{outline:none;border-radius:2px}
+[contenteditable]:hover{box-shadow:0 0 0 1px rgba(15,163,166,.6)}[contenteditable]:focus{box-shadow:0 0 0 2px ${TEAL};background:rgba(15,163,166,.05)}
+[contenteditable]:empty:before{content:'Click to add a note (optional)';color:#aaa}
+@media print{html,body{background:#fff}#panel{display:none}#pages{margin:0;padding:0}.sheet{margin:0;box-shadow:none}.sheet:last-of-type{break-after:auto;page-break-after:auto}[contenteditable]{box-shadow:none!important;background:none!important}[contenteditable]:empty{display:none}}
+.band{flex:0 0 auto;height:.5in;margin:0 -.45in;background:url(${BAND}) center/cover;border-bottom:5px solid ${TEAL}}
+.ttl{font:600 30pt/1.05 'Crimson Text',Georgia,serif;color:${RED};margin:.12in 0 0;flex:0 0 auto}
+.bd{flex:1 1 auto;min-height:0;overflow:hidden;font-size:calc(10pt * var(--k,1));margin-top:.14in;display:flex;flex-direction:column}
+.bd>*{flex:0 0 auto}
+.ft{flex:0 0 auto;display:flex;align-items:center;gap:10px;padding-top:.05in}
+.pn{background:${RED};color:#fff;font:700 9pt Helvetica,Arial;border-radius:8px;padding:2px 8px;min-width:24px;text-align:center}
+.run{font:400 6.4pt Helvetica,Arial;letter-spacing:.3em;color:#333;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:6.6in}
+.ft .rule{flex:1;border-top:1px solid ${INK};margin-right:.1in}.flogo{height:.62in;width:auto}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:.35in}.g2.tight{gap:.2in;margin-top:.1em}.g64{display:grid;grid-template-columns:1.45fr 1fr;gap:.32in}
+.sec{font:700 .9em Helvetica,Arial;color:${RED};text-transform:uppercase;margin:.55em 0 .15em}.sec:first-child{margin-top:0}
+.body{line-height:1.5;margin-bottom:.3em}.sm{font-size:.9em;line-height:1.45}.big{font:400 1.25em/1.55 'Crimson Text',Georgia,serif;margin-bottom:.8em}
+.mut{color:#777}.red{color:${RED}}
+.lab{font:600 .86em 'Crimson Text',Georgia,serif;letter-spacing:.3em;text-transform:uppercase;color:${RED};margin:.2em 0 .45em}
+.intro{font:400 1.05em/1.5 'Crimson Text',Georgia,serif;text-align:center;max-width:8in;margin:.1in auto .14in}.intro.l{text-align:left;max-width:none;margin:0 0 .14in;font-size:1.15em}
+.fivee{display:grid;grid-template-columns:repeat(5,1fr);gap:.16in}.fivee h3{font:600 1.5em 'Crimson Text',Georgia,serif;color:${RED}}.fivee b{display:block;font:700 .9em 'Crimson Text',Georgia,serif;margin:.1em 0 .35em}
+.biog{display:grid;grid-template-columns:2.3in 1fr;gap:.35in}.bio-l img{width:1.9in;height:2.25in;object-fit:cover;display:block;margin-bottom:.12in}.bio-l b{font-size:1.05em}.bio-c{margin-top:.15in;font-size:.9em;line-height:1.55;color:#444}.bio-t{white-space:pre-wrap}
+.facts{margin-top:.12in;border-top:2px solid ${RED}}.facts div{display:flex;justify-content:space-between;gap:1em;padding:.32em 0;border-bottom:1px solid #ddd;font-family:'Crimson Text',Georgia,serif;font-size:1.05em}.facts span{color:#555}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);border-top:2px solid ${RED};border-bottom:1px solid #ccc;margin-bottom:.2in}
+.stats>div{padding:.55em .7em;border-right:1px solid #ccc}.stats>div:last-child{border-right:0}
+.stats b{display:block;font:600 2.1em/1 'Crimson Text',Georgia,serif;color:${RED}}.stats span{display:block;font:400 .95em 'Crimson Text',Georgia,serif;color:#333;margin-top:.3em}
+.bovt p{font:400 1.12em/1.55 'Crimson Text',Georgia,serif;margin-bottom:.7em}
+.tbl{width:100%;border-collapse:collapse}.tbl th{font:600 .8em 'Crimson Text',Georgia,serif;letter-spacing:.2em;text-transform:uppercase;color:${RED};text-align:left;padding:.35em .4em;border-bottom:1.5px solid ${INK}}
+.tbl td{padding:.33em .4em;border-bottom:1px solid #ddd;font-family:'Crimson Text',Georgia,serif;font-size:1.05em}.r{text-align:right}
+.note{font:400 .8em/1.45 'Crimson Text',Georgia,serif;color:#666}
+.dots{list-style:none}.dots li{position:relative;padding:.35em 0 .35em 1.2em;line-height:1.45;font:400 1.12em/1.45 'Crimson Text',Georgia,serif}
+.dots li:before{content:'';position:absolute;left:0;top:.8em;width:.5em;height:.5em;border-radius:50%;background:${RED}}
+.toc{max-width:5.2in}.toc-h{font-size:1.1em;border-bottom:1.5px solid ${RED};padding-bottom:.2em;margin-bottom:.3em}
+.toc-r{display:flex;justify-content:space-between;padding:.28em 0;font:400 1.1em 'Crimson Text',Georgia,serif;border-bottom:1px dotted #ccc}
+.map{position:relative;width:100%;overflow:hidden;background:#d9d6cf}.map img{position:absolute;inset:0;width:100%;height:100%;object-fit:fill}.map svg{position:absolute;inset:0;width:100%;height:100%}
+.map.fill{height:100%;aspect-ratio:auto!important}.nomap{display:flex;align-items:center;justify-content:center;color:#555;min-height:2.5in}
+.cap{font:400 .78em 'Crimson Text',Georgia,serif;color:#777;margin-top:.25em}
+.pgrid{display:grid;grid-template-columns:repeat(var(--cols,2),1fr);gap:.12in;height:100%}
+.pgrid div{background:#eee center/cover;min-height:1.5in}
+.feeh{font:600 1.45em 'Crimson Text',Georgia,serif;color:${RED};margin-bottom:.3em}.feeg{min-height:5.5in}
+.ready{font:600 1.35em 'Crimson Text',Georgia,serif;color:${RED};margin-top:.2in}
+.thanks-img .map{height:5in;aspect-ratio:auto!important}
+.cover{padding:0;background:#fff url(${TOPO}) center bottom/cover no-repeat}
+.cv-top{height:1.62in;background:url(${BANDC}) center/cover;border-bottom:6px solid ${TEAL};display:flex;align-items:center;padding:0 .55in}
+.cv-top h1{font:600 28pt 'Crimson Text',Georgia,serif;color:#fff}
+.cv-img{height:4.38in;position:relative;overflow:hidden;background:#222 center/cover}
+.cv-bot{flex:1;display:flex;align-items:center;justify-content:space-between;padding:0 .55in}
+.cv-h{font:600 20pt/1.15 'Crimson Text',Georgia,serif;color:${RED};max-width:7.2in}
+.cv-a{font:400 15pt 'Crimson Text',Georgia,serif;margin-top:.12in}
+.cv-r{text-align:center}.cv-r img{height:1in;width:auto}.cv-r a{display:block;font:400 8.5pt 'Crimson Text',Georgia,serif;color:#1a4fa0;margin-top:.04in}
+</style></head><body>
+<aside id="panel" aria-label="Proposal editor">
+  <h2>Proposal editor</h2>
+  <div class="hint">Change the fee, value and photos here. Click any text on the pages to edit it. The panel doesn't print.</div>
+  <fieldset><legend>Success fee</legend>
+    <div class="row"><div><label for="iFee">Fee (%)</label><input id="iFee" type="number" step="0.25" min="0" max="20"></div>
+    <div><label for="iTerm">Exclusive term (months)</label><input id="iTerm" type="number" step="1" min="1" max="60"></div></div></fieldset>
+  <fieldset><legend>Broker opinion of value</legend>
+    <div id="aiWarn" class="warn" hidden>AI draft — check the value, range and wording before sending.</div>
+    <label for="iVal">Opinion of value ($)</label><input id="iVal" type="number" step="5000" min="0">
+    <div class="row"><div><label for="iLow">Range low ($)</label><input id="iLow" type="number" step="5000" min="0"></div><div><label for="iHigh">Range high ($)</label><input id="iHigh" type="number" step="5000" min="0"></div></div>
+    <label for="iAsk">Suggested asking price ($, optional)</label><input id="iAsk" type="number" step="5000" min="0">
+    <label for="iBov">BOV narrative (blank line = new paragraph)</label><textarea id="iBov"></textarea></fieldset>
+  <fieldset><legend>Photos</legend>
+    <label for="iPh">Upload photos (Additional Photos page; ★ = cover)</label><input id="iPh" type="file" accept="image/*" multiple>
+    <div class="thumbs" id="thumbs"></div>
+    <div id="cardPhWrap" hidden><label>From this card — click to add</label><div class="cardph" id="cardPh"></div></div></fieldset>
+  <div id="status" role="status" aria-live="polite"></div>
+  <div class="acts">${S.dealId?'<button type="button" class="ok" id="bSave">💾 Save to card</button>':''}<button type="button" class="pri" id="bPrint">🖨 Save as PDF</button></div>
+  ${S.dealId?'':'<div class="hint" style="margin-top:8px">Opened from Site Research — edits and photos aren\'t saved. Open it from the property card to keep them.</div>'}
+</aside>
+<main id="pages">${pages}</main>
+<script>window.__P=${state};<\/script>
+<script>
+(function(){
+  var P=window.__P, S=P.S, dirty=false, $=function(id){return document.getElementById(id)};
+  var st=$('status');
+  function m(n){ n=Number(n); return n>0?'$'+Math.round(n).toLocaleString():'—'; }
+  function short(n){ n=Number(n); if(!(n>0)) return '—'; return n>=1e6?'$'+(n/1e6).toFixed(n>=1e7?1:2).replace(/\\.?0+$/,'')+'M':'$'+Math.round(n/1000)+'K'; }
+  function setB(k,v){ document.querySelectorAll('[data-b="'+k+'"]').forEach(function(e){ e.textContent=v; }); }
+  function apply(){
+    setB('value', m(S.bovValue)); setB('ask', m(S.askPrice));
+    setB('range', (S.bovLow>0&&S.bovHigh>0)? short(S.bovLow)+' – '+short(S.bovHigh) : '—');
+    setB('psf', (S.bovValue>0&&S.sqft>0)? '$'+(S.bovValue/S.sqft).toFixed(S.bovValue/S.sqft<10?2:0) : '—');
+    setB('pac', (S.bovValue>0&&S.acres>0)? short(S.bovValue/S.acres) : '—');
+    setB('fee', (S.feePct>0? (+S.feePct).toString().replace(/\\.0+$/,'')+'%':'—'));
+    var t=+S.termMonths||0; setB('term', t? (t===12?'twelve months':t===6?'six months':t===18?'eighteen months':t===24?'twenty-four months':t+' months'):'—');
+    document.querySelectorAll('[data-show="ask"]').forEach(function(e){ e.style.display=S.askPrice>0?'':'none'; });
+    var b=$('bovText'); b.innerHTML=''; String(S.bovText||'').split(/\\n\\s*\\n/).map(function(x){return x.trim();}).filter(Boolean).forEach(function(x){ var p=document.createElement('p'); p.textContent=x; b.appendChild(p); });
+    if(!b.children.length){ var p=document.createElement('p'); p.style.color='#999'; p.textContent='Write the opinion of value in the editor panel.'; b.appendChild(p); }
+    photos(); toc(); fit();
+  }
+  function photos(){
+    var g=$('photoGrid'), pg=$('pg-photos'), list=S.photos.filter(function(p){ return p.url!==S.coverUrl || S.photos.length===1; });
+    g.innerHTML=''; var n=list.length; g.style.setProperty('--cols', n<=1?1:n<=4?2:3);
+    list.slice(0,9).forEach(function(p){ var d=document.createElement('div'); d.style.backgroundImage='url("'+p.url.replace(/"/g,'%22')+'")'; g.appendChild(d); });
+    pg.classList.toggle('off', !n);
+    var cv=$('cvImg'); var ex=cv.querySelector('.cvph'); if(ex) ex.remove();
+    if(S.coverUrl){ var c=document.createElement('div'); c.className='cvph'; c.style.cssText='position:absolute;inset:0;background:#222 center/cover;background-image:url("'+S.coverUrl.replace(/"/g,'%22')+'")'; cv.appendChild(c); }
+    var th=$('thumbs'); th.innerHTML='';
+    S.photos.forEach(function(p,i){ var d=document.createElement('div'); d.style.backgroundImage='url("'+p.url.replace(/"/g,'%22')+'")'; if(p.url===S.coverUrl) d.className='cv';
+      var x=document.createElement('button'); x.className='x'; x.type='button'; x.textContent='✕'; x.title='Remove'; x.setAttribute('aria-label','Remove photo'); x.onclick=function(){ S.photos.splice(i,1); if(S.coverUrl===p.url) S.coverUrl=''; dirty=true; apply(); };
+      var c=document.createElement('button'); c.className='c'; c.type='button'; c.textContent=p.url===S.coverUrl?'★':'☆'; c.title='Use as cover photo'; c.setAttribute('aria-label','Use as cover photo'); c.onclick=function(){ S.coverUrl=(S.coverUrl===p.url?'':p.url); dirty=true; apply(); };
+      d.appendChild(x); d.appendChild(c); th.appendChild(d); });
+    var cw=$('cardPhWrap'), cpd=$('cardPh'), left=(P.cardPhotos||[]).filter(function(u){ return !S.photos.some(function(p){return p.url===u;}); });
+    cw.hidden=!left.length; cpd.innerHTML='';
+    left.forEach(function(u){ var im=document.createElement('img'); im.src=u; im.alt='Card photo'; im.tabIndex=0; im.onclick=im.onkeydown=function(e){ if(e.type==='keydown'&&e.key!=='Enter') return; S.photos.push({url:u}); dirty=true; apply(); }; cpd.appendChild(im); });
+  }
+  function toc(){
+    var n=0, rows=[];
+    document.querySelectorAll('.sheet').forEach(function(s){ if(s.classList.contains('off')) return; n++; var pn=s.querySelector('.pn'); if(pn) pn.textContent=n; rows.push([s.getAttribute('data-sec'),n]); });
+    $('tocList').innerHTML=rows.map(function(r){ return '<div class="toc-r"><span>'+r[0]+'</span><span>'+r[1]+'</span></div>'; }).join('');
+  }
+  function fit(){
+    document.querySelectorAll('.bd:not([data-nofit])').forEach(function(b){ var k=1.12; b.style.setProperty('--k',k);
+      for(var i=0;i<60&&b.scrollHeight>b.clientHeight+1&&k>0.6;i++){ k-=0.02; b.style.setProperty('--k',k.toFixed(3)); } });
+    document.querySelectorAll('.bd[data-nofit]').forEach(function(b){ var ms=b.querySelectorAll('.map'), w=100; ms.forEach(function(x){x.style.width='';});
+      while(b.scrollHeight>b.clientHeight+1&&w>50){ w-=2; ms.forEach(function(x){ x.style.width=w+'%'; x.style.margin='0 auto'; }); } });
+  }
+  function bind(id,key,isNum){ var e=$(id); e.value=S[key]==null?'':S[key]; e.addEventListener('input',function(){ S[key]=isNum?(e.value===''?null:Number(e.value)):e.value; dirty=true; apply(); }); }
+  bind('iFee','feePct',1); bind('iTerm','termMonths',1); bind('iVal','bovValue',1); bind('iLow','bovLow',1); bind('iHigh','bovHigh',1); bind('iAsk','askPrice',1); bind('iBov','bovText',0);
+  $('aiWarn').hidden=!S.aiDraft;
+  document.querySelectorAll('[contenteditable]').forEach(function(e){ e.addEventListener('input',function(){ dirty=true; }); e.addEventListener('blur',fit); });
+  function shrink(file){ return new Promise(function(res,rej){ var img=new Image(), u=URL.createObjectURL(file);
+    img.onload=function(){ var k=Math.min(1,2000/Math.max(img.width,img.height)), c=document.createElement('canvas'); c.width=Math.round(img.width*k); c.height=Math.round(img.height*k);
+      c.getContext('2d').drawImage(img,0,0,c.width,c.height); URL.revokeObjectURL(u); c.toBlob(function(b){ b?res(b):rej(new Error('Could not read '+file.name)); },'image/jpeg',0.86); };
+    img.onerror=function(){ URL.revokeObjectURL(u); rej(new Error('Could not read '+file.name+' — use JPG or PNG')); }; img.src=u; }); }
+  $('iPh').addEventListener('change', async function(e){
+    var files=[].slice.call(e.target.files||[]); e.target.value='';
+    for(var i=0;i<files.length;i++){ var f=files[i];
+      try{ st.textContent='Adding '+f.name+'…'; var b=await shrink(f), url;
+        if(S.dealId && window.opener && window.opener._propUploadPhoto){ url=await window.opener._propUploadPhoto(S.dealId,b,f.name); }
+        else { url=await new Promise(function(r){ var fr=new FileReader(); fr.onload=function(){ r(fr.result); }; fr.readAsDataURL(b); }); }
+        S.photos.push({url:url, name:f.name}); dirty=true; apply(); st.textContent='Added '+f.name+'.';
+      }catch(err){ st.textContent='⚠️ '+(err&&err.message||err); } }
+  });
+  function edits(){ var o={}; document.querySelectorAll('[data-k]').forEach(function(e){ o[e.getAttribute('data-k')]=e.innerText.replace(/\\s+$/,''); }); return o; }
+  var bs=$('bSave'); if(bs) bs.addEventListener('click', async function(){
+    if(!window.opener||!window.opener._propSaveDoc){ st.textContent='⚠️ Terra is closed — keep this window open and reopen Terra to save.'; return; }
+    bs.disabled=true; var t=bs.textContent; bs.textContent='Saving…';
+    try{ var photosOk=S.photos.filter(function(p){ return !/^data:/.test(p.url); });
+      var r=await window.opener._propSaveDoc(S.dealId,{feePct:S.feePct,termMonths:S.termMonths,bovValue:S.bovValue,bovLow:S.bovLow,bovHigh:S.bovHigh,askPrice:S.askPrice,bovText:S.bovText,photos:photosOk,coverUrl:S.coverUrl,projectName:S.projectName,edits:edits()});
+      dirty=false; st.textContent='✅ Saved to the card'+(r&&r.filled&&r.filled.length?' · filled '+r.filled.join(' + '):'')+'.'; S.aiDraft=false; $('aiWarn').hidden=true;
+    }catch(err){ st.textContent='⚠️ Not saved: '+(err&&err.message||err); }
+    bs.disabled=false; bs.textContent=t; });
+  $('bPrint').addEventListener('click',function(){ fit(); setTimeout(function(){ window.print(); },60); });
+  window.addEventListener('beforeunload',function(e){ if(dirty && S.dealId){ e.preventDefault(); e.returnValue=''; } });
+  var imgs=[].slice.call(document.images), left=imgs.length; function done(){ if(--left<=0){ fit(); } }
+  imgs.forEach(function(im){ if(im.complete) done(); else { im.addEventListener('load',done); im.addEventListener('error',function(){ im.style.visibility='hidden'; done(); }); } });
+  (document.fonts&&document.fonts.ready?document.fonts.ready:Promise.resolve()).then(fit);
+  window.__propApply=apply; apply();
+})();
+<\/script></body></html>`;
+  if(!win || win.closed) win=window.open('','_blank','width=1320,height=900');
+  if(!win){ showToast('Pop-up blocked — allow pop-ups to build the proposal.','error'); return; }
+  win.document.open(); win.document.write(html); win.document.close();
+}
+window._propOpen=_propOpen;
 
 /* =======================================================
    VIEW: BOARD (KANBAN)
@@ -20750,6 +21284,7 @@ window.openPropertyDetail = (dealId) => {
   document.getElementById('pdw-sub').textContent =
     [deal.county, deal.landType, deal.dealType === 'lease' ? '📋 Lease' : null].filter(Boolean).join(' · ');
   document.getElementById('pdw-edit-btn').onclick = () => { closePropertyDetail(); openDealModal(dealId); };
+  { const prb=document.getElementById('pdw-prop-btn'); if(prb){ prb.onclick = () => window._dealGenerateProposal(dealId, prb); prb.style.display = (window._propStageOk && window._propStageOk(deal)) ? '' : 'none'; } }   // PROPGEN-20261119 — before Listing only
   { const omb=document.getElementById('pdw-om-btn'); if(omb){ omb.onclick = () => window._dealGenerateOM(dealId, omb); omb.style.display = (deal.doNotMarket ? 'none' : ''); } }   // OMCARD-20261119
   // Show Extension button only for Listing stage
   const extBtn = document.getElementById('pdw-ext-btn');
