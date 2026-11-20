@@ -11399,8 +11399,10 @@ function miscNetToCompany(r){
 /* Office scoping for the admin Tampa/Orlando filter — a payment belongs to
    the office on the advisor's profile. */
 function filterMiscByOffice(rows){
-  if(typeof adminOfficeFilter==='undefined' || adminOfficeFilter==='both') return rows;
-  return rows.filter(r => ((allProfiles||{})[r.advisorUid]?.office||'') === adminOfficeFilter);
+  if(typeof adminOfficeFilter==='undefined') return rows;
+  const _of=_officeScope();   // FINORL-20261120
+  if(_of==='both') return rows;
+  return rows.filter(r => ((allProfiles||{})[r.advisorUid]?.office||'') === _of);
 }
 
 /* What one payment of `amount` on `dateReceived` would pay this advisor —
@@ -12948,6 +12950,24 @@ function setContent(html){ const el=document.getElementById('main-content'); if(
 // office managers, admins viewing as advisor). Admin view and staff view are unchanged.
 const ADVISOR_VIEW_HIDDEN_TABS = [];   // ADVUNHIDE-20261015: Ryan turned Leads, Buyers, Calendar, E-mail, Drive back on — add ids here to hide a tab in Advisor View
 window.ADVISOR_VIEW_HIDDEN_TABS = ADVISOR_VIEW_HIDDEN_TABS;
+// FINORL-20261120 — Ryan (2026-11-20): Austin gets the 📊 Financials tab, scoped to the
+// Orlando office ONLY (no Tampa numbers). email → office. Admins are never forced — they keep
+// the Tampa / Both / Orlando toggle. The scope only applies while the Financials view is open.
+const FIN_OFFICE_ACCESS = {'austin@thedirtdog.com':'Orlando'};
+window.FIN_OFFICE_ACCESS = FIN_OFFICE_ACCESS;
+function _finForcedOffice(){
+  if(!currentUser || currentUser.isAdmin) return null;
+  const o = FIN_OFFICE_ACCESS[(currentUser.email||'').toLowerCase()];
+  if(!o) return null;
+  // Match the office name exactly as it is spelled on the advisor profiles
+  const known = [...new Set(Object.values(allProfiles||{}).map(p=>p&&p.office).filter(Boolean))];
+  return known.find(k=>k.trim().toLowerCase()===o.toLowerCase()) || o;
+}
+function _officeScope(){
+  const f = (currentView==='dashboard') ? _finForcedOffice() : null;
+  return f || adminOfficeFilter;
+}
+window._finForcedOffice = _finForcedOffice;
 function buildNavItems(){
   if(!currentUser) return [];
   const isAdmin=currentUser.isAdmin;
@@ -12994,6 +13014,7 @@ function buildNavItems(){
     ].filter(n=>{
       if(sv){ // staff view: always tabs + staff-flagged tabs + manager tabs (for office managers) + CRM if enabled
         if(n.staffOnly) return true;   // tabs that exist ONLY inside staff view
+        if(n.id==='dashboard' && _finForcedOffice()) return true;   // FINORL-20261120
         if(n.bm) return _bmNavVisible(false,true);   // BUYERMATCH-20261117
         if(n.llr) return _llrNavVisible(false,true);
         if(n.esh) return _eshNavVisible(false,true);   // ESH-20261116   // LLR-20261116
@@ -13005,6 +13026,7 @@ function buildNavItems(){
         return false;
       }
       if(!effectiveAdmin && ADVISOR_VIEW_HIDDEN_TABS.includes(n.id)) return false;   // ADVHIDE-20261014
+      if(n.id==='dashboard' && _finForcedOffice()) return true;   // FINORL-20261120
       if(n.esh) return _eshNavVisible(effectiveAdmin,false);   // ESH-20261116
       if(n.bm) return _bmNavVisible(effectiveAdmin,false);   // BUYERMATCH-20261117
       if(n.llr) return _llrNavVisible(effectiveAdmin,false);   // LLR-20261116
@@ -25912,12 +25934,14 @@ function officeFilterBar(){
   </div>`;
 }
 function filterDealsByOffice(deals){
-  if(adminOfficeFilter==='both') return deals;
-  return deals.filter(d=>dealOffice(d)===adminOfficeFilter);
+  const _of=_officeScope();   // FINORL-20261120
+  if(_of==='both') return deals;
+  return deals.filter(d=>dealOffice(d)===_of);
 }
 function filterAdvisorsByOffice(advisors){
-  if(adminOfficeFilter==='both') return advisors;
-  return advisors.filter(a=>(allProfiles[a.uid]?.office||'')===adminOfficeFilter);
+  const _of=_officeScope();   // FINORL-20261120
+  if(_of==='both') return advisors;
+  return advisors.filter(a=>(allProfiles[a.uid]?.office||'')===_of);
 }
 
 
@@ -26290,10 +26314,11 @@ window.viewITR = viewITR;
 
 function viewDashboard(){
   if(activeChart){ activeChart.destroy(); activeChart=null; }
-  const allVisibleDeals = visibleDeals();
+  const _finOff = _finForcedOffice();   // FINORL-20261120 — office-scoped viewer (Austin → Orlando)
+  const allVisibleDeals = _finOff ? allDeals : visibleDeals();
   const deals = filterDealsByOffice(allVisibleDeals);
   const _projDeals = filterDealsByOffice(allDeals);
-  const officeLabel = adminOfficeFilter!=='both' ? ` — ${adminOfficeFilter} Office` : (currentUser.isOfficeManager ? ` — ${currentUser.officeManagerOffice} Office` : '');
+  const officeLabel = _finOff ? ` — ${_finOff} Office` : adminOfficeFilter!=='both' ? ` — ${adminOfficeFilter} Office` : (currentUser.isOfficeManager ? ` — ${currentUser.officeManagerOffice} Office` : '');
 
   // ── Date scaffolding ──────────────────────────────────────────────
   const now      = new Date();
@@ -26343,7 +26368,7 @@ function viewDashboard(){
   // ── QuickBooks section ────────────────────────────────────────────
   let qbHtml = '';
   const qbUrl = APP_CONFIG.quickbooks?.webhookUrl;
-  if(qbUrl){
+  if(qbUrl && !_finOff){   // FINORL-20261120 — QuickBooks is company-wide (Tampa + Orlando), so hidden for office-scoped viewers
     qbHtml = `<div id="qb-section" class="bg-white rounded-2xl border p-5 mb-6">
       <div class="flex items-center gap-2 mb-3">
         <span class="text-lg">📗</span>
@@ -26621,7 +26646,7 @@ function viewDashboard(){
   }
 
   // ── Fetch QB data if configured ───────────────────────────────────
-  if(qbUrl) setTimeout(fetchQBData, 100);
+  if(qbUrl && !_finOff) setTimeout(fetchQBData, 100);   // FINORL-20261120
 }
 
 function card(label,val,icon,color){
@@ -45867,7 +45892,7 @@ async function init(){
       // Non-admin office managers default to manager/staff view
       if(currentUser.isOfficeManager && !currentUser.isAdmin) staffViewMode = true;
       // Subscribe to real-time Firestore listeners — UI auto-updates on any change
-      await FB.subscribe(fbUser.uid, currentUser.isAdmin||currentUser.isOfficeManager||currentUser.isStaff||currentUser.isDualRole, scheduleReRender);
+      await FB.subscribe(fbUser.uid, currentUser.isAdmin||currentUser.isOfficeManager||currentUser.isStaff||currentUser.isDualRole||!!FIN_OFFICE_ACCESS[(email||'').toLowerCase()], scheduleReRender);   // FINORL-20261120
       // Boot CRM contact listener immediately at login so allContacts is populated
       // before any deal save/drag fires _crmAutoCreateContactsFromDeal.
       // Without this, allContacts is empty until the CRM tab is opened, causing
