@@ -19508,6 +19508,188 @@ async function _omFlood(poly, pt){
   return null;
 }
 
+// ── Surrounding retail + residential communities (SURROUND-20261124) ─────────
+// Ryan: every OM gets a "Surrounding Retail" and a "Residential Communities" page like the
+// W Irlo Bronson / Narcoossee competition maps — pulled for THAT site, in ELC branding.
+// Numbers come from the FDOR tax roll in the FGIO statewide cadastral (building SF, units,
+// year built, home sales). Names and anchor tenants come from OpenStreetMap. AI only adds
+// "pipeline (reported)" lines, and only when it cites a source. Nothing is guessed onto the map.
+const _OM_OVERPASS = ['https://overpass.private.coffee/api/interpreter','https://overpass-api.de/api/interpreter','https://overpass.kumi.systems/api/interpreter','https://maps.mail.ru/osm/tools/overpass/api/interpreter'];
+const _OM_BUILDERS = [['LENNAR','Lennar'],['PULTE','Pulte'],['DEL WEBB','Del Webb'],['CENTEX','Centex'],['D R HORTON','D.R. Horton'],['DR HORTON','D.R. Horton'],
+  ['MERITAGE','Meritage'],['TAYLOR MORRISON','Taylor Morrison'],['KB HOME','KB Home'],['M/I HOMES','M/I Homes'],['MI HOMES','M/I Homes'],['TOLL BROTHERS','Toll Brothers'],
+  ['DREAM FINDERS','Dream Finders'],['HOLIDAY BUILDERS','Holiday Builders'],['RYAN HOMES','Ryan Homes'],['NVR INC','Ryan Homes'],['ASHTON WOODS','Ashton Woods'],
+  ['DAVID WEEKLEY','David Weekley'],['STANLEY MARTIN','Stanley Martin'],['MATTAMY','Mattamy'],['TRI POINTE','Tri Pointe'],['WESTBAY','Homes by WestBay'],
+  ['CENTURY COMMUNITIES','Century Communities'],['STARLIGHT HOMES','Starlight Homes'],['PARK SQUARE','Park Square Homes'],['ICI HOMES','ICI Homes'],
+  ['NEAL COMMUNITIES','Neal Communities'],['MARONDA','Maronda'],['ADAMS HOMES','Adams Homes'],['HIGHLAND HOMES','Highland Homes'],['BEAZER','Beazer'],
+  ['JONES HOMES','Jones Homes'],['GL HOMES','GL Homes'],['WILLIAM RYAN','William Ryan Homes'],['LGI HOMES','LGI Homes'],['CLAYTON PROPERTIES','Clayton'],['HOMES BY CALATLANTIC','CalAtlantic']];
+function _omTitle(s){
+  const small=new Set(['at','of','the','on','and','in','by','an','a','to','for']);
+  return String(s||'').toLowerCase().split(/\s+/).filter(Boolean).map((w,i)=> (i>0&&small.has(w)) ? w
+    : /^(ii|iii|iv|vi|llc|lp)$/.test(w) ? w.toUpperCase() : w.replace(/(^|[-\/'(])([a-z])/g,(m,a,b)=>a+b.toUpperCase())).join(' ');
+}
+// Subdivision / plat name from the roll's legal description ("VINELAND LANDINGS PB 28 PGS 98…" → VINELAND LANDINGS).
+function _omPlat(legal){
+  let s=String(legal||'').toUpperCase().replace(/\s+/g,' ').trim();
+  if(!s || /^(BEG|COM|COMM|FROM|THAT|ALL |PART|PORT|PARCEL|TRACT|LOTS? |UNIT |BLK|BLOCK|DOC|THE [NSEW]|[NSEW]{1,2} ?[\d\/]|\d|SEC |SECTION|GOVT|GOV |OR \d|ORB|LESS|LYING|AS DESC|DESC |RUN |TH PT|PT |PTN )/.test(s)) return '';
+  s=s.split(/\s(?:PB|P\/B|PLAT BOOK|PG|PH(?:ASE)?\s?[\dIVX]+[A-Z]?\b|UNIT\s|REPLAT|RE-PLAT|SEC(?:TION)?\s?\d|\d+\/\d+|LOTS?\s|BLK|BLOCK|TRACT|OR\s\d|ADD(?:ITION)?\b|NO\.?\s?\d|#|\(|CONDO(?:MINIUM)?\b|SUB(?:DIVISION|D)?\b|AMENDED|REVISED|PD\b|PUD\b)/)[0];
+  s=s.replace(/\s(MULTI-?F\w*|MF)$/,'').replace(/(\s(\d+[A-Z]?|[A-Z]))+$/,'').replace(/[,;:\-\s]+$/,'').trim();   // "…KISSIMMEE WEST A", "…POINCIANA MULTI-F"
+  return (s.length>=4 && /[A-Z]{3}/.test(s)) ? s : '';
+}
+// Owner of record → a usable property name ("TAPESTRY HEADWATERS LLC" → TAPESTRY HEADWATERS); '' when it reads like an entity.
+function _omOwnerName(o){
+  let s=String(o||'').toUpperCase().replace(/[.,&]/g,' ');
+  if(/\b(TRUST|TRUSTEE|ESTATE|COUNTY|CITY OF|STATE OF|SCHOOL|HOUSING AUTH|ASSOC|ASSN|CONDO|CHURCH|BANK|MINISTR)/.test(s)) return '';
+  s=s.replace(/\b(L ?L ?C|L ?P|LLLP|LTD|INC|CORP(ORATION)?|CO|COMPANY|DST|OWNER|PROPERTY|PROPERTIES|FEE|BORROWER|HOLDINGS?|VENTURES?|PARTNERS(HIP)?|INVESTMENTS?|INVESTORS?|MF|MULTIFAMILY|OWN|PROP|REIT|FUND|GROUP|ACQUISITIONS?|OPCO|PROPCO|LEASED HOUSING ASSOCIATES|I{1,3}|IV|\d+)\b/g,' ').replace(/\s+/g,' ').trim();
+  s=s.replace(/^THE\s+/,'').replace(/^[B-DF-HJ-NP-TV-Z]{2,5}\s+/,'');   // "ACPF SPLENDID PLACE" → SPLENDID PLACE
+  const w=s.split(' ').filter(Boolean);
+  return (w.length<2 || w.every(x=>x.length<=3)) ? '' : s;
+}
+// OpenStreetMap names (shops, centers, apartment complexes, subdivisions) in the box — CORS-open, mirrors tried in turn.
+async function _omOverpass(bb){
+  const b=`(${bb.s.toFixed(5)},${bb.w.toFixed(5)},${bb.n.toFixed(5)},${bb.e.toFixed(5)})`;
+  const q=`[out:json][timeout:25];(nwr["shop"]["name"]${b};nwr["landuse"="retail"]["name"]${b};nwr["amenity"="marketplace"]["name"]${b};`+
+          `nwr["building"~"^(apartments|residential|retail|commercial)$"]["name"]${b};nwr["landuse"="residential"]["name"]${b};);out center tags;`;
+  // Mirrors race (tested 2026-11-24: overpass-api.de 502, private.coffee 7 s, kumi/mail.ru slow) — first good answer wins.
+  const one=u=>_omJSON(u, 28000, {method:'POST', body:'data='+encodeURIComponent(q), headers:{'Content-Type':'application/x-www-form-urlencoded'}})
+    .then(d=>(d && Array.isArray(d.elements)) ? d.elements : Promise.reject(new Error('no data')));
+  try{
+    const el=await Promise.any(_OM_OVERPASS.map(one));
+    return el.map(e=>({lat:e.lat!=null?e.lat:(e.center&&e.center.lat), lon:e.lon!=null?e.lon:(e.center&&e.center.lon), t:e.tags||{}}))
+      .filter(e=>e.lat!=null && e.lon!=null && /[A-Za-z]{3}/.test(e.t.name||''));   // building "24", "B" etc. are not names
+  }catch(e){ return null; }
+}
+const _omEnv = bb=>({xmin:bb.w, ymin:bb.s, xmax:bb.e, ymax:bb.n, spatialReference:{wkid:4326}});
+async function _omRollQuery(bb, where, fields, maxPages){
+  const out=[]; let ok=false;
+  for(let page=0; page<(maxPages||3); page++){
+    const d=await _omJSON(_OM_CADASTRAL+'?'+_omQS({geometry:_omEnv(bb), geometryType:'esriGeometryEnvelope', inSR:'4326', spatialRel:'esriSpatialRelIntersects',
+      where, outFields:fields, returnGeometry:'true', outSR:'4326', maxAllowableOffset:'0.0002', geometryPrecision:'5',
+      resultOffset:String(page*2000), resultRecordCount:'2000', f:'json'}), 60000);
+    if(!d) break; ok=true; out.push(...(d.features||[]));
+    if(!d.exceededTransferLimit) break;
+  }
+  return ok ? out : null;
+}
+async function _omRollStats(bb, where, groupBy){
+  const d=await _omJSON(_OM_CADASTRAL+'?'+_omQS({geometry:_omEnv(bb), geometryType:'esriGeometryEnvelope', inSR:'4326', spatialRel:'esriSpatialRelIntersects', where,
+    outStatistics:[{statisticType:'count',onStatisticField:'OBJECTID',outStatisticFieldName:'n'},{statisticType:'min',onStatisticField:'ACT_YR_BLT',outStatisticFieldName:'y0'},{statisticType:'max',onStatisticField:'ACT_YR_BLT',outStatisticFieldName:'y1'}],
+    groupByFieldsForStatistics:groupBy, f:'json'}), 60000);
+  return d ? (d.features||[]).map(f=>f.attributes) : null;
+}
+// Groups parcels that belong together (one shopping center, one apartment community).
+function _omCluster(items, same){
+  const p=items.map((_,i)=>i), f=i=>p[i]===i?i:(p[i]=f(p[i]));
+  for(let i=0;i<items.length;i++) for(let j=i+1;j<items.length;j++) if(same(items[i],items[j],_omDistM(items[i].c,items[j].c))) p[f(i)]=f(j);
+  const g=new Map(); items.forEach((x,i)=>{ const k=f(i); if(!g.has(k)) g.set(k,[]); g.get(k).push(x); });
+  return [...g.values()];
+}
+function _omBBoxOf(rings){ let a=Infinity,b=Infinity,c=-Infinity,d=-Infinity; for(const r of rings) for(const q of r){ a=Math.min(a,q[0]); c=Math.max(c,q[0]); b=Math.min(b,q[1]); d=Math.max(d,q[1]); } return [a,b,c,d]; }
+function _omInside(pt, grp){ const bx=grp.bx; return pt[0]>=bx[0]&&pt[0]<=bx[2]&&pt[1]>=bx[1]&&pt[1]<=bx[3] && _omPip(pt, grp.rings); }
+
+async function _omSurroundings(center){
+  const Y=new Date().getFullYear(), here=[center.lon, center.lat];
+  const mi=c=>_omDistM(here,c)/1609.34;
+  const bbox=R=>{ const dLat=R/69.0, dLon=R/(69.17*Math.cos(center.lat*Math.PI/180)); return {s:center.lat-dLat, n:center.lat+dLat, w:center.lon-dLon, e:center.lon+dLon}; };
+  const ANCHOR=/^(supermarket|department_store|wholesale|doityourself|mall|hardware|furniture|electronics|variety_store|garden_centre|sports)$/;
+  const BIG=/^(supermarket|department_store|wholesale|doityourself|mall)$/;
+  const run=async R=>{
+    const bb=bbox(R);
+    const [retail, mf, sfAll, sfNew, sfSales, osm] = await Promise.all([
+      _omRollQuery(bb, "DOR_UC IN ('011','012','013','014','015','016') AND TOT_LVG_AR>=8000", 'CO_NO,DOR_UC,OWN_NAME,PHY_ADDR1,ACT_YR_BLT,TOT_LVG_AR,S_LEGAL,ASMNT_YR', 3),
+      _omRollQuery(bb, "DOR_UC='003' AND NO_RES_UNT>=40", 'CO_NO,OWN_NAME,PHY_ADDR1,ACT_YR_BLT,NO_RES_UNT,S_LEGAL,ASMNT_YR', 2),
+      _omRollStats(bb, "DOR_UC='001'", 'CO_NO,NBRHD_CD'),
+      _omRollStats(bb, "DOR_UC='001' AND ACT_YR_BLT>="+(Y-5), 'CO_NO,NBRHD_CD'),
+      _omRollStats(bb, "DOR_UC='001' AND SALE_PRC1>=50000 AND SALE_YR1>="+(Y-2), 'CO_NO,NBRHD_CD,SALE_YR1'),
+      _omOverpass(bb),
+    ]);
+    const O=(osm||[]).map(e=>({c:[e.lon,e.lat], t:e.t, name:String(e.t.name||'').trim()})).filter(e=>e.name);
+    const shops=O.filter(e=>e.t.shop && e.t.shop!=='mall' && (e.t.brand || ANCHOR.test(e.t.shop)));
+    // Center names only from mapped centers — a named retail BUILDING is usually one tenant ("Rack Room Shoes").
+    const areas=O.filter(e=>e.t.landuse==='retail' || e.t.shop==='mall' || e.t.amenity==='marketplace');
+    const homesO=O.filter(e=>e.t.landuse==='residential' || e.t.building==='apartments' || e.t.building==='residential');
+    const nearestName=(list, c, maxM, inside)=>{ let best=null, bd=Infinity; for(const e of list){ const d=_omDistM(c,e.c); if((inside&&inside(e.c))||d<=maxM){ const s=inside&&inside(e.c)?d-1e6:d; if(s<bd){ bd=s; best=e; } } } return best?best.name:''; };
+    const rollYr=Math.max(0,...[].concat(retail||[],mf||[]).map(f=>+f.attributes.ASMNT_YR||0))||null;
+    const prep=fs=>(fs||[]).filter(f=>f.geometry&&f.geometry.rings&&f.geometry.rings.length).map(f=>{ const st=_omRingStats(f.geometry.rings), a=f.attributes;
+      return {a, rings:f.geometry.rings, c:st.centroid, plat:_omPlat(a.S_LEGAL), own:String(a.OWN_NAME||'').toUpperCase().trim()}; }).filter(x=>mi(x.c)<=R*1.05);
+    const merge=g=>{ const rings=[].concat(...g.map(x=>x.rings)); return {rings, bx:_omBBoxOf(rings)}; };
+
+    // ── retail centers ──
+    const rItems=[];
+    _omCluster(prep(retail), (x,y,d)=>(x.plat&&x.plat===y.plat&&d<900)||(x.own&&x.own===y.own&&d<700)||d<90).forEach(g=>{
+      const m=merge(g), sf=g.reduce((s,x)=>s+(+x.a.TOT_LVG_AR||0),0);
+      const c=[g.reduce((s,x)=>s+x.c[0]*(+x.a.TOT_LVG_AR||1),0)/g.reduce((s,x)=>s+(+x.a.TOT_LVG_AR||1),0), g.reduce((s,x)=>s+x.c[1]*(+x.a.TOT_LVG_AR||1),0)/g.reduce((s,x)=>s+(+x.a.TOT_LVG_AR||1),0)];
+      const inG=pt=>_omInside(pt,m);
+      const tn=shops.filter(e=>inG(e.c)).sort((a,b)=>(BIG.test(b.t.shop)?1:0)-(BIG.test(a.t.shop)?1:0));
+      const plat=(g.map(x=>x.plat).find(Boolean)||'').replace(/^(ST|SHOPPING|SHOP) CENTER AT /,'').replace(/ (COMMERCIAL|RETAIL)$/,'');
+      const lc=x=>String(x).toLowerCase().replace(/[^a-z0-9]/g,'');
+      let tenants=[]; tn.forEach(e=>{ const t=e.t.brand||e.name; if(!tenants.some(x=>lc(x)===lc(t))) tenants.push(t); });
+      const name=nearestName(areas, c, 220, inG) || (plat?_omTitle(plat):'') || (tenants.length?tenants.slice(0,2).join(' & '):'') || _omTitle(_omOwnerName(g[0].own)) || _omTitle(g[0].a.PHY_ADDR1||'Retail');
+      tenants=tenants.filter(t=>!lc(name).includes(lc(t))).slice(0,4);
+      const yrs=g.map(x=>+x.a.ACT_YR_BLT).filter(y=>y>1900);
+      const big=tn.some(e=>BIG.test(e.t.shop));
+      if(sf<20000 && !big) return;
+      rItems.push({kind:'retail', name, tenants, sf, yr:yrs.length?Math.min(...yrs):null, c, mi:mi(c), addr:_omTitle(g[0].a.PHY_ADDR1||''), score:sf/(0.6+mi(c))+(big?40000:0)});
+    });
+    // Big-format anchors OSM knows about that the roll query missed (other use codes, no SF on the roll).
+    shops.filter(e=>BIG.test(e.t.shop) && mi(e.c)<=R).forEach(e=>{
+      if(rItems.some(r=>_omDistM(r.c,e.c)<350 || r.tenants.includes(e.t.brand||e.name))) return;
+      rItems.push({kind:'retail', name:e.name, tenants:[], sf:null, yr:null, c:e.c, mi:mi(e.c), addr:_omTitle([e.t['addr:housenumber'],e.t['addr:street']].filter(Boolean).join(' ')), score:30000/(0.6+mi(e.c))});
+    });
+
+    // ── multifamily ──
+    const mItems=[];
+    _omCluster(prep(mf), (x,y,d)=>(x.own&&x.own===y.own&&d<600)||(x.plat&&x.plat===y.plat&&d<450)).forEach(g=>{
+      const m=merge(g), units=g.reduce((s,x)=>s+(+x.a.NO_RES_UNT||0),0);
+      const c=[g.reduce((s,x)=>s+x.c[0],0)/g.length, g.reduce((s,x)=>s+x.c[1],0)/g.length];
+      const yrs=g.map(x=>+x.a.ACT_YR_BLT).filter(y=>y>1900);
+      const name=nearestName(homesO.filter(e=>e.t.building||e.t.landuse==='residential'), c, 160, pt=>_omInside(pt,m)) || _omTitle(_omOwnerName(g[0].own)) || _omTitle(g.map(x=>x.plat).find(Boolean)||'') || _omTitle(g[0].a.PHY_ADDR1||'Apartments');
+      const yr=yrs.length?Math.max(...yrs):null;
+      mItems.push({kind:'mf', name, units, yr, yr0:yrs.length?Math.min(...yrs):null, c, mi:mi(c), addr:_omTitle(g[0].a.PHY_ADDR1||''), score:units/(0.6+mi(c))*(yr&&yr>=Y-5?1.6:1)});
+    });
+
+    // ── single-family communities (roll neighborhoods → plat name, builder, sales) ──
+    const key=a=>a.CO_NO+'|'+a.NBRHD_CD, nb=new Map();
+    (sfAll||[]).forEach(a=>{ if(a.NBRHD_CD && a.n>=25) nb.set(key(a),{co:a.CO_NO, cd:a.NBRHD_CD, n:a.n, y0:a.y0, y1:a.y1, nNew:0, sales:{}}); });
+    (sfNew||[]).forEach(a=>{ const r=nb.get(key(a)); if(r) r.nNew=a.n; });
+    (sfSales||[]).forEach(a=>{ const r=nb.get(key(a)); if(r) r.sales[a.SALE_YR1]=a.n; });
+    const yrTot={}; (sfSales||[]).forEach(a=>{ yrTot[a.SALE_YR1]=(yrTot[a.SALE_YR1]||0)+a.n; });
+    const saleYear=Y-1;   // the roll carries each parcel's latest sale: count every sale since Jan 1 of last year
+    const cands=[...nb.values()].map(r=>Object.assign(r,{sold:Object.keys(r.sales).filter(y=>+y>=saleYear).reduce((s,y)=>s+r.sales[y],0)})).sort((a,b)=>(b.nNew*3+b.sold+b.n*0.05)-(a.nNew*3+a.sold+a.n*0.05)).slice(0,9);
+    const samples=await Promise.all(cands.map(r=>_omJSON(_OM_CADASTRAL+'?'+_omQS({where:`CO_NO=${+r.co} AND NBRHD_CD='${String(r.cd).replace(/'/g,"''")}' AND DOR_UC='001'`,
+      outFields:'S_LEGAL,OWN_NAME,ACT_YR_BLT', returnGeometry:'true', outSR:'4326', maxAllowableOffset:'0.001', geometryPrecision:'5', orderByFields:'ACT_YR_BLT DESC', resultRecordCount:'150', f:'json'}), 30000)));
+    const sItems=[];
+    cands.forEach((r,i)=>{
+      const fs=((samples[i]&&samples[i].features)||[]).filter(f=>f.geometry&&f.geometry.rings);
+      if(!fs.length) return;
+      const pts=fs.map(f=>_omRingStats(f.geometry.rings).centroid).filter(c=>mi(c)<=R*1.3);
+      if(!pts.length) return;
+      const med=k=>{ const v=pts.map(p=>p[k]).sort((a,b)=>a-b); return v[Math.floor(v.length/2)]; };
+      const c=[med(0),med(1)];
+      const tally=new Map(); fs.forEach(f=>{ const p=_omPlat(f.attributes.S_LEGAL); if(p) tally.set(p,(tally.get(p)||0)+1); });
+      const plat=[...tally.entries()].sort((a,b)=>b[1]-a[1])[0];
+      const name=(plat&&plat[1]>=Math.min(5,fs.length/4)) ? _omTitle(plat[0]) : nearestName(homesO.filter(e=>e.t.landuse==='residential'), c, 600);
+      if(!name) return;
+      const bl=new Map(); fs.forEach(f=>{ const o=String(f.attributes.OWN_NAME||'').toUpperCase(); const h=_OM_BUILDERS.find(([k])=>o.includes(k)); if(h) bl.set(h[1],(bl.get(h[1])||0)+1); });
+      const builders=[...bl.entries()].sort((a,b)=>b[1]-a[1]).map(x=>x[0]).slice(0,2);
+      if(sItems.some(s=>s.name===name)) { const s=sItems.find(s=>s.name===name); s.homes+=r.n; s.nNew+=r.nNew; s.sold+=r.sold; return; }
+      sItems.push({kind:'sf', name, homes:r.n, nNew:r.nNew, sold:r.sold, saleYear, yr0:r.y0>1900?r.y0:null, yr1:r.y1>1900?r.y1:null, builders, c, mi:mi(c)});
+    });
+    return {R, rollYr, saleYear, rollOk:!!(retail||mf||sfAll), osmOk:!!osm,
+      retail:rItems.sort((a,b)=>b.score-a.score).slice(0,10).sort((a,b)=>a.mi-b.mi),
+      mf:mItems.sort((a,b)=>b.score-a.score).slice(0,8).sort((a,b)=>a.mi-b.mi),
+      sf:sItems.slice(0,6).sort((a,b)=>a.mi-b.mi)};
+  };
+  let s=await run(3);
+  if(s.rollOk && (s.retail.length<3 || s.mf.length+s.sf.length<3)){   // rural / edge-of-growth sites: look farther out
+    const w=await run(7);
+    if(w.retail.length>s.retail.length) { s.retail=w.retail; s.retailR=7; }
+    if(w.mf.length+w.sf.length>s.mf.length+s.sf.length){ s.mf=w.mf; s.sf=w.sf; s.resiR=7; }
+    s.rollOk=s.rollOk||w.rollOk; s.osmOk=s.osmOk||w.osmOk; s.saleYear=s.saleYear||w.saleYear; s.rollYr=s.rollYr||w.rollYr;
+  }
+  s.retailR=s.retailR||s.R; s.resiR=s.resiR||s.R;
+  return s;
+}
+
 const _OM_LOADING = '<!DOCTYPE html><title>Building Offering Memorandum…</title><body style="font-family:Helvetica,Arial,sans-serif;background:#3a3633;color:#e7e2dc;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><div style="text-align:center"><div style="font:600 30px Georgia,serif;color:#fff">Building Offering Memorandum…</div><div id="omStep" style="margin-top:12px;font-size:13px;letter-spacing:.04em">Pulling the parcel, aerials, FDOT traffic counts, Census demographics and zoning.</div></div></body>';
 function _omStep(win, txt){ try{ const e=win.document.getElementById('omStep'); if(e) e.textContent=txt; }catch(e){} }
 
@@ -19531,7 +19713,7 @@ async function _valGenerateOM(opts){
     const conf = (opts ? opts.conf : window._valConfirmed) || {};
     const cp = conf.parcel || {};
 
-    _omStep(win,'Finding the parcel, aerials, traffic counts and Census rings…');
+    _omStep(win,'Finding the parcel, aerials, traffic counts, Census rings, nearby retail and housing…');
     const pt = await _omResolvePoint(address || p.siteAddress, parcel, county, opts ? conf : null);
     const siteAddr = p.siteAddress || cp.siteAddress || address;
     const [poly, traffic, rings] = pt ? await Promise.all([
@@ -19542,6 +19724,8 @@ async function _valGenerateOM(opts){
       _omRings(pt),
     ]) : [null, [], null];
     const center = poly ? {lat:poly.centroid[1], lon:poly.centroid[0]} : pt;
+    // SURROUND-20261124: surrounding retail + residential run alongside everything else.
+    const surroundP = center ? _omSurroundings(center).catch(e=>{ console.warn('[OM] surroundings failed', e); return null; }) : Promise.resolve(null);
     if(opts && opts.deal) _omFillAssemblageAcres(opts.deal, poly);
     const cGeo = (rings && (rings.fiveMile||rings.threeMile||{}).countyGeoid) || conf.fips || '';
     const [wet, flood, countyAcs] = center ? await Promise.all([_omWetlands(poly, center), _omFlood(poly, center), _omCountyACS(cGeo)]) : [null, null, null];
@@ -19573,8 +19757,9 @@ async function _valGenerateOM(opts){
    "standards":[{"value":"e.g. '36 ft'","label":"max 9 words"}],
    "permitted":["uses permitted by right, max 10"],"accessory":"max 35 words","special":["special exception / conditional uses, max 8"],
    "yield":[{"label":"max 8 words","value":"short"}],"sources":"code sections relied on, max 40 words"},
- "propertyHighlights":["5 bullets, max 20 words each, tied to THIS parcel"]}
-Rules: the CONFIRMED FACTS are authoritative — never contradict them and never invent traffic counts, acreage, zoning district or demographics. Zoning: research the confirmed district in the confirmed jurisdiction's code; if it is a Planned Development (PD/PUD), say standards come from the site-specific PD ordinance and give the ordinance/case number if you can find it. Standards: 4-6 of max density, height, FAR, lot coverage/ISR, key setbacks. Yield: 3-6 illustrative maximums computed from the confirmed acreage. keyMetrics: exactly 4. Keep every string within its limit.`;
+ "propertyHighlights":["5 bullets, max 20 words each, tied to THIS parcel"],
+ "pipeline":[{"name":"project name","type":"multifamily | single-family | retail | mixed-use","detail":"e.g. '159 units permitted' or '45,000 SF grocery-anchored center'","status":"permitted | under construction | approved | proposed","distanceMi":"approx straight-line miles from the site","source":"publication or agency + month/year — REQUIRED"}]}
+Rules: the CONFIRMED FACTS are authoritative — never contradict them and never invent traffic counts, acreage, zoning district or demographics. Zoning: research the confirmed district in the confirmed jurisdiction's code; if it is a Planned Development (PD/PUD), say standards come from the site-specific PD ordinance and give the ordinance/case number if you can find it. Standards: 4-6 of max density, height, FAR, lot coverage/ISR, key setbacks. Yield: 3-6 illustrative maximums computed from the confirmed acreage. keyMetrics: exactly 4. pipeline (SURROUND-20261124): 0-6 residential or retail projects within 3 miles that are proposed, approved, permitted or under construction and NOT yet open, each found in a public source from the last 24 months (county/city agenda, permit record, news); every item must name its source — return [] rather than guess. Keep every string within its limit.`;
     let om = {};
     _omStep(win,'Writing the market, location and zoning narrative…');
     try{
@@ -19586,7 +19771,9 @@ Rules: the CONFIRMED FACTS are authoritative — never contradict them and never
       }
     }catch(err){ console.warn('[OM] narrative failed', err); }
 
-    _valOpenOM(d, om, {county, parcel, address, win}, {pt, center, poly, traffic, rings, wet, flood, conf, countyAcs, places, deal});
+    _omStep(win,'Mapping surrounding retail and residential communities…');
+    const surround = await surroundP;
+    _valOpenOM(d, om, {county, parcel, address, win}, {pt, center, poly, traffic, rings, wet, flood, conf, countyAcs, places, deal, surround});
   } catch(err){
     console.error('[OM] build failed', err);
     try{ win.document.body.innerHTML='<div style="color:#fff;font-family:Arial;padding:40px">Could not build the OM: '+String(err&&err.message||err).replace(/</g,'&lt;')+'</div>'; }catch(e){}
@@ -19960,6 +20147,65 @@ function _valOpenOM(d, om, meta, data){
       :`<p class="body">No FDOT-counted road within 1.5 miles.</p>`}
     </div></div>`);
 
+  // ── Surrounding Retail + Residential Communities pages (SURROUND-20261124) ──
+  const SR = data.surround || null, YR = new Date().getFullYear();
+  const pipe = (Array.isArray(om.pipeline)?om.pipeline:[]).filter(x=>x && val(x.name) && val(x.source)).slice(0,6);
+  const pipeRetail = pipe.filter(x=>/retail|commercial|shopping|grocery/i.test(x.type||'') && !/resid|family|apartment|townhome|senior/i.test(x.type||''));
+  const pipeResi = pipe.filter(x=>!pipeRetail.includes(x));
+  const kSF = n=>n>=1e6?(n/1e6).toFixed(1)+'M':n>=1000?Math.round(n/1000)+'K':String(n);
+  const miTxt = m=>(m<10?m.toFixed(1):Math.round(m))+' mi';
+  const PIN_R=TEAL, PIN_MF=DARK;
+  const surMap = (items, alt)=>{
+    if(!center) return noMap;
+    const W=700, H=600, [cx,cy]=_omMerc(center.lon,center.lat);
+    let half=1609.34/Math.cos(center.lat*Math.PI/180);
+    items.forEach(i=>{ const [x,y]=_omMerc(i.c[0],i.c[1]); half=Math.max(half, Math.abs(x-cx)*1.16, Math.abs(y-cy)*W/H*1.16); });
+    const v=view(center.lon,center.lat,half,W,H);
+    const [sx,sy]=v.px(center.lon,center.lat), placed=[[sx,sy]];
+    let lead='', pins='';
+    items.forEach(i=>{
+      const [x,y]=v.px(i.c[0],i.c[1]); let px=x, py=y;
+      for(let k=0; k<24 && placed.some(q=>Math.hypot(q[0]-px,q[1]-py)<25); k++){ const a=k*Math.PI/4, r=27*(1+Math.floor(k/8)); px=x+Math.cos(a)*r; py=y+Math.sin(a)*r; }
+      px=Math.min(W-14,Math.max(14,px)); py=Math.min(H-14,Math.max(14,py)); placed.push([px,py]);
+      if(px!==x||py!==y) lead+=`<line x1="${x.toFixed(1)}" y1="${y.toFixed(1)}" x2="${px.toFixed(1)}" y2="${py.toFixed(1)}" stroke="#fff" stroke-width="1.6"/><circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2.6" fill="#fff"/>`;
+      const sf=i.kind==='sf';
+      pins+=`<g transform="translate(${px.toFixed(1)},${py.toFixed(1)})"><circle r="11.5" fill="${sf?'#fff':(i.kind==='retail'?PIN_R:PIN_MF)}" stroke="${sf?INK:'#fff'}" stroke-width="2.2"/><text dy="4" fill="${sf?INK:'#fff'}" font-size="11" font-weight="700" text-anchor="middle" font-family="Helvetica,Arial">${i.n}</text></g>`;
+    });
+    const star=`<g transform="translate(${sx.toFixed(1)},${sy.toFixed(1)})"><polygon points="${[...Array(10)].map((_,k)=>{ const r=k%2?7.5:18, a=-Math.PI/2+k*Math.PI/5; return (Math.cos(a)*r).toFixed(1)+','+(Math.sin(a)*r).toFixed(1); }).join(' ')}" fill="${RED}" stroke="#fff" stroke-width="2.4" stroke-linejoin="round"/></g>
+      <g transform="translate(${sx.toFixed(1)},${Math.max(30,sy-24).toFixed(1)})"><rect x="-38" y="-15" width="76" height="17" rx="2" fill="${RED}"/><text y="-3" fill="#fff" font-size="9" font-weight="700" letter-spacing="1.2" text-anchor="middle" font-family="Helvetica,Arial">SUBJECT</text></g>`;
+    return map(v,[v.url('World_Imagery','jpg'), v.url('Reference/World_Transportation','png32',true), v.url('Reference/World_Boundaries_and_Places','png32',true)], outline(v,2)+lead+pins+star+north(v)+scaleBar(v), alt);
+  };
+  const kRow = (i, title, line)=>`<div class="ky"><span class="kn" style="${i.kind==='sf'?`background:#fff;color:${INK};border:2px solid ${INK}`:`background:${i.kind==='retail'?PIN_R:PIN_MF}`}">${i.n}</span><div><b class="kt" contenteditable="true" spellcheck="false">${esc(title)}</b><span class="km">${line}</span></div></div>`;
+  const pRow = x=>`<div class="ky pipe"><span class="kn">◆</span><div><b class="kt" contenteditable="true" spellcheck="false">${esc(clip(x.name,60))}</b><span class="km">${esc([val(x.detail),val(x.status),val(x.distanceMi)?String(x.distanceMi).replace(/\s*mi.*$/,'')+' mi':''].filter(Boolean).join(' · '))}<i>${esc(clip(x.source,90))}</i></span></div></div>`;
+  const surSrc = extra=>`<div class="src"><b>Sources:</b> ${SR&&SR.rollOk?`Florida Department of Revenue ${SR.rollYr||''} tax roll via the FGIO statewide cadastral (building SF, units, year built${extra?', home sales':''}); `:''}${SR&&SR.osmOk?'names and tenants from OpenStreetMap contributors; ':''}imagery Esri. Straight-line miles from the subject. Click any name to edit it before saving.${pipe.length?' ◆ Pipeline items are reported by the cited public sources and are not mapped — verify before relying on them.':''}</div>`;
+
+  const rList=((SR&&SR.retail)||[]).map((x,k)=>Object.assign(x,{n:k+1}));
+  const rSF=rList.reduce((s,x)=>s+(x.sf||0),0);
+  const pRetail = sheet('Surrounding Retail', `<div class="sur">
+      <div class="sur-key">${lab('Shopping Centers &amp; Anchors')}
+        ${rList.length ? rList.map(x=>kRow(x, x.name, esc([x.tenants.length?x.tenants.join(', '):'', x.sf?kSF(x.sf)+' SF':'', x.yr?'Built '+x.yr:'', miTxt(x.mi)].filter(Boolean).join(' · ')))).join('')
+          : `<p class="body">${SR?`No shopping centers or big-format anchors found within ${SR.retailR} miles in the tax roll or OpenStreetMap.`:'Surrounding retail could not be retrieved — generate the OM again.'}</p>`}
+        ${pipeRetail.length?lab('Retail Pipeline (Reported)')+pipeRetail.map(pRow).join(''):''}
+      </div>
+      <div class="sur-map">${surMap(rList,'Surrounding retail map')}</div>
+    </div>${surSrc(false)}`,
+    {sub: rList.length?`WITHIN ${SR.retailR} MILES &nbsp;//&nbsp; ${rList.length} CENTERS &amp; ANCHORS${rSF?' &nbsp;//&nbsp; '+kSF(rSF)+' SF OF RETAIL':''}`:''});
+
+  const mList=((SR&&SR.mf)||[]), sList=((SR&&SR.sf)||[]);
+  [...mList,...sList].forEach((x,k)=>{ x.n=k+1; });
+  const mUnits=mList.reduce((s,x)=>s+(x.units||0),0), sHomes=sList.reduce((s,x)=>s+(x.homes||0),0);
+  const pResi = sheet('Residential Communities', `<div class="sur">
+      <div class="sur-key">
+        ${mList.length?lab('Multifamily')+mList.map(x=>kRow(x, x.name, esc([x.units.toLocaleString()+' units', x.yr?((x.yr>=YR-1?'Delivered ':'Built ')+(x.yr0&&x.yr0!==x.yr?x.yr0+'–':'')+x.yr):'', miTxt(x.mi)].filter(Boolean).join(' · ')))).join(''):''}
+        ${sList.length?lab('Single-Family Communities')+sList.map(x=>kRow(x, x.name, esc([x.homes.toLocaleString()+' homes', x.nNew?x.nNew.toLocaleString()+' built since '+(YR-5):(x.yr0&&x.yr1?'Built '+x.yr0+'–'+x.yr1:''), x.sold&&x.saleYear?x.sold.toLocaleString()+' sales since '+x.saleYear:'', x.builders.length?x.builders.join(' / '):'', miTxt(x.mi)].filter(Boolean).join(' · ')))).join(''):''}
+        ${!mList.length&&!sList.length?`<p class="body">${SR?`No apartment communities (40+ units) or single-family neighborhoods found within ${SR.resiR} miles in the tax roll.`:'Residential communities could not be retrieved — generate the OM again.'}</p>`:''}
+        ${pipeResi.length?lab('Residential Pipeline (Reported)')+pipeResi.map(pRow).join(''):''}
+      </div>
+      <div class="sur-map">${surMap([...mList,...sList],'Residential communities map')}
+        <div class="sur-leg"><span><i style="background:${PIN_MF}"></i>Multifamily</span><span><i style="background:#fff;border:2px solid ${INK}"></i>Single-family</span><span><i class="st"></i>Subject</span></div></div>
+    </div>${surSrc(true)}`,
+    {sub: (mList.length||sList.length)?`WITHIN ${SR.resiR} MILES${mUnits?' &nbsp;//&nbsp; '+mUnits.toLocaleString()+' APARTMENT UNITS':''}${sHomes?' &nbsp;//&nbsp; '+sHomes.toLocaleString()+' SINGLE-FAMILY HOMES':''}`:''});
+
   const pEnv = sheet('Environmental &amp; Site Conditions', `<div class="g3">
     <div>${lab('FEMA Flood Zone')}<div class="kvs">${kv('Zone(s) on parcel',floodZones.join(', ')||'Unconfirmed')}${sfha==null?'':kv('Special Flood Hazard Area',sfha?'Yes — flood insurance and elevation rules apply':'No — outside the 1% annual-chance floodplain')}${kv('FIRM panel',firm)}</div>
       ${lab('Wetlands · USFWS NWI')}<div class="kvs">${wet&&wet.onSite?kv('On the parcel',wet.onSite.length?wet.onSite.join(', '):'None mapped'):kv('On the parcel','Unconfirmed')}${wet?kv('Within '+(wet.ft||500).toLocaleString()+' ft',wet.nearby.length?wet.nearby.join(', '):'None mapped'):''}</div>
@@ -20094,6 +20340,20 @@ body{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:${INK}}
 .cap{font:400 .76em 'Crimson Text',Georgia,serif;color:#777;margin-top:.3em}
 .disc{columns:2;column-gap:.4in;font:400 1em/1.5 'Helvetica Neue',Helvetica,Arial;color:#333;text-align:justify}
 .disc p{margin-bottom:.8em}
+/* surrounding retail + residential (SURROUND-20261124) */
+.sur{display:grid;grid-template-columns:3.4in 1fr;gap:.26in;align-items:start;flex:0 0 auto}
+.ky{display:flex;gap:.55em;align-items:flex-start;padding:.26em 0;border-bottom:1px solid #e4e0da;break-inside:avoid}
+.kn{flex:0 0 auto;width:1.8em;height:1.8em;border-radius:50%;color:#fff;font:700 .84em/1.8em Helvetica,Arial;text-align:center;box-sizing:border-box}
+.ky .kn[style*="border"]{line-height:calc(1.8em - 4px)}
+.ky .kt{display:block;font:700 .9em/1.2 Helvetica,Arial;text-transform:uppercase;letter-spacing:.02em;color:${INK}}
+.ky .km{display:block;font:400 1em/1.3 'Crimson Text',Georgia,serif;color:#444}
+.ky .km i{display:block;font-style:normal;color:#888;font-size:.88em}
+.ky.pipe .kn{background:transparent;color:${RED};border:1.5px dashed ${RED};line-height:calc(1.8em - 3px)}
+.sur-key .lab{margin-top:.5em}.sur-key .lab:first-child{margin-top:0}
+.sur-leg{display:flex;gap:1.2em;font:400 .9em 'Crimson Text',Georgia,serif;color:#444;margin-top:.35em}
+.sur-leg i{display:inline-block;width:.95em;height:.95em;border-radius:50%;vertical-align:-.15em;margin-right:.35em;box-sizing:border-box}
+.sur-leg i.st{border-radius:0;background:${RED};clip-path:polygon(50% 0,61% 35%,98% 35%,68% 57%,79% 91%,50% 70%,21% 91%,32% 57%,2% 35%,39% 35%)}
+@media screen{.ky .kt[contenteditable]:hover,.ky .kt[contenteditable]:focus{outline:1px dashed ${TEAL};outline-offset:2px}}
 /* cover */
 .cover{padding:0;background:#fff url(${TOPO}) center bottom/cover no-repeat}
 .cv-top{height:1.62in;background:url(${BANDC}) center/cover;border-bottom:6px solid ${TEAL};display:flex;align-items:center;padding:0 .55in}
@@ -20127,7 +20387,7 @@ body{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:${INK}}
     <div class="cv-r"><img src="${LOGO}" alt="Eshenbaugh Land Company"><a>www.thedirtdog.com</a></div>
   </div>
 </section>
-${pAerial}${pDesc}${pMarket}${pZoning}${pTraffic}${pEnv}${pDemo}${pLoc}${pDisc}${pAdv}
+${pAerial}${pDesc}${pMarket}${pZoning}${pTraffic}${pRetail}${pResi}${pEnv}${pDemo}${pLoc}${pDisc}${pAdv}
 
 <script>
 (function(){
@@ -20203,7 +20463,7 @@ async function _valGenerateProposal(opts){
     const d = opts ? opts.d : window._valLastResult;
     const conf = Object.assign({}, (opts ? opts.conf : window._valConfirmed) || {}, opts?{__card:true}:{});
     const deal = (opts && opts.deal) || null;
-    _omStep(win,'Finding the parcel, aerials, traffic counts and Census rings…');
+    _omStep(win,'Finding the parcel, aerials, traffic counts, Census rings, nearby retail and housing…');
     const site = await _omGatherSite(address, parcel, county, conf, d, deal);
     const p=d.property||{}, z=d.zoning||{}, cp=conf.parcel||{};
     const zCode=(conf.cityZoning&&!conf.cityZoning._noAnswer&&conf.cityZoning.code)||(conf.zoning&&conf.zoning.code)||p.zoning||'';
