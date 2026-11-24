@@ -2396,6 +2396,7 @@ const APP_CONFIG = {
   agreements: { pdfProxyUrl: 'https://elc-agreements-worker.dirtdog.workers.dev' },   // AGPDF-20261008 — live once agreements-worker is deployed
   // 📬 Monthly Owner Reports (MREPORT-20261006). access: 'owner' | 'admins' | 'all' — overridden from eos/settings.monthlyReports
   monthlyReports: { access: 'all',   /* REPORTSALL-20261016 — opened to all users */ workerUrl: 'https://elc-report-worker.dirtdog.workers.dev' },
+  prospecting: { access: 'owner', postcardsUrl: 'https://elc-ai-proxy.dirtdog.workers.dev/postcards', approverEmails: ['ryan@thedirtdog.com'], logoUrl: 'https://terra.dirtdog.com/esh/assets/logo.png', returnAddress: { line1: '304 S. Willow Ave.', city: 'Tampa', state: 'FL', zip: '33606' } },   // PROSPECT-20261120 — 'owner' = Ryan only | 'admins' | 'all'; overridden from eos/settings.prospecting (⚙ Access on the tab)
   buyerMatch: { access: 'owner' },   // BUYERMATCH-20261117 — 'owner' = Ryan only | 'admins' | 'all'; overridden from eos/settings.buyerMatch (⚙ Access on the tab)
   landListingReport: { access: 'all' },   // LLRGROUP-20261119 default — Ryan opened it to all users 2026-11-19 (   // LLR-20261116 — 'owner' = Ryan only | 'admins' | 'all'; overridden from eos/settings.landListingReport (⚙ Access on the tab)
   eshReport: { access: 'owner', writers: [] },   // ESH-20261116 — 'owner' (Ryan) | 'writers' | 'admins' | 'all'; overridden from eos/settings.eshReport
@@ -10119,6 +10120,7 @@ const FB = {
           if(payload.social && typeof payload.social==='object') APP_CONFIG.social={...(APP_CONFIG.social||{}), ...payload.social};   // SOCIAL-20261006
           if(payload.mcBlast && typeof payload.mcBlast==='object') APP_CONFIG.mcBlast={...(APP_CONFIG.mcBlast||{}), ...payload.mcBlast};   // MCBLAST-20261007
           if(payload.monthlyReports && typeof payload.monthlyReports==='object'){ const _mrPrev=(APP_CONFIG.monthlyReports||{}).access; APP_CONFIG.monthlyReports={...(APP_CONFIG.monthlyReports||{}), ...payload.monthlyReports}; if(_mrPrev!==APP_CONFIG.monthlyReports.access && currentUser && typeof renderShell==='function'){ try{ renderShell(); renderCurrentView(); }catch(_){} } } // MREPORT-20261006
+          if(payload.prospecting && typeof payload.prospecting==='object'){ const _pzPrev=(APP_CONFIG.prospecting||{}).access; APP_CONFIG.prospecting={...(APP_CONFIG.prospecting||{}), ...payload.prospecting}; if(_pzPrev!==APP_CONFIG.prospecting.access && currentUser && typeof renderShell==='function'){ try{ renderShell(); renderCurrentView(); }catch(_){} } }   // PROSPECT-20261120
           if(payload.buyerMatch && typeof payload.buyerMatch==='object'){ const _bmPrev=(APP_CONFIG.buyerMatch||{}).access; APP_CONFIG.buyerMatch={...(APP_CONFIG.buyerMatch||{}), ...payload.buyerMatch}; if(_bmPrev!==APP_CONFIG.buyerMatch.access && currentUser && typeof renderShell==='function'){ try{ renderShell(); renderCurrentView(); }catch(_){} } }   // BUYERMATCH-20261117
           if(payload.landListingReport && typeof payload.landListingReport==='object'){ const _llrPrev=(APP_CONFIG.landListingReport||{}).access; APP_CONFIG.landListingReport={...(APP_CONFIG.landListingReport||{}), ...payload.landListingReport}; if(_llrPrev!==APP_CONFIG.landListingReport.access && currentUser && typeof renderShell==='function'){ try{ renderShell(); renderCurrentView(); }catch(_){} } }   // LLR-20261116
           if(payload.eshReport && typeof payload.eshReport==='object'){ const _eshPrev=JSON.stringify([(APP_CONFIG.eshReport||{}).access,(APP_CONFIG.eshReport||{}).writers]); APP_CONFIG.eshReport={...(APP_CONFIG.eshReport||{}), ...payload.eshReport}; if(_eshPrev!==JSON.stringify([APP_CONFIG.eshReport.access,APP_CONFIG.eshReport.writers]) && currentUser && typeof renderShell==='function'){ try{ renderShell(); renderCurrentView(); }catch(_){} } }   // ESH-20261116
@@ -13003,6 +13005,7 @@ function buildNavItems(){
       {id:'buyers',        label:'🏡 Buyers',         advisor:true, admin:true, manager:true},
       {id:'videoProposals',label:'🎬 Video Proposals',advisor:true, admin:true, manager:true, staff:true},
       {id:'monthlyReports',label:'📬 Monthly Reports', reports:true},   // MREPORT-20261006 — gated by _mrNavVisible
+      {id:'prospecting',   label:'🧭 Prospecting',    pz:true},   // PROSPECT-20261120 — gated by _pzNavVisible (Ryan only until opened)
       {id:'buyerMatch',     label:'🎯 Buyer Match',    bm:true},   // BUYERMATCH-20261117 — gated by _bmNavVisible (Ryan only until opened)
       {id:'landListingReport',label:'🏞️ Land Listing Report', llr:true},   // LLR-20261116 — gated by _llrNavVisible (Ryan only until opened)
       {id:'eshReport',     label:'📰 Eshenbaugh Report', esh:true},   // ESH-20261116 — gated by _eshNavVisible (Ryan only until he opens it)
@@ -13015,6 +13018,7 @@ function buildNavItems(){
       if(sv){ // staff view: always tabs + staff-flagged tabs + manager tabs (for office managers) + CRM if enabled
         if(n.staffOnly) return true;   // tabs that exist ONLY inside staff view
         if(n.id==='dashboard' && _finForcedOffice()) return true;   // FINORL-20261120
+        if(n.pz) return _pzNavVisible(false,true);   // PROSPECT-20261120
         if(n.bm) return _bmNavVisible(false,true);   // BUYERMATCH-20261117
         if(n.llr) return _llrNavVisible(false,true);
         if(n.esh) return _eshNavVisible(false,true);   // ESH-20261116   // LLR-20261116
@@ -13028,6 +13032,7 @@ function buildNavItems(){
       if(!effectiveAdmin && ADVISOR_VIEW_HIDDEN_TABS.includes(n.id)) return false;   // ADVHIDE-20261014
       if(n.id==='dashboard' && _finForcedOffice()) return true;   // FINORL-20261120
       if(n.esh) return _eshNavVisible(effectiveAdmin,false);   // ESH-20261116
+      if(n.pz) return _pzNavVisible(effectiveAdmin,false);   // PROSPECT-20261120
       if(n.bm) return _bmNavVisible(effectiveAdmin,false);   // BUYERMATCH-20261117
       if(n.llr) return _llrNavVisible(effectiveAdmin,false);   // LLR-20261116
       if(n.reports) return _mrNavVisible(effectiveAdmin);   // MREPORT-20261006
@@ -14346,7 +14351,7 @@ function renderCurrentView(){
     bio:viewAdvisorBio,   // ADVBIO-20261006
     splits:viewSplits,automations:viewAutomations,users:viewUsers,leaderboard:viewLeaderboard,
     manageStages:viewManageStages,officeManagers:viewOfficeManagers,approvedUsers:viewApprovedUsers,officeOverview:viewOfficeOverview,
-    eos:()=>viewEOS(window._eosSub||'rocks'),comps:viewComps,drive:viewDrive,documents:viewDocuments,hr:viewHR,crm:viewCRM,leads:viewLeads,inbox:viewSmartInbox,buyers:viewBuyers,videoProposals:viewVideoProposals,earthnotes:viewEarthNotes,valuation:viewValuation,activityLog:viewActivityLog,agreements:viewAgreements,monthlyReports:viewMonthlyReports,marketReports:viewMarketReports,landListingReport:viewLandListingReport,buyerMatch:viewBuyerMatch,eshReport:viewEshReport};   // LLR-20261116
+    eos:()=>viewEOS(window._eosSub||'rocks'),comps:viewComps,drive:viewDrive,documents:viewDocuments,hr:viewHR,crm:viewCRM,leads:viewLeads,inbox:viewSmartInbox,buyers:viewBuyers,videoProposals:viewVideoProposals,earthnotes:viewEarthNotes,valuation:viewValuation,activityLog:viewActivityLog,agreements:viewAgreements,monthlyReports:viewMonthlyReports,marketReports:viewMarketReports,landListingReport:viewLandListingReport,buyerMatch:viewBuyerMatch,prospecting:viewProspecting,eshReport:viewEshReport};   // LLR-20261116
   try {
     (map[currentView]||viewBoard)();
   } catch(e) {
@@ -44225,7 +44230,8 @@ async function launchApp(){
   // Apple Mail quick-link handoff (marker: MAILLINK-20260818)
   setTimeout(() => { try{ window._mailLinkCheck(); }catch(e){ console.warn('[mailLink]', e); } }, 800);
   setTimeout(() => { try{ window._llrMonthlyBoot && window._llrMonthlyBoot(); }catch(e){ console.warn('[llrMonthly]', e); } }, 2500);   // LLRMONTHLY-20261117 wiring
-  setTimeout(() => { try{ window._bmBoot && window._bmBoot(); }catch(e){ console.warn('[buyerMatch]', e); } }, 2600);   // BMAPPROVE-20261117 #buyer-match deep link
+  setTimeout(() => { try{ window._bmBoot && window._bmBoot(); }catch(e){ console.warn('[buyerMatch]', e); } }, 2600);
+  setTimeout(() => { try{ window._pzBoot && window._pzBoot(); }catch(e){ console.warn('[prospecting]', e); } }, 2650);   // PROSPECT-20261120 #prospecting deep link (approval task)   // BMAPPROVE-20261117 #buyer-match deep link
   // Show commission completion prompt for active contract deals missing commission info
   if(currentUser && !currentUser.isAdmin && !currentUser.isStaff){
     setTimeout(() => _checkCommissionRequirements(), 800);
@@ -55887,6 +55893,869 @@ window._psIgnore=async function(i,btn){
   finally{ done(); }
 };
 /* ===== PAGESYNC_BLOCK_END ===== */
+/* =======================================================
+   🧭 PROSPECTING — marker PROSPECT-20261120
+   Ryan (2026-11-20): "a prospecting tab in Terra for all the advisors to use — a map where they can select individual
+   parcels, polygon an area, or give a written description of criteria. Then AI pulls the owner name and mailing address
+   for each parcel plus the parcel info and adds them to the advisor's prospect list. A button generates a branded postcard
+   and mailing list sent to a printing company to mail — initial outreach about the advisor, our company, and a free offer
+   of a property valuation or an in-person market overview."
+   Decisions (same day):
+     • DATA — owners, mailing addresses and parcel facts come from the free FDOR statewide parcel layer (FL_Parcels, the same
+       service Site Research uses). MapWise only when an advisor clicks 📊 on one parcel (MW1REC-20261119 stays: one record).
+       The AI never supplies a value: for a written description it returns a FILTER (counties, use codes, acres, value…),
+       Terra turns that into the ArcGIS query itself and the layer returns the parcels.
+     • LIST — every search is saved as a named list (prospectLists/{id}, owners in prospectLists/{id}/owners/{key}, one row per
+       owner + mailing address with all their parcels). Owners are also added to the CRM under a group named for the list
+       (existing contacts are matched and just tagged). An owner who answers is promoted to a Prospect card by hand (➕).
+     • MAIL — Lob print-and-mail API. 6×9 postcard, ELC branded, advisor photo + contact, free valuation / market overview.
+       The advisor builds it and submits; nothing mails until an ADMIN approves it (📮 Mailings). The Lob key lives only in
+       the elc-ai-proxy worker (/postcards), which re-checks that the caller is an admin and uses an idempotency key per card,
+       so a card can never be mailed twice. Foreign / incomplete addresses are kept off the mailing (kept in the CSV).
+     • ACCESS — Ryan only until he opens it from ⚙ Access (APP_CONFIG.prospecting.access 'owner' | 'admins' | 'all',
+       stored in eos/settings.prospecting), same as the other new tabs.
+   Firestore rule: docs/prospecting-firestore-rules.md (prospectLists + owners + prospectMailings).
+   ======================================================= */
+const PZ_OWNER_EMAILS=['ryan@thedirtdog.com'];
+const PZ_PARCELS='https://services5.arcgis.com/GcvM6vDlR2gM4x31/arcgis/rest/services/FL_Parcels/FeatureServer/0/query';
+const PZ_FIELDS='OBJECTID,PARCEL_ID,OWN_NAME,OWN_ADDR1,OWN_ADDR2,OWN_CITY,OWN_STATE,OWN_ZIPCD,DOR_UC,Acres,JV,SALE_YR1,SALE_PRC1,PHY_ADDR1,PHY_CITY,CountyName,Latitude,Longitude,LU,JV_HMSTD';
+const PZ_MAX_PARCELS=2500, PZ_MAIL_MAX=1500, PZ_OUTLINE_ZOOM=17;
+const PZ_COUNTIES=["Alachua","Baker","Bay","Bradford","Brevard","Broward","Calhoun","Charlotte","Citrus","Clay","Collier","Columbia","DeSoto","Dixie","Duval","Escambia","Flagler","Franklin","Gadsden","Gilchrist","Glades","Gulf","Hamilton","Hardee","Hendry","Hernando","Highlands","Hillsborough","Holmes","Indian River","Jackson","Jefferson","Lafayette","Lake","Lee","Leon","Levy","Liberty","Madison","Manatee","Marion","Martin","Miami-Dade","Monroe","Nassau","Okaloosa","Okeechobee","Orange","Osceola","Palm Beach","Pasco","Pinellas","Polk","Putnam","Saint Johns","Saint Lucie","Santa Rosa","Sarasota","Seminole","Sumter","Suwannee","Taylor","Union","Volusia","Wakulla","Walton","Washington"];
+// FDOR DOR use codes grouped the way advisors talk about land. Keys are what the AI may return.
+const _pzRange=(a,b)=>{ const o=[]; for(let i=a;i<=b;i++) o.push(String(i).padStart(3,'0')); return o; };
+const PZ_USES={
+  vacant_residential:{label:'Vacant residential', codes:['000']},
+  vacant_commercial:{label:'Vacant commercial', codes:['010']},
+  vacant_industrial:{label:'Vacant industrial', codes:['040']},
+  vacant_institutional:{label:'Vacant institutional', codes:['070']},
+  acreage:{label:'Acreage (not ag)', codes:['099']},
+  agricultural:{label:'Agricultural (crops, timber, grazing, groves)', codes:_pzRange(50,69)},
+  single_family:{label:'Single-family homes', codes:['001']},
+  mobile_home:{label:'Mobile homes', codes:['002']},
+  multifamily:{label:'Multifamily', codes:['003','008']},
+  commercial_improved:{label:'Commercial (improved)', codes:_pzRange(11,39)},
+  industrial_improved:{label:'Industrial (improved)', codes:_pzRange(41,49)},
+  institutional:{label:'Institutional (churches, schools…)', codes:_pzRange(71,79)},
+};
+// Never prospected unless the advisor turns it on: government, utilities, right-of-way, water, common areas, condo units.
+const PZ_EXCLUDE_CODES=[..._pzRange(80,89),'004','009','091','094','095','096','098'];
+const PZ_OFFERS={
+  valuation:{label:'Free property valuation', head:'What is your land worth in today’s market?', band:'COMPLIMENTARY PROPERTY VALUATION'},
+  overview:{label:'Free in-person market overview', head:'What’s selling near your property?', band:'COMPLIMENTARY MARKET OVERVIEW'},
+  both:{label:'Valuation or market overview — owner’s choice', head:'What is your land worth in today’s market?', band:'FREE VALUATION · MARKET OVERVIEW'},
+};
+const _pzEsc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const _pzNum=(v,d)=>(v==null||v===''||isNaN(v))?'—':Number(v).toLocaleString(undefined,{maximumFractionDigits:d==null?0:d});
+const _pzMoney=v=>(!v||isNaN(v))?'—':'$'+Number(v).toLocaleString(undefined,{maximumFractionDigits:0});
+
+/* ---------- config / access ---------- */
+function _pzCfg(){ return (APP_CONFIG.prospecting = APP_CONFIG.prospecting || {access:'owner'}); }
+function _pzIsOwner(){ return !!(currentUser && PZ_OWNER_EMAILS.includes(String(currentUser.email||'').toLowerCase())); }
+function _pzCanAccess(){ if(!currentUser) return false; if(_pzIsOwner()) return true; const a=_pzCfg().access||'owner'; if(a==='all') return true; if(a==='admins') return !!currentUser.isAdmin; return false; }
+function _pzIsApprover(){ return !!(currentUser && (currentUser.isAdmin || _pzIsOwner())); }
+function _pzNavVisible(effectiveAdmin, sv){
+  if(!currentUser) return false; const a=_pzCfg().access||'owner';
+  if(a==='all') return !sv; if(sv) return false; if(a==='admins') return !!effectiveAdmin; return !!(effectiveAdmin && _pzIsOwner());
+}
+window._pzNavVisible=_pzNavVisible;
+function _pzState(){ return (window._pzSt=window._pzSt||{sub:'map', mode:'select', sel:new Map(), poly:[], filter:null, results:null, lists:null, mailings:null, listId:null, owners:null, ownerQ:'', ownerShow:100, busy:false}); }
+function _pzMe(){ const b=(typeof getAdvisorBio==='function')?getAdvisorBio(currentUser.uid):{}; return {uid:currentUser.uid, email:currentUser.email, name:b.name||currentUser.name||currentUser.email, bio:b}; }
+
+/* ---------- pure helpers (unit-tested in prospect_patch/test) ---------- */
+const _pzSq=s=>"'"+String(s).replace(/'/g,"''")+"'";
+function _pzBuildWhere(f){
+  f=f||{}; const w=[];
+  const counties=(f.counties||[]).filter(c=>PZ_COUNTIES.includes(c));
+  if(counties.length) w.push('CountyName IN ('+counties.map(_pzSq).join(',')+')');
+  let codes=[]; (f.uses||[]).forEach(k=>{ if(PZ_USES[k]) codes=codes.concat(PZ_USES[k].codes); });
+  codes=[...new Set(codes)];
+  if(codes.length) w.push('DOR_UC IN ('+codes.map(_pzSq).join(',')+')');
+  if(!f.includeExcluded && !codes.length) w.push('DOR_UC NOT IN ('+PZ_EXCLUDE_CODES.map(_pzSq).join(',')+')');   // picked use types never overlap the excluded ones
+  const num=(v)=>v!=null&&v!==''&&isFinite(Number(v))?Number(v):null;
+  if(num(f.minAcres)!=null) w.push('Acres >= '+num(f.minAcres));
+  if(num(f.maxAcres)!=null) w.push('Acres <= '+num(f.maxAcres));
+  if(num(f.minValue)!=null) w.push('JV >= '+Math.round(num(f.minValue)));
+  if(num(f.maxValue)!=null) w.push('JV <= '+Math.round(num(f.maxValue)));
+  if(f.outOfState) w.push("OWN_STATE <> 'FL' AND OWN_STATE <> ' ' AND OWN_STATE IS NOT NULL");
+  if(f.inState) w.push("OWN_STATE = 'FL'");
+  if(f.notRecentlySold) w.push('SALE_YR1 = 0');
+  if(f.recentlySold) w.push('SALE_YR1 > 0');
+  if(f.noHomestead) w.push('JV_HMSTD = 0');
+  const cities=(f.cities||[]).map(c=>String(c).toUpperCase().replace(/[^A-Z .'-]/g,'').trim()).filter(Boolean);
+  if(cities.length) w.push('PHY_CITY IN ('+cities.map(_pzSq).join(',')+')');
+  const own=(f.ownerContains||[]).map(s=>String(s).toUpperCase().replace(/[^A-Z0-9 &.'-]/g,'').trim()).filter(Boolean);   // quotes are escaped by _pzSq
+  if(own.length) w.push('('+own.map(s=>"OWN_NAME LIKE "+_pzSq('%'+s+'%')).join(' OR ')+')');
+  if(f.ownerType==='entity') w.push("(OWN_NAME LIKE '% LLC%' OR OWN_NAME LIKE '% INC%' OR OWN_NAME LIKE '% CORP%' OR OWN_NAME LIKE '% LP%' OR OWN_NAME LIKE '% LTD%' OR OWN_NAME LIKE '% CO %' OR OWN_NAME LIKE '% COMPANY%')");
+  if(f.ownerType==='trust') w.push("(OWN_NAME LIKE '%TRUST%' OR OWN_NAME LIKE '%TR %' OR OWN_NAME LIKE '% TR' OR OWN_NAME LIKE '%ESTATE%')");
+  return w.length?w.join(' AND '):'1=1';
+}
+function _pzIsEntity(n){ n=String(n||''); return /\d/.test(n) || /\b(LLC|L L C|INC|CORP|CORPORATION|CO|COMPANY|LP|LLP|LTD|LIMITED|PARTNERS?|PARTNERSHIP|PART|PTNR|FAMILY|HOLDINGS?|INVESTMENTS?|PROPERTY|PROPERTIES|OWNER|GROUP|ASSOC|ASSOCIATES|ASSOCIATION|BANK|CHURCH|TRUST|TR|TRS|TRUSTEE|ESTATE|FUND|VENTURES?|ENTERPRISES?|DEVELOPMENT|DEV|LAND|FARMS?|RANCH|GROVES?|CITY|COUNTY|STATE|DISTRICT|AUTHORITY|UNIVERSITY|SCHOOL|FOUNDATION|MINISTRIES|SOCIETY|OF|THE|FOR|USA|AMERICA|REALTY|RE|MF|CAPITAL|EQUITY|SERVICES|HEALTH|HOSPITAL|CENTER|COMMUNITIES|RETAIL|STORAGE|MANAGEMENT|MGMT|HOMES|BUILDERS|INTERNATIONAL|INTL|CLUB|LODGE|ACQUISITIONS?|REIT)\b/i.test(n); }
+const _pzTitle=s=>String(s||'').toLowerCase().replace(/\b([a-z])/g,m=>m.toUpperCase()).replace(/\b(Llc|Lp|Llp|Inc|Ltd|Ii|Iii|Iv|Pa|Pllc)\b/g,m=>m.toUpperCase()).replace(/\bMc([a-z])/g,(m,c)=>'Mc'+c.toUpperCase());
+function _pzGreeting(n){
+  n=String(n||'').trim(); if(!n || _pzIsEntity(n) || /&|\bAND\b|\//i.test(n)) return 'Property Owner';
+  const t=n.split(/\s+/).filter(x=>!/^(JR|SR|II|III|IV|ETAL|ET|AL|H\/E|JTWROS|TRS?)$/i.test(x));
+  if(t.length<2||t.length>4) return 'Property Owner';
+  const first=t[1]; if(first.length<2) return 'Property Owner';
+  return _pzTitle(first+' '+t[0]);   // FDOR rolls are LAST FIRST [MIDDLE]
+}
+function _pzZip(z){ const s=String(z==null?'':z).replace(/\D/g,''); if(!s||/^0+$/.test(s)) return ''; if(s.length<=5) return s.padStart(5,'0'); if(s.length===9) return s.slice(0,5)+'-'+s.slice(5); return s.slice(0,5); }
+function _pzOwnerKey(a){ return (String(a.OWN_NAME||'')+'|'+String(a.OWN_ADDR1||'')+'|'+_pzZip(a.OWN_ZIPCD)).toUpperCase().replace(/[^A-Z0-9|]/g,'').slice(0,140)||('X'+a.OBJECTID); }
+function _pzMail(a){
+  const clean=s=>String(s||'').trim();
+  const m={line1:clean(a.OWN_ADDR1), line2:clean(a.OWN_ADDR2), city:clean(a.OWN_CITY), state:clean(a.OWN_STATE).toUpperCase(), zip:_pzZip(a.OWN_ZIPCD)};
+  m.ok=!!(m.line1 && m.city && /^[A-Z]{2}$/.test(m.state) && m.zip);
+  if(!m.ok) m.why=(!m.state||!m.zip)?'Foreign or incomplete mailing address':'Incomplete mailing address';
+  return m;
+}
+function _pzParcel(a){
+  return {oid:a.OBJECTID, pid:String(a.PARCEL_ID||'').trim(), county:a.CountyName||'', site:String(a.PHY_ADDR1||'').trim(), city:String(a.PHY_CITY||'').trim(),
+    acres:a.Acres?Math.round(a.Acres*100)/100:0, dor:a.DOR_UC||'', use:a.LU||'', jv:a.JV||0, saleYr:a.SALE_YR1||0, salePrc:a.SALE_PRC1||0,
+    lat:a.Latitude||null, lng:a.Longitude||null, hmstd:!!a.JV_HMSTD};
+}
+function _pzGroupOwners(attrs){
+  const m=new Map();
+  for(const a of attrs){ if(!a||!a.OWN_NAME) continue; const k=_pzOwnerKey(a);
+    let o=m.get(k); if(!o){ o={key:k, name:String(a.OWN_NAME).trim(), display:_pzTitle(a.OWN_NAME), entity:_pzIsEntity(a.OWN_NAME), greeting:_pzGreeting(a.OWN_NAME), mail:_pzMail(a), parcels:[], status:'new', excluded:false}; m.set(k,o); }
+    if(!o.parcels.some(p=>p.pid===String(a.PARCEL_ID||'').trim())) o.parcels.push(_pzParcel(a)); }
+  for(const o of m.values()){ o.totalAcres=Math.round(o.parcels.reduce((s,p)=>s+(p.acres||0),0)*100)/100; o.totalJV=o.parcels.reduce((s,p)=>s+(p.jv||0),0); o.counties=[...new Set(o.parcels.map(p=>p.county).filter(Boolean))]; if(!o.mail.ok){ o.excluded=true; o.exclWhy=o.mail.why; } }
+  return [...m.values()].sort((a,b)=>b.totalAcres-a.totalAcres);
+}
+function _pzPropertyPhrase(o){
+  const p=o.parcels||[]; const county=(o.counties&&o.counties[0])||((p[0]||{}).county)||''; const cty=county?(county.replace(/^Saint /,'St. ')+' County'):'the area';
+  const ac=o.totalAcres?(o.totalAcres>=1?_pzNum(o.totalAcres,o.totalAcres<10?1:0)+' acres':'property'):'property';
+  if(p.length>1) return `your ${p.length} parcels (${ac}) in ${cty}`;
+  const s=p[0]||{}; const street=s.site&&!/^\s*0?\s*$/.test(s.site)?_pzTitle(s.site.replace(/^\d+\s+/,'')):'';
+  if(street) return `your ${o.totalAcres>=1?ac+' on ':'property on '}${street}${s.city?' in '+_pzTitle(s.city):''}`;
+  return `your ${o.totalAcres>=1?ac:'property'} in ${cty}`;
+}
+function _pzCsv(owners){
+  const q=v=>{ const s=String(v==null?'':v); return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s; };
+  const rows=[['Owner','Greeting','Mailing Address 1','Mailing Address 2','City','State','ZIP','Mailable','Why not','Parcel IDs','County','Site Address','Acres','Just Value','Use','Property phrase']];
+  owners.forEach(o=>rows.push([o.name,o.greeting,o.mail.line1,o.mail.line2,o.mail.city,o.mail.state,o.mail.zip,(!o.excluded&&o.mail.ok)?'Yes':'No',o.exclWhy||'',o.parcels.map(p=>p.pid).join('; '),(o.counties||[]).join('; '),o.parcels.map(p=>[p.site,p.city].filter(Boolean).join(' ')).filter(Boolean).join('; '),o.totalAcres,o.totalJV,[...new Set(o.parcels.map(p=>p.use))].join('; '),_pzPropertyPhrase(o)]));
+  return rows.map(r=>r.map(q).join(',')).join('\r\n');
+}
+function _pzDownload(name, text, type){ const b=new Blob([text],{type:type||'text/csv'}); const a=document.createElement('a'); a.href=URL.createObjectURL(b); a.download=name; document.body.appendChild(a); a.click(); setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); },500); }
+
+/* ---------- ArcGIS (free statewide layer) ---------- */
+async function _pzArc(params, timeoutMs, retry){
+  try{ return await _pzArc1(params, timeoutMs); }
+  catch(e){ if(retry!==false && !/too long/.test(e.message)){ await new Promise(r=>setTimeout(r,800)); return _pzArc1(params, timeoutMs); } throw e; }   // ArcGIS Online throws the odd blank 400 — one retry
+}
+async function _pzArc1(params, timeoutMs){
+  const ctrl=new AbortController(); const t=setTimeout(()=>ctrl.abort(), timeoutMs||45000);
+  try{
+    const body=new URLSearchParams({f:'json', ...params});
+    const r=await fetch(PZ_PARCELS,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body,signal:ctrl.signal});
+    const j=await r.json(); if(j.error) throw new Error((j.error.message||'Parcel service error')+(j.error.details&&j.error.details.length?' — '+j.error.details.join(' '):''));
+    return j;
+  } catch(e){ if(e.name==='AbortError') throw new Error('The state parcel service took too long — try a smaller area'); throw e; }
+  finally{ clearTimeout(t); }
+}
+function _pzGeomParams(poly){   // poly = [[lat,lng],…]
+  if(!poly||poly.length<3) return {};
+  const ring=poly.map(p=>[Number(p[1].toFixed(6)),Number(p[0].toFixed(6))]); ring.push(ring[0]);
+  return {geometry:JSON.stringify({rings:[ring],spatialReference:{wkid:4326}}), geometryType:'esriGeometryPolygon', inSR:'4326', spatialRel:'esriSpatialRelIntersects'};
+}
+async function _pzCount(where, poly){ const j=await _pzArc({where, ..._pzGeomParams(poly), returnCountOnly:'true'}, 60000); return j.count||0; }
+async function _pzFetchAttrs(where, poly, onProgress){
+  // DO NOT send resultRecordCount with a geometry query on this layer (it hangs — see Site Research notes). Ids first, then attributes in chunks.
+  const ids=(await _pzArc({where, ..._pzGeomParams(poly), returnIdsOnly:'true'}, 60000)).objectIds||[];
+  if(ids.length>PZ_MAX_PARCELS) throw Object.assign(new Error(`${ids.length.toLocaleString()} parcels match — narrow it to ${PZ_MAX_PARCELS.toLocaleString()} or fewer`),{tooMany:ids.length});
+  const out=[]; const chunks=[]; for(let i=0;i<ids.length;i+=250) chunks.push(ids.slice(i,i+250));
+  let done=0;
+  const worker=async()=>{ while(chunks.length){ const c=chunks.shift(); const j=await _pzArc({objectIds:c.join(','), outFields:PZ_FIELDS, returnGeometry:'false'}, 60000); (j.features||[]).forEach(f=>out.push(f.attributes)); done+=c.length; onProgress&&onProgress(done, ids.length); } };
+  await Promise.all([worker(),worker(),worker(),worker()]);
+  return out;
+}
+async function _pzParcelAt(lat,lng){
+  const j=await _pzArc({geometry:JSON.stringify({x:lng,y:lat,spatialReference:{wkid:4326}}), geometryType:'esriGeometryPoint', inSR:'4326', spatialRel:'esriSpatialRelIntersects', outFields:PZ_FIELDS, returnGeometry:'true', outSR:'4326', geometryPrecision:'6'});
+  const f=(j.features||[])[0]; if(!f) return null;
+  return {attrs:f.attributes, rings:(f.geometry&&f.geometry.rings)||[]};
+}
+async function _pzOutlinesIn(b){
+  const env={xmin:b.getWest(),ymin:b.getSouth(),xmax:b.getEast(),ymax:b.getNorth(),spatialReference:{wkid:4326}};
+  const j=await _pzArc({geometry:JSON.stringify(env), geometryType:'esriGeometryEnvelope', inSR:'4326', spatialRel:'esriSpatialRelIntersects', outFields:'OBJECTID', returnGeometry:'true', outSR:'4326', geometryPrecision:'6', maxAllowableOffset:'0.00001'}, 30000);
+  return (j.features||[]).map(f=>({oid:f.attributes.OBJECTID, rings:(f.geometry&&f.geometry.rings)||[]}));
+}
+
+/* ---------- AI: written criteria → structured filter (never values) ---------- */
+async function _pzParseCriteria(text){
+  const sys=`You turn a Florida land broker's plain-English prospecting criteria into a JSON search filter for the Florida Department of Revenue statewide parcel roll. Reply with ONE JSON object and nothing else. Keys (omit any that do not apply):
+"counties": array of county names, exactly from this list: ${PZ_COUNTIES.join(', ')} (Florida only; "St. Johns" = "Saint Johns", "St. Lucie" = "Saint Lucie"; "Tampa Bay" = Hillsborough, Pinellas, Pasco, Hernando, Manatee; "Orlando area" = Orange, Seminole, Osceola, Lake).
+"cities": array of city names as they appear in site addresses (upper case, e.g. "LAKELAND", "WESLEY CHAPEL"), only when the user names a city.
+"uses": array of keys from: ${Object.entries(PZ_USES).map(([k,v])=>k+' ('+v.label+')').join('; ')}. "Land" or "vacant land" with no other hint = vacant_residential, vacant_commercial, vacant_industrial, acreage, agricultural.
+"minAcres","maxAcres": numbers. "minValue","maxValue": numbers in dollars of county just (market) value.
+"outOfState": true when owners should live outside Florida. "inState": true when owners should live in Florida.
+"notRecentlySold": true for long-time owners / "haven't sold recently" (the roll only shows 2024–2025 sales). "recentlySold": true for recent buyers.
+"noHomestead": true to skip owner-occupied homesteads.
+"ownerType": "entity" | "trust" when the user asks for companies/LLCs or trusts/estates.
+"ownerContains": array of words that must appear in the owner name.
+"includeExcluded": true only if the user explicitly wants government, utility, right-of-way, water or condo parcels.
+"summary": one short sentence restating the search in plain English.
+"unsupported": array of short notes for any criteria the roll cannot answer (e.g. zoning, flood zone, frontage, distance to a road) — do not guess them.`;
+  const resp=await _aiPost({model:'claude-sonnet-4-6', max_tokens:800, system:sys, messages:[{role:'user',content:String(text).slice(0,2000)}]});
+  const j=await resp.json(); if(!resp.ok) throw new Error((j&&j.error&&j.error.message)||('AI error '+resp.status));
+  const t=((j.content||[]).find(c=>c.type==='text')||{}).text||''; const m=t.match(/\{[\s\S]*\}/); if(!m) throw new Error('The AI did not return a search — try rewording it');
+  return _pzSanitizeFilter(JSON.parse(m[0]));
+}
+function _pzSanitizeFilter(f){
+  f=f||{}; const o={};
+  const nums=['minAcres','maxAcres','minValue','maxValue']; nums.forEach(k=>{ if(f[k]!=null&&f[k]!==''&&isFinite(Number(f[k]))) o[k]=Number(f[k]); });
+  o.counties=(Array.isArray(f.counties)?f.counties:[]).map(c=>PZ_COUNTIES.find(x=>x.toLowerCase()===String(c).toLowerCase().replace(/^st\.? /,'saint ')) ).filter(Boolean);
+  o.uses=(Array.isArray(f.uses)?f.uses:[]).filter(k=>PZ_USES[k]);
+  o.cities=(Array.isArray(f.cities)?f.cities:[]).map(String).filter(Boolean).slice(0,20);
+  o.ownerContains=(Array.isArray(f.ownerContains)?f.ownerContains:[]).map(String).filter(Boolean).slice(0,10);
+  ['outOfState','inState','notRecentlySold','recentlySold','noHomestead','includeExcluded'].forEach(k=>{ if(f[k]===true) o[k]=true; });
+  if(f.ownerType==='entity'||f.ownerType==='trust') o.ownerType=f.ownerType;
+  if(f.summary) o.summary=String(f.summary).slice(0,300);
+  o.unsupported=(Array.isArray(f.unsupported)?f.unsupported:[]).map(String).slice(0,6);
+  return o;
+}
+function _pzFilterChips(f){
+  if(!f) return ''; const c=[];
+  if(f.counties&&f.counties.length) c.push('📍 '+f.counties.join(', '));
+  if(f.cities&&f.cities.length) c.push('🏙 '+f.cities.map(_pzTitle).join(', '));
+  if(f.uses&&f.uses.length) c.push('🏷 '+f.uses.map(k=>PZ_USES[k].label).join(', '));
+  if(f.minAcres!=null||f.maxAcres!=null) c.push('📐 '+(f.minAcres!=null?_pzNum(f.minAcres,2):'0')+'–'+(f.maxAcres!=null?_pzNum(f.maxAcres,2):'any')+' ac');
+  if(f.minValue!=null||f.maxValue!=null) c.push('💲 '+(f.minValue!=null?_pzMoney(f.minValue):'$0')+'–'+(f.maxValue!=null?_pzMoney(f.maxValue):'any'));
+  if(f.outOfState) c.push('✈️ Out-of-state owners'); if(f.inState) c.push('🌴 Florida owners');
+  if(f.notRecentlySold) c.push('⏳ Not sold 2024–25'); if(f.recentlySold) c.push('🆕 Sold 2024–25');
+  if(f.noHomestead) c.push('🏠 No homesteads'); if(f.ownerType) c.push(f.ownerType==='entity'?'🏢 Companies/LLCs':'📜 Trusts/estates');
+  if(f.ownerContains&&f.ownerContains.length) c.push('🔤 Owner has “'+f.ownerContains.join('” or “')+'”');
+  if(f.includeExcluded) c.push('⚠ Includes government/ROW/water');
+  return c.map(x=>`<span class="pz-chip">${_pzEsc(x)}</span>`).join('');
+}
+
+/* ---------- Firestore ---------- */
+async function _pzLoadLists(force){
+  const st=_pzState(); if(st.lists&&!force) return;
+  const {collection,getDocs,query,where,orderBy}=_fbFns;
+  try{
+    const q=(_pzIsApprover())?query(collection(_fbDb,'prospectLists'),orderBy('createdAt','desc')):query(collection(_fbDb,'prospectLists'),where('advisorUid','==',currentUser.uid));
+    const s=await getDocs(q); st.lists=s.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
+  }catch(e){ console.warn('[pz] lists',e); st.lists=st.lists||[]; st.listsErr=/permission/i.test(e.message)?'Firestore rule for prospectLists is not published yet (docs/prospecting-firestore-rules.md).':e.message; }
+}
+async function _pzLoadMailings(force){
+  const st=_pzState(); if(st.mailings&&!force) return;
+  const {collection,getDocs,query,where}=_fbFns;
+  try{
+    const q=_pzIsApprover()?collection(_fbDb,'prospectMailings'):query(collection(_fbDb,'prospectMailings'),where('advisorUid','==',currentUser.uid));
+    const s=await getDocs(q); st.mailings=s.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
+  }catch(e){ console.warn('[pz] mailings',e); st.mailings=st.mailings||[]; }
+}
+async function _pzLoadOwners(listId){
+  const {collection,getDocs}=_fbFns; const s=await getDocs(collection(_fbDb,'prospectLists',listId,'owners'));
+  return s.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>(b.totalAcres||0)-(a.totalAcres||0));
+}
+
+/* ---------- view ---------- */
+function viewProspecting(){
+  _mrInjectStyles(); if(typeof _bmInjectStyles==='function') _bmInjectStyles(); _pzInjectStyles();   // bm-* = the shared sub-tab bar styles
+  if(!_pzCanAccess()){ setContent(`<div class="mr-wrap"><div class="mr-card" style="padding:2rem;text-align:center"><div style="font-size:2rem">🔒</div><p style="margin-top:.5rem;font-weight:700;color:var(--text-1)">Prospecting isn’t open to your account yet.</p></div></div>`); return; }
+  const st=_pzState(); const a=_pzCfg().access||'owner';
+  const pend=(st.mailings||[]).filter(m=>m.status==='pending_approval').length;
+  setContent(`<div class="mr-wrap pz-wrap" id="pz-root">
+    <div class="mr-head"><h1>🧭 Prospecting</h1>
+      <span class="mr-chip ${a==='all'?'mr-chip-sent':(a==='admins'?'mr-chip-draft':'mr-chip-new')}" title="Who can see this tab">${a==='all'?'Open to all advisors':(a==='admins'?'Admins only':'Only you')}</span>
+      <div class="mr-toolbar">${_pzIsOwner()?`<button type="button" class="mr-btn" onclick="window._pzAccess()">⚙ Access</button>`:''}</div></div>
+    <div class="bm-tabs pz-tabs" role="tablist">
+      <button type="button" role="tab" aria-selected="${st.sub==='map'}" class="bm-tab ${st.sub==='map'?'on':''}" onclick="window._pzSub('map')">🗺 Find owners</button>
+      <button type="button" role="tab" aria-selected="${st.sub==='lists'||st.sub==='list'}" class="bm-tab ${st.sub==='lists'||st.sub==='list'?'on':''}" onclick="window._pzSub('lists')">📋 ${_pzIsApprover()?'Prospect lists':'My prospect lists'}</button>
+      <button type="button" role="tab" aria-selected="${st.sub==='mail'}" class="bm-tab ${st.sub==='mail'?'on':''}" onclick="window._pzSub('mail')">📮 Mailings${_pzIsApprover()&&pend?` <span class="bm-count">${pend}</span>`:''}</button>
+    </div>
+    <div id="pz-body"></div></div>`);
+  if(st.sub==='lists') _pzRenderLists(); else if(st.sub==='list') _pzRenderList(); else if(st.sub==='mail') _pzRenderMailings(); else _pzRenderMap();
+  if(!st.mailings && _pzIsApprover()) _pzLoadMailings().then(()=>{ const n=(_pzState().mailings||[]).filter(m=>m.status==='pending_approval').length; if(n&&document.getElementById('pz-root')&&_pzState().sub==='map'){ const t=document.querySelector('.pz-tabs .bm-tab:last-child'); if(t&&!t.querySelector('.bm-count')) t.insertAdjacentHTML('beforeend',` <span class="bm-count">${n}</span>`); } });
+}
+window.viewProspecting=viewProspecting;
+window._pzSub=function(s){ const st=_pzState(); st.sub=s; if(s!=='list'){ st.listId=null; st.owners=null; } viewProspecting(); };
+
+/* ---------- 🗺 map ---------- */
+function _pzRenderMap(){
+  const box=document.getElementById('pz-body'); if(!box) return; const st=_pzState();
+  box.innerHTML=`<div class="pz-grid">
+    <div class="mr-card pz-side">
+      <div class="pz-modes" role="radiogroup" aria-label="How to pick parcels">
+        ${[['select','👆','Click parcels'],['draw','✏️','Draw an area'],['describe','💬','Describe it']].map(([k,i,t])=>`<button type="button" role="radio" aria-checked="${st.mode===k}" class="pz-mode ${st.mode===k?'on':''}" onclick="window._pzMode('${k}')"><span aria-hidden="true">${i}</span> ${t}</button>`).join('')}
+      </div>
+      <div id="pz-mode-body"></div>
+      <div id="pz-results"></div>
+    </div>
+    <div class="mr-card pz-mapcard"><div id="pz-map" class="pz-map" role="application" aria-label="Parcel map"></div>
+      <div class="pz-maphint" id="pz-maphint" role="status"></div>
+      <form class="pz-search" onsubmit="event.preventDefault();window._pzGeocode(this)"><input class="mr-input" name="q" aria-label="Go to an address or place" placeholder="Go to address, city or parcel area…" autocomplete="off"><button class="mr-btn mr-btn-sm" type="submit">Go</button></form>
+    </div></div>`;
+  _pzRenderModeBody(); _pzRenderResults(); _pzInitMap();
+}
+window._pzMode=function(m){ const st=_pzState(); st.mode=m; if(m!=='draw') _pzStopDrawing(); document.querySelectorAll('.pz-mode').forEach(b=>{ const on=b.getAttribute('onclick').includes("'"+m+"'"); b.classList.toggle('on',on); b.setAttribute('aria-checked',on); }); _pzRenderModeBody(); _pzHint(); };
+function _pzHint(){ const el=document.getElementById('pz-maphint'); if(!el) return; const st=_pzState(); const z=st.map?st.map.getZoom():0;
+  el.textContent= st.mode==='select' ? (z<15?'Zoom in, then click parcels to add or remove them.':'Click a parcel to add it; click again to remove it.')
+    : st.mode==='draw' ? (st.drawing?'Click to add corners · double-click (or ✓ Finish) to close the area':st.poly.length>=3?'Area set — press “Get owners in this area”.':'Press ✏️ Start drawing, then click corners on the map.')
+    : 'Optional: draw an area to limit the search to it.'; }
+function _pzRenderModeBody(){
+  const el=document.getElementById('pz-mode-body'); if(!el) return; const st=_pzState();
+  if(st.mode==='select'){
+    el.innerHTML=`<p class="mr-note">Click parcels on the map. Each one is looked up on the state parcel roll (owner, mailing address, acreage, use, value).</p>
+      <div class="pz-row"><b>${st.sel.size}</b>&nbsp;parcel${st.sel.size===1?'':'s'} selected
+        ${st.sel.size?`<button type="button" class="mr-btn mr-btn-sm" style="margin-left:auto" onclick="window._pzClearSel()">Clear</button><button type="button" class="mr-btn mr-btn-sm mr-btn-teal" onclick="window._pzUseSelection(this)">Get owners →</button>`:''}</div>`;
+  } else if(st.mode==='draw'){
+    el.innerHTML=`<p class="mr-note">Outline an area. Every parcel touching it is pulled (up to ${PZ_MAX_PARCELS.toLocaleString()}). Add filters to narrow it.</p>
+      <div class="pz-row">${st.drawing?`<button type="button" class="mr-btn mr-btn-sm mr-btn-teal" onclick="window._pzFinishDraw()" ${st.poly.length<3?'disabled':''}>✓ Finish</button><button type="button" class="mr-btn mr-btn-sm" onclick="window._pzUndoPoint()" ${st.poly.length?'':'disabled'}>↶ Undo corner</button>`
+        :`<button type="button" class="mr-btn mr-btn-sm mr-btn-teal" onclick="window._pzStartDraw()">✏️ ${st.poly.length?'Redraw':'Start drawing'}</button>`}
+        ${st.poly.length&&!st.drawing?`<button type="button" class="mr-btn mr-btn-sm" onclick="window._pzClearPoly()">Clear area</button>`:''}</div>
+      ${_pzQuickFilters()}
+      <div class="pz-row"><button type="button" class="mr-btn mr-btn-teal" ${st.poly.length>=3&&!st.drawing?'':'disabled'} onclick="window._pzSearch('polygon',this)">Get owners in this area →</button></div>`;
+  } else {
+    el.innerHTML=`<label class="mr-lbl" for="pz-crit">Describe the owners you want</label>
+      <textarea id="pz-crit" class="mr-textarea" rows="4" placeholder="e.g. Vacant commercial land, 5 to 20 acres, in Pasco and Hernando, owned by out-of-state owners who haven’t sold recently">${_pzEsc(st.critText||'')}</textarea>
+      <div class="pz-row"><button type="button" class="mr-btn mr-btn-sm mr-btn-teal" onclick="window._pzInterpret(this)">✨ Interpret</button>${st.poly.length>=3?'<span class="mr-muted">Limited to your drawn area</span>':'<span class="mr-muted">Statewide unless counties are named or an area is drawn</span>'}</div>
+      ${st.filter?`<div class="pz-interp" role="status"><div class="mr-lbl">Terra will search for</div>${st.filter.summary?`<div class="pz-sum">${_pzEsc(st.filter.summary)}</div>`:''}<div class="pz-chips">${_pzFilterChips(st.filter)||'<span class="mr-muted">No filters — that would be every parcel.</span>'}</div>
+        ${(st.filter.unsupported||[]).length?`<div class="pz-warn">The parcel roll can’t filter on: ${st.filter.unsupported.map(_pzEsc).join('; ')}. Check those by hand or with 📊 MapWise on the list.</div>`:''}
+        <details class="pz-adv"><summary>Adjust</summary>${_pzFilterForm(st.filter)}</details>
+        <div class="pz-row"><button type="button" class="mr-btn mr-btn-teal" onclick="window._pzSearch('criteria',this)">Get owners →</button></div></div>`:''}`;
+  }
+}
+function _pzQuickFilters(){
+  const f=_pzState().drawFilter||{};
+  return `<details class="pz-adv" ${Object.keys(f).length?'open':''}><summary>Filters (optional)</summary>${_pzFilterForm(f,'d')}</details>`;
+}
+function _pzFilterForm(f,pre){
+  pre=pre||'c'; const id=k=>`pz-${pre}-${k}`;
+  return `<div class="pz-ff">
+    <div class="pz-ff-uses" role="group" aria-label="Property types">${Object.entries(PZ_USES).map(([k,v])=>`<label><input type="checkbox" class="mr-check" data-use="${k}" data-pre="${pre}" ${(f.uses||[]).includes(k)?'checked':''}> ${_pzEsc(v.label)}</label>`).join('')}</div>
+    <div class="pz-ff-2"><label>Min acres<input class="mr-input" id="${id('minAcres')}" inputmode="decimal" value="${f.minAcres??''}"></label><label>Max acres<input class="mr-input" id="${id('maxAcres')}" inputmode="decimal" value="${f.maxAcres??''}"></label>
+    <label>Min value $<input class="mr-input" id="${id('minValue')}" inputmode="numeric" value="${f.minValue??''}"></label><label>Max value $<input class="mr-input" id="${id('maxValue')}" inputmode="numeric" value="${f.maxValue??''}"></label></div>
+    ${pre==='c'?`<label class="pz-ff-full">Counties<input class="mr-input" id="${id('counties')}" value="${_pzEsc((f.counties||[]).join(', '))}" placeholder="Pasco, Hernando"></label>`:''}
+    <div class="pz-ff-flags">${[['outOfState','Out-of-state owners'],['notRecentlySold','Not sold in 2024–25'],['noHomestead','Skip homesteads'],['includeExcluded','Include government / ROW / water / condos']].map(([k,t])=>`<label><input type="checkbox" class="mr-check" id="${id(k)}" ${f[k]?'checked':''}> ${t}</label>`).join('')}
+      <label>Owner type <select class="mr-select" id="${id('ownerType')}"><option value="">Anyone</option><option value="entity" ${f.ownerType==='entity'?'selected':''}>Companies / LLCs</option><option value="trust" ${f.ownerType==='trust'?'selected':''}>Trusts / estates</option></select></label></div></div>`;
+}
+function _pzReadForm(pre, base){
+  const g=k=>document.getElementById(`pz-${pre}-${k}`); const f={...(base||{})};
+  f.uses=[...document.querySelectorAll(`input[data-use][data-pre="${pre}"]`)].filter(x=>x.checked).map(x=>x.dataset.use);
+  ['minAcres','maxAcres','minValue','maxValue'].forEach(k=>{ const v=(g(k)&&g(k).value||'').replace(/[$,\s]/g,''); if(v!==''&&isFinite(Number(v))) f[k]=Number(v); else delete f[k]; });
+  if(g('counties')) f.counties=g('counties').value.split(',').map(s=>s.trim()).map(c=>PZ_COUNTIES.find(x=>x.toLowerCase()===c.toLowerCase().replace(/^st\.? /,'saint ')||x.toLowerCase()===c.toLowerCase().replace(/ county$/,''))).filter(Boolean);
+  ['outOfState','notRecentlySold','noHomestead','includeExcluded'].forEach(k=>{ if(g(k)) { if(g(k).checked) f[k]=true; else delete f[k]; } });
+  if(g('ownerType')){ if(g('ownerType').value) f.ownerType=g('ownerType').value; else delete f.ownerType; }
+  return f;
+}
+window._pzInterpret=async function(btn){
+  const st=_pzState(); const t=(document.getElementById('pz-crit')||{}).value||''; st.critText=t;
+  if(t.trim().length<6){ showToast('Describe what you’re looking for first','warning'); return; }
+  const done=elcBusy(btn,'Reading…');
+  try{ st.filter=await _pzParseCriteria(t); _pzRenderModeBody(); }
+  catch(e){ showToast('Could not interpret that: '+e.message,'error',7000); } finally{ done(); }
+};
+
+/* map plumbing */
+async function _pzInitMap(){
+  const st=_pzState(); const el=document.getElementById('pz-map'); if(!el) return;
+  try{ await _loadLeaflet(); }catch(e){ el.innerHTML=`<div class="mr-note" style="padding:1rem">${_pzEsc(e.message)}</div>`; return; }
+  if(st.map){ try{ st.map.remove(); }catch(_){} st.map=null; }
+  const m=L.map(el,{zoomControl:true,doubleClickZoom:false}).setView(st.view?st.view.c:[27.98,-82.42], st.view?st.view.z:11);
+  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:20,maxNativeZoom:19,attribution:'Esri, Maxar, Earthstar'}).addTo(m);
+  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',{maxZoom:20,maxNativeZoom:19}).addTo(m);
+  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}',{maxZoom:20,maxNativeZoom:19,opacity:.7}).addTo(m);
+  st.map=m; st.outLayer=L.layerGroup().addTo(m); st.selLayer=L.layerGroup().addTo(m); st.polyLayer=L.layerGroup().addTo(m); st.resLayer=L.layerGroup().addTo(m);
+  for(const s of st.sel.values()) _pzDrawSel(s);
+  _pzDrawPoly(); _pzDrawResults();
+  m.on('click',e=>_pzMapClick(e)); m.on('dblclick',e=>{ if(st.drawing){ window._pzFinishDraw(); try{ e.originalEvent&&L.DomEvent.stop(e.originalEvent); }catch(_){} } });
+  m.on('moveend',()=>{ st.view={c:[m.getCenter().lat,m.getCenter().lng],z:m.getZoom()}; _pzHint(); _pzOutlines(); });
+  _pzHint(); _pzOutlines(); setTimeout(()=>m.invalidateSize(),60);
+}
+let _pzOutlineSeq=0;
+async function _pzOutlines(){
+  const st=_pzState(); if(!st.map) return; const seq=++_pzOutlineSeq; st.outLayer.clearLayers();
+  if(st.map.getZoom()<PZ_OUTLINE_ZOOM) return;
+  try{ const fs=await _pzOutlinesIn(st.map.getBounds()); if(seq!==_pzOutlineSeq) return;
+    fs.slice(0,1500).forEach(f=>f.rings.forEach(r=>L.polygon(r.map(p=>[p[1],p[0]]),{color:'#ffffff',weight:1,opacity:.75,fill:false,interactive:false}).addTo(st.outLayer))); }catch(e){ /* outlines are a nicety */ }
+}
+async function _pzMapClick(e){
+  const st=_pzState();
+  if(st.drawing){ st.poly.push([e.latlng.lat,e.latlng.lng]); _pzDrawPoly(); _pzRenderModeBody(); return; }
+  if(st.mode!=='select') return;
+  if(st.map.getZoom()<15){ st.map.setView(e.latlng,17); return; }
+  const hint=document.getElementById('pz-maphint'); if(hint) hint.textContent='Looking up parcel…';
+  try{ const p=await _pzParcelAt(e.latlng.lat,e.latlng.lng); if(!p){ showToast('No parcel there (road, water or outside Florida)','info'); return; }
+    const k=String(p.attrs.OBJECTID);
+    if(st.sel.has(k)){ const s=st.sel.get(k); s.layer&&st.selLayer.removeLayer(s.layer); st.sel.delete(k); }
+    else { const s={attrs:p.attrs, rings:p.rings}; st.sel.set(k,s); _pzDrawSel(s); }
+    _pzRenderModeBody();
+  }catch(err){ showToast('Parcel lookup failed: '+err.message,'error'); } finally{ _pzHint(); }
+}
+function _pzDrawSel(s){ const st=_pzState(); if(!st.selLayer) return; const a=s.attrs;
+  s.layer=L.featureGroup(s.rings.map(r=>L.polygon(r.map(p=>[p[1],p[0]]),{color:'#00B2A9',weight:3,fillColor:'#00B2A9',fillOpacity:.25}))).addTo(st.selLayer);
+  s.layer.bindTooltip(`<b>${_pzEsc(_pzTitle(a.OWN_NAME))}</b><br>${_pzEsc(a.PARCEL_ID)} · ${_pzNum(a.Acres,2)} ac<br>${_pzEsc(a.LU||'')}`,{sticky:true}); }
+window._pzClearSel=function(){ const st=_pzState(); st.sel.clear(); st.selLayer&&st.selLayer.clearLayers(); _pzRenderModeBody(); };
+window._pzStartDraw=function(){ const st=_pzState(); st.drawing=true; st.poly=[]; _pzDrawPoly(); _pzRenderModeBody(); _pzHint(); if(st.map) st.map.getContainer().style.cursor='crosshair'; };
+window._pzUndoPoint=function(){ const st=_pzState(); st.poly.pop(); _pzDrawPoly(); _pzRenderModeBody(); };
+window._pzFinishDraw=function(){ const st=_pzState();
+  // a double-click also fires two clicks — drop corners that land on top of the previous one
+  st.poly=st.poly.filter((p,i,a)=>i===0||Math.abs(p[0]-a[i-1][0])+Math.abs(p[1]-a[i-1][1])>1e-6);
+  if(st.poly.length<3){ showToast('Click at least 3 corners','warning'); return; } _pzStopDrawing(); _pzDrawPoly(); _pzRenderModeBody(); _pzHint(); };
+function _pzStopDrawing(){ const st=_pzState(); st.drawing=false; if(st.map) st.map.getContainer().style.cursor=''; }
+window._pzClearPoly=function(){ const st=_pzState(); st.poly=[]; _pzDrawPoly(); _pzRenderModeBody(); };
+function _pzDrawPoly(){ const st=_pzState(); if(!st.polyLayer) return; st.polyLayer.clearLayers(); if(!st.poly.length) return;
+  if(st.drawing){ L.polyline(st.poly,{color:'#DA291C',weight:3,dashArray:'6 4',interactive:false}).addTo(st.polyLayer); st.poly.forEach(p=>L.circleMarker(p,{radius:4,color:'#DA291C',fillOpacity:1,interactive:false}).addTo(st.polyLayer)); }
+  else L.polygon(st.poly,{color:'#DA291C',weight:3,fillOpacity:.08,interactive:false}).addTo(st.polyLayer); }
+function _pzDrawResults(){ const st=_pzState(); if(!st.resLayer) return; st.resLayer.clearLayers(); const r=st.results; if(!r||!r.owners) return;
+  r.owners.forEach(o=>o.parcels.forEach(p=>{ if(p.lat&&p.lng) L.circleMarker([p.lat,p.lng],{radius:5,color:'#fff',weight:1.5,fillColor:o.excluded?'#6b7280':'#DA291C',fillOpacity:.95}).bindTooltip(`${_pzEsc(o.display)}<br>${_pzNum(p.acres,2)} ac · ${_pzEsc(p.use)}`).addTo(st.resLayer); })); }
+window._pzGeocode=async function(form){
+  const q=form.q.value.trim(); if(!q) return; const st=_pzState();
+  try{ const r=await fetch('https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&maxLocations=1&countryCode=USA&searchExtent='+encodeURIComponent('-87.7,24.3,-79.8,31.1')+'&SingleLine='+encodeURIComponent(q));
+    const j=await r.json(); const c=(j.candidates||[])[0]; if(!c){ showToast('Couldn’t find that place','warning'); return; }
+    st.map.setView([c.location.y,c.location.x], c.score>90&&/\d/.test(q)?18:14); }catch(e){ showToast('Search failed: '+e.message,'error'); }
+};
+
+/* ---------- search → results ---------- */
+window._pzUseSelection=function(btn){ const st=_pzState(); const attrs=[...st.sel.values()].map(s=>s.attrs); st.results={source:'parcels', owners:_pzGroupOwners(attrs), parcels:attrs.length, label:attrs.length+' selected parcel'+(attrs.length===1?'':'s')}; _pzRenderResults(); _pzDrawResults(); };
+window._pzSearch=async function(source, btn){
+  const st=_pzState(); let f;
+  if(source==='criteria'){ f=_pzReadForm('c', st.filter); st.filter={...st.filter, ...f}; } else { f=_pzReadForm('d', {}); st.drawFilter=f; }
+  const poly=st.poly.length>=3?st.poly:null;
+  if(source==='criteria' && !poly && !(f.counties&&f.counties.length) && !(f.cities&&f.cities.length)){ showToast('Name at least one county (or draw an area) so the search isn’t statewide','warning',6000); return; }
+  const where=_pzBuildWhere(f); const done=elcBusy(btn,'Counting…'); const res=document.getElementById('pz-results');
+  try{
+    const n=await _pzCount(where, poly);
+    if(!n){ st.results={source, owners:[], parcels:0, filter:f, where}; _pzRenderResults(); return; }
+    if(n>PZ_MAX_PARCELS){ if(res) res.innerHTML=`<div class="pz-warn" role="alert"><b>${n.toLocaleString()} parcels</b> match — that’s more than ${PZ_MAX_PARCELS.toLocaleString()}. Add a use type, an acreage range, or a smaller area.</div>`; return; }
+    const attrs=await _pzFetchAttrs(where, poly, (d,t)=>{ if(res) res.innerHTML=`<div class="mr-note" role="status">Pulling owners… ${d.toLocaleString()} of ${t.toLocaleString()} parcels</div>`; });
+    st.results={source, owners:_pzGroupOwners(attrs), parcels:attrs.length, filter:f, where, poly, criteria:source==='criteria'?st.critText:''};
+    _pzRenderResults(); _pzDrawResults();
+    if(st.map&&poly) st.map.fitBounds(L.latLngBounds(poly),{padding:[20,20]});
+    else if(st.map){ const pts=attrs.filter(a=>a.Latitude).map(a=>[a.Latitude,a.Longitude]); if(pts.length) st.map.fitBounds(L.latLngBounds(pts),{padding:[30,30],maxZoom:16}); }
+  }catch(e){ if(res) res.innerHTML=`<div class="pz-warn" role="alert">${_pzEsc(e.message)}</div>`; else showToast(e.message,'error'); }
+  finally{ done(); }
+};
+function _pzRenderResults(){
+  const el=document.getElementById('pz-results'); if(!el) return; const r=_pzState().results; if(!r){ el.innerHTML=''; return; }
+  if(!r.owners.length){ el.innerHTML=`<div class="pz-res"><p class="mr-note" role="status">No parcels matched.</p></div>`; return; }
+  const mail=r.owners.filter(o=>!o.excluded).length; const ac=r.owners.reduce((s,o)=>s+o.totalAcres,0);
+  const dName=_pzDefaultName(r);
+  el.innerHTML=`<div class="pz-res" role="status">
+    <div class="pz-stats"><div><b>${r.parcels.toLocaleString()}</b><span>parcels</span></div><div><b>${r.owners.length.toLocaleString()}</b><span>owners</span></div><div><b>${mail.toLocaleString()}</b><span>mailable</span></div><div><b>${_pzNum(ac,0)}</b><span>acres</span></div></div>
+    <div class="pz-mini">${r.owners.slice(0,6).map(o=>`<div><b>${_pzEsc(o.display)}</b> <span class="mr-muted">· ${o.parcels.length>1?o.parcels.length+' parcels · ':''}${_pzNum(o.totalAcres,2)} ac${o.excluded?' · ⚠ '+_pzEsc(o.exclWhy):''}</span></div>`).join('')}${r.owners.length>6?`<div class="mr-muted">+ ${(r.owners.length-6).toLocaleString()} more</div>`:''}</div>
+    <label class="mr-lbl" for="pz-listname">Save as prospect list</label>
+    <input id="pz-listname" class="mr-input" value="${_pzEsc(dName)}" maxlength="80">
+    <label class="pz-check"><input type="checkbox" class="mr-check" id="pz-tocrm" checked> Add owners to the CRM (group “Prospecting – ${_pzEsc(dName)}”)</label>
+    <div class="pz-row"><button type="button" class="mr-btn mr-btn-sm" onclick="window._pzResultsCsv()">⬇ CSV</button><button type="button" class="mr-btn mr-btn-teal" style="margin-left:auto" onclick="window._pzSaveList(this)">💾 Save to my prospects</button></div></div>`;
+  const nm=document.getElementById('pz-listname'); nm&&nm.addEventListener('input',()=>{ const c=el.querySelector('.pz-check'); if(c) c.lastChild.textContent=` Add owners to the CRM (group “Prospecting – ${nm.value.trim()||'…'}”)`; });
+}
+function _pzDefaultName(r){
+  const f=r.filter||{}; const bits=[];
+  if(f.uses&&f.uses.length) bits.push(f.uses.map(k=>PZ_USES[k].label.replace(/ \(.*\)/,'')).slice(0,2).join(' + '));
+  if(f.minAcres!=null||f.maxAcres!=null) bits.push((f.minAcres??0)+'–'+(f.maxAcres??'+')+' ac');
+  if(f.counties&&f.counties.length) bits.push(f.counties.slice(0,2).join('/'));
+  else { const c=[...new Set(r.owners.flatMap(o=>o.counties))]; if(c.length&&c.length<=2) bits.push(c.join('/')); }
+  if(f.outOfState) bits.push('out-of-state');
+  const d=new Date().toLocaleDateString('en-US',{month:'short',day:'numeric'});
+  return (bits.length?bits.join(' · '):(r.source==='parcels'?'Selected parcels':'Drawn area'))+' — '+d;
+}
+window._pzResultsCsv=function(){ const r=_pzState().results; if(r) _pzDownload('Prospects '+new Date().toISOString().slice(0,10)+'.csv', _pzCsv(r.owners)); };
+
+/* ---------- save list (+ CRM) ---------- */
+window._pzSaveList=async function(btn){
+  const st=_pzState(); const r=st.results; if(!r||!r.owners.length) return;
+  const name=(document.getElementById('pz-listname').value||'').trim()||_pzDefaultName(r); const toCrm=!!(document.getElementById('pz-tocrm')||{}).checked;
+  const done=elcBusy(btn,'Saving…'); const me=_pzMe();
+  const {collection,doc,setDoc,addDoc,writeBatch,updateDoc}=_fbFns;
+  try{
+    const listData={name, advisorUid:me.uid, advisorEmail:me.email, advisorName:me.name, createdAt:Date.now(), updatedAt:Date.now(),
+      source:r.source, criteria:r.criteria||'', filter:r.filter||null, where:r.where||'', polygon:(r.poly||[]).map(p=>({lat:p[0],lng:p[1]})),
+      parcelCount:r.parcels, ownerCount:r.owners.length, mailableCount:r.owners.filter(o=>!o.excluded).length, totalAcres:Math.round(r.owners.reduce((s,o)=>s+o.totalAcres,0)), crmGroupId:'', mailed:0};
+    const ref=await addDoc(collection(_fbDb,'prospectLists'), listData);
+    let crm={added:0,matched:0}; let groupId='';
+    if(toCrm){ try{ const out=await _pzToCrm(r.owners, name, me); crm=out; groupId=out.groupId; }catch(e){ console.warn('[pz] crm',e); showToast('List saved, but the CRM step failed: '+e.message,'warning',8000); } }
+    for(let i=0;i<r.owners.length;i+=400){ const b=writeBatch(_fbDb);
+      r.owners.slice(i,i+400).forEach(o=>{ const {layer,...clean}=o; b.set(doc(_fbDb,'prospectLists',ref.id,'owners',o.key.replace(/\//g,'_')), {...clean, addedAt:Date.now()}); });
+      await b.commit(); btn.textContent=`Saving… ${Math.min(i+400,r.owners.length)}/${r.owners.length}`; }
+    if(groupId) await updateDoc(doc(_fbDb,'prospectLists',ref.id),{crmGroupId:groupId, crmAdded:crm.added, crmMatched:crm.matched});
+    st.lists=null; st.results=null; st.sel.clear(); st.poly=[]; st.listId=ref.id; st.sub='list'; st.owners=null;
+    showToast(`Saved “${name}” — ${r.owners.length.toLocaleString()} owners${toCrm?` · CRM: ${crm.added} new, ${crm.matched} already there`:''}`,'success',7000);
+    viewProspecting();
+  }catch(e){ console.warn('[pz] save',e); showToast(/permission/i.test(e.message)?'Saving is blocked until the prospectLists Firestore rule is published (docs/prospecting-firestore-rules.md)':'Could not save: '+e.message,'error',9000); }
+  finally{ done(); }
+};
+const _pzNorm=s=>String(s||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
+async function _pzToCrm(owners, listName, me){
+  if(typeof bootCRM==='function') bootCRM();
+  for(let i=0;i<30&&(typeof allContacts==='undefined'||!allContacts.length);i++) await new Promise(r=>setTimeout(r,100));
+  const {collection,doc,addDoc,writeBatch,arrayUnion}=_fbFns;
+  const gName='Prospecting – '+listName;
+  let g=(typeof allCRMGroups!=='undefined'?allCRMGroups:[]).find(x=>x.name===gName);
+  if(!g){ const data={name:gName, createdAt:Date.now(), createdBy:me.uid, source:'prospecting'}; const gr=await addDoc(collection(_fbDb,'crmGroups'),data); g={id:gr.id,...data}; if(typeof allCRMGroups!=='undefined'&&!allCRMGroups.some(x=>x.id===gr.id)) allCRMGroups.push(g); }
+  const idx=new Map(); (typeof allContacts!=='undefined'?allContacts:[]).forEach(c=>{ const st=_pzNorm(c.mailingAddress&&c.mailingAddress.street); if(!st) return; [c.company,[c.lastName,c.firstName].join(''),[c.firstName,c.lastName].join('')].forEach(n=>{ const k=_pzNorm(n); if(k) idx.set(k+'|'+st,c); }); });
+  let added=0, matched=0; const ops=[];
+  for(const o of owners){
+    const st=_pzNorm(o.mail.line1); const hit=idx.get(_pzNorm(o.name)+'|'+st)||(o.greeting!=='Property Owner'?idx.get(_pzNorm(o.greeting)+'|'+st):null);
+    if(hit){ matched++; o.contactId=hit.id; ops.push(['u',hit.id]); continue; }
+    let firstName='', lastName='', company='';
+    if(o.entity||o.greeting==='Property Owner') company=o.display; else { const [f,...l]=o.greeting.split(' '); firstName=f; lastName=l.join(' '); }
+    const ref=doc(collection(_fbDb,'contacts')); o.contactId=ref.id; added++;
+    ops.push(['c',ref,{firstName,lastName,company,title:'Property owner',email:'',phone:'',mailingAddress:{street:[o.mail.line1,o.mail.line2].filter(Boolean).join(', '),city:o.mail.city,state:o.mail.state,zip:o.mail.zip},
+      source:'prospecting', notes:'Owns '+o.parcels.map(p=>`${p.pid} (${p.county}, ${p.acres} ac, ${p.use})`).join('; ').slice(0,900), groups:[g.id], linkedDeals:[], assignedAdvisor:me.uid,
+      createdAt:Date.now(), updatedAt:Date.now(), createdBy:me.uid}]);
+  }
+  for(let i=0;i<ops.length;i+=400){ const b=writeBatch(_fbDb);
+    ops.slice(i,i+400).forEach(op=>{ if(op[0]==='u') b.update(doc(_fbDb,'contacts',op[1]),{groups:arrayUnion(g.id),updatedAt:Date.now()}); else b.set(op[1],op[2]); });
+    await b.commit(); }
+  return {groupId:g.id, added, matched};
+}
+
+/* ---------- 📋 lists ---------- */
+async function _pzRenderLists(){
+  const box=document.getElementById('pz-body'); if(!box) return; const st=_pzState();
+  if(!st.lists){ box.innerHTML=`<div class="mr-card" style="padding:1.4rem" role="status"><span class="mr-muted">Loading lists…</span></div>`; await _pzLoadLists(); if(_pzState().sub!=='lists') return; }
+  if(st.listsErr){ box.innerHTML=`<div class="pz-warn" role="alert">${_pzEsc(st.listsErr)}</div>`; return; }
+  if(!st.lists.length){ box.innerHTML=`<div class="mr-card" style="padding:1.4rem"><p style="margin:0;font-weight:700;color:var(--text-1)">No prospect lists yet.</p><p class="mr-note" style="margin:.35rem 0 .8rem">Find owners on the map, then 💾 save them here.</p><button type="button" class="mr-btn mr-btn-teal" onclick="window._pzSub('map')">🗺 Find owners</button></div>`; return; }
+  box.innerHTML=`<div class="mr-card" style="overflow:auto"><table class="mr-table pz-table"><thead><tr><th>List</th>${_pzIsApprover()?'<th>Advisor</th>':''}<th class="pz-num">Owners</th><th class="pz-num">Mailable</th><th class="pz-num">Acres</th><th class="pz-num">Mailed</th><th>Created</th></tr></thead><tbody>
+    ${st.lists.map(l=>`<tr class="pz-click" tabindex="0" onclick="window._pzOpenList('${l.id}')" onkeydown="if(event.key==='Enter')window._pzOpenList('${l.id}')"><td><b>${_pzEsc(l.name)}</b><div class="mr-muted">${l.source==='criteria'?'💬 '+_pzEsc((l.criteria||'').slice(0,80)):l.source==='polygon'?'✏️ Drawn area':'👆 Picked parcels'}</div></td>${_pzIsApprover()?`<td>${_pzEsc(l.advisorName||l.advisorEmail)}</td>`:''}<td class="pz-num">${_pzNum(l.ownerCount)}</td><td class="pz-num">${_pzNum(l.mailableCount)}</td><td class="pz-num">${_pzNum(l.totalAcres)}</td><td class="pz-num">${_pzNum(l.mailed||0)}</td><td>${new Date(l.createdAt).toLocaleDateString()}</td></tr>`).join('')}
+  </tbody></table></div>`;
+}
+window._pzOpenList=function(id){ const st=_pzState(); st.listId=id; st.owners=null; st.ownerQ=''; st.ownerShow=100; st.sub='list'; viewProspecting(); };
+const PZ_STATUS={new:['New','mr-chip-new'],mailed:['Mailed','mr-chip-queued'],responded:['Responded','mr-chip-sent'],card:['Prospect card','mr-chip-sent'],no:['Not interested','mr-chip-draft']};
+async function _pzRenderList(){
+  const box=document.getElementById('pz-body'); if(!box) return; const st=_pzState();
+  if(!st.lists) await _pzLoadLists(); const l=(st.lists||[]).find(x=>x.id===st.listId); if(!l){ window._pzSub('lists'); return; }
+  if(!st.owners){ box.innerHTML=`<div class="mr-card" style="padding:1.4rem" role="status"><span class="mr-muted">Loading owners…</span></div>`; try{ st.owners=await _pzLoadOwners(l.id); }catch(e){ box.innerHTML=`<div class="pz-warn" role="alert">${_pzEsc(e.message)}</div>`; return; } if(_pzState().listId!==l.id) return; }
+  const mine=l.advisorUid===currentUser.uid||_pzIsApprover();
+  const q=st.ownerQ.toUpperCase(); const rows=st.owners.filter(o=>!q||(o.name+' '+o.mail.line1+' '+o.mail.city+' '+o.parcels.map(p=>p.pid+' '+p.site).join(' ')).toUpperCase().includes(q));
+  const mailable=st.owners.filter(o=>!o.excluded&&o.mail&&o.mail.ok).length;
+  box.innerHTML=`<div class="mr-card pz-lhead">
+      <button type="button" class="mr-btn mr-btn-sm" onclick="window._pzSub('lists')" aria-label="Back to lists">← Lists</button>
+      <div style="flex:1;min-width:200px"><div class="bm-list-name">${_pzEsc(l.name)}</div><div class="mr-muted">${_pzEsc(l.advisorName||'')} · ${_pzNum(l.ownerCount)} owners · ${_pzNum(l.parcelCount)} parcels · ${_pzNum(l.totalAcres)} ac${l.crmGroupId?' · 🤝 in CRM':''}${l.criteria?' · “'+_pzEsc(l.criteria.slice(0,90))+'”':''}</div></div>
+      <div class="pz-row" style="margin:0"><button type="button" class="mr-btn mr-btn-sm" onclick="window._pzListCsv()">⬇ Mailing list CSV</button>
+      ${mine?`<button type="button" class="mr-btn mr-btn-teal" onclick="window._pzPostcard()" ${mailable?'':'disabled'}>📮 Generate postcards (${mailable})</button><button type="button" class="mr-btn mr-btn-sm" aria-label="Delete list" onclick="window._pzDeleteList(this)">🗑</button>`:''}</div></div>
+    <div class="pz-row"><input class="mr-input" style="max-width:340px" placeholder="Search owner, address, parcel…" aria-label="Search owners" value="${_pzEsc(st.ownerQ)}" oninput="window._pzOwnerSearch(this.value)"><span class="mr-muted">${rows.length.toLocaleString()} shown · ${mailable.toLocaleString()} will get a postcard</span></div>
+    <div class="mr-card" style="overflow:auto"><table class="mr-table pz-table"><thead><tr><th><span class="sr-only">Mail</span>📮</th><th>Owner</th><th>Mailing address</th><th>Parcels</th><th class="pz-num">Acres</th><th class="pz-num">Just value</th><th>Status</th><th><span class="sr-only">Actions</span></th></tr></thead>
+    <tbody id="pz-otb">${rows.slice(0,st.ownerShow).map(o=>_pzOwnerRow(o,mine)).join('')}</tbody></table>
+    ${rows.length>st.ownerShow?`<div style="padding:.7rem;text-align:center"><button type="button" class="mr-btn mr-btn-sm" onclick="window._pzState().ownerShow+=200;window._pzRenderList()">Show more (${(rows.length-st.ownerShow).toLocaleString()})</button></div>`:''}</div>`;
+}
+window._pzRenderList=_pzRenderList; window._pzState=_pzState;
+let _pzSearchT=null; window._pzOwnerSearch=function(v){ _pzState().ownerQ=v; clearTimeout(_pzSearchT); _pzSearchT=setTimeout(()=>{ _pzRenderList().then(()=>{ const i=document.querySelector('#pz-body input.mr-input'); if(i){ i.focus(); i.setSelectionRange(i.value.length,i.value.length);} }); },250); };
+function _pzOwnerRow(o,mine){
+  const id=_pzEsc(o.id); const s=PZ_STATUS[o.status]||PZ_STATUS.new; const p0=o.parcels[0]||{};
+  return `<tr class="${o.excluded?'pz-off':''}">
+    <td>${o.mail&&o.mail.ok?`<input type="checkbox" class="mr-check" aria-label="Mail ${_pzEsc(o.display)}" ${o.excluded?'':'checked'} ${mine?'':'disabled'} onchange="window._pzToggleOwner('${id}',this)">`:`<span title="${_pzEsc(o.exclWhy||'')}" aria-label="Not mailable">⚠</span>`}</td>
+    <td><b>${_pzEsc(o.display)}</b>${o.greeting&&o.greeting!=='Property Owner'?`<div class="mr-muted">Dear ${_pzEsc(o.greeting)}</div>`:''}</td>
+    <td>${_pzEsc(o.mail.line1)}${o.mail.line2?'<br>'+_pzEsc(o.mail.line2):''}<br>${_pzEsc([o.mail.city,o.mail.state].filter(Boolean).join(', '))} ${_pzEsc(o.mail.zip)}${!o.mail.ok?`<div class="pz-bad">${_pzEsc(o.exclWhy||o.mail.why||'')}</div>`:''}</td>
+    <td>${o.parcels.slice(0,3).map(p=>`<div><span class="pz-pid">${_pzEsc(p.pid)}</span> <span class="mr-muted">${_pzEsc(p.county)} · ${_pzEsc(p.use)}${p.site?' · '+_pzEsc(_pzTitle(p.site)):''}</span></div>`).join('')}${o.parcels.length>3?`<div class="mr-muted">+${o.parcels.length-3} more</div>`:''}</td>
+    <td class="pz-num">${_pzNum(o.totalAcres,2)}</td><td class="pz-num">${_pzMoney(o.totalJV)}</td>
+    <td>${mine?`<select class="mr-select pz-st" aria-label="Status for ${_pzEsc(o.display)}" onchange="window._pzSetStatus('${id}',this.value)">${Object.entries(PZ_STATUS).map(([k,v])=>`<option value="${k}" ${o.status===k?'selected':''}>${v[0]}</option>`).join('')}</select>`:`<span class="mr-chip ${s[1]}">${s[0]}</span>`}${o.mailedAt?`<div class="mr-muted">📮 ${new Date(o.mailedAt).toLocaleDateString()}</div>`:''}</td>
+    <td class="pz-act">${p0.lat?`<button type="button" class="mr-btn mr-btn-sm" title="Show on map" aria-label="Show on map" onclick="window._pzZoomOwner('${id}')">🗺</button>`:''}<button type="button" class="mr-btn mr-btn-sm" title="MapWise sales history & other holdings (one record)" aria-label="MapWise details" onclick="window._pzMapwise('${id}',this)">📊</button>${mine?`<button type="button" class="mr-btn mr-btn-sm" title="Make a Prospect card" aria-label="Make a Prospect card" onclick="window._pzPromote('${id}')">➕</button>`:''}</td></tr>`;
+}
+function _pzOwner(id){ return (_pzState().owners||[]).find(o=>o.id===id); }
+async function _pzOwnerPatch(o, patch){ const {doc,updateDoc}=_fbFns; Object.assign(o,patch); await updateDoc(doc(_fbDb,'prospectLists',_pzState().listId,'owners',o.id), {...patch, updatedAt:Date.now()}); }
+window._pzToggleOwner=async function(id,cb){ const o=_pzOwner(id); if(!o) return; try{ await _pzOwnerPatch(o,{excluded:!cb.checked, exclWhy:cb.checked?'':'Left off by advisor'}); }catch(e){ cb.checked=!cb.checked; showToast('Could not save: '+e.message,'error'); } };
+window._pzSetStatus=async function(id,v){ const o=_pzOwner(id); if(!o) return; const prev=o.status; try{ await _pzOwnerPatch(o,{status:v}); showToast('Status saved','success',2000); }catch(e){ o.status=prev; showToast('Could not save: '+e.message,'error'); } };
+window._pzListCsv=function(){ const st=_pzState(); const l=(st.lists||[]).find(x=>x.id===st.listId); _pzDownload((l?l.name:'Prospects').replace(/[^\w .–-]+/g,'')+'.csv', _pzCsv(st.owners||[])); };
+window._pzZoomOwner=function(id){ const o=_pzOwner(id); if(!o) return; const st=_pzState(); const p=o.parcels.find(x=>x.lat)||{}; st.view={c:[p.lat,p.lng],z:17}; st.results={source:'list', owners:[o], parcels:o.parcels.length}; st.sub='map'; st.mode='select'; viewProspecting(); };
+window._pzDeleteList=async function(btn){
+  const st=_pzState(); const l=(st.lists||[]).find(x=>x.id===st.listId); if(!l) return;
+  if(!await elcConfirm(`Delete “${l.name}” and its ${l.ownerCount} owners? CRM contacts stay in the CRM.`,{title:'Delete prospect list',okLabel:'Delete',danger:true})) return;
+  const done=elcBusy(btn,'…'); const {doc,deleteDoc,writeBatch}=_fbFns;
+  try{ const owners=st.owners||await _pzLoadOwners(l.id);
+    for(let i=0;i<owners.length;i+=400){ const b=writeBatch(_fbDb); owners.slice(i,i+400).forEach(o=>b.delete(doc(_fbDb,'prospectLists',l.id,'owners',o.id))); await b.commit(); }
+    await deleteDoc(doc(_fbDb,'prospectLists',l.id));
+    st.lists=st.lists.filter(x=>x.id!==l.id);
+    showUndoToast(`Deleted “${l.name}”`, async()=>{ const {setDoc}=_fbFns; const {id,...data}=l; await setDoc(doc(_fbDb,'prospectLists',l.id),data);
+      for(let i=0;i<owners.length;i+=400){ const b=writeBatch(_fbDb); owners.slice(i,i+400).forEach(o=>{ const {id:oid,...od}=o; b.set(doc(_fbDb,'prospectLists',l.id,'owners',oid),od); }); await b.commit(); }
+      st.lists=null; window._pzOpenList(l.id); showToast('Restored','success'); });
+    window._pzSub('lists');
+  }catch(e){ showToast('Could not delete: '+e.message,'error'); } finally{ done(); }
+};
+window._pzPromote=function(id){
+  const o=_pzOwner(id); if(!o) return; const p=o.parcels[0]||{};
+  if(typeof openDealModal!=='function'){ showToast('The deal form isn’t available here','error'); return; }
+  openDealModal(null,'Prospect');
+  const set=(k,v)=>{ const el=document.getElementById(k); if(el&&v!=null&&v!=='') el.value=v; };
+  set('f-project-name', o.display+(p.site?' – '+_pzTitle(p.site):'')); set('f-address', [p.site&&_pzTitle(p.site), p.city&&_pzTitle(p.city)].filter(Boolean).join(', ')||(p.county+' County parcel '+p.pid));
+  set('f-county', p.county.replace(/^Saint /,'St. ')); set('f-acreage', o.totalAcres||'');
+  set('f-notes', `From 🧭 Prospecting list “${((_pzState().lists||[]).find(x=>x.id===_pzState().listId)||{}).name||''}”.\nOwner: ${o.name}\nMailing: ${[o.mail.line1,o.mail.line2,o.mail.city,o.mail.state,o.mail.zip].filter(Boolean).join(', ')}\nParcels: ${o.parcels.map(x=>x.pid+' ('+x.acres+' ac, '+x.use+')').join('; ')}`);
+  _pzOwnerPatch(o,{status:'card'}).catch(()=>{});
+  showToast('Pick Short- or Long-Term, check the details and save','info',6000);
+};
+window._pzMapwise=async function(id,btn){
+  const o=_pzOwner(id)||((_pzState().results||{}).owners||[]).find(x=>x.key===id); if(!o) return; const p=o.parcels[0]||{};
+  if(typeof _mwCall!=='function'||!(_MW().enabled)){ showToast('MapWise isn’t configured','warning'); return; }
+  const ov=document.createElement('div'); ov.className='mr-ov fixed inset-0 flex items-center justify-center'; ov.id='pz-mw-ov';
+  ov.innerHTML=`<div class="mr-modal" role="dialog" aria-modal="true" aria-label="MapWise details" style="width:min(760px,100%)"><div class="mr-modal-h"><h2>📊 ${_pzEsc(o.display)}</h2><button type="button" class="mr-x" style="margin-left:auto" aria-label="Close" onclick="this.closest('.mr-ov').remove()">✕</button></div>
+    <div class="mr-modal-b"><div class="mr-muted" style="margin-bottom:.5rem">${_pzEsc(p.pid)} · ${_pzEsc(p.county)} County${o.parcels.length>1?` · showing the first of ${o.parcels.length} parcels`:''}</div><div id="pz-mw-detail" role="status">Loading MapWise (one record)…</div>
+    <div class="pz-row"><button type="button" class="mr-btn mr-btn-sm" onclick="window._pzMwHoldings('${_pzEsc(id)}',this)">🏘 Other land this owner holds</button></div><div id="pz-mw-hold"></div></div></div>`;
+  ov.addEventListener('click',e=>{ if(e.target===ov) ov.remove(); }); document.body.appendChild(ov);
+  const el=document.getElementById('pz-mw-detail');
+  try{ const d={parcel:{parcelId:p.pid, owner:o.name}, county:p.county.replace(/^Saint /,'St '), lat:p.lat, lon:p.lng};
+    let out=await _mwCall('get_parcel_detail', _MW_ARGS.parcelDetail(d)); let rec=_mwRecords(out.data)[0];
+    if(!rec&&p.lat){ out=await _mwCall('get_parcel', _MW_ARGS.parcelAtPoint(d)); rec=_mwRecords(out.data)[0]; }
+    el.innerHTML=rec?_mwRenderDetail(rec,out.cached):'<div class="mw-note">MapWise has no record for this parcel.</div>';
+  }catch(e){ el.innerHTML=`<div class="pz-warn">MapWise: ${_pzEsc(e.message)}</div>`; }
+};
+window._pzMwHoldings=async function(id,btn){
+  const o=_pzOwner(id)||((_pzState().results||{}).owners||[]).find(x=>x.key===id); if(!o) return; const el=document.getElementById('pz-mw-hold'); const done=elcBusy(btn,'Loading…');
+  try{ const out=await _mwCall('find_owner_holdings', _MW_ARGS.ownerHoldings({parcel:{owner:o.name}})); el.innerHTML=_mwRenderHoldings(out.data,out.cached,o.name); }
+  catch(e){ el.innerHTML=`<div class="pz-warn">MapWise: ${_pzEsc(e.message)}</div>`; } finally{ done(); }
+};
+
+/* ---------- 📮 postcard ---------- */
+function _pzCardDefaults(offer, me){
+  const first=(me.name||'').split(' ')[0]||'I';
+  const what=offer==='overview'?'an in-person overview of what land like yours is selling for'
+    :offer==='both'?'a complimentary valuation of {{property}} — or, if you prefer, an in-person overview of what’s selling near you'
+    :'a complimentary, no-obligation valuation of {{property}}';
+  return {offer, headline:PZ_OFFERS[offer].head,
+    message:`I’m ${first}, a land advisor with Eshenbaugh Land Company. We work on land sales across Tampa Bay and the I-4 Corridor every day, and I’d like to offer you ${what}${offer==='overview'?' — {{property}} included':''}. No cost and no obligation — just call or text me.`};
+}
+function _pzCardHtml(side, c, adv, preview){
+  const esc=_pzEsc; const logo=_pzCfg().logoUrl||'https://terra.dirtdog.com/esh/assets/logo.png'; const ret=_pzCfg().returnAddress||{line1:'304 S. Willow Ave.',city:'Tampa',state:'FL',zip:'33606'};
+  const mv=s=>preview?String(s).replace(/\{\{greeting\}\}/g,preview.greeting).replace(/\{\{property\}\}/g,preview.property):String(s);   // escaped once, by esc() at the call site
+  const base=`<style>@page{margin:0}*{box-sizing:border-box}html,body{margin:0;padding:0;width:9.25in;height:6.25in;font-family:Arial,Helvetica,sans-serif;color:#0A0A0A;-webkit-print-color-adjust:exact}</style>`;
+  if(side==='front'){
+    return `<html><head><meta charset="utf-8">${base}<style>
+.f{position:relative;width:9.25in;height:6.25in;overflow:hidden;background:#fff}
+.top{position:absolute;left:0;top:0;width:9.25in;height:.55in;background:#DA291C}
+.logo{position:absolute;right:.45in;top:.85in;width:3.1in}
+.h{position:absolute;left:.55in;top:.9in;width:5.1in;font-family:Georgia,'Times New Roman',serif;font-size:36pt;line-height:1.08;font-weight:bold}
+.band{position:absolute;left:.55in;top:3.45in;background:#DA291C;color:#fff;font-weight:bold;letter-spacing:.08em;font-size:15pt;padding:.13in .25in;border-radius:.08in}
+.sub{position:absolute;left:.55in;top:4.15in;width:5.4in;font-size:13pt;line-height:1.35}
+.bot{position:absolute;left:0;bottom:0;width:9.25in;height:.85in;background:#00B2A9;color:#fff;font-size:13pt;font-weight:bold;padding:.27in .55in}
+.bot span{float:right;font-weight:normal}</style></head><body><div class="f"><div class="top"></div>
+<img class="logo" src="${esc(logo)}" alt="Eshenbaugh Land Company">
+<div class="h">${esc(mv(c.headline))}</div><div class="band">${esc(PZ_OFFERS[c.offer].band)}</div>
+<div class="sub">Florida land is all we do. Find out what your property could bring — from the team that sells it every day.</div>
+<div class="bot">thedirtdog.com<span>${esc(adv.name)} · ${esc(adv.phone||'')}</span></div></div></body></html>`;
+  }
+  const photo=adv.headshotUrl?`<img class="ph" src="${esc(adv.headshotUrl)}" alt="">`:'';
+  return `<html><head><meta charset="utf-8">${base}<style>
+.b{position:relative;width:9.25in;height:6.25in;overflow:hidden;background:#fff}
+.l{position:absolute;left:.45in;top:.4in;width:4.55in;height:5.45in}
+.lg{width:1.9in;display:block;margin-bottom:.12in}
+.dear{font-family:Georgia,serif;font-size:13pt;font-weight:bold;margin:0 0 .06in}
+.msg{font-size:10.5pt;line-height:1.38;margin:0}
+.who{position:absolute;left:0;bottom:.55in;width:4.55in;height:1.05in;border-top:3px solid #00B2A9;padding-top:.12in}
+.ph{float:left;width:.85in;height:.85in;border-radius:50%;object-fit:cover;margin-right:.14in;border:2px solid #DA291C}
+.nm{font-size:12pt;font-weight:bold}.tt{font-size:9.5pt;color:#333}.ct{font-size:10.5pt;font-weight:bold;color:#DA291C;margin-top:.03in}.em{font-size:9.5pt}
+.ft{position:absolute;left:0;bottom:0;width:4.55in;font-size:7pt;line-height:1.3;color:#444}
+.rule{position:absolute;left:5.2in;top:.45in;width:0;height:5.35in;border-left:1px solid #ddd}</style></head><body><div class="b"><div class="l">
+<img class="lg" src="${esc(logo)}" alt="Eshenbaugh Land Company">
+<p class="dear">Dear ${preview?esc(preview.greeting):'{{greeting}}'},</p><p class="msg">${esc(mv(c.message))}</p>
+<div class="who">${photo}<div class="nm">${esc(adv.nameWithDesignations||adv.name)}</div><div class="tt">${esc(adv.title||'Advisor')}, Eshenbaugh Land Company</div><div class="ct">${esc(adv.phone||'')}</div><div class="em">${esc(adv.email||'')}</div></div>
+<div class="ft">Eshenbaugh Land Company · ${esc(ret.line1)}, ${esc(ret.city)}, ${esc(ret.state)} ${esc(ret.zip)} · thedirtdog.com<br>If your property is listed with a broker, please disregard — this is not a solicitation of listed property.</div>
+</div><div class="rule"></div></div></body></html>`;
+}
+window._pzPostcard=function(){
+  const st=_pzState(); const l=(st.lists||[]).find(x=>x.id===st.listId); if(!l) return;
+  const me=_pzMe(); const adv=me.bio||{}; const owners=(st.owners||[]).filter(o=>!o.excluded&&o.mail&&o.mail.ok);
+  if(owners.length>PZ_MAIL_MAX){ showToast(`One mailing can hold ${PZ_MAIL_MAX.toLocaleString()} cards — uncheck some owners first`,'warning',7000); return; }
+  const recent=owners.filter(o=>o.mailedAt&&Date.now()-o.mailedAt<60*864e5).length;
+  st.card=_pzCardDefaults('valuation', me); st.cardOwners=owners;
+  const ov=document.createElement('div'); ov.id='pz-pc-ov'; ov.className='mr-ov fixed inset-0 flex items-center justify-center';
+  ov.innerHTML=`<div class="mr-modal pz-pc" role="dialog" aria-modal="true" aria-label="Postcard mailing" style="width:min(1100px,100%)"><div class="mr-modal-h"><h2>📮 Postcards — ${_pzEsc(l.name)}</h2><button type="button" class="mr-x" style="margin-left:auto" aria-label="Close" onclick="document.getElementById('pz-pc-ov').remove()">✕</button></div>
+    <div class="mr-modal-b pz-pc-b"><div class="pz-pc-form">
+      ${!adv.headshotUrl||!adv.phone?`<div class="pz-warn">Your 👤 Bio is missing ${[!adv.headshotUrl&&'a headshot',!adv.phone&&'a phone number'].filter(Boolean).join(' and ')} — the card prints without it. Fix it in 👤 My Bio first for best results.</div>`:''}
+      <label class="mr-lbl">Offer</label>${Object.entries(PZ_OFFERS).map(([k,v])=>`<label class="pz-check"><input type="radio" name="pz-offer" value="${k}" ${k==='valuation'?'checked':''} onchange="window._pzCardOffer(this.value)"> ${_pzEsc(v.label)}</label>`).join('')}
+      <label class="mr-lbl" for="pz-pc-h">Front headline</label><input id="pz-pc-h" class="mr-input" maxlength="70" value="${_pzEsc(st.card.headline)}" oninput="window._pzCardEdit()">
+      <label class="mr-lbl" for="pz-pc-m">Message <span class="mr-muted">({{property}} becomes e.g. “your 5.3 acres on Dream Falls in Wesley Chapel”)</span></label><textarea id="pz-pc-m" class="mr-textarea" rows="7" maxlength="520" oninput="window._pzCardEdit()">${_pzEsc(st.card.message)}</textarea>
+      <div class="pz-sumbox"><div><b>${owners.length.toLocaleString()}</b> postcards · 6×9 · First-Class</div><div class="mr-muted">${(st.owners.length-owners.length).toLocaleString()} owners left off (unchecked or foreign/incomplete address)${recent?` · ⚠ ${recent} were mailed in the last 60 days`:''}</div>
+        <div class="mr-muted">Nothing mails until an admin approves it. You’ll see it under 📮 Mailings.</div></div>
+      <div class="pz-row"><button type="button" class="mr-btn mr-btn-sm" onclick="window._pzListCsv()">⬇ Mailing list CSV</button><button type="button" class="mr-btn mr-btn-sm" onclick="window._pzCardPrint()">🖨 Proof PDF</button><button type="button" class="mr-btn mr-btn-teal" style="margin-left:auto" onclick="window._pzSubmitMailing(this)">Submit for approval →</button></div>
+    </div><div class="pz-pc-prev"><div class="mr-lbl">Front</div><div class="pz-frame"><iframe id="pz-if-front" title="Postcard front preview"></iframe></div><div class="mr-lbl">Back <span class="mr-muted">(address & postage print on the right half)</span></div><div class="pz-frame"><iframe id="pz-if-back" title="Postcard back preview"></iframe></div>
+      <div class="pz-row"><label class="mr-muted" for="pz-pc-who">Preview as</label><select id="pz-pc-who" class="mr-select" onchange="window._pzCardEdit()">${owners.slice(0,25).map((o,i)=>`<option value="${i}">${_pzEsc(o.display)}</option>`).join('')}</select></div></div></div></div>`;
+  ov.addEventListener('click',e=>{ if(e.target===ov) ov.remove(); }); document.body.appendChild(ov); window._pzCardEdit();
+};
+window._pzCardOffer=function(k){ const st=_pzState(); const me=_pzMe(); st.card=_pzCardDefaults(k,me); document.getElementById('pz-pc-h').value=st.card.headline; document.getElementById('pz-pc-m').value=st.card.message; window._pzCardEdit(); };
+window._pzCardEdit=function(){
+  const st=_pzState(); const h=document.getElementById('pz-pc-h'); if(!h) return; st.card.headline=h.value; st.card.message=document.getElementById('pz-pc-m').value;
+  const i=Number((document.getElementById('pz-pc-who')||{}).value||0); const o=st.cardOwners[i]||{greeting:'Property Owner',parcels:[],counties:[]};
+  const pv={greeting:o.greeting||'Property Owner', property:_pzPropertyPhrase(o)}; const adv=_pzMe().bio||{};
+  ['front','back'].forEach(s=>{ const f=document.getElementById('pz-if-'+s); if(f) f.srcdoc=_pzCardHtml(s,st.card,adv,pv); });
+};
+window._pzCardPrint=function(){
+  const st=_pzState(); const adv=_pzMe().bio||{}; const o=st.cardOwners[0]||{greeting:'Property Owner',parcels:[],counties:[]}; const pv={greeting:o.greeting,property:_pzPropertyPhrase(o)};
+  const w=window.open('','_blank'); if(!w){ showToast('Allow pop-ups to print the proof','warning'); return; }
+  const strip=h=>h.replace(/^[\s\S]*?<body>/,'').replace(/<\/body>[\s\S]*$/,''); const css=h=>(h.match(/<style>[\s\S]*?<\/style>/g)||[]).join('');
+  const f=_pzCardHtml('front',st.card,adv,pv), b=_pzCardHtml('back',st.card,adv,pv);
+  w.document.write(`<html><head><title>Postcard proof</title>${css(f)}${css(b).replace(/html,body\{[^}]*\}/,'')}<style>@page{size:9.25in 6.25in;margin:0}.pg{page-break-after:always}</style></head><body><div class="pg">${strip(f)}</div><div>${strip(b)}</div><script>setTimeout(()=>print(),600)<\/script></body></html>`); w.document.close();
+};
+window._pzSubmitMailing=async function(btn){
+  const st=_pzState(); const l=(st.lists||[]).find(x=>x.id===st.listId); if(!l) return; const me=_pzMe(); const adv=me.bio||{};
+  if(!/\{\{property\}\}/.test(st.card.message) && !await elcConfirm('The message doesn’t mention {{property}} — send it without naming each owner’s property?',{title:'No property mention',okLabel:'Send as is'})) return;
+  const front=_pzCardHtml('front',st.card,adv,null), back=_pzCardHtml('back',st.card,adv,null);
+  if(front.length>9800||back.length>9800){ showToast('The card is too long for the mail house (10,000 characters a side) — shorten the message','error',8000); return; }
+  const recips=st.cardOwners.map(o=>({k:o.id, n:String(o.name).slice(0,40), a1:o.mail.line1, a2:o.mail.line2||'', c:o.mail.city, s:o.mail.state, z:o.mail.zip, g:o.greeting, p:_pzPropertyPhrase(o)}));
+  const done=elcBusy(btn,'Submitting…'); const {collection,addDoc,doc,updateDoc}=_fbFns;
+  try{
+    const data={listId:l.id, listName:l.name, advisorUid:me.uid, advisorEmail:me.email, advisorName:me.name, createdAt:Date.now(), updatedAt:Date.now(),
+      status:'pending_approval', count:recips.length, size:'6x9', mailType:'usps_first_class', offer:st.card.offer, headline:st.card.headline, message:st.card.message,
+      front, back, recipients:recips, results:{}, sentCount:0, failedCount:0};
+    const ref=await addDoc(collection(_fbDb,'prospectMailings'), data);
+    try{ const tId=await _pzApprovalTask(ref.id, data); if(tId) await updateDoc(doc(_fbDb,'prospectMailings',ref.id),{taskId:tId}); }catch(e){ console.warn('[pz] task',e); }
+    document.getElementById('pz-pc-ov')?.remove(); st.mailings=null; st.sub='mail';
+    showToast(`Submitted ${recips.length.toLocaleString()} postcards for approval`,'success',6000); viewProspecting();
+  }catch(e){ showToast(/permission/i.test(e.message)?'Blocked until the prospectMailings Firestore rule is published':'Could not submit: '+e.message,'error',8000); } finally{ done(); }
+};
+async function _pzApprovalTask(mailingId, m){
+  const emails=(_pzCfg().approverEmails||['ryan@thedirtdog.com']).map(s=>s.toLowerCase());
+  if(emails.includes(String(currentUser.email).toLowerCase())) return '';
+  const uid=Object.entries(typeof allProfiles!=='undefined'?allProfiles:{}).find(([u,p])=>emails.includes(String(p.email||'').toLowerCase()));
+  if(!uid) return '';
+  const {collection,addDoc}=_fbFns; const t=new Date(); t.setDate(t.getDate()+1);
+  const r=await addDoc(collection(_fbDb,'tasks'),{title:`📮 Approve postcard mailing — ${m.count.toLocaleString()} cards — ${m.advisorName}`, description:`${m.advisorName} built a postcard mailing from the prospect list “${m.listName}”. Open Terra → 🧭 Prospecting → 📮 Mailings to preview it and approve or deny. https://terra.dirtdog.com/#prospecting`,
+    assignedTo:uid[0], assignedToName:uid[1].name||'', assignedToEmail:uid[1].email||'', dueDate:t.toISOString().slice(0,10), status:'pending', taskType:'postcard_approval', prospectMailingId:mailingId,
+    createdBy:currentUser.uid, createdByName:currentUser.name||'', createdAt:Date.now(), updatedAt:Date.now()});
+  return r.id;
+}
+
+/* ---------- 📮 mailings (approval + send) ---------- */
+const PZ_MSTATUS={pending_approval:['Waiting for approval','mr-chip-draft'],sending:['Sending…','mr-chip-queued'],sent:['Sent','mr-chip-sent'],partial:['Partly sent','mr-chip-warn'],denied:['Denied','mr-chip-new'],canceled:['Canceled','mr-chip-new']};
+async function _pzRenderMailings(){
+  const box=document.getElementById('pz-body'); if(!box) return; const st=_pzState();
+  if(!st.mailings){ box.innerHTML=`<div class="mr-card" style="padding:1.4rem" role="status"><span class="mr-muted">Loading mailings…</span></div>`; await _pzLoadMailings(); if(_pzState().sub!=='mail') return; }
+  const ms=st.mailings; const ap=_pzIsApprover();
+  if(!ms.length){ box.innerHTML=`<div class="mr-card" style="padding:1.4rem"><p style="margin:0;font-weight:700;color:var(--text-1)">No mailings yet.</p><p class="mr-note" style="margin:.35rem 0 0">Open a prospect list and press 📮 Generate postcards.</p></div>`; return; }
+  box.innerHTML=`${ap?`<p class="mr-note">Approving sends the cards to Lob, which prints and mails them; Terra records each card’s Lob ID and expected delivery date. Each card has its own idempotency key, so pressing Approve twice can’t mail anyone twice.</p>`:''}
+    ${ms.map(m=>{ const s=PZ_MSTATUS[m.status]||[m.status,'mr-chip-new']; const left=(m.recipients||[]).filter(r=>!(m.results&&m.results[r.k]&&m.results[r.k].ok)).length;
+    return `<div class="mr-card pz-mail"><div class="pz-mail-h"><div style="flex:1;min-width:220px"><div class="bm-list-name">${_pzEsc(m.listName)}</div>
+      <div class="mr-muted">${_pzEsc(m.advisorName)} · ${new Date(m.createdAt).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})} · ${_pzNum(m.count)} cards · ${_pzEsc((PZ_OFFERS[m.offer]||{}).label||'')}${m.testMode?' · 🧪 Lob TEST key (nothing mailed)':''}</div>
+      ${m.denyReason?`<div class="pz-bad">Denied: ${_pzEsc(m.denyReason)}</div>`:''}${m.sentCount||m.failedCount?`<div class="mr-muted">✓ ${m.sentCount||0} accepted by Lob${m.failedCount?` · ✕ ${m.failedCount} rejected (bad address)`:''}</div>`:''}</div>
+      <span class="mr-chip ${s[1]}" role="status">${s[0]}</span>
+      <div class="pz-row" style="margin:0"><button type="button" class="mr-btn mr-btn-sm" onclick="window._pzPreviewMailing('${m.id}')">👁 Preview</button>
+      ${ap&&(m.status==='pending_approval'||m.status==='partial'||m.status==='sending')&&left?`<button type="button" class="mr-btn mr-btn-sm mr-btn-teal" onclick="window._pzApprove('${m.id}',this)">${m.status==='pending_approval'?'✓ Approve & mail '+_pzNum(left):'↻ Resume ('+_pzNum(left)+' left)'}</button>`:''}
+      ${ap&&m.status==='pending_approval'?`<button type="button" class="mr-btn mr-btn-sm" onclick="window._pzDeny('${m.id}',this)">✕ Deny</button>`:''}
+      ${!ap&&m.status==='pending_approval'&&m.advisorUid===currentUser.uid?`<button type="button" class="mr-btn mr-btn-sm" onclick="window._pzCancelMailing('${m.id}',this)">Cancel</button>`:''}
+      ${m.failedCount?`<button type="button" class="mr-btn mr-btn-sm" onclick="window._pzFailCsv('${m.id}')">⬇ Rejected</button>`:''}</div></div></div>`; }).join('')}`;
+}
+window._pzPreviewMailing=function(id){
+  const m=(_pzState().mailings||[]).find(x=>x.id===id); if(!m) return; const r=(m.recipients||[])[0]||{g:'Property Owner',p:'your property'};
+  const fill=h=>h.replace(/\{\{greeting\}\}/g,_pzEsc(r.g)).replace(/\{\{property\}\}/g,_pzEsc(r.p));
+  const ov=document.createElement('div'); ov.className='mr-ov fixed inset-0 flex items-center justify-center';
+  ov.innerHTML=`<div class="mr-modal" role="dialog" aria-modal="true" aria-label="Mailing preview" style="width:min(820px,100%)"><div class="mr-modal-h"><h2>👁 ${_pzEsc(m.listName)} — ${_pzNum(m.count)} cards</h2><button type="button" class="mr-x" style="margin-left:auto" aria-label="Close" onclick="this.closest('.mr-ov').remove()">✕</button></div>
+    <div class="mr-modal-b"><div class="mr-muted">Shown for ${_pzEsc(r.n||'')} — “${_pzEsc(r.p)}”</div><div class="pz-frame"><iframe title="Front"></iframe></div><div class="pz-frame"><iframe title="Back"></iframe></div>
+    <details><summary>Recipients (${_pzNum(m.count)})</summary><div style="max-height:240px;overflow:auto;font-size:.82rem">${(m.recipients||[]).map(x=>`<div>${_pzEsc(x.n)} — ${_pzEsc([x.a1,x.a2,x.c,x.s,x.z].filter(Boolean).join(', '))}${m.results&&m.results[x.k]?(m.results[x.k].ok?' ✓':' ✕ '+_pzEsc(m.results[x.k].err||'')):''}</div>`).join('')}</div></details></div></div>`;
+  ov.addEventListener('click',e=>{ if(e.target===ov) ov.remove(); }); document.body.appendChild(ov);
+  const fr=ov.querySelectorAll('iframe'); fr[0].srcdoc=fill(m.front); fr[1].srcdoc=fill(m.back);
+};
+window._pzApprove=async function(id,btn){
+  if(!_pzIsApprover()) return; const st=_pzState(); const m=st.mailings.find(x=>x.id===id); if(!m) return;
+  const todo=(m.recipients||[]).filter(r=>!(m.results&&m.results[r.k]&&m.results[r.k].ok));
+  if(m.status==='pending_approval' && !await elcConfirm(`Mail ${todo.length.toLocaleString()} postcards for ${m.advisorName}? Lob prints and mails them and bills ELC’s Lob account.`,{title:'Approve postcard mailing',okLabel:'Approve & mail'})) return;
+  const url=_pzCfg().postcardsUrl||'https://elc-ai-proxy.dirtdog.workers.dev/postcards';
+  const {doc,updateDoc,writeBatch}=_fbFns; const done=elcBusy(btn,'Mailing…');
+  try{
+    await updateDoc(doc(_fbDb,'prospectMailings',id),{status:'sending', approvedBy:currentUser.email, approvedAt:m.approvedAt||Date.now(), updatedAt:Date.now()});
+    m.results=m.results||{}; let test=false;
+    for(let i=0;i<todo.length;i+=20){
+      const chunk=todo.slice(i,i+20); const token=await _fbAuth.currentUser.getIdToken();
+      const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({idToken:token, mailingId:id, front:m.front, back:m.back, size:m.size||'6x9', mailType:m.mailType||'usps_first_class', description:`ELC prospecting · ${m.advisorName} · ${m.listName}`.slice(0,250),
+        recipients:chunk.map(x=>({key:x.k,name:x.n,line1:x.a1,line2:x.a2,city:x.c,state:x.s,zip:x.z,greeting:x.g,property:x.p}))})});
+      const j=await r.json().catch(()=>({}));
+      if(!r.ok||!j.ok) throw new Error(j.error||('Postcard service HTTP '+r.status));
+      test=test||!!j.test; const patch={};
+      (j.results||[]).forEach(x=>{ m.results[x.key]={ok:!!x.ok, id:x.id||'', err:x.error||'', eta:x.eta||''}; patch['results.'+x.key]=m.results[x.key]; });
+      const vals=Object.values(m.results); m.sentCount=vals.filter(v=>v.ok).length; m.failedCount=vals.filter(v=>!v.ok).length;
+      await updateDoc(doc(_fbDb,'prospectMailings',id),{...patch, sentCount:m.sentCount, failedCount:m.failedCount, testMode:test, updatedAt:Date.now()});
+      btn.textContent=`Mailing… ${Math.min(i+20,todo.length)}/${todo.length}`;
+    }
+    m.status=m.failedCount?'partial':'sent'; m.testMode=test;
+    await updateDoc(doc(_fbDb,'prospectMailings',id),{status:m.status, sentAt:Date.now(), updatedAt:Date.now()});
+    // stamp owners + list
+    const okKeys=Object.entries(m.results).filter(([k,v])=>v.ok).map(([k])=>k);
+    if(!test){ for(let i=0;i<okKeys.length;i+=400){ const b=writeBatch(_fbDb); okKeys.slice(i,i+400).forEach(k=>b.set(doc(_fbDb,'prospectLists',m.listId,'owners',k),{status:'mailed',mailedAt:Date.now(),lastMailingId:id},{merge:true})); await b.commit(); }
+      await updateDoc(doc(_fbDb,'prospectLists',m.listId),{mailed:okKeys.length, lastMailedAt:Date.now()}).catch(()=>{}); }
+    if(m.taskId) await updateDoc(doc(_fbDb,'tasks',m.taskId),{status:'complete',completedAt:Date.now(),updatedAt:Date.now()}).catch(()=>{});
+    showToast(test?`Test run OK — Lob accepted ${m.sentCount} (TEST key: nothing was mailed)`:`✓ ${m.sentCount.toLocaleString()} postcards sent to Lob${m.failedCount?` · ${m.failedCount} bad addresses`:''}`,'success',8000);
+  }catch(e){ console.warn('[pz] send',e); showToast('Mailing stopped: '+e.message+' — press Resume to continue (no one is mailed twice)','error',10000); }
+  finally{ done(); st.mailings=null; _pzRenderMailings(); }
+};
+window._pzDeny=async function(id,btn){
+  const m=(_pzState().mailings||[]).find(x=>x.id===id); if(!m) return;
+  const reason=await new Promise(res=>{ const ov=document.createElement('div'); ov.className='mr-ov fixed inset-0 flex items-center justify-center';
+    ov.innerHTML=`<div class="mr-modal" role="dialog" aria-modal="true" aria-label="Deny mailing" style="width:min(460px,100%)"><div class="mr-modal-h"><h2>Deny this mailing?</h2></div><div class="mr-modal-b"><label class="mr-lbl" for="pz-deny-r">Reason for ${_pzEsc(m.advisorName)} (optional)</label><textarea id="pz-deny-r" class="mr-textarea" rows="3"></textarea></div>
+    <div class="mr-modal-f"><button type="button" class="mr-btn" data-x>Cancel</button><button type="button" class="mr-btn mr-btn-primary" style="margin-left:auto" data-ok>Deny</button></div></div>`;
+    document.body.appendChild(ov); ov.querySelector('[data-x]').onclick=()=>{ ov.remove(); res(null); }; ov.querySelector('[data-ok]').onclick=()=>{ const v=ov.querySelector('textarea').value.trim(); ov.remove(); res(v); }; });
+  if(reason===null) return; const {doc,updateDoc,collection,addDoc}=_fbFns; const done=elcBusy(btn,'…');
+  try{ await updateDoc(doc(_fbDb,'prospectMailings',id),{status:'denied',denyReason:reason,deniedBy:currentUser.email,deniedAt:Date.now(),updatedAt:Date.now()});
+    if(m.taskId) await updateDoc(doc(_fbDb,'tasks',m.taskId),{status:'complete',completedAt:Date.now(),updatedAt:Date.now()}).catch(()=>{});
+    await addDoc(collection(_fbDb,'tasks'),{title:`📮 Postcard mailing not approved — ${m.listName}`, description:reason?('Reason: '+reason):'Talk to '+(currentUser.name||'your admin')+' about it.', assignedTo:m.advisorUid, assignedToName:m.advisorName, assignedToEmail:m.advisorEmail, dueDate:new Date().toISOString().slice(0,10), status:'pending', taskType:'postcard_denied', createdBy:currentUser.uid, createdByName:currentUser.name||'', createdAt:Date.now(), updatedAt:Date.now()}).catch(()=>{});
+    showToast('Denied — '+m.advisorName+' gets a task','success'); }
+  catch(e){ showToast('Could not deny: '+e.message,'error'); } finally{ done(); _pzState().mailings=null; _pzRenderMailings(); }
+};
+window._pzCancelMailing=async function(id,btn){
+  if(!await elcConfirm('Cancel this mailing request?',{title:'Cancel mailing',okLabel:'Cancel it',danger:true})) return;
+  const m=(_pzState().mailings||[]).find(x=>x.id===id); const {doc,updateDoc}=_fbFns; const done=elcBusy(btn,'…');
+  try{ await updateDoc(doc(_fbDb,'prospectMailings',id),{status:'canceled',updatedAt:Date.now()}); if(m&&m.taskId) updateDoc(doc(_fbDb,'tasks',m.taskId),{status:'complete',updatedAt:Date.now()}).catch(()=>{}); showToast('Canceled','success'); }
+  catch(e){ showToast('Could not cancel: '+e.message,'error'); } finally{ done(); _pzState().mailings=null; _pzRenderMailings(); }
+};
+window._pzFailCsv=function(id){ const m=(_pzState().mailings||[]).find(x=>x.id===id); if(!m) return; const q=v=>'"'+String(v==null?'':v).replace(/"/g,'""')+'"';
+  _pzDownload('Rejected addresses.csv',['Owner,Address 1,Address 2,City,State,ZIP,Reason'].concat((m.recipients||[]).filter(r=>m.results&&m.results[r.k]&&!m.results[r.k].ok).map(r=>[r.n,r.a1,r.a2,r.c,r.s,r.z,m.results[r.k].err].map(q).join(','))).join('\r\n')); };
+
+/* ---------- access + deep link ---------- */
+window._pzAccess=function(){
+  if(!_pzIsOwner()) return; const a=_pzCfg().access||'owner';
+  document.getElementById('pz-acc-ov')?.remove();
+  const ov=document.createElement('div'); ov.id='pz-acc-ov'; ov.className='mr-ov fixed inset-0 flex items-center justify-center';
+  const opt=(v,t,s)=>`<label class="mr-sec" style="display:flex;gap:.6rem;align-items:flex-start;cursor:pointer"><input type="radio" name="pz-acc" value="${v}" ${a===v?'checked':''} style="margin-top:.2rem;width:18px;height:18px;accent-color:var(--brand-teal)"><span><b style="color:var(--text-1)">${t}</b><br><span class="mr-muted">${s}</span></span></label>`;
+  ov.innerHTML=`<div class="mr-modal" role="dialog" aria-modal="true" aria-label="Who can see Prospecting" style="width:min(480px,100%)"><div class="mr-modal-h"><h2>Who can see Prospecting?</h2><button type="button" class="mr-x" style="margin-left:auto" aria-label="Close" onclick="document.getElementById('pz-acc-ov').remove()">✕</button></div>
+    <div class="mr-modal-b">${opt('owner','Only me','Hidden from everyone else (testing).')}${opt('admins','Admins','Admins can build lists and approve mailings.')}${opt('all','All advisors','Every advisor builds their own lists and submits postcards; admins approve every mailing.')}</div>
+    <div class="mr-modal-f"><button type="button" class="mr-btn" onclick="document.getElementById('pz-acc-ov').remove()">Cancel</button><button type="button" class="mr-btn mr-btn-teal" style="margin-left:auto" onclick="window._pzAccessSave(this)">Save</button></div></div>`;
+  ov.addEventListener('click',e=>{ if(e.target===ov) ov.remove(); }); document.body.appendChild(ov);
+};
+window._pzAccessSave=async function(btn){
+  const v=(document.querySelector('input[name="pz-acc"]:checked')||{}).value||'owner'; const done=elcBusy(btn,'Saving…');
+  try{ const {doc,setDoc}=_fbFns; const cfg={..._pzCfg(),access:v}; await setDoc(doc(_fbDb,'eos','settings'),{prospecting:cfg},{merge:true}); APP_CONFIG.prospecting=cfg;
+    document.getElementById('pz-acc-ov')?.remove(); showToast('Access saved','success'); try{ renderShell(); }catch(_){} viewProspecting(); }
+  catch(e){ showToast('Could not save: '+e.message,'error'); } finally{ done(); }
+};
+window._pzBoot=function(){ if(!currentUser || !/prospecting/.test(location.hash||'') || !_pzNavVisible(true,false)) return; try{ history.replaceState(null,'',location.pathname+location.search); }catch(_){} _pzState().sub='mail'; currentView='prospecting'; renderShell(); renderCurrentView(); };
+
+function _pzInjectStyles(){
+  if(document.getElementById('pz-styles')) return;
+  const s=document.createElement('style'); s.id='pz-styles'; s.textContent=`
+  .pz-wrap{max-width:1500px}
+  .pz-grid{display:grid;grid-template-columns:minmax(300px,380px) 1fr;gap:.8rem;align-items:start}
+  .pz-side{padding:.9rem;display:flex;flex-direction:column;gap:.6rem;max-height:calc(100vh - 190px);overflow:auto}
+  .pz-mapcard{position:relative;padding:0;overflow:hidden}
+  .pz-map{height:calc(100vh - 190px);min-height:460px;width:100%;background:#1f2937}
+  .pz-maphint{position:absolute;left:50%;transform:translateX(-50%);bottom:12px;z-index:500;background:rgba(10,10,10,.82);color:#fff;font-size:.82rem;padding:.35rem .7rem;border-radius:999px;pointer-events:none;max-width:90%;text-align:center}
+  .pz-search{position:absolute;top:10px;right:10px;z-index:500;display:flex;gap:.3rem;width:min(360px,70%)}
+  .pz-search .mr-input{flex:1;background:var(--surface,#fff)}
+  .pz-modes{display:grid;grid-template-columns:repeat(3,1fr);gap:.3rem}
+  .pz-mode{border:1px solid var(--border,#d1d5db);background:var(--surface,#fff);color:var(--text-1,#111);border-radius:10px;padding:.5rem .3rem;font-size:.82rem;font-weight:700;min-height:44px;cursor:pointer}
+  .pz-mode.on{border-color:var(--brand-teal);background:rgba(0,178,169,.12);box-shadow:inset 0 0 0 1px var(--brand-teal)}
+  .pz-mode:focus-visible,.pz-click:focus-visible{outline:3px solid var(--brand-teal);outline-offset:2px}
+  .pz-row{display:flex;gap:.4rem;align-items:center;flex-wrap:wrap;margin:.45rem 0}
+  .pz-chips{display:flex;flex-wrap:wrap;gap:.3rem;margin:.3rem 0}
+  .pz-chip{background:rgba(0,178,169,.12);border:1px solid rgba(0,178,169,.45);color:var(--text-1);border-radius:999px;padding:.15rem .55rem;font-size:.78rem;font-weight:600}
+  .pz-sum{font-weight:700;color:var(--text-1);margin:.2rem 0}
+  .pz-interp{border-top:1px solid var(--border,#e5e7eb);padding-top:.5rem}
+  .pz-warn{background:#fff7ed;border:1px solid #fdba74;color:#7c2d12;border-radius:8px;padding:.5rem .7rem;font-size:.84rem;margin:.4rem 0}
+  html.dark .pz-warn{background:rgba(234,88,12,.15);border-color:rgba(253,186,116,.5);color:#fed7aa}
+  .pz-bad{color:#b91c1c;font-size:.78rem;font-weight:600}html.dark .pz-bad{color:#fca5a5}
+  .pz-adv summary{cursor:pointer;font-weight:700;font-size:.84rem;color:var(--text-2);padding:.3rem 0}
+  .pz-ff{display:flex;flex-direction:column;gap:.5rem;font-size:.82rem;color:var(--text-2)}
+  .pz-ff-uses{display:grid;grid-template-columns:1fr 1fr;gap:.2rem .5rem}.pz-ff-uses label,.pz-ff-flags label{display:flex;gap:.35rem;align-items:center}
+  .pz-ff-2{display:grid;grid-template-columns:1fr 1fr;gap:.4rem}.pz-ff-2 label,.pz-ff-full{display:flex;flex-direction:column;gap:.15rem}
+  .pz-ff-flags{display:flex;flex-direction:column;gap:.25rem}
+  .pz-res{border-top:2px solid var(--brand-red);padding-top:.6rem;display:flex;flex-direction:column;gap:.35rem}
+  .pz-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:.3rem;text-align:center}.pz-stats b{display:block;font-size:1.1rem;color:var(--text-1)}.pz-stats span{font-size:.72rem;color:var(--text-2)}
+  .pz-mini{font-size:.8rem;max-height:150px;overflow:auto;color:var(--text-1)}
+  .pz-check{display:flex;gap:.4rem;align-items:center;font-size:.84rem;color:var(--text-1);min-height:32px}
+  .pz-table td,.pz-table th{vertical-align:top}.pz-num{text-align:right;white-space:nowrap}.pz-click{cursor:pointer}.pz-click:hover{background:var(--surface-2,#f9fafb)}
+  .pz-off td{opacity:.55}.pz-pid{font-family:ui-monospace,Menlo,monospace;font-size:.78rem}.pz-act{white-space:nowrap}.pz-act .mr-btn{min-width:36px}
+  .pz-st{min-width:130px}.pz-lhead{display:flex;gap:.7rem;align-items:center;flex-wrap:wrap;padding:.8rem;margin-bottom:.6rem}
+  .pz-mail{padding:.8rem;margin-bottom:.6rem}.pz-mail-h{display:flex;gap:.7rem;align-items:center;flex-wrap:wrap}
+  .pz-pc-b{display:grid;grid-template-columns:minmax(280px,380px) 1fr;gap:1rem}.pz-pc-form{display:flex;flex-direction:column;gap:.35rem}
+  .pz-pc-prev{display:flex;flex-direction:column;gap:.35rem;min-width:0}
+  .pz-frame{position:relative;width:100%;aspect-ratio:9.25/6.25;border:1px solid var(--border,#d1d5db);border-radius:6px;overflow:hidden;background:#fff;box-shadow:0 2px 10px rgba(0,0,0,.12)}
+  .pz-frame iframe{position:absolute;left:0;top:0;width:888px;height:600px;border:0;transform-origin:0 0}
+  .pz-sumbox{background:var(--surface-2,#f3f4f6);border-radius:8px;padding:.6rem .7rem;font-size:.84rem;color:var(--text-1);display:flex;flex-direction:column;gap:.2rem}
+  .sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+  @media (max-width:900px){.pz-grid,.pz-pc-b{grid-template-columns:1fr}.pz-map{height:60vh;min-height:340px}.pz-side{max-height:none}}
+  @media (max-width:767px){.pz-side input,.pz-side textarea,.pz-side select,.pz-search input{font-size:16px}}
+  @media (pointer:coarse){.pz-act .mr-btn,.pz-mode{min-height:44px;min-width:44px}}`;
+  document.head.appendChild(s);
+  // scale the 9.25×6.25in card (888×600 css px) to whatever width the frame has
+  if(!window._pzFrameRO && 'ResizeObserver' in window){ window._pzFrameRO=new ResizeObserver(es=>es.forEach(e=>{ const f=e.target.querySelector('iframe'); if(f) f.style.transform=`scale(${e.contentRect.width/888})`; }));
+    new MutationObserver(()=>document.querySelectorAll('.pz-frame:not([data-ro])').forEach(fr=>{ fr.dataset.ro=1; window._pzFrameRO.observe(fr); })).observe(document.body,{childList:true,subtree:true}); }
+}
 /* =======================================================
    🎯 BUYER MATCH — marker BUYERMATCH-20261117
    Ryan (2026-11-17): "a new section that only I can see for the time being, but once finalized I can share with other advisors.
