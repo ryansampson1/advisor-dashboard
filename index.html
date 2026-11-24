@@ -56755,6 +56755,7 @@ const PZ_OFFERS={
   overview:{label:'Free in-person market overview', head:'What’s selling near your property?', band:'COMPLIMENTARY MARKET OVERVIEW'},
   both:{label:'Valuation or market overview — owner’s choice', head:'What is your land worth in today’s market?', band:'FREE VALUATION · MARKET OVERVIEW'},
   neighbor:{label:'New listing — letter to neighbors', head:'', band:'JUST LISTED'},   // NEIGHBOR-20261124
+  sold:{label:'Just sold — letter to neighbors', head:'', band:'JUST SOLD'},   // NBSOLD-20261124
 };
 const _pzEsc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const _pzNum=(v,d)=>(v==null||v===''||isNaN(v))?'—':Number(v).toLocaleString(undefined,{maximumFractionDigits:d==null?0:d});
@@ -57176,7 +57177,7 @@ window._pzSaveList=async function(btn){
   try{
     const listData={name, advisorUid:me.uid, advisorEmail:me.email, advisorName:me.name, createdAt:Date.now(), updatedAt:Date.now(),
       source:r.source, criteria:r.criteria||'', filter:r.filter||null, where:r.where||'', polygon:(r.poly||[]).map(p=>({lat:p[0],lng:p[1]})),
-      parcelCount:r.parcels, ownerCount:r.owners.length, mailableCount:r.owners.filter(o=>!o.excluded).length, totalAcres:Math.round(r.owners.reduce((s,o)=>s+o.totalAcres,0)), crmGroupId:'', mailed:0, ...(r.nb?{dealId:r.nb.dealId, dealName:r.nb.name, neighborRadiusFt:r.nb.radiusFt, nbCenter:r.nb.center, nbBox:r.nb.box, listingParcels:r.nb.listingPids||[]}:{})};   // NEIGHBOR-20261124
+      parcelCount:r.parcels, ownerCount:r.owners.length, mailableCount:r.owners.filter(o=>!o.excluded).length, totalAcres:Math.round(r.owners.reduce((s,o)=>s+o.totalAcres,0)), crmGroupId:'', mailed:0, ...(r.nb?{dealId:r.nb.dealId, dealName:r.nb.name, neighborRadiusFt:r.nb.radiusFt, nbCenter:r.nb.center, nbBox:r.nb.box, listingParcels:r.nb.listingPids||[], nbSold:!!r.nb.sold}:{})};   // NEIGHBOR-20261124
     const ref=await addDoc(collection(_fbDb,'prospectLists'), listData);
     let crm={added:0,matched:0}; let groupId='';
     if(toCrm){ try{ const out=await _pzToCrm(r.owners, name, me); crm=out; groupId=out.groupId; }catch(e){ console.warn('[pz] crm',e); showToast('List saved, but the CRM step failed: '+e.message,'warning',8000); } }
@@ -57312,7 +57313,7 @@ window._pzMwHoldings=async function(id,btn){
 
 /* ---------- 📮 postcard ---------- */
 function _pzCardDefaults(offer, me){
-  if(offer==='neighbor') return _pzNbCardDefaults(me);   // NEIGHBOR-20261124
+  if(offer==='neighbor'||offer==='sold') return _pzNbCardDefaults(me, offer);   // NEIGHBOR-20261124 + NBSOLD-20261124
   const first=(me.name||'').split(' ')[0]||'I';
   const what=offer==='overview'?'an in-person overview of what land like yours is selling for'
     :offer==='both'?'a complimentary valuation of {{property}} — or, if you prefer, an in-person overview of what’s selling near you'
@@ -57321,7 +57322,7 @@ function _pzCardDefaults(offer, me){
     message:`I’m ${first}, a land advisor with Eshenbaugh Land Company. We work on land sales across Tampa Bay and the I-4 Corridor every day, and I’d like to offer you ${what}${offer==='overview'?' — {{property}} included':''}. No cost and no obligation — just call or text me.`};
 }
 function _pzCardHtml(side, c, adv, preview){
-  if(c&&c.offer==='neighbor') return _pzNbCardHtml(side, c, adv, preview);   // NEIGHBOR-20261124
+  if(c&&(c.offer==='neighbor'||c.offer==='sold')) return _pzNbCardHtml(side, c, adv, preview);   // NEIGHBOR-20261124 + NBSOLD-20261124
   const esc=_pzEsc; const logo=_pzCfg().logoUrl||'https://terra.dirtdog.com/esh/assets/logo.png'; const ret=_pzCfg().returnAddress||{line1:'304 S. Willow Ave.',city:'Tampa',state:'FL',zip:'33606'};
   const mv=s=>preview?String(s).replace(/\{\{greeting\}\}/g,preview.greeting).replace(/\{\{property\}\}/g,preview.property):String(s);   // escaped once, by esc() at the call site
   const base=`<style>@page{margin:0}*{box-sizing:border-box}html,body{margin:0;padding:0;width:9.25in;height:6.25in;font-family:Arial,Helvetica,sans-serif;color:#0A0A0A;-webkit-print-color-adjust:exact}</style>`;
@@ -57363,7 +57364,7 @@ window._pzPostcard=function(){
   const me=_pzMe(); const adv=me.bio||{}; const owners=(st.owners||[]).filter(o=>!o.excluded&&o.mail&&o.mail.ok);
   if(owners.length>PZ_MAIL_MAX){ showToast(`One mailing can hold ${PZ_MAIL_MAX.toLocaleString()} cards — uncheck some owners first`,'warning',7000); return; }
   const recent=owners.filter(o=>o.mailedAt&&Date.now()-o.mailedAt<60*864e5).length;
-  st.nbCardDeal=l.dealId||st.nbCardDeal||''; st.card=_pzCardDefaults(l.dealId?'neighbor':'valuation', me); st.cardOwners=owners;   // NEIGHBOR-20261124 — a neighbors list opens on the neighbor card
+  st.nbCardDeal=l.dealId||st.nbCardDeal||''; st.card=_pzCardDefaults(l.dealId?(_pzNbIsSold(_pzNbDeal(l.dealId))?'sold':'neighbor'):'valuation', me); st.cardOwners=owners;   // NEIGHBOR-20261124 — a neighbors list opens on the neighbor card
   const ov=document.createElement('div'); ov.id='pz-pc-ov'; ov.className='mr-ov fixed inset-0 flex items-center justify-center';
   ov.innerHTML=`<div class="mr-modal pz-pc" role="dialog" aria-modal="true" aria-label="Postcard mailing" style="width:min(1100px,100%)"><div class="mr-modal-h"><h2>📮 Postcards — ${_pzEsc(l.name)}</h2><button type="button" class="mr-x" style="margin-left:auto" aria-label="Close" onclick="document.getElementById('pz-pc-ov').remove()">✕</button></div>
     <div class="mr-modal-b pz-pc-b"><div class="pz-pc-form">
@@ -57394,7 +57395,7 @@ window._pzCardPrint=function(){
 };
 window._pzSubmitMailing=async function(btn){
   const st=_pzState(); const l=(st.lists||[]).find(x=>x.id===st.listId); if(!l) return; const me=_pzMe(); const adv=me.bio||{};
-  if(st.card.offer==='neighbor'){ const nd=_pzNbDeal(st.card.dealId); if(!nd){ showToast('Pick the listing for the neighbor card first','warning'); return; } if(typeof _dnmGuard==='function'&&_dnmGuard(nd,'neighbor postcards')) return; }   // NEIGHBOR-20261124
+  if(st.card.offer==='neighbor'||st.card.offer==='sold'){ const nd=_pzNbDeal(st.card.dealId); if(!nd){ showToast(st.card.offer==='sold'?'Pick the sold property for the card first':'Pick the listing for the neighbor card first','warning'); return; } if(typeof _dnmGuard==='function'&&_dnmGuard(nd,'neighbor postcards')) return; }   // NEIGHBOR-20261124
   if(!/\{\{property\}\}/.test(st.card.message) && !await elcConfirm('The message doesn’t mention {{property}} — send it without naming each owner’s property?',{title:'No property mention',okLabel:'Send as is'})) return;
   const front=_pzCardHtml('front',st.card,adv,null), back=_pzCardHtml('back',st.card,adv,null);
   if(front.length>9800||back.length>9800){ showToast('The card is too long for the mail house (10,000 characters a side) — shorten the message','error',8000); return; }
@@ -57443,16 +57444,25 @@ function _pzNbDeal(id){ return id?(((typeof allDeals!=='undefined'&&allDeals)||[
 function _pzNbName(d){ if(!d) return ''; let t=''; try{ t=typeof _llrTitle==='function'?_llrTitle(d):''; }catch(_){} return String(d.projectName||'').trim()||t||String(d.propertyAddress||'').split(',')[0]||'Listing'; }
 function _pzNbMine(d){ try{ return typeof isDealAdvisor==='function'?!!isDealAdvisor(d,currentUser.uid):d.advisorUid===currentUser.uid; }catch(_){ return false; } }
 function _pzNbIsListing(d){ return !!(d && d.id && typeof _mrIsActiveListing==='function' && _mrIsActiveListing(d)); }
-function _pzNbListings(){
-  return ((typeof allDeals!=='undefined'&&allDeals)||[]).filter(_pzNbIsListing)
-    .map(d=>({d, mine:_pzNbMine(d), dnm:!!d.doNotMarket, uc:!!(typeof _mrUnderContract==='function'&&_mrUnderContract(d))}))
+// NBSOLD-20261124 — a sold seller-side sale (won stage, not a lease) closed in the last 24 months
+const PZ_NB_SOLD_DAYS=730;
+function _pzNbSoldTs(d){ const t=v=>{ if(!v) return 0; if(typeof v==='number') return v; if(typeof v.toMillis==='function') return v.toMillis(); const s=String(v); const x=new Date(/^\d{4}-\d{2}-\d{2}$/.test(s)?s+'T12:00:00':s).getTime(); return isNaN(x)?0:x; }; return d?(t(d.closeDate)||t(d.stageEnteredAt)):0; }
+function _pzNbIsSold(d){ if(!(d && d.id && (d.representation||'seller')!=='buyer' && d.dealType!=='lease' && typeof isWonStage==='function')) return false; const s=(typeof _mrStageOf==='function'?_mrStageOf(d):d.stage)||''; if(!isWonStage(s)) return false; const ts=_pzNbSoldTs(d); return !!ts && Date.now()-ts<=PZ_NB_SOLD_DAYS*864e5; }
+function _pzNbListings(kind){   // kind: 'neighbor' = active listings · 'sold' = recent sales · blank = both
+  const all=((typeof allDeals!=='undefined'&&allDeals)||[]);
+  const act=kind==='sold'?[]:all.filter(_pzNbIsListing).map(d=>({d, mine:_pzNbMine(d), dnm:!!d.doNotMarket, uc:!!(typeof _mrUnderContract==='function'&&_mrUnderContract(d)), sold:false}))
     .sort((a,b)=>(b.mine-a.mine)||(a.uc-b.uc)||_pzNbName(a.d).localeCompare(_pzNbName(b.d)));
+  const sold=kind==='neighbor'?[]:all.filter(_pzNbIsSold).map(d=>({d, mine:_pzNbMine(d), dnm:!!d.doNotMarket, uc:false, sold:true, ts:_pzNbSoldTs(d)}))
+    .sort((a,b)=>(b.mine-a.mine)||(b.ts-a.ts));
+  return act.concat(sold);
 }
-function _pzNbOptions(sel){
-  return `<option value="">Choose a listing…</option>`+_pzNbListings().map(r=>`<option value="${_pzEsc(r.d.id)}" ${r.d.id===sel?'selected':''} ${r.dnm?'disabled':''}>${r.mine?'⭐ ':''}${_pzEsc(_pzNbName(r.d))}${r.uc?' (under contract)':''}${r.dnm?' — 🚫 DO NOT MARKET':''}</option>`).join('');
+function _pzNbOptions(sel, kind){
+  const rows=_pzNbListings(kind); const opt=r=>`<option value="${_pzEsc(r.d.id)}" ${r.d.id===sel?'selected':''} ${r.dnm?'disabled':''}>${r.mine?'⭐ ':''}${_pzEsc(_pzNbName(r.d))}${r.uc?' (under contract)':''}${r.sold&&r.ts?' — sold '+new Date(r.ts).toLocaleDateString('en-US',{month:'short',year:'numeric'}):''}${r.dnm?' — 🚫 DO NOT MARKET':''}</option>`;
+  const a=rows.filter(r=>!r.sold), s=rows.filter(r=>r.sold);
+  return `<option value="">${kind==='sold'?'Choose a sold property…':kind==='neighbor'?'Choose a listing…':'Choose a listing or a recent sale…'}</option>`+(a.length?`<optgroup label="Active listings">${a.map(opt).join('')}</optgroup>`:'')+(s.length?`<optgroup label="Sold — last 24 months">${s.map(opt).join('')}</optgroup>`:'');
 }
 // window._pzNbCardOk(deal) — does the property card show 🏘 Mail neighbors?
-window._pzNbCardOk=function(d){ return !!(currentUser && _pzNbIsListing(d) && !d.doNotMarket && _pzCanAccess()); };
+window._pzNbCardOk=function(d){ return !!(currentUser && (_pzNbIsListing(d)||_pzNbIsSold(d)) && !d.doNotMarket && _pzCanAccess()); };
 
 /* ---------- pure geometry helpers (unit-tested in neighbor_patch/test) ---------- */
 function _pzNbInRings(x,y,rings){ let inside=false; (rings||[]).forEach(r=>{ for(let i=0,j=r.length-1;i<r.length;j=i++){ const xi=r[i][0],yi=r[i][1],xj=r[j][0],yj=r[j][1]; if(((yi>y)!==(yj>y)) && (x<(xj-xi)*(y-yi)/((yj-yi)||1e-12)+xi)) inside=!inside; } }); return inside; }
@@ -57488,7 +57498,8 @@ function _pzNbFacts(d, list){
     acres:String(f(typeof _llrAcres!=='undefined'?_llrAcres:null,d)||''), zoning:String(d.zoning||'').trim().replace(/^zoned\s+/i,''),
     ask, lease, priceBadge:lease?'FOR LEASE':ask?'SALE PRICE: '+_pzNbMoney(ask):'CONTACT ADVISOR FOR PRICING',
     link:String(f(typeof _llrLink!=='undefined'?_llrLink:null,d)||''), photo:String(f(typeof _llrPhoto!=='undefined'?_llrPhoto:null,d)||''),
-    lat, lng, halfM:Math.round(halfM)};
+    lat, lng, halfM:Math.round(halfM),
+    sold:_pzNbIsSold(d), soldTs:_pzNbSoldTs(d), salePrice:Number(d.purchasePrice||d.contractPrice||0)||0};   // NBSOLD-20261124 — the sale price prints only if the advisor ticks it
 }
 function _pzNbMessage(me, L){
   const first=(me.name||'').split(' ')[0]||'I';
@@ -57496,14 +57507,31 @@ function _pzNbMessage(me, L){
   const price=L.lease?'available for lease':L.ask?'offered at '+_pzNbMoney(L.ask):'';
   return `I’m ${first} with Eshenbaugh Land Company, and I wanted to let you know we just listed the land near {{property}}${desc?' — '+desc+(price?', '+price:''):''}. As a neighbor, you’re one of the first to hear about it. Should you have any interest in buying it, or possibly selling your own land, we would welcome a conversation. Call or text me anytime.`;
 }
-function _pzNbCardDefaults(me){
+function _pzNbCardDefaults(me, offer){
+  offer=offer==='sold'?'sold':'neighbor';
   const st=_pzState(); const l=(st.lists||[]).find(x=>x.id===st.listId)||null; const d=_pzNbDeal(st.nbCardDeal);
-  if(!d || d.doNotMarket) return {offer:'neighbor', dealId:'', headline:'', message:'', listing:{}};
+  if(!d || d.doNotMarket || (offer==='sold'?!_pzNbIsSold(d):!_pzNbIsListing(d))) return {offer, dealId:'', headline:'', message:'', listing:{}, showPrice:false};
   const L=_pzNbFacts(d, l&&l.dealId===d.id?l:null);
-  return {offer:'neighbor', dealId:d.id, headline:L.name, message:_pzNbMessage(me,L), listing:L};
+  return {offer, dealId:d.id, headline:L.name, message:offer==='sold'?_pzNbSoldMessage(me,L):_pzNbMessage(me,L), listing:L, showPrice:false};
 }
-function _pzNbFactsLine(L){
-  if(!L||!L.dealId) return 'Pick the listing — its name, address, price, acreage, zoning, photo and website come from the card.';
+// NBSOLD-20261124 — Ryan: "letting them know we have sold another one. Also mention our $3B in past sales, awards, rankings, process,
+// etc so that if they ever choose to sell they consider us." Figures = Ryan's stated company figures; awards = the proposal's
+// Experience page. Override with APP_CONFIG.prospecting.soldProof {stats:[[big,small]…], awards:[…], process:[…]}.
+const PZ_NB_PROOF={
+  stats:[['$3B+','in Florida land sales since 1992'],['100,000+','acres sold'],['{years}','years selling Florida land']],
+  awards:['3× National Commercial Land Broker of the Year — RLI APEX Awards','8× Top 20 Land Producer Nationally — RLI APEX Awards','19× #1 Top Producing Regional Land Broker — Florida Gulfcoast Commercial Assn.','Top 10 Largest Commercial Real Estate Firms in Tampa Bay — Tampa Bay Business Journal'],
+  process:['A free, no-obligation valuation and pricing strategy','A custom marketing plan — property website, sign, CREXi, LoopNet, CoStar and Land.com','Direct outreach to our 17,000+ buyer and developer contacts','A written report every month, through closing'],
+};
+function _pzNbProof(){ const o=(_pzCfg().soldProof)||{}; const p={stats:o.stats||PZ_NB_PROOF.stats, awards:o.awards||PZ_NB_PROOF.awards, process:o.process||PZ_NB_PROOF.process};
+  const yrs=String(new Date().getFullYear()-1992)+'+'; p.stats=p.stats.map(([b,s])=>[String(b).replace('{years}',yrs),s]); return p; }
+function _pzNbSoldMessage(me, L){
+  const first=(me.name||'').split(' ')[0]||'I';
+  const desc=[L.acres?L.acres+' acres':'', L.street?'at '+L.street:''].filter(Boolean).join(' ');
+  return `I’m ${first} with Eshenbaugh Land Company, and I wanted to let you know we just sold the land near {{property}}${desc?' — '+desc:''}. It’s one more sale in your neighborhood, and buyers are still looking. If you ever decide to sell, we would welcome the chance to show you what your land could bring. Call or text me anytime.`;
+}
+function _pzNbFactsLine(L, offer){
+  if(!L||!L.dealId) return offer==='sold'?'Pick the sold property — its name, address, acreage, photo and sale date come from the card.':'Pick the listing — its name, address, price, acreage, zoning, photo and website come from the card.';
+  if(offer==='sold') return [L.acres?L.acres+' ac':'', L.soldTs?'Sold '+new Date(L.soldTs).toLocaleDateString('en-US',{month:'long',year:'numeric'}):'', L.photo?'📷 card photo':(L.lat?'📷 no card photo — satellite view used':'📷 no card photo or location — add one to the card')].filter(Boolean).join(' · ');
   return [L.acres?L.acres+' ac':'', L.zoning?'Zoned '+L.zoning:'', L.priceBadge, L.photo?'📷 card photo':(L.lat?'📷 no card photo — satellite view used':'📷 no card photo or location — add one to the card'), L.link?'🔗 '+_pzNbShortLink(L.link):''].filter(Boolean).join(' · ');
 }
 
@@ -57514,6 +57542,7 @@ function _pzNbCardHtml(side, c, adv, preview){
   const base=`<style>@page{margin:0}*{box-sizing:border-box}html,body{margin:0;padding:0;width:9.25in;height:6.25in;font-family:Arial,Helvetica,sans-serif;color:#0A0A0A;-webkit-print-color-adjust:exact}</style>`;
   if(side==='front'){
     const t=String(mv(c.headline||L.name||'')).toUpperCase(); const fs=t.length>46?17:t.length>38?20:t.length>30?25:30;
+    const sold=c.offer==='sold'; const badge=sold?((c.showPrice&&L.salePrice)?'SOLD FOR '+_pzNbMoney(L.salePrice):('SOLD'+(L.soldTs?' · '+new Date(L.soldTs).toLocaleDateString('en-US',{month:'long',year:'numeric'}).toUpperCase():''))):L.priceBadge;
     const photo=L.photo||(L.lat?_pzNbEsri('World_Imagery',_pzNbBoxAround(L.lat,L.lng,L.halfM||220,2.78),1600,576):'');
     const ph=[adv.directLine?'D. '+adv.directLine:'', adv.cell&&adv.cell!==adv.directLine?'M. '+adv.cell:''].filter(Boolean); if(!ph.length&&adv.phone) ph.push(adv.phone);
     return `<html><head><meta charset="utf-8">${base}<style>
@@ -57530,12 +57559,14 @@ function _pzNbCardHtml(side, c, adv, preview){
 .nm{position:absolute;left:.72in;top:.2in;font-weight:bold;font-size:11pt;letter-spacing:.1em}
 .ln{position:absolute;left:.72in;top:.44in;font-size:9.5pt;letter-spacing:.05em;line-height:1.35}
 .lg{position:absolute;right:.45in;top:.2in;background:#fff;border-radius:.08in;padding:.05in .14in}.lg img{height:.8in;display:block}
+.pr.sd{background:#DA291C;border:3px solid #fff;letter-spacing:.06em}
 </style></head><body><div class="f">
 <div class="hd"><div class="t">${esc(t)}</div>${L.address?`<div class="a">${esc(L.address.toUpperCase())}</div>`:''}</div><div class="bk" style="top:0;height:1.5in"></div><div class="r" style="top:1.5in"></div>
-${photo?`<img class="ph" src="${esc(photo)}" alt="">`:'<div class="ph"></div>'}<div class="tag">JUST LISTED</div>${L.priceBadge?`<div class="pr">${esc(L.priceBadge)}</div>`:''}<div class="r" style="top:4.8in"></div>
+${photo?`<img class="ph" src="${esc(photo)}" alt="">`:'<div class="ph"></div>'}<div class="tag">${sold?'JUST SOLD':'JUST LISTED'}</div>${badge?`<div class="pr${sold?' sd':''}">${esc(badge)}</div>`:''}<div class="r" style="top:4.8in"></div>
 <div class="ft"><div class="nm">${esc(String(adv.nameWithDesignations||adv.name||'').toUpperCase())}</div><div class="ln">${esc(adv.title||'Advisor')}${ph.map(x=>'<br>'+esc(x)).join('')}${adv.email?'<br>'+esc(adv.email):''}</div><div class="lg"><img src="${esc(logo)}" alt="Eshenbaugh Land Company"></div></div><div class="bk" style="top:4.88in;height:1.37in"></div>
 </div></body></html>`;
   }
+  if(c.offer==='sold') return _pzNbSoldBack(c, adv, preview, base, mv);   // NBSOLD-20261124
   const hl=[L.acres?L.acres+' ± acres':'', L.zoning?'Zoned '+L.zoning:'', L.lease?'Available for lease':L.ask?'Offered at '+_pzNbMoney(L.ask):'Contact me for pricing', L.link?_pzNbShortLink(L.link):''].filter(Boolean);
   const map=L.lat?_pzNbEsri('World_Street_Map',_pzNbBoxAround(L.lat,L.lng,1400,3.7/2.6),740,520):'';
   const photo=adv.headshotUrl?`<img class="hp" src="${esc(adv.headshotUrl)}" alt="">`:'';
@@ -57564,9 +57595,9 @@ ${hl.length?`<div class="hh">PROPERTY HIGHLIGHTS</div><ul class="hl">${hl.map(x=
 /* ---------- 🗺 Find owners → 🏘 Listing neighbors ---------- */
 function _pzNbBody(){
   const st=_pzState(); const nb=st.nb||{}; const sel=st.nbDealId||''; const rad=st.nbRad||500;
-  if(!_pzNbListings().length) return `<p class="mr-note">No active listings on the board right now.</p>`;
-  return `<p class="mr-note">Mail the owners around one of our listings. Terra outlines the listing from its card (parcel ID, else its street address), then pulls every parcel within the distance you pick. The listing itself and its owner are left off.</p>
-    <label class="mr-lbl" for="pz-nb-deal">Listing</label>
+  if(!_pzNbListings().length) return `<p class="mr-note">No active listings or recent sales on the board right now.</p>`;
+  return `<p class="mr-note">Mail the owners around one of our listings or recent sales (Just Listed / Just Sold cards). Terra outlines the listing from its card (parcel ID, else its street address), then pulls every parcel within the distance you pick. The listing itself and its owner are left off.</p>
+    <label class="mr-lbl" for="pz-nb-deal">Listing or recent sale</label>
     <select id="pz-nb-deal" class="mr-select" onchange="window._pzNbPick(this.value)">${_pzNbOptions(sel)}</select>
     <label class="mr-lbl" for="pz-nb-rad">Distance from the listing’s boundary</label>
     <select id="pz-nb-rad" class="mr-select" onchange="window._pzState().nbRad=Number(this.value)">${PZ_NB_RADII.map(([v,t])=>`<option value="${v}" ${v===rad?'selected':''}>${t}</option>`).join('')}</select>
@@ -57613,7 +57644,7 @@ window._pzNbFind=async function(btn){
     const keep=attrs.filter(a=>!inside(a) && !selfNames.has(_pzNorm(a.OWN_NAME))); const dropped=attrs.length-keep.length;
     const ownerNames=[...new Set(own.map(a=>_pzTitle(a.OWN_NAME)).filter(Boolean))];
     st.results={source:'neighbors', owners:_pzGroupOwners(keep), parcels:keep.length, filter:f, where, poly:null, criteria:'',
-      nb:{dealId:d.id, name:_pzNbName(d), radiusFt:ft, src, center:{lat:(box.ymin+box.ymax)/2, lng:(box.xmin+box.xmax)/2}, box, listingPids:own.map(a=>String(a.PARCEL_ID||'').trim()).slice(0,20)},
+      nb:{dealId:d.id, name:_pzNbName(d), radiusFt:ft, src, sold:_pzNbIsSold(d), center:{lat:(box.ymin+box.ymax)/2, lng:(box.xmin+box.xmax)/2}, box, listingPids:own.map(a=>String(a.PARCEL_ID||'').trim()).slice(0,20)},
       note:dropped?`Left off ${dropped} parcel${dropped===1?'':'s'} belonging to the listing${ownerNames.length?' ('+ownerNames.slice(0,2).join(', ')+')':''}.`:'⚠ The listing’s own parcel wasn’t in the results — check the red outline on the map.'};
     st.nb={msg:`Listing outlined from ${src==='parcel'?'the card’s parcel ID':src==='address'?'the card’s street address':'the parcels you clicked'} · neighbors within ${_pzNbRadLabel(ft)}.`};
     _pzRenderModeBody(); _pzRenderResults(); _pzDrawResults();
@@ -57634,17 +57665,23 @@ window._pzNeighborsFor=function(dealId){
 
 /* ---------- 📮 postcard modal: listing picker for the neighbor card ---------- */
 function _pzNbCardPicker(){
-  const st=_pzState(); const on=!!(st.card&&st.card.offer==='neighbor');
+  const st=_pzState(); const on=!!(st.card&&(st.card.offer==='neighbor'||st.card.offer==='sold'));
   return `<div id="pz-pc-nb" class="pz-nbbox" ${on?'':'hidden'}><label class="mr-lbl" for="pz-pc-nbdeal">Listing on the card</label>
-    <select id="pz-pc-nbdeal" class="mr-select" onchange="window._pzNbCardDeal(this.value)">${_pzNbOptions((st.card&&st.card.dealId)||st.nbCardDeal||'')}</select>
-    <div class="mr-muted" id="pz-pc-nbfacts">${_pzEsc(_pzNbFactsLine(st.card&&st.card.listing))}</div></div>`;
+    <select id="pz-pc-nbdeal" class="mr-select" onchange="window._pzNbCardDeal(this.value)">${_pzNbOptions((st.card&&st.card.dealId)||st.nbCardDeal||'', st.card&&st.card.offer)}</select>
+    <div class="mr-muted" id="pz-pc-nbfacts">${_pzEsc(_pzNbFactsLine(st.card&&st.card.listing, st.card&&st.card.offer))}</div>
+    <label class="pz-check" id="pz-pc-nbprice" ${st.card&&st.card.offer==='sold'&&st.card.listing&&st.card.listing.salePrice?'':'hidden'}><input type="checkbox" class="mr-check" ${st.card&&st.card.showPrice?'checked':''} onchange="window._pzNbShowPrice(this.checked)"> Print the sale price (<span id="pz-pc-nbprice-v">${_pzEsc(_pzNbMoney(st.card&&st.card.listing&&st.card.listing.salePrice))}</span>) — only if the seller is OK with it</label></div>`;
 }
 window._pzNbCardDeal=function(id){
-  const st=_pzState(); st.nbCardDeal=id; st.card=_pzCardDefaults('neighbor',_pzMe());
+  const st=_pzState(); st.nbCardDeal=id; st.card=_pzCardDefaults((st.card&&st.card.offer)==='sold'?'sold':'neighbor',_pzMe());
   const h=document.getElementById('pz-pc-h'), m=document.getElementById('pz-pc-m'); if(h) h.value=st.card.headline; if(m) m.value=st.card.message;
-  const f=document.getElementById('pz-pc-nbfacts'); if(f) f.textContent=_pzNbFactsLine(st.card.listing); window._pzCardEdit();
+  _pzNbSyncPicker(); window._pzCardEdit();
 };
-window._pzNbAfterOffer=function(k){ const nb=document.getElementById('pz-pc-nb'); if(nb) nb.hidden=(k!=='neighbor'); const f=document.getElementById('pz-pc-nbfacts'); if(f) f.textContent=_pzNbFactsLine((_pzState().card||{}).listing); };
+window._pzNbAfterOffer=function(k){ const nb=document.getElementById('pz-pc-nb'); if(nb) nb.hidden=!(k==='neighbor'||k==='sold');
+  const s=document.getElementById('pz-pc-nbdeal'); if(s&&(k==='neighbor'||k==='sold')) s.innerHTML=_pzNbOptions((_pzState().card||{}).dealId||'', k); _pzNbSyncPicker(); };
+function _pzNbSyncPicker(){ const c=_pzState().card||{}; const L=c.listing||{};   // NBSOLD-20261124
+  const f=document.getElementById('pz-pc-nbfacts'); if(f) f.textContent=_pzNbFactsLine(L, c.offer);
+  const p=document.getElementById('pz-pc-nbprice'); if(p){ p.hidden=!(c.offer==='sold'&&L.salePrice); const cb=p.querySelector('input'); if(cb) cb.checked=!!c.showPrice; const v=document.getElementById('pz-pc-nbprice-v'); if(v) v.textContent=_pzNbMoney(L.salePrice); } }
+window._pzNbShowPrice=function(on){ const st=_pzState(); if(st.card) st.card.showPrice=!!on; window._pzCardEdit(); };
 function _pzNbInjectStyles(){
   if(document.getElementById('pz-nb-css')) return; const s=document.createElement('style'); s.id='pz-nb-css';
   s.textContent=`.pz-nbbox{border:1px solid var(--border,#d1d5db);border-left:4px solid #DA291C;border-radius:8px;padding:.5rem .6rem;background:var(--surface-2,#f9fafb);display:flex;flex-direction:column;gap:.3rem}
@@ -57654,6 +57691,36 @@ function _pzNbInjectStyles(){
   document.head.appendChild(s);
 }
 try{ _pzNbInjectStyles(); }catch(_){}
+/* NBSOLD-20261124 — back of the Just Sold card: letter + our process on the left, "Why Eshenbaugh" proof panel top-right
+   (ends at 3.25 in — clear of Lob's 4×2.375 in bottom-right address/postage zone, which starts at 3.625 in). */
+function _pzNbSoldBack(c, adv, preview, base, mv){
+  const esc=_pzEsc; const P=_pzNbProof(); const ret=_pzCfg().returnAddress||{line1:'304 S. Willow Ave.',city:'Tampa',state:'FL',zip:'33606'};
+  const photo=adv.headshotUrl?`<img class="hp" src="${esc(adv.headshotUrl)}" alt="">`:'';
+  return `<html><head><meta charset="utf-8">${base}<style>
+.b{position:relative;width:9.25in;height:6.25in;overflow:hidden;background:#fff}
+.l{position:absolute;left:.45in;top:.4in;width:4.45in;height:5.45in}
+.dear{font-family:Georgia,serif;font-size:13pt;font-weight:bold;margin:0 0 .06in}
+.msg{font-size:10.5pt;line-height:1.36;margin:0}
+.hh{color:#DA291C;font-weight:bold;font-size:9.5pt;letter-spacing:.08em;margin:.13in 0 .04in}
+.pc{margin:0;padding:0;list-style:none;counter-reset:s}.pc li{counter-increment:s;position:relative;padding-left:.27in;font-size:9.5pt;line-height:1.3;margin-bottom:.035in}
+.pc li:before{content:counter(s);position:absolute;left:0;top:.01in;width:.18in;height:.18in;border-radius:50%;background:#00B2A9;color:#fff;font-size:8pt;font-weight:bold;text-align:center;line-height:.18in}
+.who{position:absolute;left:0;bottom:.55in;width:4.45in;height:1.05in;border-top:3px solid #00B2A9;padding-top:.12in}
+.hp{float:left;width:.85in;height:.85in;border-radius:50%;object-fit:cover;margin-right:.14in;border:2px solid #DA291C}
+.nm{font-size:12pt;font-weight:bold}.tt{font-size:9.5pt;color:#333}.ct{font-size:10.5pt;font-weight:bold;color:#DA291C;margin-top:.03in}.em{font-size:9.5pt}
+.ft{position:absolute;left:0;bottom:0;width:4.45in;font-size:7pt;line-height:1.3;color:#444}
+.wy{position:absolute;left:5.1in;top:.4in;width:3.7in;max-height:2.85in;background:#DA291C;color:#fff;border-radius:.06in;padding:.14in .18in;overflow:hidden}
+.wy h4{margin:0 0 .07in;font-size:10pt;letter-spacing:.1em}
+.st{display:flex;gap:.08in;border-bottom:2px solid #00B2A9;padding-bottom:.08in;margin-bottom:.08in}.st div{flex:1}
+.st b{display:block;font-size:17pt;line-height:1.05}.st span{display:block;font-size:7pt;line-height:1.2;opacity:.95}
+.aw{margin:0;padding-left:.15in;font-size:8pt;line-height:1.28}.aw li{margin-bottom:.03in}
+</style></head><body><div class="b"><div class="l">
+<p class="dear">Dear ${preview?esc(preview.greeting):'{{greeting}}'},</p><p class="msg">${esc(mv(c.message))}</p>
+${P.process.length?`<div class="hh">HOW WE SELL LAND</div><ol class="pc">${P.process.slice(0,4).map(x=>'<li>'+esc(x)+'</li>').join('')}</ol>`:''}
+<div class="who">${photo}<div class="nm">${esc(adv.nameWithDesignations||adv.name)}</div><div class="tt">${esc(adv.title||'Advisor')}, Eshenbaugh Land Company</div><div class="ct">${esc(adv.phone||'')}</div><div class="em">${esc(adv.email||'')}</div></div>
+<div class="ft">Eshenbaugh Land Company · ${esc(ret.line1)}, ${esc(ret.city)}, ${esc(ret.state)} ${esc(ret.zip)} · thedirtdog.com<br>If your property is listed with a broker, please disregard — this is not a solicitation of listed property.</div>
+</div><div class="wy"><h4>WHY ESHENBAUGH</h4><div class="st">${P.stats.slice(0,3).map(([b,s])=>`<div><b>${esc(b)}</b><span>${esc(s)}</span></div>`).join('')}</div>
+<ul class="aw">${P.awards.slice(0,4).map(x=>'<li>'+esc(x)+'</li>').join('')}</ul></div></div></body></html>`;
+}
 /* ===== NEIGHBOR_BLOCK_END ===== */
 
 /* ---------- 📮 mailings (approval + send) ---------- */
