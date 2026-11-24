@@ -1931,6 +1931,7 @@ html.dark .mw-pre{background:rgba(255,255,255,.04);color:var(--text-2,#d1d5db)}
       <button id="pdw-ext-btn" onclick="" style="background:#eff6ff;border:none;border-radius:8px;padding:.4rem .8rem;font-size:.8rem;font-weight:600;color:#2563eb;cursor:pointer;display:none">📋 Extension</button>
       <button id="pdw-prop-btn" type="button" onclick="" title="Build the Broker Opinion of Value &amp; Marketing Proposal for this owner (runs Site Research and fills blank card fields)" style="background:#fdeced;border:none;border-radius:8px;padding:.4rem .8rem;font-size:.8rem;font-weight:600;color:#b3141c;cursor:pointer;white-space:nowrap;display:none">📝 Proposal</button><!-- PROPGEN-20261119 -->
       <button id="pdw-om-btn" type="button" onclick="" title="Run Site Research on this property, fill any blank card fields, and build the Offering Memorandum" style="background:#e6f7f6;border:none;border-radius:8px;padding:.4rem .8rem;font-size:.8rem;font-weight:600;color:#047a72;cursor:pointer;white-space:nowrap">📋 Generate OM</button><!-- OMCARD-20261119 -->
+      <button id="pdw-nb-btn" type="button" onclick="" title="Find the owners around this listing and mail them a Just Listed postcard (🧭 Prospecting)" style="background:#fdeced;border:none;border-radius:8px;padding:.4rem .8rem;font-size:.8rem;font-weight:600;color:#b3141c;cursor:pointer;white-space:nowrap;display:none">🏘 Mail neighbors</button><!-- NEIGHBOR-20261124 -->
       <button id="pdw-edit-btn" onclick="" style="background:#f3f4f6;border:none;border-radius:8px;padding:.4rem .8rem;font-size:.8rem;font-weight:600;color:#374151;cursor:pointer">✏️ Edit</button>
       <button onclick="requestClosePropertyDetail()" aria-label="Close" title="Close (Esc)" style="background:none;border:none;font-size:1.4rem;color:#6b7280;cursor:pointer;line-height:1;width:2.5rem;height:2.5rem;display:flex;align-items:center;justify-content:center;border-radius:9999px;transition:background .15s,color .15s" onmouseover="this.style.background='#f3f4f6';this.style.color='#111827'" onmouseout="this.style.background='none';this.style.color='#6b7280'">&times;</button>
     </div>
@@ -10237,6 +10238,7 @@ const FB = {
   async createDeal(data){
     const {collection, addDoc} = _fbFns;
     const ref = await addDoc(collection(_fbDb,'deals'), sanitizeForFirestore(data));
+    try{ if(window._ompAfterDealWrite) window._ompAfterDealWrite(ref.id, data); }catch(e){ console.warn('[omp] after deal create',e); }   // OMPDATA-20261124
     try { window.logUserActivity && window.logUserActivity('deal_created',
       `Created deal: ${data.projectName||data.address||ref.id}`,
       { dealId: ref.id, dealName: data.projectName||data.address||'' }); } catch(_){}
@@ -10245,6 +10247,7 @@ const FB = {
   async updateDeal(id, data){
     const {doc, updateDoc} = _fbFns;
     await updateDoc(doc(_fbDb,'deals',id), sanitizeForFirestore(data));
+    try{ if(window._ompAfterDealWrite) window._ompAfterDealWrite(id, data); }catch(e){ console.warn('[omp] after deal write',e); }   // OMPDATA-20261124
   },
   async deleteDeal(id){
     const {doc, deleteDoc} = _fbFns;
@@ -19224,6 +19227,353 @@ function _valBuildPDFBody(d){
 }
 window._valBuildPDFBody = _valBuildPDFBody;
 
+// ── OM page generator: data layer (OMPDATA-20261124) ─────────────────────────
+// Pat Shelton's prompt pack "OM Builder: Market Profile & Zoning Page Generator", Prompt 2.
+// Every figure or code standard on a Market Profile / Zoning page is one FACT with a source,
+// an as-of date, a method and a status. Approved work is cached in a LIBRARY so the next deal
+// in the same city / district reuses it. A PAGE JOB ties a draft page to its deal and its facts.
+// Schema reference: docs/om-pages-schema.md   Firestore rules: docs/om-pages-firestore-rules.md
+//
+//   omPageJobs/{jobId}                 page job (deal, page type, inputs, status, snapshot, approval)
+//   omPageJobs/{jobId}/facts/{factId}  the facts on that page
+//   omGeoProfiles/{geoKey}             approved market profile per geography (place_ / county_ / cdp_ / radius_)
+//   omZoningDistricts/{zoneKey}        approved district standards per jurisdiction + code
+//   omSiteZoning/{caseKey}             PD / RZ case: documents + extracted conditions (never shared across cases)
+//   deals/{id}.censusGeo               Census Geocoder result (FIPS, incorporated / CDP, jurisdiction)
+//   deals/{id}.apn                     full parcel number(s) from the FDOR roll — never folio / alternate key
+
+/** @typedef {{dealId:string,name:string,address:string,apn:string[],county:string,lat:?number,lon:?number,acreage:?number,
+ *   zoning:string,futureLandUse:string,jurisdiction:string,geo:?CensusGeo}} SiteContext */
+/** @typedef {{stateFips:string,countyFips:string,countyName:string,placeFips:string,placeName:string,incorporated:boolean,
+ *   cdpFips:string,cdpName:string,jurisdiction:string,tract:string,lat:number,lon:number,matched:string,via:'pin'|'address',geocodedAt:number,forAddress:string}} CensusGeo */
+/** @typedef {'api'|'document'|'web_research'|'calculated'|'manual'} FactMethod */
+/** @typedef {'verified'|'needs_check'|'edited'|'rejected'} FactStatus */
+/** @typedef {{id:string,pageJobId:?string,module:string,label:string,value:(number|string|null),unit:string,displayValue:string,
+ *   sourceName:string,sourceUrl:string,sourceSection:string,quote:string,asOf:string,retrievedAt:string,method:FactMethod,
+ *   status:FactStatus,editorNote:string,formula:string,inputs:string[],problems:string[]}} Fact */
+/** @typedef {{dealId:string,omId:?string,pageType:'market_profile'|'zoning',inputs:Object,status:'drafting'|'in_review'|'approved'|'rendered',
+ *   htmlSnapshot:string,pdfFile:?Object,pageNumber:?number,footerMode:'add'|'leave_space',createdBy:string,createdAt:number,
+ *   approvedBy:string,approvedAt:?number,documents:Object[]}} PageJob */
+
+const _OMP = {
+  JOBS:'omPageJobs', GEO:'omGeoProfiles', ZONE:'omZoningDistricts', SITEZ:'omSiteZoning',
+  METHODS:['api','document','web_research','calculated','manual'],
+  STATUSES:['verified','needs_check','edited','rejected'],
+  JOB_STATUS:['drafting','in_review','approved','rendered'],
+  GEO_MAX_DAYS:365, ZONE_MAX_DAYS:182,
+  SITE_SPECIFIC:/^(PD|PUD|MPUD|RPUD|CPUD|IPUD|PD-?A|PD-?MU|PD-?R|PD-?C|PDD|DRI|SPI|SP|MXD-?PD)\b|\bPLANNED (UNIT )?DEVELOPMENT\b|\bDEVELOPMENT OF REGIONAL IMPACT\b/i,
+};
+const _ompSlug = s => String(s||'').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g,'')
+  .replace(/^(city|town|village) of\s+/,'').replace(/\s+county$/,'').replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,80);
+const _ompUid  = () => (typeof currentUser!=='undefined' && currentUser && (currentUser.uid||currentUser.email)) || '';
+const _ompWho  = () => (typeof currentUser!=='undefined' && currentUser && (currentUser.name||currentUser.email)) || '';
+const _ompToday = () => new Date().toISOString().slice(0,10);
+
+// ── 1. Site context ────────────────────────────────────────────────────────
+// Census Geocoder (geographies). The card's exact map pin wins over the typed address.
+async function _ompCensusGeo(deal){
+  const addr=String(deal.propertyAddress||deal.address||'').trim();
+  const pinFor=d=>(typeof d.geoLat==='number' && typeof d.geoLng==='number' && (d.geoPrecision||'exact')==='exact' && (!d.geoAddr || d.geoAddr===addr)) ? {lat:d.geoLat, lon:d.geoLng} : null;
+  let pin=pinFor(deal);
+  const base='https://geocoding.geo.census.gov/geocoder/geographies/';
+  const qs={benchmark:'Public_AR_Current', vintage:'Current_Current', format:'json'};
+  let g=null, pt=null, matched='', via='';
+  try{
+    if(pin){
+      const r=await fetch(base+'coordinates?'+new URLSearchParams(Object.assign({x:pin.lon, y:pin.lat}, qs)), {signal:AbortSignal.timeout(20000)});
+      const d=r.ok?await r.json():null; g=d&&d.result&&d.result.geographies; pt=pin; via='pin';
+    }
+    if(!g && addr){
+      const one=/,\s*FL\b|florida/i.test(addr)?addr:addr+(deal.county?', '+deal.county+' County':'')+', FL';
+      const r=await fetch(base+'onelineaddress?'+new URLSearchParams(Object.assign({address:one}, qs)), {signal:AbortSignal.timeout(20000)});
+      const d=r.ok?await r.json():null; const m=d&&d.result&&d.result.addressMatches&&d.result.addressMatches[0];
+      if(m){ g=m.geographies; pt={lat:m.coordinates.y, lon:m.coordinates.x}; matched=m.matchedAddress||''; via='address'; }
+    }
+    // Vacant land often has no Census street match: use Terra's map geocoder (Census → Nominatim), exact hits only.
+    if(!g && addr && typeof _mapGeocode==='function'){
+      const h=await _mapGeocode(deal).catch(()=>null);
+      if(h && h.precision==='exact'){
+        const r=await fetch(base+'coordinates?'+new URLSearchParams(Object.assign({x:h.lng, y:h.lat}, qs)), {signal:AbortSignal.timeout(20000)});
+        const d=r.ok?await r.json():null; g=d&&d.result&&d.result.geographies; pt={lat:h.lat, lon:h.lng}; via='map-geocode';
+      }
+    }
+  }catch(e){ console.warn('[OMP] Census geocoder failed', e&&e.message); }
+  if(!g || !pt) return null;
+  const first=k=>(g[k]||[])[0]||{};
+  const st=first('States'), co=first('Counties'), pl=first('Incorporated Places'), cdp=first('Census Designated Places'), tr=first('Census Tracts');
+  const placeName=String(pl.NAME||'').replace(/\s+(city|town|village)$/i,'');
+  return {
+    stateFips:st.STATE||String(co.GEOID||'').slice(0,2)||'', countyFips:co.GEOID||'', countyName:co.NAME||'',
+    placeFips:pl.GEOID||'', placeName, incorporated:!!pl.GEOID,
+    cdpFips:cdp.GEOID||'', cdpName:String(cdp.NAME||'').replace(/\s+CDP$/,''),
+    jurisdiction: pl.GEOID ? (/town$/i.test(pl.NAME||'')?'Town of ':/village$/i.test(pl.NAME||'')?'Village of ':'City of ')+placeName : (co.NAME?co.NAME+' (unincorporated)':''),
+    tract:tr.GEOID||'', lat:pt.lat, lon:pt.lon, matched, via, geocodedAt:Date.now(), forAddress:addr,
+  };
+}
+// Stores deal.censusGeo; never touches any other card field. Re-runs only when the address or pin changed.
+async function _ompEnsureGeo(deal, force){
+  if(!deal || !deal.id) return null;
+  const addr=String(deal.propertyAddress||deal.address||'').trim();
+  const cur=deal.censusGeo;
+  const pinMoved=cur && cur.via==='pin' && typeof deal.geoLat==='number' && (Math.abs(cur.lat-deal.geoLat)>1e-5 || Math.abs(cur.lon-deal.geoLng)>1e-5);
+  if(!force && cur && cur.forAddress===addr && !pinMoved) return cur;
+  if(!addr && typeof deal.geoLat!=='number') return cur||null;
+  const geo=await _ompCensusGeo(deal);
+  if(!geo) return cur||null;
+  try{ await Store.updateDeal(deal.id, {censusGeo:geo}); deal.censusGeo=geo; }catch(e){ console.warn('[OMP] save censusGeo failed', e&&e.message); }
+  return geo;
+}
+window._ompEnsureGeo=_ompEnsureGeo;
+// Hook from Store (FB.createDeal / FB.updateDeal): geocode in the background after an address or pin change.
+const _ompGeoQ=new Set();
+window._ompAfterDealWrite=function(id, data){
+  if(!id || !data || !('propertyAddress' in data || 'geoLat' in data || 'address' in data)) return;
+  if(_ompGeoQ.has(id)) return; _ompGeoQ.add(id);
+  setTimeout(async()=>{
+    _ompGeoQ.delete(id);
+    const pool=[].concat(typeof allDeals!=='undefined'?allDeals:[], typeof allDealsCompany!=='undefined'?allDealsCompany:[]);
+    const deal=pool.find(x=>x&&x.id===id) || Object.assign({id}, data);
+    try{ await _ompEnsureGeo(deal); }catch(e){ console.warn('[OMP] geocode on save', e&&e.message); }
+  }, 1500);
+};
+// Full parcel number(s): the card's own APN if set, else the FDOR roll PARCEL_ID under the parcel outline.
+async function _ompResolveApn(deal, poly){
+  const own=Array.isArray(deal.apn)?deal.apn.filter(Boolean):(deal.apn?[String(deal.apn)]:[]);
+  if(own.length) return own;
+  let ids=[];
+  if(poly && Array.isArray(poly.parcels) && poly.parcels.length) ids=poly.parcels.map(p=>p.id).filter(Boolean);
+  if(!ids.length && poly && poly.attrs && poly.attrs.PARCEL_ID) ids=[String(poly.attrs.PARCEL_ID).trim()];
+  if(ids.length && deal.id){ try{ await Store.updateDeal(deal.id,{apn:ids}); deal.apn=ids; }catch(e){} }
+  return ids;
+}
+async function _ompSiteContext(deal, poly){
+  const geo=await _ompEnsureGeo(deal);
+  const ac=parseFloat(String(deal.acreage==null?'':deal.acreage).replace(/,/g,''));
+  return {
+    dealId:deal.id, name:deal.projectName||deal.propertyAddress||'', address:deal.propertyAddress||'',
+    apn:await _ompResolveApn(deal, poly), county:deal.county||(geo&&geo.countyName?geo.countyName.replace(/ County$/,''):''),
+    lat:geo?geo.lat:(typeof deal.geoLat==='number'?deal.geoLat:null), lon:geo?geo.lon:(typeof deal.geoLng==='number'?deal.geoLng:null),
+    acreage:isFinite(ac)?ac:null, zoning:deal.zoning||'', futureLandUse:deal.futureLandUse||deal.flu||'',
+    jurisdiction:(geo&&geo.jurisdiction)||'', geo,
+  };
+}
+window._ompSiteContext=_ompSiteContext;
+// Geography modes offered on the inputs sheet; preselect City when incorporated, else County.
+function _ompGeoOptions(geo){
+  if(!geo) return {modes:['county','radius'], preselect:'county', note:'Address not geocoded yet.'};
+  const modes=[]; if(geo.incorporated) modes.push('city'); modes.push('county'); if(geo.cdpFips) modes.push('cdp'); modes.push('radius');
+  return {modes, preselect:geo.incorporated?'city':'county', note:geo.incorporated?'':'Unincorporated '+geo.countyName+(geo.cdpName?' — inside '+geo.cdpName+' CDP':'')};
+}
+window._ompGeoOptions=_ompGeoOptions;
+
+// ── 2. Facts ───────────────────────────────────────────────────────────────
+// Normalises a fact and enforces the pack's rules: a number needs a source + as-of date; a zoning
+// standard needs its code section + a verbatim quote; a calculated fact needs its formula + inputs.
+// Anything missing is downgraded to needs_check with the reason in .problems — never filled in.
+function _ompFact(f){
+  f=f||{};
+  const x={ id:String(f.id||('f_'+Math.random().toString(36).slice(2,10))), pageJobId:f.pageJobId||null, module:String(f.module||''),
+    label:String(f.label||''), value:(f.value===undefined?null:f.value), unit:String(f.unit||''), displayValue:String(f.displayValue||''),
+    sourceName:String(f.sourceName||''), sourceUrl:String(f.sourceUrl||''), sourceSection:String(f.sourceSection||''), quote:String(f.quote||''),
+    asOf:String(f.asOf||''), retrievedAt:String(f.retrievedAt||_ompToday()), method:_OMP.METHODS.includes(f.method)?f.method:'web_research',
+    status:_OMP.STATUSES.includes(f.status)?f.status:'needs_check', editorNote:String(f.editorNote||''),
+    formula:String(f.formula||''), inputs:Array.isArray(f.inputs)?f.inputs.map(String):[], problems:[] };
+  const isNum=typeof x.value==='number' && isFinite(x.value);
+  if(x.method==='calculated'){
+    if(!x.formula) x.problems.push('calculated without a formula');
+    if(!x.inputs.length) x.problems.push('calculated without input facts');
+  } else if(x.method!=='manual'){
+    if(isNum && !x.sourceName) x.problems.push('no source');
+    if(isNum && !x.asOf) x.problems.push('no as-of date');
+    if(/^zoning/.test(x.module) && x.method!=='document' && (!x.sourceSection || !x.quote)) x.problems.push('no code section + quote');
+    if(/^zoning/.test(x.module) && x.method==='document' && !x.sourceSection) x.problems.push('no condition / page reference');
+  }
+  if(x.method==='manual' && !x.editorNote && x.status!=='needs_check') x.problems.push('manual value without a note');
+  if(x.problems.length && x.status==='verified') x.status='needs_check';
+  if(!x.displayValue && isNum) x.displayValue=_ompDisplay(x.value, x.unit);
+  return x;
+}
+function _ompDisplay(v, unit){
+  if(typeof v!=='number' || !isFinite(v)) return String(v==null?'':v);
+  const u=String(unit||'');
+  if(/^usd$/i.test(u)) return '$'+Math.round(v).toLocaleString();
+  if(/^%|percent/i.test(u)) return (Math.abs(v)<10?v.toFixed(1):Math.round(v))+'%';
+  return (Number.isInteger(v)?v.toLocaleString():(+v.toFixed(2)).toLocaleString())+(u && !/^(people|count|number)$/i.test(u)?' '+u:'');
+}
+// Calculated fact: fn receives the input facts' values in order. Recomputed whenever an input is edited.
+function _ompCalc(id, label, formula, inputFacts, fn, unit, module){
+  const vals=inputFacts.map(f=>f&&typeof f.value==='number'?f.value:NaN);
+  const v=vals.some(n=>!isFinite(n))?null:fn(...vals);
+  return _ompFact({id, label, module:module||'', value:v, unit:unit||'', method:'calculated', formula, inputs:inputFacts.map(f=>f&&f.id),
+    status:(v==null||inputFacts.some(f=>!f||f.status==='needs_check'||f.status==='rejected'))?'needs_check':'verified',
+    asOf:inputFacts.map(f=>f&&f.asOf).filter(Boolean)[0]||''});
+}
+// Editing a value marks it Edited (note required) and recomputes every calculated fact that uses it.
+function _ompEditFact(facts, id, newValue, note, recalc){
+  if(!String(note||'').trim()) throw new Error('Add a note saying why the value changed');
+  const f=facts.find(x=>x.id===id); if(!f) throw new Error('Fact not found');
+  f.value=newValue; f.displayValue=_ompDisplay(newValue, f.unit); f.status='edited'; f.editorNote=String(note).trim(); f.editedBy=_ompWho(); f.editedAt=Date.now();
+  if(typeof recalc==='function') facts.filter(x=>x.method==='calculated' && x.inputs.includes(id)).forEach(c=>{ const n=recalc(c, facts); if(n) Object.assign(c, n); });
+  return f;
+}
+const _ompNeedsCheck = facts => (facts||[]).filter(f=>f.status==='needs_check' && !(f.acceptedWithNote));
+window._ompFact=_ompFact; window._ompCalc=_ompCalc; window._ompEditFact=_ompEditFact; window._ompNeedsCheck=_ompNeedsCheck;
+
+// ── 3. Library ─────────────────────────────────────────────────────────────
+function _ompGeoKey(mode, geo, center){
+  if(mode==='city'   && geo && geo.placeFips) return 'place_'+geo.placeFips;
+  if(mode==='cdp'    && geo && geo.cdpFips)   return 'cdp_'+geo.cdpFips;
+  if(mode==='county' && geo && geo.countyFips) return 'county_'+geo.countyFips;
+  if(mode==='radius' && center) return 'radius_'+(+center.lat).toFixed(4)+'_'+(+center.lon).toFixed(4)+'_1-3-5';
+  return '';
+}
+const _ompZoneKey = (jurisdiction, code) => _ompSlug(jurisdiction)+'__'+_ompSlug(code);
+const _ompCaseKey = (jurisdiction, caseNo) => _ompSlug(jurisdiction)+'__'+_ompSlug(caseNo);
+// Latest ACS 5-year vintage end year: each release lands in mid-December for the prior year.
+function _ompLatestAcs(d){ d=d||new Date(); const y=d.getFullYear(); return (d.getMonth()===11 && d.getDate()>=15) ? y-1 : y-2; }
+function _ompStale(rec, kind, now){
+  if(!rec) return {stale:true, why:'not in the library'};
+  now=now||Date.now();
+  const at=rec.approvedAt||rec.retrievedAtMs||0, days=at?(now-at)/864e5:Infinity;
+  if(kind==='geo'){
+    const v=+String(rec.acsVintage||'').slice(-4);
+    if(v && v<_ompLatestAcs(new Date(now))) return {stale:true, why:'newer ACS release ('+(_ompLatestAcs(new Date(now))-4)+'-'+_ompLatestAcs(new Date(now))+') is out'};
+    if(days>_OMP.GEO_MAX_DAYS) return {stale:true, why:'approved more than 12 months ago'};
+  } else if(kind==='zone'){
+    if(days>_OMP.ZONE_MAX_DAYS) return {stale:true, why:'code checked more than 6 months ago — re-verify'};
+  }
+  return {stale:false, why:''};
+}
+async function _ompLibGet(col, key){
+  if(!key || typeof _fbDb==='undefined' || !_fbDb) return null;
+  try{ const {doc,getDoc}=_fbFns; const s=await getDoc(doc(_fbDb,col,key)); return s.exists()?Object.assign({key},s.data()):null; }
+  catch(e){ console.warn('[OMP] library read', col, key, e&&e.message); return null; }
+}
+async function _ompLibPut(col, key, rec){
+  const {doc,setDoc}=_fbFns;
+  const clean=JSON.parse(JSON.stringify(Object.assign({}, rec, {key, updatedAt:Date.now(), updatedBy:_ompWho()})));
+  await setDoc(doc(_fbDb,col,key), clean, {merge:true});
+  return clean;
+}
+// Lookup with staleness: {rec, stale, why}. Site-specific zoning is only ever matched on its own case key.
+async function _ompLibLookup(kind, key){
+  await _ompEnsureSeed();
+  const col=kind==='geo'?_OMP.GEO:kind==='zone'?_OMP.ZONE:_OMP.SITEZ;
+  const rec=await _ompLibGet(col, key);
+  const st=kind==='sitez' ? {stale:!rec, why:rec?'':'not in the library'} : _ompStale(rec, kind);
+  return Object.assign({rec}, st);
+}
+window._ompGeoKey=_ompGeoKey; window._ompZoneKey=_ompZoneKey; window._ompCaseKey=_ompCaseKey; window._ompLibLookup=_ompLibLookup; window._ompLibPut=_ompLibPut;
+// Is this district's standard set by an individual ordinance / site plan? (PD gate)
+const _ompIsSiteSpecific = (code, ticked) => !!ticked || _OMP.SITE_SPECIFIC.test(String(code||'').trim());
+function _ompPdGate(inputs){
+  const ss=_ompIsSiteSpecific(inputs&&inputs.districtCode, inputs&&inputs.siteSpecific);
+  if(!ss) return {ok:true, siteSpecific:false};
+  const has=(inputs.pdDocuments&&inputs.pdDocuments.length) || String(inputs.pdNumber||'').trim() || String(inputs.rzNumber||'').trim();
+  return has ? {ok:true, siteSpecific:true}
+    : {ok:false, siteSpecific:true, message:`${inputs.districtCode||'This district'} is site-specific zoning: its standards come from its own ordinance. Upload the ordinance / conditions / site plan, or enter the PD number or the RZ number, then generate.`};
+}
+window._ompIsSiteSpecific=_ompIsSiteSpecific; window._ompPdGate=_ompPdGate;
+
+// ── 4. Page jobs ───────────────────────────────────────────────────────────
+async function _ompJobCreate(o){
+  if(!['market_profile','zoning'].includes(o.pageType)) throw new Error('pageType must be market_profile or zoning');
+  const {collection,addDoc}=_fbFns;
+  const job={ dealId:o.dealId||'', omId:o.omId||null, pageType:o.pageType, inputs:JSON.parse(JSON.stringify(o.inputs||{})), status:'drafting',
+    htmlSnapshot:'', pdfFile:null, pageNumber:o.pageNumber||null, footerMode:o.footerMode==='add'?'add':'leave_space',
+    createdBy:_ompUid(), createdByName:_ompWho(), createdAt:Date.now(), approvedBy:'', approvedAt:null, documents:[], libraryKey:o.libraryKey||'' };
+  const ref=await addDoc(collection(_fbDb,_OMP.JOBS), job);
+  return Object.assign({id:ref.id}, job);
+}
+async function _ompJobUpdate(id, patch){
+  const {doc,updateDoc}=_fbFns;
+  if(patch.status && !_OMP.JOB_STATUS.includes(patch.status)) throw new Error('bad status '+patch.status);
+  await updateDoc(doc(_fbDb,_OMP.JOBS,id), JSON.parse(JSON.stringify(Object.assign({}, patch, {updatedAt:Date.now()}))));
+}
+async function _ompJobSaveFacts(id, facts){
+  const {doc,writeBatch}=_fbFns; const list=(facts||[]).map(f=>Object.assign(_ompFact(f),{pageJobId:id}));
+  for(let i=0;i<list.length;i+=400){ const b=writeBatch(_fbDb); list.slice(i,i+400).forEach(f=>b.set(doc(_fbDb,_OMP.JOBS,id,'facts',f.id), JSON.parse(JSON.stringify(f)))); await b.commit(); }
+  return list;
+}
+async function _ompJobFacts(id){
+  const {collection,getDocs}=_fbFns; const s=await getDocs(collection(_fbDb,_OMP.JOBS,id,'facts'));
+  const rank={needs_check:0, edited:1, rejected:2, verified:3};   // Needs check rows sort to the top
+  return s.docs.map(d=>d.data()).sort((a,b)=>(rank[a.status]??9)-(rank[b.status]??9) || String(a.module).localeCompare(String(b.module)));
+}
+// Approve: blocked while any needs_check fact is unresolved; then writes the approved facts back to the library.
+async function _ompJobApprove(job, facts, libRecord){
+  const open=_ompNeedsCheck(facts);
+  if(open.length) throw new Error(open.length+' fact'+(open.length>1?'s need':' needs')+' checking first: '+open.slice(0,3).map(f=>f.label).join(', '));
+  const by=_ompWho(), at=Date.now();
+  await _ompJobUpdate(job.id, {status:'approved', approvedBy:by, approvedAt:at});
+  if(libRecord && libRecord.col && libRecord.key)
+    await _ompLibPut(libRecord.col, libRecord.key, Object.assign({}, libRecord.data||{}, {facts:facts.filter(f=>f.status!=='rejected'), approvedBy:by, approvedAt:at, fromJob:job.id, fromDeal:job.dealId}));
+  return {approvedBy:by, approvedAt:at};
+}
+window._ompJobCreate=_ompJobCreate; window._ompJobUpdate=_ompJobUpdate; window._ompJobSaveFacts=_ompJobSaveFacts; window._ompJobFacts=_ompJobFacts; window._ompJobApprove=_ompJobApprove;
+
+// ── 5. Zoning document uploads (PD packets, ordinances, site plans) ────────
+// Stored on the page job AND listed on the deal (📎 activity entry, same as every card attachment).
+async function _ompUploadZoningDoc(dealId, jobId, file, kind){
+  if(typeof _fbStorage==='undefined' || !_fbStorage || !_fbFns) throw new Error('Storage not connected');
+  const {ref:fbRef,uploadBytes,getDownloadURL,collection,addDoc,doc,updateDoc,arrayUnion}=_fbFns;
+  const safe=String(file.name||'document').replace(/[^a-zA-Z0-9._-]/g,'_').slice(0,80);
+  const path=`dealDocs/${dealId}/zoning_${Date.now()}_${safe}`;
+  const snap=await uploadBytes(fbRef(_fbStorage,path), file, {contentType:file.type||'application/octet-stream'});
+  const url=await getDownloadURL(snap.ref);
+  const rec={name:file.name||safe, url, path, kind:kind||'ordinance', uploadedAt:Date.now(), uploadedBy:_ompWho()};
+  if(jobId) await updateDoc(doc(_fbDb,_OMP.JOBS,jobId), {documents:arrayUnion(rec), updatedAt:Date.now()});
+  // Card Attachments panel (dealAttachments), the same shape every card upload uses.
+  try{
+    const pool=[].concat(typeof allDeals!=='undefined'?allDeals:[], typeof allDealsCompany!=='undefined'?allDealsCompany:[]);
+    const deal=pool.find(x=>x&&x.id===dealId);
+    const list=[...((deal&&deal.dealAttachments)||[]), {name:rec.name, url, uploadedAt:rec.uploadedAt, uploadedBy:rec.uploadedBy, kind:'zoning_document'}];
+    await Store.updateDeal(dealId, {dealAttachments:list}); if(deal) deal.dealAttachments=list;
+  }catch(e){ console.warn('[OMP] card attachment', e&&e.message); }
+  try{ await addDoc(collection(_fbDb,'deals',dealId,'activities'), { type:'attachment', attachmentType:'zoning_document',
+    attachmentLabel:'Zoning document ('+(kind||'ordinance').replace(/_/g,' ')+')', attachmentName:rec.name, attachmentUrl:url,
+    createdAt:Date.now(), createdBy:_ompUid(), createdByName:_ompWho(), body:'Zoning document uploaded for the OM: '+rec.name }); }
+  catch(e){ console.warn('[OMP] activity entry', e&&e.message); }
+  return rec;
+}
+window._ompUploadZoningDoc=_ompUploadZoningDoc;
+
+// ── 6. Seed: Indian Rocks Beach (City) + CT district from the starter kit ──
+// Known-good golden records. Written once, only if the library doesn't already hold them.
+const _OMP_SEED = {"market_profile":{"page_type":"market_profile","deal":{"name":"400 Gulf Blvd","address":"400 Gulf Blvd, Indian Rocks Beach, FL 33785","county":"Pinellas"},"inputs":{"geography_mode":"city","geography":{"name":"Indian Rocks Beach","type":"place","state_fips":"12","place_fips":"33625"},"comparison_geography":{"name":"Pinellas County","type":"county","state_fips":"12","county_fips":"103"},"product_types":["tourism","hospitality"],"footer_mode":"leave_space"},"title":"Indian Rocks Beach Market Profile","subtitle":"Sand Key Barrier Island // Pinellas County, FL 33785","narrative":{"heading":"The Community","text":"Indian Rocks Beach is a small, largely residential city on the Sand Key barrier island between Belleair Beach and Indian Shores, a short drive down Gulf Boulevard from Clearwater Beach. It is low-rise in character, with public beach access at the street ends and a walkable business district of local restaurants and shops at the foot of the Walsingham Road (CR 688) causeway. Residents are affluent and established, and more than four in ten housing units are not occupied year-round, a sign of deep second-home and seasonal-rental demand. After Hurricanes Helene and Milton in 2024, a county-funded project rebuilt the beach. Cleared, Gulf-front land zoned for density is in very short supply.","method":"web_research","status":"verified"},"stat_tiles":[{"fact":"pinellas_visitors_fy2025"},{"fact":"pinellas_tourism_impact_fy2025"},{"fact":"pinellas_high_season_visitors_2026"},{"fact":"pinellas_beach_nourishment_cost"}],"comparison_table":{"heading":"Indian Rocks Beach vs. Pinellas County","rows":[{"label":"Median Household Income","subject":"irb_mhi","comparison":"pin_mhi","difference":"irb_mhi_vs_county"},{"label":"Per Capita Income","subject":"irb_pci","comparison":"pin_pci","difference":"irb_pci_vs_county"},{"label":"Median Home Value (owner-occupied)","subject":"irb_mhv","comparison":"pin_mhv","difference":"irb_mhv_vs_county"},{"label":"Owner-Occupied Households","subject":"irb_owner_occ","comparison":"pin_owner_occ","difference":"irb_owner_occ_vs_county"},{"label":"Population","subject":"irb_population","comparison":"pin_population","difference_text":"Median age 58.6"}]},"location":{"heading":"Location","note":"Approx. drive miles","items":[{"label":"Clearwater Beach","miles":9,"status":"needs_check","editor_note":"Carried over from the prior OM page, not routed"},{"label":"St. Pete-Clearwater (PIE)","miles":12,"status":"needs_check"},{"label":"Downtown St. Pete","miles":20,"status":"needs_check"},{"label":"Tampa Int'l (TPA)","miles":25,"status":"needs_check"}]},"right_column":[{"module":"income_trend_chart","heading":"Median Household Income","caption":"Indian Rocks Beach, +47% from 2017 to 2024","series_fact":"irb_mhi_trend"},{"module":"housing_occupancy_split","heading":"Housing Stock · Occupancy","facts":["irb_vacant_seasonal_share","irb_owner_share_all_units","irb_renter_share_all_units"]},{"module":"market_drivers","heading":"Market Drivers","bullets":[{"text":"Tourism is Pinellas County's top economic driver, supporting about 100,000 jobs; FY2025 was the fourth straight year above $10B of impact.","facts":["pinellas_tourism_jobs"]},{"text":"Feb-Apr 2026 bed-tax collections hit a record $36.2M, the highest ever for the high season.","facts":["pinellas_tdt_high_season_2026"]},{"text":"The nourishment project placed 2.5M+ cubic yards of sand on Sand Key (including Indian Rocks Beach), Treasure Island and Upham Beach after the 2024 storms.","facts":["pinellas_nourishment_sand"]}]}],"facts":[{"id":"irb_population","label":"Population","value":3664,"unit":"people","source_name":"U.S. Census Bureau, ACS 2020-2024 5-Year (DP05)","source_url":"https://americabynumbers.com/cities/indian-rocks-beach-florida/","as_of":"ACS 2020-2024","method":"api","status":"verified","note":"Production should pull directly from api.census.gov"},{"id":"irb_mhi","label":"Median household income","value":98611,"unit":"USD","source_name":"ACS 2020-2024 5-Year (B19013)","as_of":"ACS 2020-2024","method":"api","status":"verified"},{"id":"irb_pci","label":"Per capita income","value":74521,"unit":"USD","source_name":"ACS 2020-2024 5-Year (B19301)","as_of":"ACS 2020-2024","method":"api","status":"verified"},{"id":"irb_mhv","label":"Median home value","value":738800,"unit":"USD","source_name":"ACS 2020-2024 5-Year (B25077)","as_of":"ACS 2020-2024","method":"api","status":"verified"},{"id":"irb_owner_occ","label":"Owner-occupied share of occupied units","value":76.4,"unit":"%","source_name":"ACS 2020-2024 5-Year (DP04)","as_of":"ACS 2020-2024","method":"api","status":"verified"},{"id":"irb_vacancy","label":"Vacant share of all housing units (incl. seasonal)","value":43.3,"unit":"%","source_name":"ACS 2020-2024 5-Year (DP04)","as_of":"ACS 2020-2024","method":"api","status":"verified"},{"id":"irb_median_age","label":"Median age","value":58.6,"unit":"years","source_name":"ACS 2020-2024 5-Year (B01002)","as_of":"ACS 2020-2024","method":"api","status":"verified"},{"id":"irb_mhi_trend","label":"Median HH income by ACS 5-year release","value":{"2017":67043,"2019":71532,"2020":72303,"2021":83348,"2022":92283,"2023":98279,"2024":98611},"unit":"USD","source_name":"ACS 5-Year releases ending 2017-2024 (B19013)","source_url":"https://censusdepth.com/trends/cities/indian-rocks-beach-fl/income","method":"api","status":"verified"},{"id":"irb_vacant_seasonal_share","label":"Vacant / seasonal share of all units","value":43.3,"unit":"%","method":"calculated","formula":"irb_vacancy","status":"verified"},{"id":"irb_owner_share_all_units","label":"Owner-occupied share of all units","value":43.3,"unit":"%","method":"calculated","formula":"(100 - irb_vacancy) * irb_owner_occ / 100","status":"verified"},{"id":"irb_renter_share_all_units","label":"Renter-occupied share of all units","value":13.4,"unit":"%","method":"calculated","formula":"(100 - irb_vacancy) * (100 - irb_owner_occ) / 100","status":"verified"},{"id":"pin_mhi","label":"Pinellas median household income","value":72646,"unit":"USD","source_name":"Census QuickFacts, Pinellas County (ACS 2020-2024)","source_url":"https://www.census.gov/quickfacts/fact/table/pinellascountyflorida/PST045223","as_of":"ACS 2020-2024","method":"api","status":"verified"},{"id":"pin_pci","label":"Pinellas per capita income","value":48351,"unit":"USD","source_name":"Census QuickFacts, Pinellas County","as_of":"ACS 2020-2024","method":"api","status":"verified"},{"id":"pin_mhv","label":"Pinellas median home value","value":355100,"unit":"USD","source_name":"Census QuickFacts, Pinellas County","as_of":"ACS 2020-2024","method":"api","status":"verified"},{"id":"pin_owner_occ","label":"Pinellas owner-occupied rate","value":69.5,"unit":"%","source_name":"Census QuickFacts, Pinellas County","as_of":"ACS 2020-2024","method":"api","status":"verified"},{"id":"pin_population","label":"Pinellas population estimate","value":948563,"unit":"people","source_name":"Census Population Estimates V2025","as_of":"2025-07-01","method":"api","status":"verified"},{"id":"irb_mhi_vs_county","display_value":"+36%","method":"calculated","formula":"irb_mhi / pin_mhi - 1","status":"verified"},{"id":"irb_pci_vs_county","display_value":"+54%","method":"calculated","formula":"irb_pci / pin_pci - 1","status":"verified"},{"id":"irb_mhv_vs_county","display_value":"2.1x","method":"calculated","formula":"irb_mhv / pin_mhv","status":"verified"},{"id":"irb_owner_occ_vs_county","display_value":"+6.9 pts","method":"calculated","formula":"irb_owner_occ - pin_owner_occ","status":"verified"},{"id":"pinellas_visitors_fy2025","label":"Pinellas County visitors, FY2025","value":14929998,"display_value":"14.9M","source_name":"Visit St. Pete-Clearwater, FY2025 Destination Metrics (Dec. 2025)","source_url":"https://www.visitstpeteclearwater.com/sites/default/files/2025-12/Agenda%20Item%20V.%20b.%20Final%20December%202025%20Destination%20Metrics%20%281%29%20%281%29.pdf","as_of":"FY2025","method":"web_research","status":"verified"},{"id":"pinellas_tourism_impact_fy2025","label":"Tourism economic impact, FY2025","value":10153022423,"display_value":"$10.2B","source_name":"Visit St. Pete-Clearwater, FY2025 Destination Metrics","as_of":"FY2025","method":"web_research","status":"verified"},{"id":"pinellas_tourism_jobs","label":"Tourism jobs","value":100000,"display_value":"about 100,000","source_name":"Visit St. Pete-Clearwater press release, Jan. 21, 2026","source_url":"https://www.visitstpeteclearwater.com/press-release/tourism-drives-10-billion-economic-impact-fuels-nearly-155-million-direct-investment","method":"web_research","status":"verified"},{"id":"pinellas_high_season_visitors_2026","label":"Visitors, Feb-Apr 2026","value":4700000,"display_value":"4.7M","source_name":"Visit St. Pete-Clearwater press release, June 22, 2026","source_url":"https://www.visitstpeteclearwater.com/press-release/st-pete-clearwater-welcomed-nearly-5-million-spring-visitors-this-spring-generating","method":"web_research","status":"verified"},{"id":"pinellas_tdt_high_season_2026","label":"Bed-tax collections, Feb-Apr 2026","value":36159000,"display_value":"$36.2M","source_name":"Visit St. Pete-Clearwater press release, June 22, 2026","method":"web_research","status":"verified"},{"id":"pinellas_beach_nourishment_cost","label":"County emergency beach nourishment","value":125700000,"display_value":"$125.7M","source_name":"Pinellas County 2025 Beach Nourishment Project; FOX 13 (Feb. 9, 2026)","source_url":"https://pinellas.gov/PCBeaches","method":"web_research","status":"verified"},{"id":"pinellas_nourishment_sand","label":"Sand placed","value":2500000,"display_value":"2.5M+ cubic yards","source_name":"Pinellas County via Dredging Today (Oct. 2025)","source_url":"https://www.dredgingtoday.com/2025/10/02/update-pinellas-county-beach-nourishment-project","method":"web_research","status":"verified"}],"sources_footnote":"U.S. Census Bureau, American Community Survey 2020-2024 5-Year Estimates (Indian Rocks Beach city; Pinellas County via QuickFacts) and prior 5-year releases for the 2017-2023 income series; Census Population Estimates V2025 (county population); Visit St. Pete-Clearwater FY2025 Destination Metrics (Dec. 2025) and press releases (Jan. 21 and June 22, 2026); Pinellas County 2025 Beach Nourishment Project; WUSF and FOX 13 (Feb. 2026). Vacancy includes seasonal and recreational units. Drive distances approximate."},"zoning":{"page_type":"zoning","deal":{"name":"400 Gulf Blvd","apn":["12-30-14-42858-007-0120","12-30-14-42858-007-0070","12-30-14-78887-007-0090"],"acres":0.99},"inputs":{"jurisdiction":"City of Indian Rocks Beach","district_code":"CT","site_specific":false,"pd_documents":[],"pd_number":null,"rz_number":null,"product_types":["tourism","hospitality","multifamily"],"footer_mode":"leave_space"},"code_source":{"name":"City of Indian Rocks Beach Code of Ordinances, Ch. 110 Land Development Code","url":"https://www.zoneomics.com/code/indian-rocks-beach-FL/chapter_3","note":"Production should cite the official Municode copy and record its supplement date","retrieved_at":"2026-11-17"},"title":"CT Zoning: High Density Commercial Tourist","subtitle":"Indian Rocks Beach LDC Sec. 110-131(5) // Future Land Use: Resort Facilities High (RFH)","stat_tiles":["density","height_above_pilings","seawall_setback","gulf_blvd_setback","isr","far"],"intent":{"text":"High-density commercial tourist facilities, matched to the Countywide Plan's RFH category. Temporary lodging use of dwellings is expressly permitted; any use not listed below is prohibited.","section":"110-131(5)"},"uses":{"permitted":["Single-family detached","Two-family (duplex)","Multifamily attached","Hotels, motels, motor lodges","Planned unit development","Temporary lodging use","Bed & breakfast (Sec. 110-592)","Houses of worship"],"accessory":["Private garages","Swimming pools and cabanas","Other uses customarily incidental to a permitted or approved special exception use"],"special_exception":{"approval":"Board of Adjustment and City Commission","uses":["Public land and buildings","Essential services","Public parks and recreation","Parking lots"]},"prohibited_rule":"Any use not listed as permitted, accessory or special exception is prohibited","section":"110-131(5)"},"standards":[{"id":"density","label":"Max density","value":30,"unit":"units/acre","applies_to":"permanent dwelling units and temporary lodging","section":"110-131(5)","quote":"The maximum density is 30 units per acre for both permanent dwelling units and temporary lodging.","status":"verified"},{"id":"pilings_max","label":"Max piling height","value":10,"unit":"ft","section":"110-131(5)(g)","quote":"The maximum height of pilings is ten feet.","status":"verified"},{"id":"height_above_pilings","label":"Max building height above pilings","value":36,"unit":"ft","section":"110-131(5)(g)","quote":"The maximum height of a building above pilings is 36 feet.","status":"verified"},{"id":"seawall_setback","label":"Setback from existing seawall centerline","value":35,"unit":"ft","section":"110-131(5); 110-218","quote":"No structure or building shall be placed seaward or within 35 feet of the existing seawall.","status":"verified"},{"id":"gulf_blvd_setback","label":"Min. setback from Gulf Boulevard","value":25,"unit":"ft","section":"110-131(5)","quote":"All lots with a front, side or rear yard on Gulf Boulevard shall have a minimum of 25 feet from Gulf Boulevard.","exception":"15 ft in Blocks 3 and 4, Indian Rocks Subdivision","status":"verified"},{"id":"rear_setback","label":"Rear setback","value":{"hotel_multifamily":15,"sf_duplex_with_alley":5,"sf_duplex_no_alley":10,"north_south_street":20},"unit":"ft","section":"110-131(5)","status":"verified"},{"id":"side_setback","label":"Side setbacks","rule":{"up_to_25ft_above_pilings":"15 ft total, 7 ft min one side","over_25ft_above_pilings":"12% of building width each side, at least 7 ft one side and 15 ft total","height_stepback":"+1 ft each minimum side yard per 2 ft of height above 30 ft from grade","gulf_blvd_corner_beach_access":"25 ft on the Gulf Blvd side"},"section":"110-131(5)","quote":"for every two feet in height above 30 feet from grade, one foot shall be added to each minimum side yard","status":"verified"},{"id":"isr","label":"Max impervious surface ratio","value":0.7,"applies_to":"hotel, motel, multifamily and non-residential","section":"110-131(5); 110-155","quote":"The impervious surface ratio in the CT zone for hotel, motel, multifamily structures and non-residential uses is 0.70.","status":"verified"},{"id":"far","label":"Max floor area ratio","value":0.5,"applies_to":"hotels, motels, motor lodges and non-residential; no maximum for residential","section":"110-131(5); 110-155","status":"verified"},{"id":"min_lot_area","label":"Min lot area","rule":"SF/duplex 5,808 sf; multifamily 5,808 sf for first 4 units + 1,452 sf per added unit; min 50 ft wide x 100 ft deep","section":"110-131(5)","status":"verified"},{"id":"min_unit_size","label":"Min multifamily unit size","value":750,"unit":"sf","section":"110-131(5)","status":"verified"},{"id":"parking_mf","label":"Multifamily parking","rule":"2 spaces per 1-2 BR unit; 3 per 3+ BR unit","section":"110-372(2)","status":"verified"},{"id":"cccl","label":"Coastal Construction Control Line","rule":"No city building permit seaward of the CCCL without FDEP approval where required; no pools west of the CCCL","section":"110-218; 110-344(6)(a)","status":"verified"}],"yield":[{"label":"Max units or hotel rooms (30 u/ac)","value":29,"formula":"floor(0.99 * 30) = floor(29.7)","method":"calculated"},{"label":"Lot area test (5,808 sf + 1,452 sf/unit after 4)","value":29,"formula":"4 + floor((0.99*43560 - 5808) / 1452) = 4 + floor(25.7)","method":"calculated"},{"label":"Hotel / non-res. floor area (0.50 FAR)","value":21562,"display_value":"≈21,560 sf","formula":"0.99 * 43560 * 0.50","method":"calculated"},{"label":"Max impervious surface (0.70 ISR)","value":30187,"display_value":"≈30,190 sf","formula":"0.99 * 43560 * 0.70","method":"calculated"},{"label":"Min. multifamily unit size","display_value":"750 sf","fact":"min_unit_size"},{"label":"Parking: 1-2 BR / 3+ BR unit","display_value":"2 / 3 spaces","fact":"parking_mf"}],"diagrams":{"height_envelope":{"pilings_ft":10,"building_ft":36,"stepback_trigger_ft_from_grade":30,"stepback_rule":"+1 ft each side per 2 ft above 30 ft"},"setbacks":{"waterfront_ft":35,"waterfront_label":"35 ft from seawall","street_ft":25,"street_label":"25 ft from Gulf Blvd","sides":"side","rear_caption":"Rear yard where applicable: 15 ft hotel/multifamily; 5-10 ft single-family/duplex; 20 ft on a N/S street."},"side_yard_example":{"building_width_ft":100,"building_height_ft":46,"result":"12 ft + (16 ft / 2) = 20 ft each side"}},"flags_for_advisor":["The site plan concept in the 400 Gulf OM shows 30 condos; code math at 0.99 AC supports 29.","The site plan shows a pool on the beach side; confirm where the CCCL falls on the site."],"sources_footnote":"City of Indian Rocks Beach Code of Ordinances, Ch. 110 Land Development Code: Sec. 110-131(5) CT district, Sec. 110-155 intensity standards, Sec. 110-218 coastal construction, Sec. 110-344 pools, Sec. 110-372 off-street parking. Site area 0.99± AC across three parcels per the offering memorandum. Yields are illustrative maximums, subject to site plan review, FDEP/CCCL permitting and flood-zone requirements; confirm current code with the City before relying on these figures."}};
+function _ompFromSample(f, module){
+  return _ompFact({ id:f.id, module, label:f.label, value:f.value, unit:f.unit, displayValue:f.display_value,
+    sourceName:f.source_name, sourceUrl:f.source_url, sourceSection:f.section||f.source_section, quote:f.quote,
+    asOf:f.as_of, retrievedAt:f.retrieved_at, method:f.method||(f.section?'web_research':'api'), status:f.status,
+    editorNote:f.note||'', formula:f.formula, inputs:f.inputs });
+}
+let _ompSeedDone=false;
+async function _ompEnsureSeed(){
+  if(_ompSeedDone || typeof _fbDb==='undefined' || !_fbDb) return;
+  _ompSeedDone=true;
+  try{
+    const mp=_OMP_SEED.market_profile, z=_OMP_SEED.zoning;
+    const gk='place_'+mp.inputs.geography.state_fips+mp.inputs.geography.place_fips;
+    if(!(await _ompLibGet(_OMP.GEO, gk))){
+      await _ompLibPut(_OMP.GEO, gk, { mode:mp.inputs.geography_mode, name:mp.inputs.geography.name, geoType:mp.inputs.geography.type,
+        stateFips:mp.inputs.geography.state_fips, placeFips:mp.inputs.geography.state_fips+mp.inputs.geography.place_fips,
+        comparison:mp.inputs.comparison_geography, productTypes:mp.inputs.product_types, acsVintage:'2020-2024',
+        title:mp.title, subtitle:mp.subtitle, narrative:mp.narrative, layout:{stat_tiles:mp.stat_tiles, comparison_table:mp.comparison_table, location:mp.location, right_column:mp.right_column},
+        sourcesFootnote:mp.sources_footnote, facts:(mp.facts||[]).map(f=>_ompFromSample(f,'market')),
+        approvedBy:'Starter kit seed (400 Gulf Blvd OM)', approvedAt:Date.parse('2026-11-17T12:00:00Z'), seed:true });
+    }
+    const zk=_ompZoneKey(z.inputs.jurisdiction, z.inputs.district_code);
+    if(!(await _ompLibGet(_OMP.ZONE, zk))){
+      await _ompLibPut(_OMP.ZONE, zk, { jurisdiction:z.inputs.jurisdiction, districtCode:z.inputs.district_code, title:z.title, subtitle:z.subtitle,
+        codeSource:z.code_source, intent:z.intent, uses:z.uses, statTiles:z.stat_tiles, diagrams:z.diagrams, yieldTemplate:z.yield,
+        flags:z.flags_for_advisor, sourcesFootnote:z.sources_footnote, standards:(z.standards||[]).map(f=>_ompFromSample(f,'zoning')),
+        approvedBy:'Starter kit seed (400 Gulf Blvd OM)', approvedAt:Date.parse(z.code_source.retrieved_at+'T12:00:00Z'), retrievedAtMs:Date.parse(z.code_source.retrieved_at+'T12:00:00Z'), seed:true });
+    }
+  }catch(e){ _ompSeedDone=false; console.warn('[OMP] seed', e&&e.message); }
+}
+window._ompEnsureSeed=_ompEnsureSeed;
+// ── end OMPDATA-20261124 ──
+
 // ── Offering Memorandum Generator ─────────────────────────────────────────
 // OMLAND-20261119 — Ryan: the OM came back portrait, pages spilling into each other,
 // and the aerials showed the wrong place (304 S Willow Ave printed a suburban US-41
@@ -19698,7 +20048,7 @@ async function _valGenerateOM(opts){
   opts = (opts && typeof opts==='object' && opts.d) ? opts : null;
   if(!opts && !window._valLastResult){ showToast('Run a site research first.','error'); return; }
   // Open the window inside the click so pop-up blockers allow it; fill it when the data is in.
-  const win = (opts && opts.win && !opts.win.closed) ? opts.win : window.open('','_blank','width=1180,height=860');
+  const win = (opts && opts.win && !opts.win.closed) ? opts.win : window.open('','_blank','width=1480,height=900');
   if(!win){ showToast('Pop-up blocked — allow pop-ups to generate OM.','error'); return; }
   if(!opts) try{ win.document.write(_OM_LOADING); }catch(e){}
 
@@ -19773,7 +20123,7 @@ Rules: the CONFIRMED FACTS are authoritative — never contradict them and never
 
     _omStep(win,'Mapping surrounding retail and residential communities…');
     const surround = await surroundP;
-    _valOpenOM(d, om, {county, parcel, address, win}, {pt, center, poly, traffic, rings, wet, flood, conf, countyAcs, places, deal, surround});
+    _valOpenOM(d, om, {county, parcel, address, win}, {pt, center, poly, traffic, rings, wet, flood, conf, countyAcs, places, deal, surround, cardDeal:(opts&&opts.deal)||null});
   } catch(err){
     console.error('[OM] build failed', err);
     try{ win.document.body.innerHTML='<div style="color:#fff;font-family:Arial;padding:40px">Could not build the OM: '+String(err&&err.message||err).replace(/</g,'&lt;')+'</div>'; }catch(e){}
@@ -19865,6 +20215,44 @@ async function _omCardResearch(deal, win){
     return {d, conf, county, parcel:parcel||patch.folioNumber||''};
 }
 
+// ── Edited OM saved to the card (OMEDIT-20261124) ─────────────────────────────
+// Ryan: "we need to be able to edit the OM once generated similar to the proposal". The OM window
+// is an editor; 💾 Save stores the whole edited OM (HTML) in Storage under dealDocs/{id}/ and
+// points deal.omDoc at it. 📋 Generate OM on that card then offers to reopen it or build fresh.
+window._omSaveDoc = async function(dealId, html, pages){
+  if(typeof _fbStorage==='undefined' || !_fbStorage || !_fbFns) throw new Error('Storage not connected — reload Terra and try again');
+  const pool=[].concat(typeof allDeals!=='undefined'?allDeals:[], typeof allDealsCompany!=='undefined'?allDealsCompany:[]);
+  const deal=pool.find(x=>x&&x.id===dealId); if(!deal) throw new Error('Property not found');
+  const {ref:fbRef, uploadBytes, getDownloadURL}=_fbFns;
+  const path=`dealDocs/${dealId}/om_${Date.now()}.html`;
+  const snap=await uploadBytes(fbRef(_fbStorage, path), new Blob([html],{type:'text/html'}), {contentType:'text/html; charset=utf-8'});
+  const url=await getDownloadURL(snap.ref);
+  const by=(typeof currentUser!=='undefined'&&currentUser&&(currentUser.name||currentUser.email))||'';
+  const patch={ omDoc:{url, path, savedAt:Date.now(), savedBy:by, pages:pages||null}, updatedAt:Date.now() };
+  await Store.updateDeal(dealId, patch); Object.assign(deal, patch);
+  try{ showToast('📋 Edited OM saved to the card.','success'); }catch(e){}
+  return {when:new Date().toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'})};
+};
+// true = the saved OM was opened (caller stops); false = build a fresh one.
+async function _omReopenSaved(deal){
+  const o=deal && deal.omDoc; if(!o || !o.url) return false;
+  const when=o.savedAt?new Date(o.savedAt).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}):'';
+  const reopen=await elcConfirm(`This card has an edited OM saved${when?' on '+when:''}${o.savedBy?' by '+o.savedBy:''}. Open it to keep editing, or build a fresh OM from today's data? Building fresh keeps the saved copy until you save over it.`,
+    {title:'Saved Offering Memorandum', okLabel:'Open saved OM', cancelLabel:'Build fresh OM', danger:false, icon:'📋'});
+  if(!reopen) return false;
+  const w=window.open('','_blank','width=1480,height=900');
+  if(!w){ showToast('Pop-up blocked — allow pop-ups to open the OM.','error'); return true; }
+  try{ w.document.write(_OM_LOADING); }catch(e){}
+  try{
+    const r=await fetch(o.url); if(!r.ok) throw new Error('HTTP '+r.status);
+    const h=await r.text(); w.document.open(); w.document.write(h); w.document.close(); return true;
+  }catch(err){
+    console.warn('[OM] saved copy failed to open', err); try{ w.close(); }catch(e){}
+    showToast('Could not open the saved OM — building a fresh one.','error'); return false;
+  }
+}
+window._omReopenSaved = _omReopenSaved;
+
 async function _dealGenerateOM(dealId, btn){
   const pool=[].concat(typeof allDeals!=='undefined'?allDeals:[], typeof allDealsCompany!=='undefined'?allDealsCompany:[]);
   const deal=pool.find(x=>x&&x.id===dealId);
@@ -19873,7 +20261,8 @@ async function _dealGenerateOM(dealId, btn){
   const address=(deal.propertyAddress||'').trim();
   const parcel=String(deal.folioNumber||(Array.isArray(deal.parcelRaw)&&deal.parcelRaw[0])||'').trim();
   if(!address && !parcel){ await elcAlert('Add an address or a parcel ID to this card first, then Generate OM.'); return; }
-  const win=window.open('','_blank','width=1180,height=860');
+  if(await _omReopenSaved(deal)) return;   // OMEDIT-20261124
+  const win=window.open('','_blank','width=1480,height=900');
   if(!win){ showToast('Pop-up blocked — allow pop-ups to generate OM.','error'); return; }
   try{ win.document.write(_OM_LOADING); }catch(e){}
   const restore=(typeof elcBusy==='function' && btn) ? elcBusy(btn,'Researching…') : null;
@@ -19905,6 +20294,7 @@ function _valOpenOM(d, om, meta, data){
   const traffic=trafficAll.filter(t=>!RAMP.test(t.name)); traffic.all=trafficAll.all||trafficAll;
   const rings=data.rings||{}, cty=data.countyAcs, places=data.places||[], deal=data.deal;
   const poly=data.poly, center=data.center;
+  const cardDealId=(data.cardDeal&&data.cardDeal.id)||'';   // OMEDIT-20261124: only a card-built OM can be saved back
 
   // ── text hygiene ──
   const esc = s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -20258,12 +20648,32 @@ function _valOpenOM(d, om, meta, data){
 *{box-sizing:border-box;margin:0;padding:0;-webkit-print-color-adjust:exact;print-color-adjust:exact}
 html,body{background:#5b5e63}
 body{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:${INK}}
-.bar{position:sticky;top:0;z-index:9;background:${DARK};color:#e7e2dc;display:flex;gap:14px;align-items:center;justify-content:center;padding:10px;font-size:12px}
-.bar button{background:${RED};color:#fff;border:0;border-radius:6px;padding:9px 18px;font:700 13px Helvetica,Arial;cursor:pointer;min-height:40px}
-.bar button:focus-visible{outline:3px solid ${TEAL};outline-offset:2px}
+/* OM editor panel (OMEDIT-20261124) — same pattern as the 📝 Proposal editor */
+#omPanel{position:fixed;left:0;top:0;bottom:0;width:300px;background:#1d1a1b;color:#e7e2dc;font:13px/1.45 Helvetica,Arial,sans-serif;padding:16px 16px 120px;overflow-y:auto;z-index:20;box-shadow:2px 0 12px rgba(0,0,0,.35)}
+#omPanel h2{font:700 15px Helvetica,Arial;margin:0 0 6px;color:#fff}
+#omPanel .hint{font-size:12px;color:#bdb6ad;margin-bottom:12px}
+#omPanel fieldset{border:1px solid #3a3536;border-radius:8px;padding:8px 10px 10px;margin:0 0 12px}
+#omPanel legend{font:700 11px Helvetica,Arial;letter-spacing:.08em;text-transform:uppercase;color:#9be7df;padding:0 4px}
+#omPages label{display:flex;gap:8px;align-items:center;padding:5px 2px;border-bottom:1px solid #2c2829;cursor:pointer;min-height:32px}
+#omPages input{width:18px;height:18px;accent-color:${TEAL};flex:0 0 auto}
+#omPages .pnum{margin-left:auto;color:#8f8a84;font-size:11px}
+#omPages label.off span:first-of-type{color:#7d7771;text-decoration:line-through}
+#omPanel button{background:#3a3536;color:#fff;border:0;border-radius:6px;padding:9px 12px;font:600 13px Helvetica,Arial;cursor:pointer;min-height:42px}
+#omPanel button:focus-visible,#omPages input:focus-visible{outline:3px solid ${TEAL};outline-offset:2px}
+#omPanel button.pri{background:${RED}}#omPanel button.ok{background:${TEAL}}#omPanel button.warn{background:#7a2a1c}
+#omPanel .acts{position:fixed;left:0;bottom:0;width:300px;background:#151314;padding:10px 16px;display:flex;flex-wrap:wrap;gap:8px;border-top:1px solid #333}
+#omPanel .acts button{flex:1 1 40%}
+#omStatus{font-size:12px;color:#9be7df;min-height:16px;margin-top:4px}
+#omPagesWrap{margin-left:300px;padding:.05in 0}
+[data-ed]{outline:none;border-radius:2px}
+[data-ed]:hover{box-shadow:0 0 0 1px rgba(15,163,166,.6)}
+[data-ed]:focus{box-shadow:0 0 0 2px ${TEAL};background:rgba(15,163,166,.06)}
+.sheet.off{display:none}
+@media print{#omPanel{display:none}#omPagesWrap{margin:0;padding:0}[data-ed]{box-shadow:none!important;background:none!important}}
+@media (max-width:900px){#omPanel{position:static;width:auto;padding-bottom:16px}#omPanel .acts{position:static;width:auto;padding:10px 0 0;background:none;border:0}#omPagesWrap{margin-left:0}}
 .sheet{width:11in;height:8.5in;margin:.3in auto;background:#fff;position:relative;overflow:hidden;display:flex;flex-direction:column;padding:0 .45in .26in;box-shadow:0 6px 24px rgba(0,0,0,.35);break-after:page;page-break-after:always}
 .sheet:last-of-type{break-after:auto;page-break-after:auto}
-@media print{html,body{background:#fff}.bar{display:none}.sheet{margin:0;box-shadow:none}}
+@media print{html,body{background:#fff}.sheet{margin:0;box-shadow:none}}
 .band{flex:0 0 auto;height:.5in;margin:0 -.45in;background:url(${BAND}) center/cover;border-bottom:5px solid ${TEAL}}
 .ttl{font:600 30pt/1.05 'Crimson Text',Georgia,serif;color:${RED};margin:.12in 0 0;flex:0 0 auto}
 .sub{font:400 9pt 'Crimson Text',Georgia,serif;letter-spacing:.32em;color:#555;margin-top:.04in;flex:0 0 auto}
@@ -20376,8 +20786,16 @@ body{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:${INK}}
 .why b{display:block;color:${RED};font-weight:700}
 .adv-q{height:.95in;background:url(${BANDC}) center/cover;display:flex;align-items:center;padding:0 .55in;gap:.3in}
 .adv-q span:first-child{font:600 20pt 'Crimson Text',Georgia,serif;color:#fff}
-</style></head><body>
-<div class="bar"><span>Landscape · Letter 11 × 8.5 · ${pg} pages</span><button type="button" id="omPrint">🖨 Save as PDF / Print</button><span id="omStatus" role="status" aria-live="polite">Loading imagery…</span></div>
+</style></head><body data-deal="${esc(cardDealId)}">
+<aside id="omPanel" aria-label="Offering Memorandum editor">
+  <h2>OM editor</h2>
+  <div class="hint">Click any text on the pages to edit it (⌘Z undoes). Untick a page to leave it out; page numbers follow. This panel doesn't print.</div>
+  <fieldset><legend>Pages</legend><div id="omPages"></div></fieldset>
+  <div id="omStatus" role="status" aria-live="polite">Loading imagery…</div>
+  <div class="hint" id="omSaveHint"></div>
+  <div class="acts"><button type="button" class="ok" id="omSave" hidden>💾 Save to card</button><button type="button" id="omReset">↺ Discard edits</button><button type="button" class="pri" id="omPrint">🖨 Save as PDF</button></div>
+</aside>
+<main id="omPagesWrap">
 
 <section class="sheet cover">
   <div class="cv-top"><h1>Offering Memorandum</h1></div>
@@ -20388,10 +20806,79 @@ body{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:${INK}}
   </div>
 </section>
 ${pAerial}${pDesc}${pMarket}${pZoning}${pTraffic}${pRetail}${pResi}${pEnv}${pDemo}${pLoc}${pDisc}${pAdv}
+</main>
 
 <script>
 (function(){
   var st=document.getElementById('omStatus');
+  // ── OM editor (OMEDIT-20261124) — click-to-edit text, show/hide pages, save the edited OM to the card ──
+  var B=document.body, dealId=B.getAttribute('data-deal')||'', dirty=false, $=function(id){return document.getElementById(id)};
+  var WRAP=$('omPagesWrap'), EDSEL=['.ttl','.sub','.cv-h','.cv-a','.cv-top h1','p','li','td','th','.kv .k','.kv .v','.stats b','.stats span','.places b','.places span',
+    '.lab','.lab2 span','.sec','.cap','.note','.src','.pill','.kt','.km','.contact','.why div','.adv-card div','.adv-q span:first-child','.yh span','.yr span','.yr b',
+    '.chk','.bl','.bv','.leg div','.sur-leg span','.cmp td','.dem td'].join(',');
+  function markEditable(){
+    var chosen=[];
+    WRAP.querySelectorAll(EDSEL).forEach(function(e){
+      if(e.closest('.map,svg,.ft,.pn')) return;
+      if(chosen.some(function(c){ return c.contains(e); })) return;          // outer element already editable
+      if(!e.textContent.trim()) return;
+      chosen.push(e); e.setAttribute('contenteditable','true'); e.setAttribute('spellcheck','true'); e.setAttribute('data-ed','');
+    });
+  }
+  var original=null;
+  function pageName(s){ if(s.classList.contains('cover')) return 'Cover'; if(s.classList.contains('adv')) return 'Your Advisor'; var t=s.querySelector('.ttl'); return t?t.textContent.trim().slice(0,46):'Page'; }
+  function renumber(){
+    var n=0; [].forEach.call(WRAP.querySelectorAll('section.sheet'),function(s){ if(s.classList.contains('off')) return; n++; var p=s.querySelector('.pn'); if(p) p.textContent=n; });
+    return n;
+  }
+  function pagesList(){
+    var box=$('omPages'); box.innerHTML='';
+    [].forEach.call(WRAP.querySelectorAll('section.sheet'),function(s,i){
+      var lab=document.createElement('label'), cb=document.createElement('input'), sp=document.createElement('span'), num=document.createElement('span');
+      cb.type='checkbox'; cb.checked=!s.classList.contains('off'); sp.textContent=pageName(s); num.className='pnum';
+      if(s.classList.contains('cover')){ cb.disabled=true; cb.title='The cover always prints'; }
+      lab.className=cb.checked?'':'off'; lab.appendChild(cb); lab.appendChild(sp); lab.appendChild(num); box.appendChild(lab);
+      cb.addEventListener('change',function(){ s.classList.toggle('off',!cb.checked); lab.className=cb.checked?'':'off'; dirty=true; refresh(); });
+      sp.addEventListener('click',function(e){ if(cb.checked){ e.preventDefault(); s.scrollIntoView({behavior:'smooth',block:'start'}); } });
+    });
+    refresh();
+  }
+  function refresh(){
+    var n=renumber(), k=0;
+    [].forEach.call($('omPages').querySelectorAll('label'),function(l,i){ var s=WRAP.querySelectorAll('section.sheet')[i]; l.querySelector('.pnum').textContent=s&&!s.classList.contains('off')?(++k===1?'':String(k)):''; });
+    if(/Ready|Saved|Edited|edits/.test(st.textContent)||!st.textContent) st.textContent=(dirty?'Edited · ':'')+n+' pages · landscape 11 × 8.5';
+  }
+  function init(){
+    if(original==null) original=WRAP.innerHTML;
+    markEditable(); pagesList();
+    WRAP.addEventListener('input',function(e){ if(e.target.closest('[data-ed]')){ dirty=true; refresh(); } });
+    WRAP.addEventListener('focusout',function(e){ if(e.target.closest('[data-ed]')) fit(); });
+    WRAP.addEventListener('paste',function(e){ if(!e.target.closest('[data-ed]')) return; e.preventDefault(); var t=(e.clipboardData||window.clipboardData).getData('text/plain'); document.execCommand('insertText',false,t); });
+    var sv=$('omSave'), hint=$('omSaveHint');
+    if(dealId && window.opener && !window.opener.closed){ sv.hidden=false; hint.textContent=B.getAttribute('data-saved')?'Opened from the copy saved on the card '+B.getAttribute('data-saved')+'.':'Save keeps this edited OM on the property card; next time 📋 Generate OM offers to reopen it.'; }
+    else hint.textContent=dealId?'Terra is closed — keep this window open and print, or reopen from the card to save.':'Opened from Site Research — edits aren’t saved. Generate the OM from the property card to keep them.';
+    sv.addEventListener('click', async function(){
+      if(!window.opener||window.opener.closed||!window.opener._omSaveDoc){ st.textContent='⚠️ Terra is closed — keep this window open and reopen Terra to save.'; return; }
+      sv.disabled=true; var t=sv.textContent; sv.textContent='Saving…';
+      try{
+        var c=document.documentElement.cloneNode(true);
+        c.querySelectorAll('[data-ed]').forEach(function(e){ e.removeAttribute('contenteditable'); e.removeAttribute('data-ed'); e.removeAttribute('spellcheck'); });
+        var when=new Date().toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+        c.querySelector('body').setAttribute('data-saved', when);
+        c.querySelector('#omPages').innerHTML=''; c.querySelector('#omStatus').textContent='Loading imagery…';
+        var r=await window.opener._omSaveDoc(dealId, '<!DOCTYPE html>'+c.outerHTML, renumber());
+        dirty=false; st.textContent='✅ Saved to the card'+(r&&r.when?' · '+r.when:'')+'.';
+      }catch(err){ st.textContent='⚠️ Not saved: '+(err&&err.message||err); }
+      sv.disabled=false; sv.textContent=t;
+    });
+    var rs=$('omReset'), armed=0;
+    rs.addEventListener('click',function(){
+      if(!armed){ armed=setTimeout(function(){ armed=0; rs.textContent='↺ Discard edits'; },4000); rs.textContent='Click again to discard'; return; }
+      clearTimeout(armed); armed=0; rs.textContent='↺ Discard edits';
+      WRAP.innerHTML=original; markEditable(); pagesList(); dirty=false; fit(); st.textContent='Edits discarded.'; refresh();
+    });
+    window.addEventListener('beforeunload',function(e){ if(dirty && dealId){ e.preventDefault(); e.returnValue=''; } });
+  }
   function fit(){
     document.querySelectorAll('.bd:not([data-nofit])').forEach(function(b){
       var k=1.18; b.style.setProperty('--k',k);
@@ -20411,12 +20898,13 @@ ${pAerial}${pDesc}${pMarket}${pZoning}${pTraffic}${pRetail}${pResi}${pEnv}${pDem
   window.addEventListener('load',fit);
   window.__omFit=fit;
   document.getElementById('omPrint').addEventListener('click',function(){ fit(); setTimeout(function(){ window.print(); },60); });
+  init();
 })();
 <\/script>
 </body></html>`;
 
   let win = meta && meta.win;
-  if(!win || win.closed) win = window.open('','_blank','width=1180,height=860');
+  if(!win || win.closed) win = window.open('','_blank','width=1480,height=900');
   if(!win){ showToast('Pop-up blocked — allow pop-ups to generate OM.','error'); return; }
   win.document.open(); win.document.write(html); win.document.close();
 }
@@ -21711,6 +22199,7 @@ window.openPropertyDetail = (dealId) => {
   document.getElementById('pdw-edit-btn').onclick = () => { closePropertyDetail(); openDealModal(dealId); };
   { const prb=document.getElementById('pdw-prop-btn'); if(prb){ prb.onclick = () => window._dealGenerateProposal(dealId, prb); prb.style.display = (window._propStageOk && window._propStageOk(deal)) ? '' : 'none'; } }   // PROPGEN-20261119 — before Listing only
   { const omb=document.getElementById('pdw-om-btn'); if(omb){ omb.onclick = () => window._dealGenerateOM(dealId, omb); omb.style.display = (deal.doNotMarket ? 'none' : ''); } }   // OMCARD-20261119
+  { const nbb=document.getElementById('pdw-nb-btn'); if(nbb){ nbb.onclick = () => window._pzNeighborsFor(dealId); nbb.style.display = (window._pzNbCardOk && window._pzNbCardOk(deal)) ? '' : 'none'; } }   // NEIGHBOR-20261124
   // Show Extension button only for Listing stage
   const extBtn = document.getElementById('pdw-ext-btn');
   const isListing = /^listing$/i.test(deal.stage||'');
@@ -56265,6 +56754,7 @@ const PZ_OFFERS={
   valuation:{label:'Free property valuation', head:'What is your land worth in today’s market?', band:'COMPLIMENTARY PROPERTY VALUATION'},
   overview:{label:'Free in-person market overview', head:'What’s selling near your property?', band:'COMPLIMENTARY MARKET OVERVIEW'},
   both:{label:'Valuation or market overview — owner’s choice', head:'What is your land worth in today’s market?', band:'FREE VALUATION · MARKET OVERVIEW'},
+  neighbor:{label:'New listing — letter to neighbors', head:'', band:'JUST LISTED'},   // NEIGHBOR-20261124
 };
 const _pzEsc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const _pzNum=(v,d)=>(v==null||v===''||isNaN(v))?'—':Number(v).toLocaleString(undefined,{maximumFractionDigits:d==null?0:d});
@@ -56498,7 +56988,7 @@ function _pzRenderMap(){
   box.innerHTML=`<div class="pz-grid">
     <div class="mr-card pz-side">
       <div class="pz-modes" role="radiogroup" aria-label="How to pick parcels">
-        ${[['select','👆','Click parcels'],['draw','✏️','Draw an area'],['describe','💬','Describe it']].map(([k,i,t])=>`<button type="button" role="radio" aria-checked="${st.mode===k}" class="pz-mode ${st.mode===k?'on':''}" onclick="window._pzMode('${k}')"><span aria-hidden="true">${i}</span> ${t}</button>`).join('')}
+        ${[['select','👆','Click parcels'],['draw','✏️','Draw an area'],['describe','💬','Describe it'],['neighbors','🏘','Listing neighbors']].map(([k,i,t])=>`<button type="button" role="radio" aria-checked="${st.mode===k}" class="pz-mode ${st.mode===k?'on':''}" onclick="window._pzMode('${k}')"><span aria-hidden="true">${i}</span> ${t}</button>`).join('')}
       </div>
       <div id="pz-mode-body"></div>
       <div id="pz-results"></div>
@@ -56513,6 +57003,7 @@ window._pzMode=function(m){ const st=_pzState(); st.mode=m; if(m!=='draw') _pzSt
 function _pzHint(){ const el=document.getElementById('pz-maphint'); if(!el) return; const st=_pzState(); const z=st.map?st.map.getZoom():0;
   el.textContent= st.mode==='select' ? (z<15?'Zoom in, then click parcels to add or remove them.':'Click a parcel to add it; click again to remove it.')
     : st.mode==='draw' ? (st.drawing?'Click to add corners · double-click (or ✓ Finish) to close the area':st.poly.length>=3?'Area set — press “Get owners in this area”.':'Press ✏️ Start drawing, then click corners on the map.')
+    : st.mode==='neighbors' ? 'Pick a listing and a distance, then press 🏘 Find neighbors. The listing is outlined in red.'   // NEIGHBOR-20261124
     : 'Optional: draw an area to limit the search to it.'; }
 function _pzRenderModeBody(){
   const el=document.getElementById('pz-mode-body'); if(!el) return; const st=_pzState();
@@ -56527,6 +57018,7 @@ function _pzRenderModeBody(){
         ${st.poly.length&&!st.drawing?`<button type="button" class="mr-btn mr-btn-sm" onclick="window._pzClearPoly()">Clear area</button>`:''}</div>
       ${_pzQuickFilters()}
       <div class="pz-row"><button type="button" class="mr-btn mr-btn-teal" ${st.poly.length>=3&&!st.drawing?'':'disabled'} onclick="window._pzSearch('polygon',this)">Get owners in this area →</button></div>`;
+  } else if(st.mode==='neighbors'){ el.innerHTML=_pzNbBody();   // NEIGHBOR-20261124
   } else {
     el.innerHTML=`<label class="mr-lbl" for="pz-crit">Describe the owners you want</label>
       <textarea id="pz-crit" class="mr-textarea" rows="4" placeholder="e.g. Vacant commercial land, 5 to 20 acres, in Pasco and Hernando, owned by out-of-state owners who haven’t sold recently">${_pzEsc(st.critText||'')}</textarea>
@@ -56579,7 +57071,7 @@ async function _pzInitMap(){
   L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}',{maxZoom:20,maxNativeZoom:19,opacity:.7}).addTo(m);
   st.map=m; st.outLayer=L.layerGroup().addTo(m); st.selLayer=L.layerGroup().addTo(m); st.polyLayer=L.layerGroup().addTo(m); st.resLayer=L.layerGroup().addTo(m);
   for(const s of st.sel.values()) _pzDrawSel(s);
-  _pzDrawPoly(); _pzDrawResults();
+  _pzDrawPoly(); _pzDrawResults(); if(window._pzNbRedraw) window._pzNbRedraw();   // NEIGHBOR-20261124
   m.on('click',e=>_pzMapClick(e)); m.on('dblclick',e=>{ if(st.drawing){ window._pzFinishDraw(); try{ e.originalEvent&&L.DomEvent.stop(e.originalEvent); }catch(_){} } });
   m.on('moveend',()=>{ st.view={c:[m.getCenter().lat,m.getCenter().lng],z:m.getZoom()}; _pzHint(); _pzOutlines(); });
   _pzHint(); _pzOutlines(); setTimeout(()=>m.invalidateSize(),60);
@@ -56654,7 +57146,7 @@ function _pzRenderResults(){
   const mail=r.owners.filter(o=>!o.excluded).length; const ac=r.owners.reduce((s,o)=>s+o.totalAcres,0);
   const dName=_pzDefaultName(r);
   el.innerHTML=`<div class="pz-res" role="status">
-    <div class="pz-stats"><div><b>${r.parcels.toLocaleString()}</b><span>parcels</span></div><div><b>${r.owners.length.toLocaleString()}</b><span>owners</span></div><div><b>${mail.toLocaleString()}</b><span>mailable</span></div><div><b>${_pzNum(ac,0)}</b><span>acres</span></div></div>
+    <div class="pz-stats"><div><b>${r.parcels.toLocaleString()}</b><span>parcels</span></div><div><b>${r.owners.length.toLocaleString()}</b><span>owners</span></div><div><b>${mail.toLocaleString()}</b><span>mailable</span></div><div><b>${_pzNum(ac,0)}</b><span>acres</span></div></div>${r.note?`<div class="mr-note">${_pzEsc(r.note)}</div>`:''}
     <div class="pz-mini">${r.owners.slice(0,6).map(o=>`<div><b>${_pzEsc(o.display)}</b> <span class="mr-muted">· ${o.parcels.length>1?o.parcels.length+' parcels · ':''}${_pzNum(o.totalAcres,2)} ac${o.excluded?' · ⚠ '+_pzEsc(o.exclWhy):''}</span></div>`).join('')}${r.owners.length>6?`<div class="mr-muted">+ ${(r.owners.length-6).toLocaleString()} more</div>`:''}</div>
     <label class="mr-lbl" for="pz-listname">Save as prospect list</label>
     <input id="pz-listname" class="mr-input" value="${_pzEsc(dName)}" maxlength="80">
@@ -56663,6 +57155,7 @@ function _pzRenderResults(){
   const nm=document.getElementById('pz-listname'); nm&&nm.addEventListener('input',()=>{ const c=el.querySelector('.pz-check'); if(c) c.lastChild.textContent=` Add owners to the CRM (group “Prospecting – ${nm.value.trim()||'…'}”)`; });
 }
 function _pzDefaultName(r){
+  if(r.nb) return ('Neighbors – '+r.nb.name).slice(0,64)+' ('+_pzNbRadLabel(r.nb.radiusFt)+')';   // NEIGHBOR-20261124
   const f=r.filter||{}; const bits=[];
   if(f.uses&&f.uses.length) bits.push(f.uses.map(k=>PZ_USES[k].label.replace(/ \(.*\)/,'')).slice(0,2).join(' + '));
   if(f.minAcres!=null||f.maxAcres!=null) bits.push((f.minAcres??0)+'–'+(f.maxAcres??'+')+' ac');
@@ -56683,7 +57176,7 @@ window._pzSaveList=async function(btn){
   try{
     const listData={name, advisorUid:me.uid, advisorEmail:me.email, advisorName:me.name, createdAt:Date.now(), updatedAt:Date.now(),
       source:r.source, criteria:r.criteria||'', filter:r.filter||null, where:r.where||'', polygon:(r.poly||[]).map(p=>({lat:p[0],lng:p[1]})),
-      parcelCount:r.parcels, ownerCount:r.owners.length, mailableCount:r.owners.filter(o=>!o.excluded).length, totalAcres:Math.round(r.owners.reduce((s,o)=>s+o.totalAcres,0)), crmGroupId:'', mailed:0};
+      parcelCount:r.parcels, ownerCount:r.owners.length, mailableCount:r.owners.filter(o=>!o.excluded).length, totalAcres:Math.round(r.owners.reduce((s,o)=>s+o.totalAcres,0)), crmGroupId:'', mailed:0, ...(r.nb?{dealId:r.nb.dealId, dealName:r.nb.name, neighborRadiusFt:r.nb.radiusFt, nbCenter:r.nb.center, nbBox:r.nb.box, listingParcels:r.nb.listingPids||[]}:{})};   // NEIGHBOR-20261124
     const ref=await addDoc(collection(_fbDb,'prospectLists'), listData);
     let crm={added:0,matched:0}; let groupId='';
     if(toCrm){ try{ const out=await _pzToCrm(r.owners, name, me); crm=out; groupId=out.groupId; }catch(e){ console.warn('[pz] crm',e); showToast('List saved, but the CRM step failed: '+e.message,'warning',8000); } }
@@ -56730,7 +57223,7 @@ async function _pzRenderLists(){
   if(st.listsErr){ box.innerHTML=`<div class="pz-warn" role="alert">${_pzEsc(st.listsErr)}</div>`; return; }
   if(!st.lists.length){ box.innerHTML=`<div class="mr-card" style="padding:1.4rem"><p style="margin:0;font-weight:700;color:var(--text-1)">No prospect lists yet.</p><p class="mr-note" style="margin:.35rem 0 .8rem">Find owners on the map, then 💾 save them here.</p><button type="button" class="mr-btn mr-btn-teal" onclick="window._pzSub('map')">🗺 Find owners</button></div>`; return; }
   box.innerHTML=`<div class="mr-card" style="overflow:auto"><table class="mr-table pz-table"><thead><tr><th>List</th>${_pzIsApprover()?'<th>Advisor</th>':''}<th class="pz-num">Owners</th><th class="pz-num">Mailable</th><th class="pz-num">Acres</th><th class="pz-num">Mailed</th><th>Created</th></tr></thead><tbody>
-    ${st.lists.map(l=>`<tr class="pz-click" tabindex="0" onclick="window._pzOpenList('${l.id}')" onkeydown="if(event.key==='Enter')window._pzOpenList('${l.id}')"><td><b>${_pzEsc(l.name)}</b><div class="mr-muted">${l.source==='criteria'?'💬 '+_pzEsc((l.criteria||'').slice(0,80)):l.source==='polygon'?'✏️ Drawn area':'👆 Picked parcels'}</div></td>${_pzIsApprover()?`<td>${_pzEsc(l.advisorName||l.advisorEmail)}</td>`:''}<td class="pz-num">${_pzNum(l.ownerCount)}</td><td class="pz-num">${_pzNum(l.mailableCount)}</td><td class="pz-num">${_pzNum(l.totalAcres)}</td><td class="pz-num">${_pzNum(l.mailed||0)}</td><td>${new Date(l.createdAt).toLocaleDateString()}</td></tr>`).join('')}
+    ${st.lists.map(l=>`<tr class="pz-click" tabindex="0" onclick="window._pzOpenList('${l.id}')" onkeydown="if(event.key==='Enter')window._pzOpenList('${l.id}')"><td><b>${_pzEsc(l.name)}</b><div class="mr-muted">${l.source==='neighbors'?'🏘 Neighbors of '+_pzEsc(l.dealName||'a listing')+(l.neighborRadiusFt?' · '+_pzNbRadLabel(l.neighborRadiusFt):''):l.source==='criteria'?'💬 '+_pzEsc((l.criteria||'').slice(0,80)):l.source==='polygon'?'✏️ Drawn area':'👆 Picked parcels'}</div></td>${_pzIsApprover()?`<td>${_pzEsc(l.advisorName||l.advisorEmail)}</td>`:''}<td class="pz-num">${_pzNum(l.ownerCount)}</td><td class="pz-num">${_pzNum(l.mailableCount)}</td><td class="pz-num">${_pzNum(l.totalAcres)}</td><td class="pz-num">${_pzNum(l.mailed||0)}</td><td>${new Date(l.createdAt).toLocaleDateString()}</td></tr>`).join('')}
   </tbody></table></div>`;
 }
 window._pzOpenList=function(id){ const st=_pzState(); st.listId=id; st.owners=null; st.ownerQ=''; st.ownerShow=100; st.sub='list'; viewProspecting(); };
@@ -56819,6 +57312,7 @@ window._pzMwHoldings=async function(id,btn){
 
 /* ---------- 📮 postcard ---------- */
 function _pzCardDefaults(offer, me){
+  if(offer==='neighbor') return _pzNbCardDefaults(me);   // NEIGHBOR-20261124
   const first=(me.name||'').split(' ')[0]||'I';
   const what=offer==='overview'?'an in-person overview of what land like yours is selling for'
     :offer==='both'?'a complimentary valuation of {{property}} — or, if you prefer, an in-person overview of what’s selling near you'
@@ -56827,6 +57321,7 @@ function _pzCardDefaults(offer, me){
     message:`I’m ${first}, a land advisor with Eshenbaugh Land Company. We work on land sales across Tampa Bay and the I-4 Corridor every day, and I’d like to offer you ${what}${offer==='overview'?' — {{property}} included':''}. No cost and no obligation — just call or text me.`};
 }
 function _pzCardHtml(side, c, adv, preview){
+  if(c&&c.offer==='neighbor') return _pzNbCardHtml(side, c, adv, preview);   // NEIGHBOR-20261124
   const esc=_pzEsc; const logo=_pzCfg().logoUrl||'https://terra.dirtdog.com/esh/assets/logo.png'; const ret=_pzCfg().returnAddress||{line1:'304 S. Willow Ave.',city:'Tampa',state:'FL',zip:'33606'};
   const mv=s=>preview?String(s).replace(/\{\{greeting\}\}/g,preview.greeting).replace(/\{\{property\}\}/g,preview.property):String(s);   // escaped once, by esc() at the call site
   const base=`<style>@page{margin:0}*{box-sizing:border-box}html,body{margin:0;padding:0;width:9.25in;height:6.25in;font-family:Arial,Helvetica,sans-serif;color:#0A0A0A;-webkit-print-color-adjust:exact}</style>`;
@@ -56868,13 +57363,13 @@ window._pzPostcard=function(){
   const me=_pzMe(); const adv=me.bio||{}; const owners=(st.owners||[]).filter(o=>!o.excluded&&o.mail&&o.mail.ok);
   if(owners.length>PZ_MAIL_MAX){ showToast(`One mailing can hold ${PZ_MAIL_MAX.toLocaleString()} cards — uncheck some owners first`,'warning',7000); return; }
   const recent=owners.filter(o=>o.mailedAt&&Date.now()-o.mailedAt<60*864e5).length;
-  st.card=_pzCardDefaults('valuation', me); st.cardOwners=owners;
+  st.nbCardDeal=l.dealId||st.nbCardDeal||''; st.card=_pzCardDefaults(l.dealId?'neighbor':'valuation', me); st.cardOwners=owners;   // NEIGHBOR-20261124 — a neighbors list opens on the neighbor card
   const ov=document.createElement('div'); ov.id='pz-pc-ov'; ov.className='mr-ov fixed inset-0 flex items-center justify-center';
   ov.innerHTML=`<div class="mr-modal pz-pc" role="dialog" aria-modal="true" aria-label="Postcard mailing" style="width:min(1100px,100%)"><div class="mr-modal-h"><h2>📮 Postcards — ${_pzEsc(l.name)}</h2><button type="button" class="mr-x" style="margin-left:auto" aria-label="Close" onclick="document.getElementById('pz-pc-ov').remove()">✕</button></div>
     <div class="mr-modal-b pz-pc-b"><div class="pz-pc-form">
       ${!adv.headshotUrl||!adv.phone?`<div class="pz-warn">Your 👤 Bio is missing ${[!adv.headshotUrl&&'a headshot',!adv.phone&&'a phone number'].filter(Boolean).join(' and ')} — the card prints without it. Fix it in 👤 My Bio first for best results.</div>`:''}
-      <label class="mr-lbl">Offer</label>${Object.entries(PZ_OFFERS).map(([k,v])=>`<label class="pz-check"><input type="radio" name="pz-offer" value="${k}" ${k==='valuation'?'checked':''} onchange="window._pzCardOffer(this.value)"> ${_pzEsc(v.label)}</label>`).join('')}
-      <label class="mr-lbl" for="pz-pc-h">Front headline</label><input id="pz-pc-h" class="mr-input" maxlength="70" value="${_pzEsc(st.card.headline)}" oninput="window._pzCardEdit()">
+      <label class="mr-lbl">Offer</label>${Object.entries(PZ_OFFERS).map(([k,v])=>`<label class="pz-check"><input type="radio" name="pz-offer" value="${k}" ${k===st.card.offer?'checked':''} onchange="window._pzCardOffer(this.value)"> ${_pzEsc(v.label)}</label>`).join('')}
+      ${_pzNbCardPicker()}<label class="mr-lbl" for="pz-pc-h">Front headline</label><input id="pz-pc-h" class="mr-input" maxlength="70" value="${_pzEsc(st.card.headline)}" oninput="window._pzCardEdit()">
       <label class="mr-lbl" for="pz-pc-m">Message <span class="mr-muted">({{property}} becomes e.g. “your 5.3 acres on Dream Falls in Wesley Chapel”)</span></label><textarea id="pz-pc-m" class="mr-textarea" rows="7" maxlength="520" oninput="window._pzCardEdit()">${_pzEsc(st.card.message)}</textarea>
       <div class="pz-sumbox"><div><b>${owners.length.toLocaleString()}</b> postcards · 6×9 · First-Class</div><div class="mr-muted">${(st.owners.length-owners.length).toLocaleString()} owners left off (unchecked or foreign/incomplete address)${recent?` · ⚠ ${recent} were mailed in the last 60 days`:''}</div>
         <div class="mr-muted">Nothing mails until an admin approves it. You’ll see it under 📮 Mailings.</div></div>
@@ -56883,7 +57378,7 @@ window._pzPostcard=function(){
       <div class="pz-row"><label class="mr-muted" for="pz-pc-who">Preview as</label><select id="pz-pc-who" class="mr-select" onchange="window._pzCardEdit()">${owners.slice(0,25).map((o,i)=>`<option value="${i}">${_pzEsc(o.display)}</option>`).join('')}</select></div></div></div></div>`;
   ov.addEventListener('click',e=>{ if(e.target===ov) ov.remove(); }); document.body.appendChild(ov); window._pzCardEdit();
 };
-window._pzCardOffer=function(k){ const st=_pzState(); const me=_pzMe(); st.card=_pzCardDefaults(k,me); document.getElementById('pz-pc-h').value=st.card.headline; document.getElementById('pz-pc-m').value=st.card.message; window._pzCardEdit(); };
+window._pzCardOffer=function(k){ const st=_pzState(); const me=_pzMe(); st.card=_pzCardDefaults(k,me); document.getElementById('pz-pc-h').value=st.card.headline; document.getElementById('pz-pc-m').value=st.card.message; if(window._pzNbAfterOffer) window._pzNbAfterOffer(k); window._pzCardEdit(); };
 window._pzCardEdit=function(){
   const st=_pzState(); const h=document.getElementById('pz-pc-h'); if(!h) return; st.card.headline=h.value; st.card.message=document.getElementById('pz-pc-m').value;
   const i=Number((document.getElementById('pz-pc-who')||{}).value||0); const o=st.cardOwners[i]||{greeting:'Property Owner',parcels:[],counties:[]};
@@ -56899,6 +57394,7 @@ window._pzCardPrint=function(){
 };
 window._pzSubmitMailing=async function(btn){
   const st=_pzState(); const l=(st.lists||[]).find(x=>x.id===st.listId); if(!l) return; const me=_pzMe(); const adv=me.bio||{};
+  if(st.card.offer==='neighbor'){ const nd=_pzNbDeal(st.card.dealId); if(!nd){ showToast('Pick the listing for the neighbor card first','warning'); return; } if(typeof _dnmGuard==='function'&&_dnmGuard(nd,'neighbor postcards')) return; }   // NEIGHBOR-20261124
   if(!/\{\{property\}\}/.test(st.card.message) && !await elcConfirm('The message doesn’t mention {{property}} — send it without naming each owner’s property?',{title:'No property mention',okLabel:'Send as is'})) return;
   const front=_pzCardHtml('front',st.card,adv,null), back=_pzCardHtml('back',st.card,adv,null);
   if(front.length>9800||back.length>9800){ showToast('The card is too long for the mail house (10,000 characters a side) — shorten the message','error',8000); return; }
@@ -56906,7 +57402,7 @@ window._pzSubmitMailing=async function(btn){
   const done=elcBusy(btn,'Submitting…'); const {collection,addDoc,doc,updateDoc}=_fbFns;
   try{
     const data={listId:l.id, listName:l.name, advisorUid:me.uid, advisorEmail:me.email, advisorName:me.name, createdAt:Date.now(), updatedAt:Date.now(),
-      status:'pending_approval', count:recips.length, size:'6x9', mailType:'usps_first_class', offer:st.card.offer, headline:st.card.headline, message:st.card.message,
+      status:'pending_approval', count:recips.length, size:'6x9', mailType:'usps_first_class', offer:st.card.offer, dealId:st.card.dealId||'', headline:st.card.headline, message:st.card.message,
       front, back, recipients:recips, results:{}, sentCount:0, failedCount:0};
     const ref=await addDoc(collection(_fbDb,'prospectMailings'), data);
     try{ const tId=await _pzApprovalTask(ref.id, data); if(tId) await updateDoc(doc(_fbDb,'prospectMailings',ref.id),{taskId:tId}); }catch(e){ console.warn('[pz] task',e); }
@@ -56925,6 +57421,240 @@ async function _pzApprovalTask(mailingId, m){
     createdBy:currentUser.uid, createdByName:currentUser.name||'', createdAt:Date.now(), updatedAt:Date.now()});
   return r.id;
 }
+
+/* =======================================================
+   🏘 NEIGHBOR POSTCARDS — marker NEIGHBOR-20261124
+   Ryan (2026-11-24): "add a surrounding neighbor postcard, so that we can mail a new listing to the surrounding
+   neighbors. It should pull the info from the listing card and then say a simple message along the lines of dear
+   neighbor, I wanted to let you know we listed the neighboring parcel. Should you have any interest in buying it or
+   possibly selling your land, we would welcome a conversation." Example given: the Gulfport – Shore Blvd Assemblage card
+   (red title band + address, aerial, teal SALE PRICE badge, red advisor footer with the logo).
+   • 🗺 Find owners → 🏘 Listing neighbors: pick an active listing + a distance. The listing's outline comes from the card
+     (_mbParcelRings — parcel IDs, else the exact street address) or from parcels the advisor clicked. Every FDOR parcel
+     within that distance of the outline is pulled (Terra buffers the outline — the FDOR server can't); the listing's own parcels and everything its
+     owner holds in the results are left off. Saved as a normal prospect list carrying dealId.
+   • 📮 Postcards → "New listing — neighbors": the listing facts are baked into the card HTML (same on every card); only
+     {{greeting}} and {{property}} merge per owner, so the /postcards worker needs no change.
+   • 🏘 Mail neighbors button on active listing cards. DO NOT MARKET listings can't be picked, searched or mailed.
+   ======================================================= */
+const PZ_NB_RADII=[[300,'300 ft'],[500,'500 ft'],[1000,'1,000 ft'],[1320,'¼ mile'],[2640,'½ mile'],[5280,'1 mile']];
+function _pzNbRadLabel(ft){ const r=PZ_NB_RADII.find(x=>x[0]===Number(ft)); return r?r[1]:(Number(ft||0).toLocaleString()+' ft'); }
+function _pzNbDeal(id){ return id?(((typeof allDeals!=='undefined'&&allDeals)||[]).find(d=>d&&d.id===id)||null):null; }
+function _pzNbName(d){ if(!d) return ''; let t=''; try{ t=typeof _llrTitle==='function'?_llrTitle(d):''; }catch(_){} return String(d.projectName||'').trim()||t||String(d.propertyAddress||'').split(',')[0]||'Listing'; }
+function _pzNbMine(d){ try{ return typeof isDealAdvisor==='function'?!!isDealAdvisor(d,currentUser.uid):d.advisorUid===currentUser.uid; }catch(_){ return false; } }
+function _pzNbIsListing(d){ return !!(d && d.id && typeof _mrIsActiveListing==='function' && _mrIsActiveListing(d)); }
+function _pzNbListings(){
+  return ((typeof allDeals!=='undefined'&&allDeals)||[]).filter(_pzNbIsListing)
+    .map(d=>({d, mine:_pzNbMine(d), dnm:!!d.doNotMarket, uc:!!(typeof _mrUnderContract==='function'&&_mrUnderContract(d))}))
+    .sort((a,b)=>(b.mine-a.mine)||(a.uc-b.uc)||_pzNbName(a.d).localeCompare(_pzNbName(b.d)));
+}
+function _pzNbOptions(sel){
+  return `<option value="">Choose a listing…</option>`+_pzNbListings().map(r=>`<option value="${_pzEsc(r.d.id)}" ${r.d.id===sel?'selected':''} ${r.dnm?'disabled':''}>${r.mine?'⭐ ':''}${_pzEsc(_pzNbName(r.d))}${r.uc?' (under contract)':''}${r.dnm?' — 🚫 DO NOT MARKET':''}</option>`).join('');
+}
+// window._pzNbCardOk(deal) — does the property card show 🏘 Mail neighbors?
+window._pzNbCardOk=function(d){ return !!(currentUser && _pzNbIsListing(d) && !d.doNotMarket && _pzCanAccess()); };
+
+/* ---------- pure geometry helpers (unit-tested in neighbor_patch/test) ---------- */
+function _pzNbInRings(x,y,rings){ let inside=false; (rings||[]).forEach(r=>{ for(let i=0,j=r.length-1;i<r.length;j=i++){ const xi=r[i][0],yi=r[i][1],xj=r[j][0],yj=r[j][1]; if(((yi>y)!==(yj>y)) && (x<(xj-xi)*(y-yi)/((yj-yi)||1e-12)+xi)) inside=!inside; } }); return inside; }
+function _pzNbBox(rings){ const b={xmin:180,ymin:90,xmax:-180,ymax:-90}; (rings||[]).forEach(r=>r.forEach(p=>{ b.xmin=Math.min(b.xmin,p[0]); b.xmax=Math.max(b.xmax,p[0]); b.ymin=Math.min(b.ymin,p[1]); b.ymax=Math.max(b.ymax,p[1]); })); return b; }
+function _pzNbBoxAround(lat,lng,halfWm,aspect){ const dLng=halfWm/(111320*Math.cos(lat*Math.PI/180)), dLat=halfWm/(aspect||1)/111320; return {xmin:lng-dLng,xmax:lng+dLng,ymin:lat-dLat,ymax:lat+dLat}; }
+// The FDOR layer is stored in Florida Albers (6439), which its server can't buffer (distance queries fail with SRID 24204),
+// so Terra buffers itself: convex hull of the listing outline, grown by the distance (24-sided circles at each corner,
+// circumscribed so nothing inside the distance is missed). Returns [[lat,lng],…] for the normal area query.
+function _pzNbHull(P){ P=P.slice().sort((a,b)=>a[0]-b[0]||a[1]-b[1]); if(P.length<3) return P; const cr=(o,a,b)=>(a[0]-o[0])*(b[1]-o[1])-(a[1]-o[1])*(b[0]-o[0]); const lo=[],up=[];
+  for(const p of P){ while(lo.length>=2&&cr(lo[lo.length-2],lo[lo.length-1],p)<=0) lo.pop(); lo.push(p); }
+  for(let i=P.length-1;i>=0;i--){ const p=P[i]; while(up.length>=2&&cr(up[up.length-2],up[up.length-1],p)<=0) up.pop(); up.push(p); }
+  return lo.slice(0,-1).concat(up.slice(0,-1)); }
+function _pzNbBuffer(rings, ft){
+  const pts=[].concat(...(rings||[])); if(!pts.length) return [];
+  const lat0=pts.reduce((s,p)=>s+p[1],0)/pts.length; const kx=111320*Math.cos(lat0*Math.PI/180), ky=110574; const r=Math.max(0,Number(ft)||0)*0.3048/Math.cos(Math.PI/24);
+  const cloud=[]; _pzNbHull(pts.map(p=>[p[0]*kx,p[1]*ky])).forEach(([x,y])=>{ for(let i=0;i<24;i++){ const t=i*Math.PI/12; cloud.push([x+r*Math.cos(t), y+r*Math.sin(t)]); } });
+  return _pzNbHull(cloud).map(([x,y])=>[y/ky, x/kx]); }
+function _pzNbEsri(svc, b, w, h){ return `https://server.arcgisonline.com/ArcGIS/rest/services/${svc}/MapServer/export?bbox=${[b.xmin,b.ymin,b.xmax,b.ymax].map(v=>Number(v).toFixed(6)).join(',')}&bboxSR=4326&imageSR=3857&size=${w},${h}&format=jpg&f=image`; }
+function _pzNbShortLink(u){ return String(u||'').replace(/^https?:\/\/(www\.)?/i,'').replace(/[?#].*$/,'').replace(/\/$/,'').slice(0,46); }
+function _pzNbMoney(n){ n=Number(n); return n?'$'+Math.round(n).toLocaleString('en-US'):''; }
+
+/* ---------- listing facts from the card ---------- */
+function _pzNbFacts(d, list){
+  if(!d) return {};
+  const f=(fn,...a)=>{ try{ return typeof fn==='function'?fn(...a):''; }catch(_){ return ''; } };
+  const ask=Number(f(typeof _llrAskingPrice!=='undefined'?_llrAskingPrice:null, d))||0; const lease=d.dealType==='lease';
+  const pin=f(typeof _llrPinOf!=='undefined'?_llrPinOf:null, d)||null;
+  let lat=pin&&pin.precision==='exact'?pin.lat:null, lng=pin&&pin.precision==='exact'?pin.lng:null, halfM=220;
+  if(list && list.nbCenter && list.nbCenter.lat){ lat=list.nbCenter.lat; lng=list.nbCenter.lng; }
+  if(list && list.nbBox && lat){ const b=list.nbBox; const w=Math.max((b.xmax-b.xmin)*111320*Math.cos(lat*Math.PI/180),(b.ymax-b.ymin)*111320*2.7); halfM=Math.max(150,Math.min(1500,w*0.85)); }
+  return {dealId:d.id, name:_pzNbName(d), address:String(d.propertyAddress||d.address||'').trim(),
+    street:String(f(typeof _llrStreet!=='undefined'?_llrStreet:null,d)||''), city:String(f(typeof _llrCity!=='undefined'?_llrCity:null,d)||''),
+    acres:String(f(typeof _llrAcres!=='undefined'?_llrAcres:null,d)||''), zoning:String(d.zoning||'').trim().replace(/^zoned\s+/i,''),
+    ask, lease, priceBadge:lease?'FOR LEASE':ask?'SALE PRICE: '+_pzNbMoney(ask):'CONTACT ADVISOR FOR PRICING',
+    link:String(f(typeof _llrLink!=='undefined'?_llrLink:null,d)||''), photo:String(f(typeof _llrPhoto!=='undefined'?_llrPhoto:null,d)||''),
+    lat, lng, halfM:Math.round(halfM)};
+}
+function _pzNbMessage(me, L){
+  const first=(me.name||'').split(' ')[0]||'I';
+  const desc=[L.acres?L.acres+' acres':'', L.street?'at '+L.street:''].filter(Boolean).join(' ');   // the owner's own phrase already names the town
+  const price=L.lease?'available for lease':L.ask?'offered at '+_pzNbMoney(L.ask):'';
+  return `I’m ${first} with Eshenbaugh Land Company, and I wanted to let you know we just listed the land near {{property}}${desc?' — '+desc+(price?', '+price:''):''}. As a neighbor, you’re one of the first to hear about it. Should you have any interest in buying it, or possibly selling your own land, we would welcome a conversation. Call or text me anytime.`;
+}
+function _pzNbCardDefaults(me){
+  const st=_pzState(); const l=(st.lists||[]).find(x=>x.id===st.listId)||null; const d=_pzNbDeal(st.nbCardDeal);
+  if(!d || d.doNotMarket) return {offer:'neighbor', dealId:'', headline:'', message:'', listing:{}};
+  const L=_pzNbFacts(d, l&&l.dealId===d.id?l:null);
+  return {offer:'neighbor', dealId:d.id, headline:L.name, message:_pzNbMessage(me,L), listing:L};
+}
+function _pzNbFactsLine(L){
+  if(!L||!L.dealId) return 'Pick the listing — its name, address, price, acreage, zoning, photo and website come from the card.';
+  return [L.acres?L.acres+' ac':'', L.zoning?'Zoned '+L.zoning:'', L.priceBadge, L.photo?'📷 card photo':(L.lat?'📷 no card photo — satellite view used':'📷 no card photo or location — add one to the card'), L.link?'🔗 '+_pzNbShortLink(L.link):''].filter(Boolean).join(' · ');
+}
+
+/* ---------- the card (Lob 6×9 with bleed: 9.25 × 6.25 in) ---------- */
+function _pzNbCardHtml(side, c, adv, preview){
+  const esc=_pzEsc; const L=c.listing||{}; const logo=_pzCfg().logoUrl||'https://terra.dirtdog.com/esh/assets/logo.png'; const ret=_pzCfg().returnAddress||{line1:'304 S. Willow Ave.',city:'Tampa',state:'FL',zip:'33606'};
+  const mv=s=>preview?String(s).replace(/\{\{greeting\}\}/g,preview.greeting).replace(/\{\{property\}\}/g,preview.property):String(s);
+  const base=`<style>@page{margin:0}*{box-sizing:border-box}html,body{margin:0;padding:0;width:9.25in;height:6.25in;font-family:Arial,Helvetica,sans-serif;color:#0A0A0A;-webkit-print-color-adjust:exact}</style>`;
+  if(side==='front'){
+    const t=String(mv(c.headline||L.name||'')).toUpperCase(); const fs=t.length>46?17:t.length>38?20:t.length>30?25:30;
+    const photo=L.photo||(L.lat?_pzNbEsri('World_Imagery',_pzNbBoxAround(L.lat,L.lng,L.halfM||220,2.78),1600,576):'');
+    const ph=[adv.directLine?'D. '+adv.directLine:'', adv.cell&&adv.cell!==adv.directLine?'M. '+adv.cell:''].filter(Boolean); if(!ph.length&&adv.phone) ph.push(adv.phone);
+    return `<html><head><meta charset="utf-8">${base}<style>
+.f{position:relative;width:9.25in;height:6.25in;overflow:hidden;background:#fff}
+.hd{position:absolute;left:0;top:0;width:9.25in;height:1.5in;background:#DA291C;color:#fff}
+.bk{position:absolute;left:0;width:.42in;background:#111}
+.t{position:absolute;left:.72in;right:.45in;top:.36in;font-size:${fs}pt;letter-spacing:.04em;line-height:1.1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.a{position:absolute;left:.72in;right:.45in;top:1.0in;font-size:12.5pt;letter-spacing:.13em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.r{position:absolute;left:0;width:9.25in;height:.08in;background:#00B2A9}
+.ph{position:absolute;left:0;top:1.58in;width:9.25in;height:3.22in;object-fit:cover;background:#cfd8d6}
+.tag{position:absolute;left:.72in;top:1.8in;background:#fff;color:#DA291C;font-weight:bold;font-size:11pt;letter-spacing:.12em;padding:.06in .14in;border-radius:.04in}
+.pr{position:absolute;left:.72in;top:4.3in;background:#00B2A9;color:#fff;font-weight:bold;font-size:14pt;padding:.08in .18in}
+.ft{position:absolute;left:0;top:4.88in;width:9.25in;height:1.37in;background:#DA291C;color:#fff}
+.nm{position:absolute;left:.72in;top:.2in;font-weight:bold;font-size:11pt;letter-spacing:.1em}
+.ln{position:absolute;left:.72in;top:.44in;font-size:9.5pt;letter-spacing:.05em;line-height:1.35}
+.lg{position:absolute;right:.45in;top:.2in;background:#fff;border-radius:.08in;padding:.05in .14in}.lg img{height:.8in;display:block}
+</style></head><body><div class="f">
+<div class="hd"><div class="t">${esc(t)}</div>${L.address?`<div class="a">${esc(L.address.toUpperCase())}</div>`:''}</div><div class="bk" style="top:0;height:1.5in"></div><div class="r" style="top:1.5in"></div>
+${photo?`<img class="ph" src="${esc(photo)}" alt="">`:'<div class="ph"></div>'}<div class="tag">JUST LISTED</div>${L.priceBadge?`<div class="pr">${esc(L.priceBadge)}</div>`:''}<div class="r" style="top:4.8in"></div>
+<div class="ft"><div class="nm">${esc(String(adv.nameWithDesignations||adv.name||'').toUpperCase())}</div><div class="ln">${esc(adv.title||'Advisor')}${ph.map(x=>'<br>'+esc(x)).join('')}${adv.email?'<br>'+esc(adv.email):''}</div><div class="lg"><img src="${esc(logo)}" alt="Eshenbaugh Land Company"></div></div><div class="bk" style="top:4.88in;height:1.37in"></div>
+</div></body></html>`;
+  }
+  const hl=[L.acres?L.acres+' ± acres':'', L.zoning?'Zoned '+L.zoning:'', L.lease?'Available for lease':L.ask?'Offered at '+_pzNbMoney(L.ask):'Contact me for pricing', L.link?_pzNbShortLink(L.link):''].filter(Boolean);
+  const map=L.lat?_pzNbEsri('World_Street_Map',_pzNbBoxAround(L.lat,L.lng,1400,3.7/2.6),740,520):'';
+  const photo=adv.headshotUrl?`<img class="hp" src="${esc(adv.headshotUrl)}" alt="">`:'';
+  return `<html><head><meta charset="utf-8">${base}<style>
+.b{position:relative;width:9.25in;height:6.25in;overflow:hidden;background:#fff}
+.l{position:absolute;left:.45in;top:.4in;width:4.45in;height:5.45in}
+.dear{font-family:Georgia,serif;font-size:13pt;font-weight:bold;margin:0 0 .06in}
+.msg{font-size:10.5pt;line-height:1.38;margin:0}
+.hh{color:#DA291C;font-weight:bold;font-size:10pt;letter-spacing:.08em;margin:.14in 0 .03in}
+.hl{margin:0;padding-left:.2in;font-size:10pt;line-height:1.36}
+.who{position:absolute;left:0;bottom:.55in;width:4.45in;height:1.05in;border-top:3px solid #00B2A9;padding-top:.12in}
+.hp{float:left;width:.85in;height:.85in;border-radius:50%;object-fit:cover;margin-right:.14in;border:2px solid #DA291C}
+.nm{font-size:12pt;font-weight:bold}.tt{font-size:9.5pt;color:#333}.ct{font-size:10.5pt;font-weight:bold;color:#DA291C;margin-top:.03in}.em{font-size:9.5pt}
+.ft{position:absolute;left:0;bottom:0;width:4.45in;font-size:7pt;line-height:1.3;color:#444}
+.mp{position:absolute;left:5.1in;top:.4in;width:3.7in;height:2.6in;border:1px solid #bbb;overflow:hidden;background:#eef1f0}.mp img{width:100%;height:100%;object-fit:cover;display:block}
+.pin{position:absolute;left:50%;top:50%;width:.26in;height:.26in;margin:-.13in 0 0 -.13in;border-radius:50%;background:#00B2A9;border:3px solid #fff;box-shadow:0 0 0 2px #DA291C}
+.cap{position:absolute;left:0;right:0;bottom:0;background:#DA291C;color:#fff;font-size:8.5pt;font-weight:bold;letter-spacing:.06em;padding:.05in .1in;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+</style></head><body><div class="b"><div class="l">
+<p class="dear">Dear ${preview?esc(preview.greeting):'{{greeting}}'},</p><p class="msg">${esc(mv(c.message))}</p>
+${hl.length?`<div class="hh">PROPERTY HIGHLIGHTS</div><ul class="hl">${hl.map(x=>'<li>'+esc(x)+'</li>').join('')}</ul>`:''}
+<div class="who">${photo}<div class="nm">${esc(adv.nameWithDesignations||adv.name)}</div><div class="tt">${esc(adv.title||'Advisor')}, Eshenbaugh Land Company</div><div class="ct">${esc(adv.phone||'')}</div><div class="em">${esc(adv.email||'')}</div></div>
+<div class="ft">Eshenbaugh Land Company · ${esc(ret.line1)}, ${esc(ret.city)}, ${esc(ret.state)} ${esc(ret.zip)} · thedirtdog.com<br>If your property is listed with a broker, please disregard — this is not a solicitation of listed property.</div>
+</div>${map?`<div class="mp"><img src="${esc(map)}" alt=""><div class="pin"></div><div class="cap">${esc(String(c.headline||L.name||'').toUpperCase())}</div></div>`:''}</div></body></html>`;
+}
+
+/* ---------- 🗺 Find owners → 🏘 Listing neighbors ---------- */
+function _pzNbBody(){
+  const st=_pzState(); const nb=st.nb||{}; const sel=st.nbDealId||''; const rad=st.nbRad||500;
+  if(!_pzNbListings().length) return `<p class="mr-note">No active listings on the board right now.</p>`;
+  return `<p class="mr-note">Mail the owners around one of our listings. Terra outlines the listing from its card (parcel ID, else its street address), then pulls every parcel within the distance you pick. The listing itself and its owner are left off.</p>
+    <label class="mr-lbl" for="pz-nb-deal">Listing</label>
+    <select id="pz-nb-deal" class="mr-select" onchange="window._pzNbPick(this.value)">${_pzNbOptions(sel)}</select>
+    <label class="mr-lbl" for="pz-nb-rad">Distance from the listing’s boundary</label>
+    <select id="pz-nb-rad" class="mr-select" onchange="window._pzState().nbRad=Number(this.value)">${PZ_NB_RADII.map(([v,t])=>`<option value="${v}" ${v===rad?'selected':''}>${t}</option>`).join('')}</select>
+    ${st.sel.size?`<label class="pz-check"><input type="checkbox" class="mr-check" id="pz-nb-usesel" ${st.nbUseSel?'checked':''} onchange="window._pzState().nbUseSel=this.checked"> Use the ${st.sel.size} parcel${st.sel.size===1?'':'s'} I clicked as the listing</label>`:''}
+    <details class="pz-adv" ${st.nbFilter&&Object.keys(st.nbFilter).some(k=>k!=='uses'||(st.nbFilter.uses||[]).length)?'open':''}><summary>Filters (optional)</summary>${_pzFilterForm(st.nbFilter||{},'n')}</details>
+    ${nb.msg?`<div class="${nb.err?'pz-warn':'mr-note'}" role="${nb.err?'alert':'status'}">${_pzEsc(nb.msg)}</div>`:''}
+    <div class="pz-row"><button type="button" class="mr-btn mr-btn-teal" onclick="window._pzNbFind(this)" ${sel?'':'disabled'}>🏘 Find neighbors →</button></div>`;
+}
+function _pzNbSaveForm(){ const st=_pzState(); if(document.getElementById('pz-n-minAcres')) st.nbFilter=_pzReadForm('n',{}); const r=document.getElementById('pz-nb-rad'); if(r) st.nbRad=Number(r.value)||st.nbRad; }
+window._pzNbPick=function(id){
+  const st=_pzState(); _pzNbSaveForm(); st.nbDealId=id; st.nb={}; st.nbRings=null; st.nbBuf=null; if(st.nbLayer) st.nbLayer.clearLayers(); _pzRenderModeBody();
+  const d=_pzNbDeal(id); let p=null; try{ p=typeof _llrPinOf==='function'?_llrPinOf(d):null; }catch(_){}
+  if(p && st.map) st.map.setView([p.lat,p.lng],16);
+};
+function _pzNbDraw(){
+  const st=_pzState(); if(!st.map) return;
+  if(!st.nbLayer || !st.map.hasLayer(st.nbLayer)) st.nbLayer=L.layerGroup().addTo(st.map);
+  st.nbLayer.clearLayers(); if(!st.nbRings||!st.nbRings.length) return;
+  if(st.nbBuf&&st.nbBuf.length>=3) L.polygon(st.nbBuf,{color:'#DA291C',weight:2,dashArray:'6 5',fill:false,interactive:false}).addTo(st.nbLayer);
+  L.featureGroup(st.nbRings.map(r=>L.polygon(r.map(p=>[p[1],p[0]]),{color:'#DA291C',weight:4,fillColor:'#DA291C',fillOpacity:.25,interactive:true}))).bindTooltip('🏘 '+_pzEsc(_pzNbName(_pzNbDeal(st.nbDealId))||'Listing'),{sticky:true}).addTo(st.nbLayer);
+}
+window._pzNbRedraw=function(){ try{ if(_pzState().mode==='neighbors') _pzNbDraw(); }catch(_){} };
+window._pzNbFind=async function(btn){
+  const st=_pzState(); const d=_pzNbDeal(st.nbDealId); if(!d){ showToast('Pick a listing first','warning'); return; }
+  if(typeof _dnmGuard==='function' && _dnmGuard(d,'neighbor mailings')) return;
+  _pzNbSaveForm(); const f=st.nbFilter||{}; const ft=st.nbRad||500;
+  const done=elcBusy(btn,'Finding the listing…'); const res=document.getElementById('pz-results'); st.nb={};
+  try{
+    let rings=[], src='';
+    if(st.nbUseSel && st.sel.size){ rings=[].concat(...[...st.sel.values()].map(s=>s.rings||[])); src='clicked'; }
+    else { const r=await _mbParcelRings(d); rings=(r&&r.rings)||[]; src=(r&&r.src)||''; }
+    if(!rings.length){ st.nbRings=null; st.nbBuf=null; _pzNbDraw(); st.nb={err:true,msg:'Terra couldn’t outline this listing from its card (no parcel ID it recognizes and no exact street address). Add the parcel ID to the card — or switch to 👆 Click parcels, click the listing’s parcel(s), come back here and tick “Use the parcels I clicked”.'}; _pzRenderModeBody(); return; }
+    st.nbRings=rings; _pzNbDraw();
+    const box=_pzNbBox(rings);
+    const geo=_pzNbBuffer(rings, ft); st.nbBuf=geo; _pzNbDraw();
+    const where=_pzBuildWhere(f);
+    if(btn&&btn.isConnected) btn.textContent='Counting…';
+    const n=await _pzCount(where, geo);
+    if(n>PZ_MAX_PARCELS){ st.nb={err:true,msg:`${n.toLocaleString()} parcels are within ${_pzNbRadLabel(ft)} — more than ${PZ_MAX_PARCELS.toLocaleString()}. Pick a shorter distance or add a filter.`}; _pzRenderModeBody(); return; }
+    const attrs=n?await _pzFetchAttrs(where, geo, (a,t)=>{ if(res) res.innerHTML=`<div class="mr-note" role="status">Pulling neighbors… ${a.toLocaleString()} of ${t.toLocaleString()} parcels</div>`; }):[];
+    // the listing's own parcels (centroid inside its outline) and everything that owner holds here are left off
+    const inside=a=>a.Latitude!=null && a.Longitude!=null && _pzNbInRings(Number(a.Longitude),Number(a.Latitude),rings);
+    const own=attrs.filter(inside); const selfNames=new Set(own.map(a=>_pzNorm(a.OWN_NAME)).filter(Boolean));
+    const keep=attrs.filter(a=>!inside(a) && !selfNames.has(_pzNorm(a.OWN_NAME))); const dropped=attrs.length-keep.length;
+    const ownerNames=[...new Set(own.map(a=>_pzTitle(a.OWN_NAME)).filter(Boolean))];
+    st.results={source:'neighbors', owners:_pzGroupOwners(keep), parcels:keep.length, filter:f, where, poly:null, criteria:'',
+      nb:{dealId:d.id, name:_pzNbName(d), radiusFt:ft, src, center:{lat:(box.ymin+box.ymax)/2, lng:(box.xmin+box.xmax)/2}, box, listingPids:own.map(a=>String(a.PARCEL_ID||'').trim()).slice(0,20)},
+      note:dropped?`Left off ${dropped} parcel${dropped===1?'':'s'} belonging to the listing${ownerNames.length?' ('+ownerNames.slice(0,2).join(', ')+')':''}.`:'⚠ The listing’s own parcel wasn’t in the results — check the red outline on the map.'};
+    st.nb={msg:`Listing outlined from ${src==='parcel'?'the card’s parcel ID':src==='address'?'the card’s street address':'the parcels you clicked'} · neighbors within ${_pzNbRadLabel(ft)}.`};
+    _pzRenderModeBody(); _pzRenderResults(); _pzDrawResults();
+    if(st.map){ const pts=keep.filter(a=>a.Latitude).map(a=>[a.Latitude,a.Longitude]); pts.push([box.ymin,box.xmin],[box.ymax,box.xmax]); st.map.fitBounds(L.latLngBounds(pts),{padding:[30,30],maxZoom:17}); }
+  }catch(e){ console.warn('[pz] neighbors',e); st.nb={err:true,msg:e.message||String(e)}; _pzRenderModeBody(); }
+  finally{ done(); }
+};
+// 🏘 Mail neighbors on the property card → Prospecting, listing picked, search started
+window._pzNeighborsFor=function(dealId){
+  const d=_pzNbDeal(dealId); if(!d) return;
+  if(typeof _dnmGuard==='function' && _dnmGuard(d,'neighbor postcards')) return;
+  if(!_pzCanAccess()){ showToast('Prospecting isn’t open to your account yet','info'); return; }
+  try{ if(typeof closePropertyDetail==='function') closePropertyDetail(); }catch(_){}
+  const st=_pzState(); Object.assign(st,{sub:'map', mode:'neighbors', nbDealId:dealId, nb:{}, nbRings:null, nbBuf:null, results:null, listId:null, owners:null});
+  currentView='prospecting'; renderShell(); renderCurrentView();
+  setTimeout(()=>{ const b=document.querySelector('#pz-mode-body .mr-btn-teal'); if(b && _pzState().mode==='neighbors' && _pzState().nbDealId===dealId) window._pzNbFind(b); },450);
+};
+
+/* ---------- 📮 postcard modal: listing picker for the neighbor card ---------- */
+function _pzNbCardPicker(){
+  const st=_pzState(); const on=!!(st.card&&st.card.offer==='neighbor');
+  return `<div id="pz-pc-nb" class="pz-nbbox" ${on?'':'hidden'}><label class="mr-lbl" for="pz-pc-nbdeal">Listing on the card</label>
+    <select id="pz-pc-nbdeal" class="mr-select" onchange="window._pzNbCardDeal(this.value)">${_pzNbOptions((st.card&&st.card.dealId)||st.nbCardDeal||'')}</select>
+    <div class="mr-muted" id="pz-pc-nbfacts">${_pzEsc(_pzNbFactsLine(st.card&&st.card.listing))}</div></div>`;
+}
+window._pzNbCardDeal=function(id){
+  const st=_pzState(); st.nbCardDeal=id; st.card=_pzCardDefaults('neighbor',_pzMe());
+  const h=document.getElementById('pz-pc-h'), m=document.getElementById('pz-pc-m'); if(h) h.value=st.card.headline; if(m) m.value=st.card.message;
+  const f=document.getElementById('pz-pc-nbfacts'); if(f) f.textContent=_pzNbFactsLine(st.card.listing); window._pzCardEdit();
+};
+window._pzNbAfterOffer=function(k){ const nb=document.getElementById('pz-pc-nb'); if(nb) nb.hidden=(k!=='neighbor'); const f=document.getElementById('pz-pc-nbfacts'); if(f) f.textContent=_pzNbFactsLine((_pzState().card||{}).listing); };
+function _pzNbInjectStyles(){
+  if(document.getElementById('pz-nb-css')) return; const s=document.createElement('style'); s.id='pz-nb-css';
+  s.textContent=`.pz-nbbox{border:1px solid var(--border,#d1d5db);border-left:4px solid #DA291C;border-radius:8px;padding:.5rem .6rem;background:var(--surface-2,#f9fafb);display:flex;flex-direction:column;gap:.3rem}
+  .pz-nbbox[hidden]{display:none}.pz-nbbox{min-width:0;max-width:100%}.pz-nbbox select{width:100%;max-width:100%;min-width:0}.pz-nbbox .mr-muted{font-size:.8rem;line-height:1.35}
+  #pdw-nb-btn:focus-visible{outline:3px solid var(--brand-teal,#00B2A9);outline-offset:2px}
+  html.dark #pdw-nb-btn{background:rgba(218,41,28,.18)!important;color:#fca5a5!important}`;
+  document.head.appendChild(s);
+}
+try{ _pzNbInjectStyles(); }catch(_){}
+/* ===== NEIGHBOR_BLOCK_END ===== */
 
 /* ---------- 📮 mailings (approval + send) ---------- */
 const PZ_MSTATUS={pending_approval:['Waiting for approval','mr-chip-draft'],sending:['Sending…','mr-chip-queued'],sent:['Sent','mr-chip-sent'],partial:['Partly sent','mr-chip-warn'],denied:['Denied','mr-chip-new'],canceled:['Canceled','mr-chip-new']};
@@ -57039,7 +57769,7 @@ function _pzInjectStyles(){
   .pz-maphint{position:absolute;left:50%;transform:translateX(-50%);bottom:12px;z-index:500;background:rgba(10,10,10,.82);color:#fff;font-size:.82rem;padding:.35rem .7rem;border-radius:999px;pointer-events:none;max-width:90%;text-align:center}
   .pz-search{position:absolute;top:10px;right:10px;z-index:500;display:flex;gap:.3rem;width:min(360px,70%)}
   .pz-search .mr-input{flex:1;background:var(--surface,#fff)}
-  .pz-modes{display:grid;grid-template-columns:repeat(3,1fr);gap:.3rem}
+  .pz-modes{display:grid;grid-template-columns:repeat(2,1fr);gap:.3rem}
   .pz-mode{border:1px solid var(--border,#d1d5db);background:var(--surface,#fff);color:var(--text-1,#111);border-radius:10px;padding:.5rem .3rem;font-size:.82rem;font-weight:700;min-height:44px;cursor:pointer}
   .pz-mode.on{border-color:var(--brand-teal);background:rgba(0,178,169,.12);box-shadow:inset 0 0 0 1px var(--brand-teal)}
   .pz-mode:focus-visible,.pz-click:focus-visible{outline:3px solid var(--brand-teal);outline-offset:2px}
